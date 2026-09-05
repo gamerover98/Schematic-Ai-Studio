@@ -2957,6 +2957,99 @@ console.log("\n--- in flight Ctrl belongs to the camera ---");
 }
 
 // ---------------------------------------------------------------------------
+// Ctrl+A selects the schematic, not the window.
+//
+// The keystroke was always the app's: `onWindowKey` calls `selectAll` and
+// `preventDefault`s the browser's. What handed it back were the early returns,
+// and the first of them is the gate checked just above -- Ctrl in flight
+// belongs to the camera, so Ctrl+A there is sprint-plus-strafe-left and the
+// handler leaves before it can suppress anything. Every strafe under sprint
+// highlighted every word in the app.
+//
+// The gate cannot go, so the fix is that there is nothing to highlight. Which
+// makes the thing to check the thing the fix must *not* do: a CSS rule that
+// quietly disabled a keyboard gesture would fail nothing anywhere else.
+console.log("\n--- Ctrl+A selects the schematic, not the window ---");
+{
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8");
+
+  /*
+   * The shell, and then the opt-ins **by name**.
+   *
+   * A list of selectors rather than one predicate over the file, because the
+   * failure this guards against is one surface losing its selection while the
+   * rest keep theirs -- and then the message has to say which.
+   */
+  check(
+    "the shell of the window refuses text selection",
+    /html,\s*\r?\nbody,\s*\r?\n#app \{[^}]*user-select: none;/.test(css),
+  );
+  // Sliced from the end of the previous rule rather than from the shell rule,
+  // so that losing the shell fails one check by name instead of cascading
+  // through every opt-in and burying it.
+  const optInEnd = css.indexOf("user-select: text;");
+  const optIn = css.slice(css.lastIndexOf("}", optInEnd) + 1, optInEnd);
+  for (const selector of [
+    "input",
+    "select",
+    "textarea",
+    '[contenteditable="true"]',
+    // A code block and the NBT dump exist to be copied, and `TraceView` writes
+    // its arguments and results as `pre`/`code` too -- so both are covered
+    // here rather than by a class repeated in three components.
+    "pre",
+    "code",
+    ".selectable",
+  ]) {
+    check(
+      `...but ${selector} still selects`,
+      optIn.includes(`\n${selector},`) || optIn.includes(`\n${selector} {`),
+    );
+  }
+
+  // The chat log is prose somebody copies, and it is not a form control, so it
+  // is the one surface that has to say so for itself.
+  const chat = readFileSync(path.join(RENDERER, "lib", "ChatPanel.svelte"), "utf8");
+  check("the chat log opts back in", /class="log selectable"/.test(chat));
+
+  /*
+   * `AboutModal` keeps its own rule, and that is load-bearing now rather than
+   * decorative: with the shell refusing selection, deleting that line would
+   * silently make the one row in the app that exists to be pasted into a bug
+   * report unselectable. A value set directly on an element beats an inherited
+   * one, which is the whole mechanism these opt-ins run on.
+   */
+  const about = readFileSync(path.join(RENDERER, "lib", "AboutModal.svelte"), "utf8");
+  check("the version row keeps its own", /\.runtime \{[^}]*user-select: text;/.test(about));
+
+  /*
+   * And the half that must not have moved: the keystroke itself.
+   *
+   * In orbit, with a document open and the caret outside a field, Ctrl+A still
+   * means the schematic -- `preventDefault` and then `selectAll`, in that
+   * order, because suppressing the browser's after selecting would be a race
+   * with nothing enforcing it.
+   */
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const from = app.indexOf("function onWindowKey");
+  const handler = app.slice(from, app.indexOf("\n  }", from));
+  const branch = handler.slice(handler.indexOf('if (key === \"a\")'));
+  check(
+    "Ctrl+A still selects the whole schematic",
+    /^if \(key === "a"\) \{\s*\r?\n\s*event\.preventDefault\(\);\s*\r?\n\s*selectAll\(\);/.test(
+      branch,
+    ),
+  );
+  // ...and still stands aside for a field, which is what a blanket
+  // `user-select: none` would otherwise have been reached for instead of.
+  check(
+    "...and stands aside for a text field",
+    handler.indexOf("if (editingText || hasTextSelection())") <
+      handler.indexOf('if (key === \"a\")'),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The inspector lists what a block *may* hold, not only what it happens to
 // ---------------------------------------------------------------------------
 //

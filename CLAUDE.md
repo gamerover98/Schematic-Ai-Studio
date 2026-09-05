@@ -2028,6 +2028,40 @@ are a browser fact this harness has no browser for, so `tests/ui.ts` checks the
 source the way the coplanar epsilons are checked: that the gate is there, and
 that it is still the first thing in the function to look at a modifier.
 
+**And that gate is why the window's text is not selectable.** Ctrl+A has always
+been the app's — `onWindowKey` calls `selectAll` and `preventDefault`s the
+browser's — but five early returns hand it back, and the first of them is the
+gate above: in flight Ctrl+A is sprint-plus-strafe-left, so the handler leaves
+before it can suppress anything. **Every strafe under sprint highlighted every
+word in the app.** The other four are the command palette, nothing open, busy,
+and a caret already in a field.
+
+The gate cannot go, so the answer is that there is nothing to highlight:
+`user-select: none` on `html, body, #app`, and `text` put back **by name** on
+the surfaces that exist to be read. Three things about it are worth keeping:
+
+- **it changes no keydown, which is the half the check is written about.** In
+  orbit, with a document open and the caret outside a field, Ctrl+A still
+  selects the whole schematic; in a field it still selects the field. A CSS
+  rule that quietly disabled a keyboard gesture would fail nothing anywhere
+  else, so `tests/ui.ts` reads the branch back out of `App.svelte`;
+- **it makes the canvas gesture *more* reliable, not less.**
+  `hasTextSelection()` hands Ctrl+A to the browser whenever a highlight already
+  exists, so a stray drag across the chat used to disarm the schematic
+  selection until you clicked something. A shell that does not highlight by
+  accident does not disarm it by accident either;
+- **the opt-ins are named, because \"which surfaces exist to be read\" is not a
+  question CSS can answer.** Form controls, `pre` and `code` — which covers the
+  NBT dump and `TraceView`'s arguments and results without a class repeated in
+  three components — and `.selectable`, which today is the chat log alone.
+
+What makes them win is that **a value set directly on an element beats one
+inherited from an ancestor**, and that is also why `AboutModal`'s own
+`user-select: text` keeps working where it is. That line stopped being
+decorative the moment the shell refused: deleting it would silently make the
+one row in the app that exists to be pasted into a bug report unselectable, so
+it is checked too.
+
 
 **Enablement is decided from main's own state**, not reported back by the
 renderer: `currentSession() !== null` plus the recents list main already owns.

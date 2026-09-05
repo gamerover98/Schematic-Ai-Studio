@@ -164,6 +164,48 @@ body,
   color: var(--text);
 }
 
+/*
+ * Ctrl+A selects the schematic, not the window.
+ *
+ * The keystroke is already the app's -- `onWindowKey` calls `selectAll` and
+ * `preventDefault`s the browser's -- but five early returns hand it back, and
+ * the first is the one met every day: **Ctrl in flight belongs to the
+ * camera**, so Ctrl+A there is sprint-plus-strafe-left and the handler returns
+ * before it can suppress anything. Every strafe under sprint lit up every word
+ * in the app.
+ *
+ * That exit cannot go -- it is the rule `CLAUDE.md` states in three places --
+ * so the answer is that there is nothing to light up. **This changes no
+ * keydown.** Ctrl+A in the canvas still selects the whole schematic, and in a
+ * field still selects the field.
+ *
+ * It makes the canvas gesture *more* reliable rather than less, which is the
+ * part worth knowing: `hasTextSelection()` hands Ctrl+A back to the browser
+ * whenever a highlight already exists, so a stray drag across the chat used to
+ * disarm it until you clicked something.
+ *
+ * The opt-ins are named rather than derived, because "which surfaces exist to
+ * be read" is not a question CSS can answer. A value set *directly* on an
+ * element beats one inherited from an ancestor, which is what makes them win
+ * -- and is why `AboutModal`'s own `user-select: text` keeps working where it
+ * is, next to the sentence explaining it.
+ */
+html,
+body,
+#app {
+  user-select: none;
+}
+
+input,
+select,
+textarea,
+[contenteditable="true"],
+pre,
+code,
+.selectable {
+  user-select: text;
+}
+
 button {
   font: inherit;
   color: var(--text);
