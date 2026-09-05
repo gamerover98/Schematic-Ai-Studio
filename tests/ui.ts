@@ -80,6 +80,7 @@ import {
   dragFace,
   moveDestination,
   movedRegion,
+  translatedRegion,
   dragPlaneNormal,
   faceCentre,
   intersectPlane,
@@ -868,6 +869,72 @@ console.log("\n--- moving a region ---");
     "...and a move to where it already is changes nothing",
     movedRegion(region, { x: region.minX, y: region.minY, z: region.minZ }),
     region,
+  );
+
+  /*
+   * And the box carried by a growth that moved the document.
+   *
+   * The grid has no negative index, so an edit reaching below the origin makes
+   * room by moving everything already there up and out of the way. Main has
+   * always done that and never said so, and the renderer holds three things
+   * naming a cell in the frame that moved: the selection, the pivot, and the
+   * stamp's ghost, which is derived from the selection.
+   *
+   * A translation, not a `movedRegion`: the box keeps its size **and its place
+   * relative to the blocks**, which is the whole point of following.
+   */
+  equal("a shifted box keeps its size and its contents", translatedRegion(region, [4, 0, 0]), {
+    minX: 8,
+    minY: 2,
+    minZ: 6,
+    maxX: 11,
+    maxY: 3,
+    maxZ: 6,
+  });
+  // The identity has to be the identity, because it is the case that runs on
+  // every edit that did not grow -- which is very nearly all of them.
+  equal("...and a growth that moved nothing moves it nowhere", translatedRegion(region, [0, 0, 0]), region);
+  equal(
+    "...on every axis at once",
+    translatedRegion(region, [1, 2, 3]),
+    { minX: 5, minY: 4, minZ: 9, maxX: 8, maxY: 5, maxZ: 9 },
+  );
+
+  /*
+   * The wiring, which needs an IPC round trip this harness does not make.
+   *
+   * `runDocument` is the one place every edit passes through, so the live
+   * selection, its anchor and the pivot are carried there -- and each of the
+   * four commits that *replace* the selection afterwards has to restate its
+   * destination in the new frame, or the box lands back where the blocks used
+   * to be. Four sites, so four is the number checked: three commits translate
+   * their own destination and `commitMove` translates a `movedRegion`.
+   */
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const run = app.slice(app.indexOf("async function runDocument"));
+  const runBody = run.slice(0, run.indexOf("\n  }"));
+  check("every edit carries what the renderer aims at", /followShift\(response\.shift\)/.test(runBody));
+  // Sliced to `runDocument` itself, or the comparison would be against the
+  // first `refreshDocument` anywhere in the file and would prove nothing.
+  check(
+    "...before the document is redrawn from it",
+    runBody.indexOf("followShift(response.shift)") < runBody.indexOf("await refreshDocument()"),
+  );
+  equal(
+    "the four commits restate their destination in the new frame",
+    (app.match(/translatedRegion\(/g) ?? []).length,
+    4,
+  );
+  /*
+   * And the timeline is **not** carried. Its entries are in the frame the
+   * document had when they were recorded, and undoing the growth puts the
+   * document back into that frame -- so translating them would be right twice
+   * and wrong on the one press that matters.
+   */
+  const follow = app.slice(app.indexOf("function followShift"));
+  check(
+    "...and the recorded history is left in the frame it was written in",
+    !follow.slice(0, follow.indexOf("\n  }")).includes("selectionTimeline"),
   );
 }
 

@@ -82,7 +82,7 @@ import {
   takeCheckpoint,
   useCheckpointDirectory,
 } from "../src/main/services/checkpoints.js";
-import { isDirty, undo } from "../src/main/domain/history.js";
+import { contentShiftSince, isDirty, undo } from "../src/main/domain/history.js";
 import { anchorOf, countBlocks, createDocument, documentFromLoaded } from "../src/main/domain/document.js";
 import { UnrepresentableBlocksError } from "../src/main/services/writers.js";
 import { SpongeSchematicWriter } from "../src/main/services/schematic.js";
@@ -1972,6 +1972,125 @@ console.log("\n--- moving a region ---");
     getBlock(hollow.doc, 5, 0, 0).namespacedName,
     "minecraft:air",
   );
+}
+
+// --- a growth that moves the build says so -----------------------------------
+//
+// The grid has no negative index, so making room *below* the origin can only
+// be done by moving everything already there up and out of the way.
+// `growthToInclude` does exactly that and `resizeDocument` compensates `offset`
+// and `worldOrigin` the other way, so the build keeps its place in the world.
+//
+// What had no answer was everything outside main: the renderer's selection, its
+// pivot and its stamp all name particular cells, and none of them was told. So
+// dragging a selection below the origin grew the schematic, slid the content
+// one way, and left the box where the pointer had put it -- outside the
+// document, to be clamped by the next `normalizeRegion`.
+//
+// The defect is **asymmetric**, and that is why it survived: past the *high*
+// faces the shift is zero and everything has always worked. Both are stated.
+console.log("\n--- a growth that moves the build says so ---");
+{
+  const rock = { namespacedName: "minecraft:stone", properties: {} };
+  const pane = { namespacedName: "minecraft:glass", properties: {} };
+  const marked = () => {
+    const doc = newDocument({ width: 16, height: 4, length: 16 });
+    // A block at each end of the region being moved, so the arrival can be
+    // read as an order rather than as a count.
+    setBlock(doc.doc, 0, 0, 0, rock);
+    setBlock(doc.doc, 3, 0, 0, pane);
+    return doc;
+  };
+
+  {
+    const session = marked();
+    const before = session.history.nextId;
+    moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: -4, y: 0, z: 0 });
+    const shift = contentShiftSince(session.history, before);
+
+    equal("a move below the origin moves the whole document", shift, [4, 0, 0]);
+    equal("...which is what the extra room cost", session.doc.width, 20);
+    /*
+     * And the blocks are where the shift says. The region was dragged to
+     * `x = -4`; the document moved up by 4, so the moved blocks land at 0..3
+     * and a selection still naming -4 is outside the document entirely.
+     */
+    equal(
+      "the moved blocks land where the shift puts them",
+      getBlock(session.doc, 0, 0, 0).namespacedName,
+      "minecraft:stone",
+    );
+    equal(
+      "...in order",
+      getBlock(session.doc, 3, 0, 0).namespacedName,
+      "minecraft:glass",
+    );
+  }
+
+  /*
+   * The half that has always worked, stated so that the asymmetry is on the
+   * record: growing past a high face adds room at the far side and moves
+   * nothing, which is why nobody found this by dragging outwards.
+   */
+  {
+    const session = marked();
+    const before = session.history.nextId;
+    moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: 20, y: 0, z: 0 });
+    equal("a move past the far face moves nothing", contentShiftSince(session.history, before), [
+      0, 0, 0,
+    ]);
+    equal("...and still makes the room", session.doc.width, 24);
+  }
+
+  // The other three ways to grow, because each computes its own growth and any
+  // one of them could be the one that forgets.
+  {
+    const session = marked();
+    copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 });
+    const before = session.history.nextId;
+    pasteSelection(session, { x: 0, y: -2, z: 0 });
+    equal("a paste below the origin says how far it moved", contentShiftSince(session.history, before), [
+      0, 2, 0,
+    ]);
+  }
+  {
+    const session = marked();
+    const before = session.history.nextId;
+    transformRegion(
+      session,
+      { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
+      { kind: "rotate", steps: 1 },
+      { to: { x: 0, y: 0, z: -3 } },
+    );
+    equal("a turn below the origin says so too", contentShiftSince(session.history, before), [
+      0, 0, 3,
+    ]);
+  }
+  {
+    const session = marked();
+    const before = session.history.nextId;
+    scaleRegion(
+      session,
+      { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 },
+      { kind: "multiply", factor: 2 },
+      { to: { x: -8, y: 0, z: 0 } },
+    );
+    equal("and so does a scale", contentShiftSince(session.history, before), [8, 0, 0]);
+  }
+
+  /*
+   * Read against an id captured *before* the call, which is what makes an edit
+   * that changed nothing report nothing rather than the previous edit's shift.
+   * `runTransaction` pushes no transaction for a recorder with no commands.
+   */
+  {
+    const session = marked();
+    moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: -4, y: 0, z: 0 });
+    const after = session.history.nextId;
+    equal("a later edit does not inherit an earlier shift", contentShiftSince(session.history, after), [
+      0, 0, 0,
+    ]);
+  }
 }
 
 // The default that makes paste usable: a copied box is mostly air, and writing

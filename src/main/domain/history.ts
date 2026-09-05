@@ -184,6 +184,47 @@ export function nextRedoLabel(history: History): string | null {
 }
 
 /**
+ * How far the transactions pushed since `sinceId` moved the document's content.
+ *
+ * The grid has no negative index, so making room *below* the origin can only
+ * be done by moving everything that is already there up and out of the way --
+ * `growthToInclude` says so in as many words, and `resizeDocument` compensates
+ * `offset` and `worldOrigin` in the opposite direction so the build keeps its
+ * place in the world.
+ *
+ * What had no answer was everything **outside** main. The renderer holds a
+ * selection, a pivot and a stamp, all of which name particular cells, and none
+ * of them was told. Drag a selection below the origin and the schematic grew,
+ * the content slid one way, and the box stayed where the pointer left it --
+ * outside the document, to be clamped by the next `normalizeRegion`.
+ *
+ * Derived here rather than returned by the five functions that grow, because
+ * `tx.resize` is the one place that knows and every one of them goes through
+ * it. Read against an id captured before the call: a body that changed nothing
+ * pushes no transaction, and then there is no shift to find rather than a
+ * stale one to report.
+ *
+ * Summed rather than taken from the newest, because a transaction is a list
+ * and nothing says a future one holds only a single resize.
+ */
+export function contentShiftSince(
+  history: History,
+  sinceId: number,
+): readonly [number, number, number] {
+  const total: [number, number, number] = [0, 0, 0];
+  for (const transaction of history.undoStack) {
+    if (transaction.id < sinceId) continue;
+    for (const command of transaction.commands) {
+      if (command.kind !== "resize") continue;
+      total[0] += command.shift[0];
+      total[1] += command.shift[1];
+      total[2] += command.shift[2];
+    }
+  }
+  return total;
+}
+
+/**
  * The id of the transaction an undo would revert, or `null` for an empty stack.
  *
  * The label's counterpart, and the one to compare against: a caller holding an

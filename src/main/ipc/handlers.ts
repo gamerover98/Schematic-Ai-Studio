@@ -13,6 +13,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron"
 
 import {
   IPC,
+  NO_SHIFT,
   type AgentRequestPayload,
   type AgentResponse,
   type Artifact,
@@ -72,6 +73,7 @@ import {
   type StartupProgressEvent,
   type TransformRequest,
 } from "../../shared/ipc.js";
+import { contentShiftSince } from "../domain/history.js";
 import { SCHEMATIC_FORMAT_LABEL, schematicExtension } from "../../shared/schematic.js";
 import {
   dataVersionOf,
@@ -1235,8 +1237,21 @@ ${report.stack}`),
   ipcMain.handle(IPC.docApply, async (_event, request: EditRequest): Promise<EditResponse> => {
     try {
       const session = requireSession();
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
       const changed = applyEdit(session, request, await editOptionsFor(session));
-      return { ok: true, changed, state: shellState(session) };
+      return {
+        ok: true,
+        changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
@@ -1263,7 +1278,7 @@ ${report.stack}`),
         if (session.doc.filePath !== null) {
           await rememberProject(session.doc.filePath, { voidBlock: session.voidBlock });
         }
-        return { ok: true, changed, state: shellState(session) };
+        return { ok: true, changed, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
@@ -1304,6 +1319,8 @@ ${report.stack}`),
         return {
           ok: true,
           changed: result.changed,
+          // A version change renames, restates and drops; it never resizes.
+          shift: NO_SHIFT,
           state: shellState(session),
           notes: result.notes,
         };
@@ -1322,7 +1339,7 @@ ${report.stack}`),
         const changed = resizeSession(session, request, {
           confirmLoss: request.confirmLoss === true,
         });
-        return { ok: true, changed, state: shellState(session) };
+        return { ok: true, changed, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
@@ -1375,7 +1392,7 @@ ${report.stack}`),
         request.path,
         request.value,
       );
-      return { ok: true, changed, state: shellState(session) };
+      return { ok: true, changed, shift: NO_SHIFT, state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
@@ -1403,7 +1420,7 @@ ${report.stack}`),
           request.revision,
           "Edit the schematic's NBT",
         );
-        return { ok: true, changed, state: shellState(session) };
+        return { ok: true, changed, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
@@ -1426,7 +1443,7 @@ ${report.stack}`),
       try {
         const session = requireSession();
         setWorldEditAnchor(session.doc, session.history, anchor, "Set the WorldEdit anchor");
-        return { ok: true, changed: 0, state: shellState(session) };
+        return { ok: true, changed: 0, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
@@ -1439,7 +1456,7 @@ ${report.stack}`),
       try {
         const session = requireSession();
         setWorldOrigin(session.doc, session.history, origin, "Set the WorldEdit origin");
-        return { ok: true, changed: 0, state: shellState(session) };
+        return { ok: true, changed: 0, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
@@ -1450,6 +1467,14 @@ ${report.stack}`),
     try {
       const session = requireSession();
       const options = await editOptionsFor(session);
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
       const result = scaleRegion(session, request.region, request.spec, {
         ...options,
         to: request.to ?? null,
@@ -1463,6 +1488,7 @@ ${report.stack}`),
       return {
         ok: true,
         changed: result.changed,
+        shift: contentShiftSince(session.history, before),
         state: shellState(session),
         ...(result.notes === "" ? {} : { notes: result.notes }),
       };
@@ -1480,8 +1506,21 @@ ${report.stack}`),
        * because `pasteClipboard` clips by letting `tx.setBlock` return false.
        */
       const options = await editOptionsFor(session);
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
       const changed = moveRegion(session, request.region, request.to, options);
-      return { ok: true, changed, state: shellState(session) };
+      return {
+        ok: true,
+        changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
@@ -1536,11 +1575,24 @@ ${report.stack}`),
     try {
       const session = requireSession();
       const options = await editOptionsFor(session);
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
       const changed = transformRegion(session, request.region, request.transform, {
         ...options,
         to: request.to ?? null,
       });
-      return { ok: true, changed, state: shellState(session) };
+      return {
+        ok: true,
+        changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
@@ -1576,12 +1628,25 @@ ${report.stack}`),
       const session = requireSession();
       // The same options a move gets, and for the same reason: a paste that
       // reached past the edge used to lose the overhang without a word.
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
       const changed = pasteSelection(session, request, {
         ...(await editOptionsFor(session)),
         includeAir: request.includeAir,
         skipEmpty: request.skipEmpty === true,
       });
-      return { ok: true, changed, state: shellState(session) };
+      return {
+        ok: true,
+        changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
@@ -1591,7 +1656,7 @@ ${report.stack}`),
     try {
       const session = requireSession();
       undoEdit(session);
-      return { ok: true, changed: 0, state: shellState(session) };
+      return { ok: true, changed: 0, shift: NO_SHIFT, state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
@@ -1601,7 +1666,7 @@ ${report.stack}`),
     try {
       const session = requireSession();
       redoEdit(session);
-      return { ok: true, changed: 0, state: shellState(session) };
+      return { ok: true, changed: 0, shift: NO_SHIFT, state: shellState(session) };
     } catch (err) {
       return failure(err);
     }

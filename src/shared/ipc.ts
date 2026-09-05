@@ -1292,10 +1292,37 @@ export interface SetNbtRequest {
   value: string;
 }
 
+/**
+ * An edit that cannot make room below the origin moves nothing, and says so.
+ *
+ * Named rather than written out as a literal at each site, because the point
+ * of `EditSuccess.shift` being required is that every producer answers the
+ * question -- and \"this one cannot\" is an answer worth reading.
+ */
+export const NO_SHIFT: readonly [number, number, number] = [0, 0, 0];
+
 export interface EditSuccess {
   /** Voxels actually changed; 0 means the edit matched nothing. */
   changed: number;
   state: DocumentState;
+  /**
+   * How far the document's own content moved to make room for this edit.
+   *
+   * The grid has no negative index, so growing *below* the origin is done by
+   * moving everything already there up and out of the way. Main has always
+   * done that correctly and has never told anybody: the renderer holds a
+   * selection, a pivot and a stamp, every one of which names a cell, and all
+   * three stayed in the old frame while the blocks moved out from under them.
+   *
+   * Always `>= 0` on every axis, and non-zero only on the axes that went below
+   * zero -- so an edit dragged out past the *high* faces has always worked and
+   * always will, which is why this went unnoticed for so long.
+   *
+   * Required rather than optional, and that is deliberate: a field that can be
+   * left out is a field somebody leaves out, and leaving it out is exactly the
+   * bug. `NO_SHIFT` is what an edit that cannot grow says.
+   */
+  shift: readonly [number, number, number];
   /**
    * A sentence about what the edit did, when the count alone does not say it.
    *

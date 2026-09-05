@@ -2453,6 +2453,35 @@ console.log("\n--- recovering is opening ---");
       `${channel} puts a document on screen without saying which conversation it belongs to`,
     );
   }
+
+  /*
+   * And the five handlers that can move the document say how far.
+   *
+   * Growing below the origin moves every block already in the document, and
+   * `EditSuccess.shift` is how anything outside main hears about it. The field
+   * is required, so the *compiler* already names a producer that forgets it --
+   * but not one that answers `NO_SHIFT` where the honest answer is derived,
+   * and that is the mistake with no other tripwire: it typechecks, every suite
+   * passes, and a selection dragged below the origin is left behind again.
+   *
+   * The five are exactly the callers of `growthFor`. Named rather than
+   * counted, so a failure says which one went quiet.
+   */
+  for (const channel of ["docApply", "docMove", "docTransform", "docScale", "docPaste"]) {
+    const body = bodyOf(channel);
+    check(`${channel} is registered`, body !== "");
+    check(
+      `${channel} reports how far the document moved`,
+      /shift: contentShiftSince\(session\.history, before\)/.test(body),
+      `${channel} can grow below the origin and does not say so`,
+    );
+    // Read against an id captured *before* the call, or an edit that changed
+    // nothing would report whatever the previous one did.
+    check(
+      `...against an id taken before the edit`,
+      /const before = session\.history\.nextId;/.test(body),
+    );
+  }
 }
 
 // --- what the window says on its way down -----------------------------------

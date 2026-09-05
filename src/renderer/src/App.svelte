@@ -66,7 +66,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
   import { blocksIn } from "../../shared/block_versions.js";
   import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
-  import { movedRegion } from "./lib/selection_drag.js";
+  import { movedRegion, translatedRegion } from "./lib/selection_drag.js";
 import {
   gizmoOrigin,
   scaledRegion,
@@ -2471,10 +2471,49 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * Every document call funnels through here so failures cannot go unreported.
    * Returns how many blocks changed, or `null` if the call did not succeed.
    */
+  /**
+   * What an edit did: how many voxels moved, and how far the *document* moved.
+   *
+   * The second is almost always `[0, 0, 0]` and is required anyway, for
+   * `EditSuccess.shift`'s reason: the bug being fixed is exactly that it could
+   * be left out.
+   */
+  type EditOutcome = {
+    readonly changed: number;
+    readonly shift: readonly [number, number, number];
+  };
+
+  /**
+   * Everything in the renderer that names a cell, carried by a growth.
+   *
+   * Growing below the origin moves every block already in the document, and
+   * this window holds three things that point at particular cells: the
+   * selection with its anchor, the pivot, and -- through the selection it is
+   * derived from -- the stamp's ghost. Leaving them behind is the report: the
+   * structure slides one way and the box stays where the pointer left it,
+   * outside the document, to be clamped by the next `normalizeRegion`.
+   *
+   * The **timeline is deliberately not moved**. Its entries are in the frame
+   * the document had when they were recorded, and undoing the growth puts the
+   * document back into that frame -- so translating them would be right twice
+   * and wrong on the press that matters.
+   */
+  function followShift(shift: readonly [number, number, number]): void {
+    if (shift[0] === 0 && shift[1] === 0 && shift[2] === 0) return;
+    if (selection !== null) selection = translatedRegion(selection, shift);
+    if (anchor !== null) {
+      anchor = { x: anchor.x + shift[0], y: anchor.y + shift[1], z: anchor.z + shift[2] };
+    }
+    if (pivot !== null) {
+      pivot = { x: pivot.x + shift[0], y: pivot.y + shift[1], z: pivot.z + shift[2] };
+    }
+    lastSelection = selectionNow();
+  }
+
   async function runDocument(
     doing: string,
     call: () => Promise<EditResponse>,
-  ): Promise<number | null> {
+  ): Promise<EditOutcome | null> {
     busy = true;
     try {
       const response = await call();
@@ -2483,6 +2522,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         return null;
       }
       docState = response.state;
+      // Before anything else reads a cell: `refreshDocument` below redraws
+      // from a document that has already moved.
+      followShift(response.shift);
       /*
        * What the edit did, when the count alone does not say it.
        *
@@ -2501,7 +2543,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       if (inspectedAt) {
         await inspectBlock(inspectedAt.x, inspectedAt.y, inspectedAt.z);
       }
-      return response.changed;
+      return { changed: response.changed, shift: response.shift };
     } catch (err) {
       failed(err, doing);
       return null;
@@ -3157,10 +3199,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   async function pasteHere(): Promise<void> {
     if (!selection) return;
     const at = { x: selection.minX, y: selection.minY, z: selection.minZ };
-    const changed = await runDocument(t("task.pasting"), () =>
+    const outcome = await runDocument(t("task.pasting"), () =>
       api().pasteClipboard({ ...at, skipEmpty: pasteKeepsUnder }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   /**
@@ -3173,10 +3215,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   async function transformSelection(transform: TransformRequest["transform"]): Promise<void> {
     if (!selection) return;
     const region = selection;
-    const changed = await runDocument(t("task.transforming"), () =>
+    const outcome = await runDocument(t("task.transforming"), () =>
       api().transformRegion({ region: forIpc(region), transform }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   /**
@@ -3380,16 +3422,25 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (!region) return;
     const before = selectionNow();
     const depthBefore = docState?.undoDepth ?? 0;
-    const changed = await runDocument(t("task.moving"), () =>
+    const outcome = await runDocument(t("task.moving"), () =>
       api().moveRegion({ region: forIpc(region), to }),
     );
-    if (changed !== null) {
-      adoptEditedSelection(before, movedRegion(region, to), depthBefore);
+    if (outcome !== null) {
+      /*
+       * `to` is in the frame the document had when the drag started, and a
+       * move that made room below the origin has moved the frame under it.
+       * `runDocument` has already carried the live selection and the pivot;
+       * this is the destination being restated in the same frame, or the box
+       * would land back where the blocks used to be.
+       */
+      adoptEditedSelection(before, translatedRegion(movedRegion(region, to), outcome.shift), depthBefore);
       // The pivot moved with the blocks, or it would name a cell the region
-      // has left -- and the next turn would swing it round empty space.
+      // has left -- and the next turn would swing it round empty space. The
+      // delta is the same in either frame, so this composes with the shift
+      // rather than fighting it.
       movePivot(region, to);
     }
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   /**
@@ -3415,7 +3466,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const to = transformedRegion(region, origin, transform);
     const before = selectionNow();
     const depthBefore = docState?.undoDepth ?? 0;
-    const changed = await runDocument(t("task.transforming"), () =>
+    const outcome = await runDocument(t("task.transforming"), () =>
       api().transformRegion({
         region: forIpc(region),
         transform:
@@ -3425,12 +3476,14 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         to: { x: to.minX, y: to.minY, z: to.minZ },
       }),
     );
-    if (changed !== null) {
+    if (outcome !== null) {
       // The box follows the blocks, exactly as it does after a move: leaving it
       // on the space they came from would make the next operation act on air.
-      adoptEditedSelection(before, to, depthBefore);
+      // ...and follows the *document* too, where the turn made room below the
+      // origin and moved everything up.
+      adoptEditedSelection(before, translatedRegion(to, outcome.shift), depthBefore);
     }
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   /**
@@ -3456,13 +3509,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const to = scaledRegion(region, origin, spec);
     const before = selectionNow();
     const depthBefore = docState?.undoDepth ?? 0;
-    const changed = await runDocument(t("task.scaling"), () =>
+    const outcome = await runDocument(t("task.scaling"), () =>
       api().scaleRegion({ region: forIpc(region), spec, to: { x: to.minX, y: to.minY, z: to.minZ } }),
     );
-    if (changed !== null) {
-      adoptEditedSelection(before, to, depthBefore);
+    if (outcome !== null) {
+      adoptEditedSelection(before, translatedRegion(to, outcome.shift), depthBefore);
     }
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   /**
@@ -3488,25 +3541,25 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   async function deleteSelection(): Promise<void> {
     if (!selection) return;
     const region = selection;
-    const changed = await runDocument(t("task.deleting"), () =>
+    const outcome = await runDocument(t("task.deleting"), () =>
       api().applyEdit({ kind: "fill", region: forIpc(region), block: { namespacedName: "minecraft:air" } }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   async function fillSelection(block: string): Promise<void> {
     if (!selection) return;
     const region = selection;
-    const changed = await runDocument(t("task.filling"), () =>
+    const outcome = await runDocument(t("task.filling"), () =>
       api().applyEdit({ kind: "fill", region: forIpc(region), block: parseBlock(block) }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   async function replaceInSelection(from: string, to: string): Promise<void> {
     if (!selection) return;
     const region = selection;
-    const changed = await runDocument(t("task.replacing"), () =>
+    const outcome = await runDocument(t("task.replacing"), () =>
       api().applyEdit({
         kind: "replace",
         region: forIpc(region),
@@ -3514,7 +3567,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         to: parseBlock(to),
       }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   /**

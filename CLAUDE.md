@@ -107,6 +107,51 @@ before it would index the old shape. The grid has no negative coordinates, so
 reaching below the origin moves the *content* up and the region with it; that
 sign is the part that fails silently.
 
+**And a growth that moves the content has to say so, because nothing outside
+main could see it.** That arithmetic was right from the day it was written:
+`growthToInclude` sets `shift = -min(0, region.min)` per axis, `resizeDocument`
+moves the voxels, the block entities and the entities, and compensates `offset`
+and `worldOrigin` the opposite way so the build keeps its place in the world.
+
+What had no answer was the **renderer**, which holds three things naming a
+particular cell — the selection with its anchor, the pivot, and the stamp's
+ghost, derived from the selection. Drag a selection below the origin and the
+schematic grew, the content slid one way, and the box stayed where the pointer
+had left it: outside the document, to be clamped by the next
+`normalizeRegion`. Reported as the structure shifting *and* the selection
+ending up in the wrong place, which is one fault seen from both sides.
+
+**The defect is asymmetric, and that is why it survived.** Past the *high*
+faces the shift is zero and everything has always worked — so the ordinary way
+of building outwards never showed it, and only the one direction that has no
+index did.
+
+`EditSuccess.shift` is the wire, and it is **required rather than optional**:
+a field that can be left out is a field somebody leaves out, and leaving it
+out is exactly the bug. `NO_SHIFT` is what an edit that cannot grow says, and
+the compiler names every producer that forgets. What it cannot name is a
+producer that answers `NO_SHIFT` where the honest answer is derived — that
+typechecks and passes everything — so `tests/services.ts` reads the five
+handlers that call `growthFor` out of the source and requires each to derive
+it. Found by sabotage: making `docMove` claim `NO_SHIFT` failed nothing at
+all until that check existed.
+
+**It is derived from the transaction rather than returned by five functions.**
+`tx.resize` is the one place that knows and every growing path goes through
+it, so `contentShiftSince(history, id)` sums the resizes pushed since an id
+captured before the call. The id is what makes an edit that changed nothing
+report nothing rather than inherit the previous edit's answer —
+`runTransaction` pushes no transaction for a recorder with no commands.
+
+In the renderer `runDocument` carries the live selection, its anchor and the
+pivot, because it is the one place every edit passes through. The four commits
+that *replace* the selection afterwards restate their destination in the new
+frame themselves — `to` was computed in the old one. The **timeline is
+deliberately not carried**: its entries are in the frame the document had when
+they were recorded, and undoing the growth puts the document back into that
+frame, so translating them would be right twice and wrong on the one press
+that matters.
+
 **A single placed block grows it too, and for a while it did not.** That
 asymmetry was invisible from either side: `document.setBlock` refuses an
 out-of-bounds write by returning `null`, so a block placed past the edge came
