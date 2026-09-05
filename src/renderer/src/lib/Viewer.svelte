@@ -28,7 +28,14 @@
   import type { ResolvedTheme } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
 import { antialiasSamples, shaderPreset } from "./shader_modes.js";
-  import { facingNormal, hoverSource, outlineCentre, pointerOnHandle } from "./block_hover.js";
+  import {
+    entryFace,
+    facingNormal,
+    hasDominantAxis,
+    hoverSource,
+    outlineCentre,
+    pointerOnHandle,
+  } from "./block_hover.js";
   import {
   cellFade,
   cellRegion,
@@ -1031,9 +1038,11 @@ import { isTyping } from "./typing.js";
       .clone()
       .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld))
       .normalize();
-    // ...and turned to face the ray, because the material is `DoubleSide` and
-    // a paper-thin element can perfectly well be struck from behind. See
-    // `facingNormal`: this is the azalea's "unremovable air block above".
+    // ...and turned to face the ray. The opaque material is `FrontSide` now, so
+    // the opaque layer can no longer produce a back hit; the two layers that
+    // are still double-sided are raycast by nothing today, which is a fact
+    // about the call sites rather than about the rule. See `facingNormal`:
+    // this is the azalea's "unremovable air block above".
     const normal = new THREE.Vector3(
       ...facingNormal(
         [surface.x, surface.y, surface.z],
@@ -1059,7 +1068,40 @@ import { isTyping } from "./typing.js";
      * The dominant axis rather than rounding each component, so a cross quad's
      * diagonal normal yields a real neighbour instead of a diagonal one that
      * shares no face.
+     *
+     * That was true and incomplete. It picks a real neighbour, and where there
+     * is **no** dominant axis it picks an arbitrary one: a cross's planes are
+     * turned 45 degrees, so the two horizontal terms are exactly equal, the
+     * winner is whichever way a `>=` leans, and the vertical term is zero and
+     * can never win at all.
+     *
+     * A chain is what that cost. Its planes run the full height of the cell, so
+     * `boxFaces` drops their `up` and `down` faces for having no area -- there
+     * is no end of a chain to aim at -- and a click from any angle put the next
+     * one in a cell *beside* it, carrying the axis of that sideways face.
+     * `entryFace` answers instead, with the face of the cell the ray came in
+     * through: what a full-cell collision box would give, which is the thing
+     * vanilla has here and this app does not, because it keeps interaction
+     * shapes apart from models and the viewport raycasts the model.
      */
+    if (!hasDominantAxis([normal.x, normal.y, normal.z])) {
+      const face = entryFace(
+        [raycaster.ray.origin.x, raycaster.ray.origin.y, raycaster.ray.origin.z],
+        [raycaster.ray.direction.x, raycaster.ray.direction.y, raycaster.ray.direction.z],
+        { x, y, z },
+      );
+      const step = FACE_VECTOR[face];
+      return {
+        x,
+        y,
+        z,
+        extend: false,
+        place: { x: x + step.x, y: y + step.y, z: z + step.z },
+        face,
+        cursorY: hit.point.y - Math.floor(inside.y),
+      };
+    }
+
     const ax = Math.abs(normal.x);
     const ay = Math.abs(normal.y);
     const az = Math.abs(normal.z);

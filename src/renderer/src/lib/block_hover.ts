@@ -16,6 +16,8 @@
  * Only the trigger stays unobservable; the decision is `tests/ui.ts`'s.
  */
 
+import type { Face } from "../../../shared/block_orientation.js";
+
 /** Where to cast from, or that there is nothing to draw. */
 export type HoverSource =
   | { readonly kind: "none" }
@@ -138,4 +140,91 @@ export function facingNormal(
   const towardsRay =
     normal[0] * direction[0] + normal[1] * direction[1] + normal[2] * direction[2] > 0;
   return towardsRay ? [-normal[0], -normal[1], -normal[2]] : normal;
+}
+
+/**
+ * Whether a normal picks out an axis at all.
+ *
+ * `pickBlockAt` turns a hit normal into a face of the cell by taking its
+ * dominant component. That is right whenever there *is* one, and for a great
+ * many shapes it is exact -- a slab's top, a stair's riser, a torch's side are
+ * all axis-aligned, and the lectern's desk, tilted 22.5 degrees, still has a
+ * clear winner at 0.924 against 0.383.
+ *
+ * A **cross** does not. Its planes are turned 45 degrees about y, so the
+ * normal is `(+-0.7071, 0, +-0.7071)`: the two horizontal terms are exactly
+ * equal and the winner is decided by which way a `>=` happens to lean, while
+ * the vertical term is zero and can never win. Every chain, flower, sapling,
+ * amethyst bud and fire in the game is one of these.
+ *
+ * That is what made a column of chains impossible to build. A chain's two
+ * planes span the full height of the cell, so `boxFaces` drops their `up` and
+ * `down` faces as having no area -- there is no end of a chain to click. Aim
+ * at one from below and the ray struck a plane's side, the tie was broken
+ * sideways, and the next chain went in the cell *beside* the one clicked,
+ * carrying the axis of that sideways face. Reported exactly that way: placed
+ * laterally, and with a different `axis`.
+ *
+ * The epsilon is not a tuning knob. A tie means the existing answer is a coin
+ * toss, and this returns `false` only then; anything with a real winner keeps
+ * the answer it always had.
+ */
+export function hasDominantAxis(normal: readonly [number, number, number]): boolean {
+  const sorted = [Math.abs(normal[0]), Math.abs(normal[1]), Math.abs(normal[2])].sort(
+    (a, b) => b - a,
+  );
+  return sorted[0] > 1e-6 && sorted[0] - sorted[1] > 1e-6;
+}
+
+/**
+ * The face of a cell that a ray entered through.
+ *
+ * This is the answer a **collision box** would give, and this app has none:
+ * the viewport raycasts one fused mesh with no per-block identity, so a
+ * block's interaction volume is exactly the geometry that is drawn. Vanilla
+ * keeps the two apart, which is why a chain there has a bottom face to click
+ * -- its box is a full-height 3x3 column -- while the model it draws does not.
+ *
+ * Used only where `hasDominantAxis` says the normal names no face, so it
+ * stands in for a full-cell box and nothing narrower. That is the right
+ * approximation for the shapes that reach it: a cross fills the cell corner
+ * to corner in plan, and its planes run the whole way up.
+ *
+ * Slab method on the unit cube `[cell, cell + 1]` on each axis, taking the
+ * **largest** of the three entry distances -- the last slab entered is the one
+ * whose face the ray actually crossed. A component of zero is parallel to that
+ * pair of planes and contributes no entry at all, which is what the guard is
+ * for rather than a division producing an infinity that then wins.
+ *
+ * The face is named from the side the ray came *from*, so it is the face a
+ * neighbour would share: entering through the bottom gives `down`, and a
+ * placement one cell along `down` lands under the block that was clicked.
+ */
+export function entryFace(
+  origin: readonly [number, number, number],
+  direction: readonly [number, number, number],
+  cell: { readonly x: number; readonly y: number; readonly z: number },
+): Face {
+  const low = [cell.x, cell.y, cell.z];
+  const faces: readonly [Face, Face][] = [
+    ["west", "east"],
+    ["down", "up"],
+    ["north", "south"],
+  ];
+
+  let best = -Infinity;
+  let face: Face = "up";
+  for (let axis = 0; axis < 3; axis += 1) {
+    const d = direction[axis];
+    if (Math.abs(d) < 1e-9) continue;
+    // The near plane of this slab is the one the ray meets first, which is the
+    // low side when travelling in the positive direction.
+    const plane = d > 0 ? low[axis] : low[axis] + 1;
+    const t = (plane - origin[axis]) / d;
+    if (t > best) {
+      best = t;
+      face = d > 0 ? faces[axis][0] : faces[axis][1];
+    }
+  }
+  return face;
 }

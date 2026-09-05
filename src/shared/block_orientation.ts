@@ -31,7 +31,7 @@
  * and not about the click. It belongs to whoever holds the voxels.
  */
 
-import { defaultStateFor, hasProperty } from "./block_states.js";
+import { defaultStateFor, hasProperty, legalValuesFor } from "./block_states.js";
 
 /** A face of a cell, named as Minecraft names its directions. */
 export type Face = "up" | "down" | "north" | "south" | "east" | "west";
@@ -104,37 +104,6 @@ const OPPOSITE: Record<Face, Face> = {
   east: "west",
   west: "east",
 };
-
-/**
- * Pillars: `axis` comes from the face, never from the look direction.
- *
- * `_stem` is deliberately not a suffix here. `crimson_stem` is a pillar and
- * `melon_stem` is a crop with an `age`, and writing `axis` onto the crop would
- * produce a block state that does not exist.
- */
-const AXIS_SUFFIXES = ["_log", "_wood", "_hyphae"] as const;
-
-const AXIS_NAMES: ReadonlySet<string> = new Set([
-  "crimson_stem",
-  "stripped_crimson_stem",
-  "warped_stem",
-  "stripped_warped_stem",
-  "bone_block",
-  "hay_block",
-  "purpur_pillar",
-  "quartz_pillar",
-  "basalt",
-  "polished_basalt",
-  "deepslate",
-  "infested_deepslate",
-  "muddy_mangrove_roots",
-  "ochre_froglight",
-  "verdant_froglight",
-  "pearlescent_froglight",
-  "chain",
-  "bamboo_block",
-  "stripped_bamboo_block",
-]);
 
 /**
  * Blocks whose front turns to face the player — the reason a freshly placed
@@ -387,10 +356,40 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
   const name = baseBlockName(id);
   const upper = placedInUpperHalf(look);
 
-  if (AXIS_NAMES.has(name) || AXIS_SUFFIXES.some((suffix) => name.endsWith(suffix))) {
-    // No face means no answer here: a pillar's axis is a property of the
-    // surface it was placed on, and the look direction cannot stand in for it.
-    return look.against === null ? {} : { axis: FACE_AXIS[look.against] };
+  /*
+   * Pillars: `axis` comes from the face, never from the look direction.
+   *
+   * **The membership is asked of the registry**, which is `isOpenable`'s move
+   * and the one the `rotation` arm below already makes. It was nineteen names
+   * plus `_log`/`_wood`/`_hyphae`, and that reached **59** of the **70** blocks
+   * carrying the property. The eleven it missed:
+   *
+   * - **nine chains.** `chain` was in the list and `iron_chain` was not, which
+   *   is the 1.21.9 rename this file's own neighbour warns about -- *any future
+   *   rename needs both halves* -- with the texture alias added and the
+   *   orientation left behind. The eight copper chains were never in it at all,
+   *   so a chain strung sideways against a wall hung vertically instead;
+   * - **`creaking_heart`**, a 1.21.4 block nobody went back to add;
+   * - **`nether_portal`**, which is the one that must stay out, and the reason
+   *   `hasProperty` alone is not the rule. Its `axis` is `x|z` with no `y`, so
+   *   a click on a floor would write a state the game does not have -- the
+   *   exact failure `hasProperty` exists to prevent, one question short.
+   *
+   * Asking whether the derived value is *legal* covers both halves at once,
+   * and it improves the portal rather than merely excusing it: against a wall
+   * it now takes the axis it was placed on instead of the registry default.
+   *
+   * `melon_stem` needed a hand-written exclusion under the old rule and needs
+   * none now: a crop has an `age` and no `axis`, so the registry never offers
+   * it.
+   *
+   * No face means no answer: a pillar's axis is a property of the surface it
+   * was placed on, and the look direction cannot stand in for it.
+   */
+  if (look.against !== null && hasProperty(name, "axis")) {
+    const axis = FACE_AXIS[look.against];
+    if (legalValuesFor(name, "axis")?.includes(axis) === true) return { axis };
+    return {};
   }
 
   if (name.endsWith("_stairs")) {
@@ -562,7 +561,6 @@ export function placementState(id: string, look: PlacementLook): Record<string, 
  * app would ever notice.
  */
 export const ORIENTED_BLOCK_NAMES: readonly string[] = [
-  ...AXIS_NAMES,
   ...FRONT_TO_PLAYER,
   ...FRONT_TO_PLAYER_ANY_AXIS,
   ...AWAY_FROM_PLAYER_ANY_AXIS,

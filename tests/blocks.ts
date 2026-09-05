@@ -3541,6 +3541,92 @@ console.log("\n--- placement orientation ---");
     {},
   );
 
+  /*
+   * And the walk, which is what turned a report about chains into a list.
+   *
+   * The rule was nineteen names plus three suffixes and reached **59** of the
+   * **70** blocks the registry gives an `axis`. Asking the registry reaches
+   * all of them, and asking whether the derived value is *legal* is what
+   * keeps `nether_portal` out -- so the two halves are stated separately,
+   * because deleting either leaves the other passing.
+   */
+  {
+    const FACES: readonly (readonly ["up" | "down" | "north" | "south" | "east" | "west", string])[] = [
+      ["up", "y"],
+      ["down", "y"],
+      ["north", "z"],
+      ["south", "z"],
+      ["east", "x"],
+      ["west", "x"],
+    ];
+    const missed: string[] = [];
+    const invented: string[] = [];
+    let holders = 0;
+    for (const name of knownBlockNames()) {
+      const legal = legalValuesFor(name, "axis");
+      if (legal === null) continue;
+      holders += 1;
+      for (const [face, axis] of FACES) {
+        const got = orientPlacement(`minecraft:${name}`, looking(0, 0, -1, face)).axis;
+        const want = legal.includes(axis) ? axis : undefined;
+        if (got === want) continue;
+        (want === undefined ? invented : missed).push(`${name}/${face}`);
+      }
+    }
+    equal("the registry names seventy blocks with an axis", holders, 70);
+    equal("every one of them takes it from the face clicked", missed, []);
+    // `nether_portal` is `x|z` with no `y`, so a floor click has no legal
+    // answer and must produce none. It is the whole of this list, and the
+    // reason `hasProperty` alone is one question short of the rule.
+    equal("...and none is given a value the game does not have", invented, []);
+  }
+
+  /*
+   * The eleven the old rule missed, by name, because a count says nothing
+   * about which. Nine of them are chains: `chain` was in the list and
+   * `iron_chain` -- the same block after the 1.21.9 rename -- was not, and the
+   * eight copper ones never were. A chain strung sideways hung vertically.
+   */
+  for (const name of [
+    "iron_chain",
+    "copper_chain",
+    "exposed_copper_chain",
+    "weathered_copper_chain",
+    "oxidized_copper_chain",
+    "waxed_copper_chain",
+    "waxed_exposed_copper_chain",
+    "waxed_weathered_copper_chain",
+    "waxed_oxidized_copper_chain",
+    "creaking_heart",
+  ]) {
+    equal(
+      `${name} lies along the face it was hung on`,
+      orientPlacement(`minecraft:${name}`, looking(0, 0, -1, "east")),
+      { axis: "x" },
+    );
+  }
+  equal(
+    "...and a chain clicked underneath hangs down the y axis",
+    orientPlacement("minecraft:iron_chain", looking(0, -1, 0, "up")),
+    { axis: "y" },
+  );
+
+  /*
+   * The portal from both sides. On a wall it now takes the axis it was placed
+   * on, which the old rule never gave it either -- so this is not a exclusion
+   * grudgingly preserved, it is a block that got better.
+   */
+  equal(
+    "a nether portal on a floor is given no axis at all",
+    orientPlacement("minecraft:nether_portal", looking(0, -1, 0, "up")),
+    {},
+  );
+  equal(
+    "...but on an east face it takes the one it has",
+    orientPlacement("minecraft:nether_portal", looking(0, 0, -1, "east")),
+    { axis: "x" },
+  );
+
   // A furnace turns its front to you. It is why a freshly placed dispenser
   // fires at the person who placed it.
   equal("a furnace faces the player", orientPlacement("minecraft:furnace", east).facing, "west");

@@ -37,7 +37,9 @@ import {
   shaderPreset,
 } from "../src/renderer/src/lib/shader_modes.js";
 import {
+  entryFace,
   facingNormal,
+  hasDominantAxis,
   hoverSource,
   outlineCentre,
   pointerOnHandle,
@@ -2898,6 +2900,125 @@ console.log("\n--- which side of a surface the block is on ---");
   equal("a grazing hit keeps its side", facingNormal(up, [0.999, -0.01, 0]), up);
   equal("a perpendicular one is left alone", facingNormal(up, [1, 0, 0]), up);
 }
+
+/*
+ * A normal with no dominant axis, and the face the ray came in through.
+ *
+ * `pickBlockAt` turns a hit normal into a face of the cell by taking its
+ * largest component, which is exact wherever there is one -- and a coin toss
+ * where there is not. A cross's planes are turned 45 degrees, so the two
+ * horizontal terms are exactly equal and the vertical term is zero: the
+ * winner is decided by which way a `>=` leans, and `up` and `down` can never
+ * win at all.
+ *
+ * A chain is what that cost. Its planes run the whole height of the cell, so
+ * `boxFaces` drops their `up` and `down` faces for having no area and there
+ * is no end of a chain to aim at -- so a column could not be built. The next
+ * chain always went in a cell beside the one clicked, carrying that sideways
+ * face's axis, which is the report word for word.
+ */
+console.log("\n--- a normal that names no face ---");
+{
+  // Axis-aligned, and the lectern's desk at -22.5 degrees: both have a clear
+  // winner and must keep the answer they always had.
+  check("an axis-aligned normal has a dominant axis", hasDominantAxis([0, 1, 0]));
+  check(
+    "...and so does a tilted box, at 0.924 against 0.383",
+    hasDominantAxis([0, 0.9239, 0.3827]),
+  );
+  // The cross. Both spellings, because the sign is what varies between the
+  // two planes and neither is more of a tie than the other.
+  check("a cross quad does not", !hasDominantAxis([0.7071, 0, -0.7071]));
+  check("...whichever diagonal it is on", !hasDominantAxis([-0.7071, 0, -0.7071]));
+  check("a zero normal has no axis either", !hasDominantAxis([0, 0, 0]));
+
+  /*
+   * `entryFace` stands in for the full-cell collision box this app does not
+   * have. Named from the side the ray came *from*, so it is the face a
+   * neighbour would share and a placement one step along it lands outside.
+   */
+  const cell = { x: 4, y: 2, z: 7 };
+  const AT: readonly (readonly [
+    string,
+    readonly [number, number, number],
+    readonly [number, number, number],
+  ])[] = [
+    ["down", [4.5, -10, 7.5], [0, 1, 0]],
+    ["up", [4.5, 20, 7.5], [0, -1, 0]],
+    ["west", [-10, 2.5, 7.5], [1, 0, 0]],
+    ["east", [20, 2.5, 7.5], [-1, 0, 0]],
+    ["north", [4.5, 2.5, -10], [0, 0, 1]],
+    ["south", [4.5, 2.5, 20], [0, 0, -1]],
+  ];
+  for (const [face, origin, direction] of AT) {
+    equal(
+      `a ray from the ${face} side enters through it`,
+      entryFace(origin, direction, cell),
+      face,
+    );
+  }
+
+  /*
+   * The case the whole change exists for: aiming *up* at a chain from below
+   * and slightly to one side. The ray is mostly vertical, so the last slab it
+   * enters is the floor of the cell -- and the placement one step along
+   * `down` is the cell underneath, which is the next link of the column.
+   */
+  equal(
+    "aiming up from below and to the side still enters through the floor",
+    entryFace([4.9, 0.2, 7.9], [-0.2, 0.96, -0.2], cell),
+    "down",
+  );
+  // ...and the mirror of it, so a column can be built upwards as well.
+  equal(
+    "aiming down from above enters through the ceiling",
+    entryFace([4.1, 9, 7.1], [0.2, -0.96, 0.2], cell),
+    "up",
+  );
+  /*
+   * A shallow, mostly-horizontal ray is a side hit and must stay one: that is
+   * the answer the app already gave for a chain seen at eye level, and it was
+   * the right one. Only the vertical case was unreachable.
+   */
+  equal(
+    "a shallow ray still enters through the side",
+    entryFace([-6, 2.6, 7.5], [0.99, 0.14, 0], cell),
+    "west",
+  );
+  /*
+   * A component of exactly zero is parallel to that pair of planes and offers
+   * no entry at all. Without the guard the division yields an infinity, which
+   * then wins the `t > best` comparison and names a face the ray never
+   * crossed.
+   */
+  equal(
+    "an axis the ray does not travel along cannot win",
+    entryFace([-10, 2.5, 7.5], [1, 0, 0], cell),
+    "west",
+  );
+
+  /*
+   * And the wiring, which runs from a pointer event and cannot be driven
+   * here. Both halves are greppable and both matter: the tie has to be asked
+   * about **before** the dominant-axis block, or it decides nothing, and it
+   * has to be the ray that answers rather than the normal a second time.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const pick = viewer.slice(viewer.indexOf("function pickBlockAt"));
+  const tie = pick.indexOf("if (!hasDominantAxis(");
+  const dominant = pick.indexOf("const ax = Math.abs(normal.x);");
+  check("the pick asks whether the normal names a face", tie > 0);
+  check(
+    "...before it takes a dominant axis anyway",
+    tie > 0 && dominant > 0 && tie < dominant,
+    `tie at ${tie}, dominant at ${dominant}`,
+  );
+  check(
+    "...and answers from the ray, not from the normal again",
+    /entryFace\(\s*\r?\n?\s*\[raycaster\.ray\.origin/.test(pick),
+  );
+}
+
 
 /*
  * In flight, Ctrl belongs to the camera.

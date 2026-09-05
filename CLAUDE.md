@@ -1129,6 +1129,40 @@ is found by moving `1e-3` along `-normal` from the hit point and flooring. Half
 a block is the obvious choice and is wrong: a pressure plate is a sixteenth
 tall, so stepping half a block in from its top face lands underneath it.
 
+**And a normal with no dominant axis names no face of the cell.** Which face
+the placement goes to is the hit normal's largest component, and that is exact
+wherever there is a largest — a slab's top, a stair's riser, the lectern's desk
+at 0.924 against 0.383. A **cross** has none: its planes are turned 45° about
+y, so the two horizontal terms are exactly equal, the winner is whichever way a
+`>=` leans, and the vertical term is zero and can never win at all. Every
+chain, flower, sapling, amethyst bud and fire in the game is one of those.
+
+**A chain is what that cost, and the two halves compound.** Its planes run the
+full height of the cell, so `boxFaces` drops their `up` and `down` faces for
+having no area: there is *no end of a chain to aim at*. So a click from any
+angle broke the tie sideways and put the next link in the cell **beside** the
+one clicked, carrying that sideways face's axis. Reported exactly that way —
+placed laterally, and with a different `axis` — and a column was unbuildable.
+
+`entryFace` in `block_hover.ts` answers where the tie is: the face of the cell
+the **ray** came in through, by the slab method on the unit cube. That is what
+a full-cell **collision box** would give, and it is the thing vanilla has here
+and this app does not — the game keeps interaction shapes apart from models,
+and a chain's box is a full-height 3×3 column while the model it draws is two
+planes. Aim up at a chain from below and the ray enters through the floor of
+its cell, so the next link goes underneath it, with `axis=y`.
+
+The epsilon is not a tuning knob and the rule is deliberately narrow: a tie
+means the existing answer was a coin toss, so only those change. Everything
+with a real winner keeps the answer it always had, which is why the lectern is
+named in the checks beside the cross — it is the near miss.
+
+A per-*shape* interaction box is the real version of this and is a project of
+its own: it would also fix the outline, which traces the cell rather than the
+block for the same reason. This reproduces the full-cell box only, which is
+the right approximation for the shapes that reach it — a cross fills its cell
+corner to corner in plan and runs the whole way up.
+
 **`block_id_list.txt` is generated, and the registry decides what is in it.**
 `node scripts/gen-block-list.mjs > block_id_list.txt`, idempotent, from
 `resources/block_states.json` — the game's own block registry — plus the
@@ -4555,6 +4589,36 @@ rotations. `legacy_blocks.json` maps `144:0/1/8/9` to `rotation=0/4/8/12` and
 the rest lived in the tile entity, so twelve of them come back `degraded` from
 the MCEdit writer. Signs and the white banner carry all sixteen — `63:0..15`
 and `176:0..15`.
+
+**Every block the registry gives an `axis` takes it from the face clicked, and
+eleven did not.** The rule was nineteen hand-written names plus `_log`,
+`_wood` and `_hyphae`, which reached **59** of the **70** blocks carrying the
+property. Asking the registry is `isOpenable`'s move and the `rotation` arm's,
+and what it recovered is the shape of the same mistake twice:
+
+- **nine chains.** `chain` was in the list; `iron_chain` — the same block after
+  the **1.21.9** rename — was not, which is the failure the block-states
+  section already warns about in as many words: *any future rename needs both
+  halves*. The texture alias was added and the orientation was left behind. The
+  eight copper chains were never in it at all;
+- **`creaking_heart`**, 1.21.4, that nobody went back to add.
+
+**`nether_portal` is the eleventh, and it is the one that must stay out.** Its
+`axis` is `x|z` with no `y`, so a click on a floor under a plain `hasProperty`
+rule would write a state the game does not have — precisely the failure that
+function exists to prevent, one question short. So the branch asks whether the
+**derived value is legal**, which covers both halves at once and improves the
+portal rather than merely excusing it: against a wall it now takes the axis it
+was placed on, where the old rule gave it the registry default.
+
+`melon_stem` needed a hand-written exclusion under the old rule and needs none
+now — a crop has an `age` and no `axis`, so the registry never offers it. The
+comment explaining that trap is gone with the trap.
+
+The walk over all 70 is what makes this a list rather than a report, and the
+two halves are stated separately because deleting either leaves the other
+passing: *every holder takes the face's axis*, and *none is given a value the
+game does not have*.
 
 **A hopper points into the block it was clicked onto**, which is the whole of
 what makes one feed a chest. It was in none of `orientPlacement`'s tables, so
