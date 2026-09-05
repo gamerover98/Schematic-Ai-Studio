@@ -34,6 +34,7 @@ import {
   markSaved,
   normalizeRegion,
   paletteHistogram,
+  paletteTally,
   regionVolume,
   setBlock,
   type Region,
@@ -299,8 +300,8 @@ export function adoptDocument(doc: SchematicDocument, history?: History): Docume
  * The cost is already paid. `paletteHistogram` walks every voxel and runs on
  * every state push either way; dropping the `.slice` adds payload, not work.
  */
-function paletteCounts(doc: SchematicDocument): PaletteCount[] {
-  return [...paletteHistogram(doc).entries()]
+function paletteCounts(histogram: ReadonlyMap<string, number>): PaletteCount[] {
+  return [...histogram.entries()]
     .filter(([block]) => !block.startsWith("minecraft:air"))
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .map(([block, count]) => ({ block, count }));
@@ -308,6 +309,9 @@ function paletteCounts(doc: SchematicDocument): PaletteCount[] {
 
 export function documentState(session: DocumentSession): DocumentState {
   const { doc, history } = session;
+  // One walk for both numbers. This runs on every mutating handler, and a
+  // selection-face drag reaches it many times a second.
+  const tally = paletteTally(doc);
   return {
     filePath: doc.filePath,
     fileName: doc.filePath === null ? null : path.basename(doc.filePath),
@@ -316,8 +320,8 @@ export function documentState(session: DocumentSession): DocumentState {
     size: [doc.width, doc.height, doc.length],
     offset: doc.offset === null ? null : ([...doc.offset] as [number, number, number]),
     worldOrigin: doc.worldOrigin === null ? null : ([...doc.worldOrigin] as [number, number, number]),
-    blockCount: countBlocks(doc),
-    palette: paletteCounts(doc),
+    blockCount: tally.blocks,
+    palette: paletteCounts(tally.histogram),
     dirty: isDirty(history),
     canUndo: canUndo(history),
     undoDepth: history.undoStack.length,

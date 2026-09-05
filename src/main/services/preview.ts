@@ -55,6 +55,7 @@ import {
   buildChunkedMesh,
   createChunkMeshCache,
   type ChunkMeshCache,
+  type MeshBounds,
 } from "../pipeline/chunked_mesh.js";
 import { computeLight } from "../pipeline/lighting.js";
 
@@ -106,8 +107,8 @@ function boundsOf(pieces: readonly MeshBuffers[]): {
   center: [number, number, number];
   size: [number, number, number];
 } {
-  const min = [Infinity, Infinity, Infinity];
-  const max = [-Infinity, -Infinity, -Infinity];
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
   for (const piece of pieces) {
     for (let i = 0; i < piece.positions.length; i += 3) {
       for (let axis = 0; axis < 3; axis += 1) {
@@ -117,6 +118,26 @@ function boundsOf(pieces: readonly MeshBuffers[]): {
       }
     }
   }
+  return extentOf({ min, max });
+}
+
+/**
+ * A box as midpoint and extent, which is what the viewer's caption reads.
+ *
+ * Split out of `boundsOf` because the chunked path no longer walks vertices
+ * to find the box -- every chunk carries its own and the union is O(chunks) --
+ * while the single-mesh preview path still has one mesh and nothing cheaper to
+ * ask. Two ways to the box, one way to the sentence about it.
+ *
+ * `Infinity` means there were no vertices at all, which is a document with
+ * nothing in it: a zero box at the origin says so without claiming there is
+ * something there.
+ */
+function extentOf(box: MeshBounds): {
+  center: [number, number, number];
+  size: [number, number, number];
+} {
+  const { min, max } = box;
   if (!Number.isFinite(min[0])) {
     return { center: [0, 0, 0], size: [0, 0, 0] };
   }
@@ -775,10 +796,18 @@ export async function buildDocumentPreview(
     filled.voidIndices,
   );
   await warnAboutBlocksWithNoGeometry(structure, cached.baker, new Set(Object.keys(atlas.uvRects)));
-  if (chunked.buffers.indices.length === 0) {
+  /*
+   * `pieces` only ever receives chunks that have indices, so this is exactly
+   * the question the fused mesh used to be built to answer -- and building it
+   * was **155 ms of a 207 ms edit** on a dense 128x32x128, some 264 MB
+   * allocated and copied per placed block. See `concatChunks`.
+   */
+  if (chunked.pieces.length === 0) {
     throw new EmptyPreviewError(countSolidBlocks(structure));
   }
-  const bounds = boundsOf(chunked.pieces);
+  // Unioned from the chunks' own boxes rather than walked over every vertex,
+  // which was another 39 ms of the same edit.
+  const bounds = extentOf(chunked.bounds);
   return {
     mesh: toMeshPayload(
       chunked.pieces,

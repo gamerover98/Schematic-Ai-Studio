@@ -69,9 +69,41 @@ export const CHUNK_SIZE = 16;
  * `filler` is empty for every document until somebody chooses a void block,
  * which is the default.
  */
+/** A box in world units, or `null` for geometry with no vertices in it. */
+export interface MeshBounds {
+  readonly min: readonly [number, number, number];
+  readonly max: readonly [number, number, number];
+}
+
 export interface ChunkLayers {
   readonly solid: MeshBuffers;
   readonly filler: MeshBuffers;
+  /**
+   * The solid layer's box, computed once when the chunk is meshed.
+   *
+   * The fourth thing to ride with a chunk, after its voxels, its light and its
+   * sign text, and for the same arithmetic: the viewport's caption wants the
+   * geometry's extent, and walking every vertex of every chunk to find it cost
+   * **39 ms of a 207 ms edit** on a dense 128x32x128 -- on every placed block,
+   * over chunks that had not moved. A chunk carried forward by reference
+   * carries its box with it and the union is O(chunks).
+   */
+  readonly bounds: MeshBounds | null;
+}
+
+/** The box of one chunk's geometry, walked once, when it is built. */
+function boundsOf(buffers: MeshBuffers): MeshBounds | null {
+  if (buffers.positions.length === 0) return null;
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < buffers.positions.length; i += 3) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = buffers.positions[i + axis];
+      if (value < min[axis]) min[axis] = value;
+      if (value > max[axis]) max[axis] = value;
+    }
+  }
+  return { min, max };
 }
 
 export interface ChunkMeshCache {
@@ -118,7 +150,15 @@ export interface ChunkMeshCache {
 }
 
 export interface ChunkedMeshResult {
-  buffers: MeshBuffers;
+  /**
+   * The box the solid geometry occupies, unioned from the chunks' own.
+   *
+   * This replaced a `buffers` field holding the whole fused mesh, whose only
+   * consumer asked it `indices.length === 0` -- a question `pieces.length ===
+   * 0` answers for nothing, because `pieces` only ever receives chunks that
+   * have indices. See `concatChunks`, which survives for the tests.
+   */
+  bounds: MeshBounds;
   /**
    * The same geometry, still separated by chunk.
    *
@@ -183,8 +223,22 @@ function emptyBuffers(): MeshBuffers {
  * Indices are per-chunk — each chunk numbers its vertices from zero — so they
  * are shifted by the running vertex count as they are copied. That shift is the
  * only per-element work here; everything else is `set`, which is a memcpy.
+ *
+ * **Nothing in the app calls this, and that is the point.** It used to run on
+ * every build, and its result had exactly one consumer: `preview.ts` asking
+ * `buffers.indices.length === 0`. Since `ordered` only ever receives pieces
+ * that already have indices, that question is `pieces.length === 0` — so the
+ * whole fusion was provably redundant. Measured on a dense 128x32x128, it was
+ * **155 ms of a 207 ms edit**, allocating and copying about 264 MB per placed
+ * block to answer *is it empty*.
+ *
+ * It stays exported because `tests/chunks.ts` needs it: the property that
+ * whole suite rests on is that an incrementally updated mesh is byte-identical
+ * to one built from scratch, and comparing them means fusing them. Doing that
+ * in the test rather than in the pipeline is the right way round -- the fusing
+ * is what the check is *about*.
  */
-function concatChunks(pieces: readonly MeshBuffers[]): MeshBuffers {
+export function concatChunks(pieces: readonly MeshBuffers[]): MeshBuffers {
   let positionCount = 0;
   let uvCount = 0;
   let indexCount = 0;
@@ -440,9 +494,13 @@ export async function buildChunkedMesh(
      */
     const solidFaces = faces.filter((face) => face.voidFill !== true);
     const voidFaces = voidIndices === null ? [] : faces.filter((face) => face.voidFill === true);
+    const solid = buildMesh(solidFaces, atlasUv, (name) => baker.isTextureTranslucent(name));
     const layers: ChunkLayers = {
-      solid: buildMesh(solidFaces, atlasUv, (name) => baker.isTextureTranslucent(name)),
+      solid,
       filler: buildMesh(voidFaces, atlasUv, (name) => baker.isTextureTranslucent(name)),
+      // Walked here, where the chunk is already being built, so a chunk carried
+      // forward by reference carries its box with it.
+      bounds: boundsOf(solid),
     };
     if (layers.solid.indices.length === 0 && layers.filler.indices.length === 0) {
       // An all-air chunk holds nothing; dropping it keeps the concatenation
@@ -478,8 +536,27 @@ export async function buildChunkedMesh(
     }
   }
 
+  /*
+   * The union, over chunks rather than over vertices.
+   *
+   * `Infinity` for an empty build, which is what the caller's `isFinite` guard
+   * already reads as \"nothing here\" -- there is no box for geometry with no
+   * vertices, and inventing one at the origin would frame a document that has
+   * nothing in it as though it had something at (0, 0, 0).
+   */
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (const key of orderedKeys) {
+    const box = chunks.get(key)?.bounds;
+    if (box === undefined || box === null) continue;
+    for (let axis = 0; axis < 3; axis += 1) {
+      if (box.min[axis] < min[axis]) min[axis] = box.min[axis];
+      if (box.max[axis] > max[axis]) max[axis] = box.max[axis];
+    }
+  }
+
   return {
-    buffers: concatChunks(ordered),
+    bounds: { min, max },
     pieces: ordered,
     pieceKeys: orderedKeys,
     voidPieces: orderedVoid,

@@ -1537,6 +1537,58 @@ carries what the window already holds. Four things about it are load-bearing:
   scene with nothing to update; refusing to be incremental there means the
   renderer never has to reason about that case.
 
+**And the shipping was fixed while the *building* went on doing the same work
+twice.** That earlier fix made the payload a delta and said, correctly, that
+none of the stutter was the meshing. It was not the meshing then and it is not
+now — it was two passes beside it, and they stayed:
+
+- **`concatChunks` rebuilt the whole fused mesh on every build.** Five typed
+  arrays plus a scalar loop over every index in the document, because the
+  indices are per chunk and have to be shifted. Its only consumer in the whole
+  of `src/main` was one line: `if (chunked.buffers.indices.length === 0)`. And
+  `pieces` only ever receives chunks that already *have* indices, so that
+  question is `pieces.length === 0` — the fusion was **provably** redundant;
+- **`boundsOf` walked every vertex of every chunk**, on every edit, over chunks
+  that had not moved, to fill in a caption.
+
+Measured on a dense 128×32×128 — a checkerboard, so every block is
+all-faces-visible and the geometry is the 75 MB of positions this file's
+17.5 MB was the sparse version of:
+
+| | |
+|---|---|
+| one block placed, before | **207 ms** |
+| ...of which `concatChunks` | 155 ms, allocating and copying ~264 MB |
+| ...of which `boundsOf` | 39 ms |
+| one block placed, after | **48 ms** |
+
+`concatChunks` is **exported and called by nothing in the app**, which is the
+arrangement worth keeping: `tests/chunks.ts` needs it, because the property
+that suite rests on is that an incrementally updated mesh is byte-identical to
+one built from scratch, and comparing them means fusing them. The fusing is
+what the check is *about*, so it belongs in the check.
+
+**Each chunk carries its own box**, which is the fourth thing to ride with a
+chunk after its voxels, its light and its sign text, and for the same
+arithmetic: a chunk carried forward by reference carries its box with it, so
+the union is O(chunks). The check on it is the one every incremental cache
+needs — the cheap answer equals the expensive one, over a sequence of edits —
+and it has a trap that cost a rewrite to see. The fixture has to be a **floor
+and nothing else**: `seeded()` holds a column running the document's full
+height, so its overall box never moves however the chunks are edited, and a
+union reading stale per-chunk boxes passes every comparison. The extremes have
+to be the thing being edited. Same reason the edit list writes into a chunk
+that **already has geometry**: an edit into an empty chunk creates it, and a
+chunk with no old box has no stale box to keep.
+
+**`paletteTally` is one walk where there were two.** `documentState` wants the
+materials list and the block count, and asked for them separately — two passes
+over every cell on every mutating handler, which a selection-face drag reaches
+many times a second. 12.1 ms became 5.6 ms on the same document. `blocks` is
+derived as `cells - counts[0]` rather than by filtering names, because that is
+`countBlocks`' answer *exactly*: index 0 is always air and is the only thing it
+excludes, so a `cave_air` interned at some other index counts as a block to it.
+
 **The viewport receives geometry, not a container format.** `docMesh` hands over
 per-chunk `Float32Array`/`Uint32Array` attributes plus the atlas as raw RGBA
 pixels; `Viewer.svelte` builds `BufferGeometry` and a `DataTexture` directly.
