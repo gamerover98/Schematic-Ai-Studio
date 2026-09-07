@@ -37,7 +37,10 @@ import {
   shaderPreset,
 } from "../src/renderer/src/lib/shader_modes.js";
 import {
+  continuedPlacement,
   entryFace,
+  rayBox,
+  thinBoxes,
   facingNormal,
   hasDominantAxis,
   hoverSource,
@@ -153,7 +156,11 @@ import {
   projectAxis,
   type Quat,
 } from "../src/renderer/src/lib/compass.js";
-import { FACE_VECTOR, type Face } from "../src/shared/block_orientation.js";
+import {
+  FACE_VECTOR,
+  type Face,
+  type PlacementLook,
+} from "../src/shared/block_orientation.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const RENDERER = path.join(here, "..", "src", "renderer", "src");
@@ -3231,6 +3238,338 @@ console.log("\n--- a normal that names no face ---");
   check(
     "...and answers from the ray, not from the normal again",
     /entryFace\(\s*\r?\n?\s*\[raycaster\.ray\.origin/.test(pick),
+  );
+}
+
+// --- a block too thin to aim at ---------------------------------------------
+//
+// The viewport raycasts the fused mesh, and a chain's mesh is two planes of
+// zero thickness, 3 texels wide, crossed at the middle of its cell. Vanilla
+// gives it a solid 3x16x3 column to click; here there was nothing to click, so
+// the ray went past it and hit whatever stood behind -- and that block took
+// the placement.
+//
+// Measured against a real document, a chain hanging from stone: from dead
+// underneath the planes are edge-on and present no area at all, so the ray
+// reached the stone's `down` face and the placement went into the cell the
+// chain was already in; from above or to one side it reached the stone's
+// *east* face and the new chain went in beside it with `axis=x`. Reported
+// three times, and never actually about the placement rules.
+console.log("\n--- a block too thin to aim at ---");
+{
+  /** One quad, as `buildMesh` lays it out: four positions, the normal four times. */
+  const quad = (
+    corners: readonly (readonly [number, number, number])[],
+    normal: readonly [number, number, number],
+  ): { positions: number[]; normals: number[] } => ({
+    positions: corners.flatMap((c) => [...c]),
+    normals: [0, 1, 2, 3].flatMap(() => [...normal]),
+  });
+  const buffers = (quads: { positions: number[]; normals: number[] }[]) => ({
+    positions: new Float32Array(quads.flatMap((q) => q.positions)),
+    normals: new Float32Array(quads.flatMap((q) => q.normals)),
+  });
+
+  /*
+   * A chain: two planes 3/16 wide, turned 45 degrees about the cell's
+   * middle, running its full height. Both diagonals, so both normals are
+   * ties -- which is the whole of how this set is recognised.
+   */
+  const s = 0.5 - (1.5 / 16) * Math.SQRT1_2;
+  const e = 0.5 + (1.5 / 16) * Math.SQRT1_2;
+  const d = Math.SQRT1_2;
+  const chain = buffers([
+    quad([[s, 0, e], [e, 0, s], [e, 1, s], [s, 1, e]], [d, 0, d]),
+    quad([[e, 0, s], [s, 0, e], [s, 1, e], [e, 1, s]], [-d, 0, -d]),
+    quad([[s, 0, s], [e, 0, e], [e, 1, e], [s, 1, s]], [d, 0, -d]),
+    quad([[e, 0, e], [s, 0, s], [s, 1, s], [e, 1, e]], [-d, 0, d]),
+  ]);
+  const found = thinBoxes(chain.positions, chain.normals);
+  equal("a chain is one cell the pointer would pass through", found.length, 1);
+  equal("...named by the cell it is in", found[0]?.cell, [0, 0, 0]);
+  /*
+   * ...and by the line it runs along, which is the axis it is *not* narrow
+   * on. That is the same fact twice: what makes a chain unaimable is what
+   * says which way it is strung, so the shape that qualifies also answers
+   * the question a run needs answered.
+   */
+  equal("...and the axis it is strung along", found[0]?.axis, 1);
+  /*
+   * The box is the geometry's **own** extent, not a transcribed collision
+   * shape: 2.12 across, which is 3 turned 45 degrees, against vanilla's
+   * 3x16x3. A little narrower, and deliberately so -- it is derived from
+   * what is drawn, so it cannot claim a shape the block does not have.
+   */
+  check(
+    "...as wide as the geometry is, which is 3 texels turned 45 degrees",
+    Math.abs((found[0].max[0] - found[0].min[0]) * 16 - 3 * Math.SQRT1_2) < 1e-4 &&
+      Math.abs(found[0].max[1] - found[0].min[1] - 1) < 1e-6,
+    `${((found[0].max[0] - found[0].min[0]) * 16).toFixed(2)} wide`,
+  );
+
+  /*
+   * A **cross** is drawn exactly the same way and must not be in the set. It
+   * spans its cell corner to corner, so it is 11.3 units across rather than
+   * 2.1 and is already easy to hit -- and a box would make it impossible to
+   * click the ground behind a flower, which is a thing people do.
+   */
+  const cross = buffers([
+    quad([[0, 0, 1], [1, 0, 0], [1, 1, 0], [0, 1, 1]], [d, 0, d]),
+    quad([[1, 0, 0], [0, 0, 1], [0, 1, 1], [1, 1, 0]], [-d, 0, -d]),
+    quad([[0, 0, 0], [1, 0, 1], [1, 1, 1], [0, 1, 0]], [d, 0, -d]),
+    quad([[1, 0, 1], [0, 0, 0], [0, 1, 0], [1, 1, 1]], [-d, 0, d]),
+  ]);
+  equal("a flower is not one of them", thinBoxes(cross.positions, cross.normals).length, 0);
+
+  /*
+   * A chain lying flat is the same thing turned, and the axis has to turn
+   * with it -- reading the run as vertical whatever it was is what made a
+   * sideways chain impossible to carry on, which was reported.
+   */
+  const flat = buffers([
+    quad([[0, s, e], [0, e, s], [1, e, s], [1, s, e]], [0, d, d]),
+    quad([[0, e, s], [0, s, e], [1, s, e], [1, e, s]], [0, -d, -d]),
+    quad([[0, s, s], [0, e, e], [1, e, e], [1, s, s]], [0, d, -d]),
+    quad([[0, e, e], [0, s, s], [1, s, s], [1, e, e]], [0, -d, d]),
+  ]);
+  const lying = thinBoxes(flat.positions, flat.normals);
+  equal("a chain lying along x is one of them too", lying.length, 1);
+  equal("...strung along x, not down", lying[0]?.axis, 0);
+
+  // And nothing axis-aligned ever is, whatever its size: a face of a cube, a
+  // slab, a fence rail all name an axis, so they are aimable by construction.
+  const slab = buffers([
+    quad([[0, 0.5, 0], [1, 0.5, 0], [1, 0.5, 1], [0, 0.5, 1]], [0, 1, 0]),
+    quad([[0, 0, 0], [0, 0.5, 0], [0, 0.5, 1], [0, 0, 1]], [-1, 0, 0]),
+  ]);
+  equal("a slab is not one of them", thinBoxes(slab.positions, slab.normals).length, 0);
+
+  /*
+   * The box test itself. Six faces, and each one is a direction the ray can
+   * come from -- this is what `entryFace` does on the unit cell, answering
+   * for an arbitrary box and reporting the range as well.
+   */
+  const min: readonly [number, number, number] = [0.4, 0, 0.4];
+  const max: readonly [number, number, number] = [0.6, 1, 0.6];
+  for (const [label, from, towards, face] of [
+    ["from below", [0.5, -3, 0.5], [0, 1, 0], "down"],
+    ["from above", [0.5, 4, 0.5], [0, -1, 0], "up"],
+    ["from the east", [3, 0.5, 0.5], [-1, 0, 0], "east"],
+    ["from the west", [-3, 0.5, 0.5], [1, 0, 0], "west"],
+    ["from the south", [0.5, 0.5, 3], [0, 0, -1], "south"],
+    ["from the north", [0.5, 0.5, -3], [0, 0, 1], "north"],
+  ] as const) {
+    equal(
+      `a ray ${label} enters by that face`,
+      rayBox(from, towards, min, max)?.face,
+      face,
+    );
+  }
+  equal("...at the range it actually meets it", rayBox([0.5, -3, 0.5], [0, 1, 0], min, max)?.distance, 3);
+
+  // A ray that misses the column entirely, which is most of them: the box is
+  // a fifth of a block across.
+  equal("a ray beside it is not a hit", rayBox([0.9, -3, 0.9], [0, 1, 0], min, max), null);
+  /*
+   * A ray that starts **inside** is not a hit either, and that one is load
+   * bearing: in flight the camera passes through the build, and a box the
+   * camera is standing in would be picked at zero range and beat everything
+   * else on screen.
+   */
+  equal("...and neither is one starting inside it", rayBox([0.5, 0.5, 0.5], [0, 1, 0], min, max), null);
+  // Parallel to a pair of planes, and outside them: the division would be an
+  // infinity that then wins the comparison, which is `entryFace`'s own trap.
+  equal("a ray parallel to it and past it misses", rayBox([0.9, 0.5, 0.5], [0, 0, 1], min, max), null);
+  equal("a ray pointing away from it misses", rayBox([0.5, -3, 0.5], [0, -1, 0], min, max), null);
+
+  /*
+   * And the wiring, which needs a scene. Two things: the boxes are built
+   * where the chunk's mesh is, so they are evicted exactly when it is; and
+   * the pick asks for them **before** it reads the mesh hit, bounded by that
+   * hit's own distance so a nearer wall still wins.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  check(
+    "the boxes ride with the chunk mesh they came from",
+    /mesh\.userData\.thin = thinBoxes\(chunk\.positions, chunk\.normals\)/.test(viewer),
+  );
+  check(
+    "...and the void layer gets none, because nothing raycasts it",
+    /if \(chunk\.layer !== "void"\) \{\s*\r?\n\s*mesh\.userData\.thin/.test(viewer),
+  );
+  const pick = viewer.slice(viewer.indexOf("function pickBlockAt"));
+  check(
+    "the pick asks for a stand-in box, bounded by what the mesh found",
+    /nearestThinBox\(raycaster\.ray, hit\?\.distance \?\? Infinity\)/.test(pick),
+  );
+  check(
+    "...before it gives up on a ray the mesh missed",
+    pick.indexOf("nearestThinBox(") < pick.indexOf("if (!hit || !hit.face) return null;"),
+  );
+}
+// --- a run of chains --------------------------------------------------------
+//
+// The entry face is the game's own answer and it is a narrow gesture,
+// measured: the ray has to cross the cell's floor inside its footprint, so
+// aiming at the middle of a chain needs a look steeper than 45 degrees and a
+// shallower one comes back with a side face. Reported twice as a column being
+// unbuildable -- the second time as *not fixed at all*, which was fair.
+//
+// So the half of the block that was clicked decides which end the next one
+// goes on. It is a deliberate deviation, and it is the question a slab
+// already asks of `cursorY`.
+//
+// **Which end of *what* is the trap**, and reading the half vertically is
+// the obvious way to fall into it: a chain strung along x or z could then not
+// be continued at all, because a click on one would send the next above or
+// below it. The box the block is picked through already knows better -- it is
+// long on exactly one axis and narrow on the other two, and that axis is the
+// run. Both directions are stated below for that reason.
+console.log("\n--- a run of chains ---");
+{
+  const AT = { x: 4, y: 7, z: 9 };
+  const hitting = (
+    against: PlacementLook["against"],
+    axis: "x" | "y" | "z",
+    at: number,
+  ): PlacementLook => ({
+    direction: { x: 1, y: 0, z: 0 },
+    against,
+    cursorY: 0.5,
+    run: { axis, at },
+  });
+
+  /*
+   * Clicked on the west side of a chain hanging vertically, low down: `at`
+   * is the cell to the west, so the chain that was hit is one step back
+   * east, and the next link goes under *it* rather than beside it.
+   */
+  const low = continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:chain");
+  equal("clicking the low half of a hanging chain sends the next one under it", low?.at, {
+    x: AT.x + 1,
+    y: AT.y - 1,
+    z: AT.z,
+  });
+  equal("...against the face that gives it the vertical axis", low?.against, "down");
+
+  const high = continuedPlacement(AT, hitting("west", "y", 0.8), "minecraft:chain");
+  equal("clicking the high half sends it over the top", high?.at, {
+    x: AT.x + 1,
+    y: AT.y + 1,
+    z: AT.z,
+  });
+  equal("...and against the other one", high?.against, "up");
+
+  /*
+   * **And a chain lying flat carries on flat**, which is the half that was
+   * wrong: reading the half vertically whatever the run was made a sideways
+   * chain impossible to extend at all. The run comes from the box, so this
+   * needs no second rule -- only the axis it was already given.
+   */
+  const west = continuedPlacement(AT, hitting("up", "x", 0.2), "minecraft:chain");
+  equal("clicking the west half of a chain strung along x carries it west", west?.against, "west");
+  equal("...into the cell that way", west?.at, { x: AT.x - 1, y: AT.y - 1, z: AT.z });
+  const east = continuedPlacement(AT, hitting("up", "x", 0.8), "minecraft:chain");
+  equal("...and the east half carries it east", east?.against, "east");
+
+  const north = continuedPlacement(AT, hitting("up", "z", 0.2), "minecraft:chain");
+  equal("a chain along z goes north from its north half", north?.against, "north");
+  const south = continuedPlacement(AT, hitting("up", "z", 0.8), "minecraft:chain");
+  equal("...and south from its south half", south?.against, "south");
+
+  /*
+   * The renamed spelling, because that is the half of a rename that gets left
+   * behind -- `chain` became `iron_chain` at 1.21.9 and this app offers both.
+   * Asking the registry for `axis` is what covers the pair with no list.
+   */
+  equal(
+    "...and iron_chain, which is the same block after 1.21.9",
+    continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:iron_chain")?.against,
+    "down",
+  );
+  equal(
+    "...and a copper one",
+    continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:waxed_copper_chain")?.against,
+    "down",
+  );
+
+  /*
+   * **Idempotent where the entry face already agreed.** Aiming steeply from
+   * below gives `against: "down"` on its own, and the rule must then name the
+   * same cell rather than stepping a second time -- which is the mistake the
+   * arithmetic invites, because it walks back along `against` and then
+   * forward along a face that is sometimes the very same one.
+   */
+  const already = continuedPlacement(AT, hitting("down", "y", 0.1), "minecraft:chain");
+  equal("a face the ray already found is not stepped along twice", already?.at, AT);
+
+  /*
+   * And the guards, each of which is a way this could reach a placement it has
+   * no business changing.
+   */
+  equal(
+    "a block picked off its own geometry is left alone",
+    continuedPlacement(
+      AT,
+      { against: "west", run: null },
+      "minecraft:chain",
+    ),
+    null,
+  );
+  /*
+   * A poppy is a cross exactly as a chain is, and is not replaceable, so this
+   * is the guard that keeps ordinary building unchanged: stone clicked onto a
+   * chain goes where it always went.
+   */
+  equal(
+    "...and so is a block with no axis to continue",
+    continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:stone"),
+    null,
+  );
+  equal(
+    "...and a click that landed on no face at all",
+    continuedPlacement(AT, hitting(null, "y", 0.2), "minecraft:chain"),
+    null,
+  );
+  /*
+   * `nether_portal` carries an `axis` of `x|z` and no `y`. The guard is about
+   * the *value* rather than about the block, which is what the orientation
+   * arm does one layer along -- so it is refused on a vertical run and
+   * allowed on a horizontal one, and stating both is what says which.
+   */
+  equal(
+    "...and a run whose axis the held block has no value for",
+    continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:nether_portal"),
+    null,
+  );
+  equal(
+    "...while one it does have is allowed",
+    continuedPlacement(AT, hitting("up", "x", 0.2), "minecraft:nether_portal")?.against,
+    "west",
+  );
+
+  // And the wiring: the rule has to be asked before the request is built, and
+  // never for a break, whose coordinates name the block itself.
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check(
+    "the placement asks it, and a break does not",
+    /const along =\s*\r?\n?\s*action === \"break\" \? null : continuedPlacement\(at, look, held\.namespacedName\)/.test(
+      app,
+    ),
+  );
+  check(
+    "...and the cell it names is the one that is sent",
+    /x: cell\.x,\r?\n\s*y: cell\.y,\r?\n\s*z: cell\.z,/.test(app),
+  );
+  check(
+    "...with the face that goes with it",
+    /\.\.\.\(facing\.against === null \? \{\} : \{ against: facing\.against \}\)/.test(app),
+  );
+  // The block is born from that same face, or it would carry the axis of the
+  // side it was clicked on while standing in the cell beyond it.
+  check(
+    "...and the block is oriented from it too",
+    /placementState\(held\.namespacedName, facing\)/.test(app),
   );
 }
 

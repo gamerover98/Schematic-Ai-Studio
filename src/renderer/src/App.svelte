@@ -66,6 +66,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
   import { blocksIn } from "../../shared/block_versions.js";
   import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
+  import { continuedPlacement } from "./lib/block_hover.js";
   import { movedRegion, translatedRegion } from "./lib/selection_drag.js";
 import {
   gizmoOrigin,
@@ -764,6 +765,21 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (busy) return;
     const held = parseBlock(placingBlock);
     /*
+     * A chain has no end to click, so the column is continued by the half of
+     * it that was clicked. The rule and the whole argument for it are in
+     * `continuedPlacement`; `null` means the ordinary answer stands, which is
+     * every placement in the app but this one family.
+     *
+     * A **break** is exempt, and not incidentally: its `x/y/z` names the
+     * block itself rather than the cell across the face, so the step back
+     * this rule takes would land somewhere else entirely. That is the same
+     * confusion that made the replaceable redirect swallow every break in the
+     * app, one layer down.
+     */
+    const along = action === "break" ? null : continuedPlacement(at, look, held.namespacedName);
+    const cell = along?.at ?? at;
+    const facing: PlacementLook = along === null ? look : { ...look, against: along.against };
+    /*
      * Breaking writes the *void block*, which is air unless somebody chose
      * otherwise.
      *
@@ -779,7 +795,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         : {
             ...held,
             properties: {
-              ...placementState(held.namespacedName, look),
+              ...placementState(held.namespacedName, facing),
               ...(held.properties ?? {}),
             },
           };
@@ -802,15 +818,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     await runDocument(label, () =>
       api().applyEdit({
         kind: action === "use" ? "use" : "setBlock",
-        x: at.x,
-        y: at.y,
-        z: at.z,
+        x: cell.x,
+        y: cell.y,
+        z: cell.z,
         block,
         // Only main can see what was clicked -- the renderer holds no schematic
         // -- so it needs the direction to look in. Two slabs meeting reads it,
         // and so does `use`: the block that might open is one step back along
         // this face from the cell a placement would fill.
-        ...(look.against === null ? {} : { against: look.against }),
+        ...(facing.against === null ? {} : { against: facing.against }),
       }),
     );
   }

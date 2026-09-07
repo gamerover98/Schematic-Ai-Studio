@@ -1281,6 +1281,129 @@ and a chain's box is a full-height 3×3 column while the model it draws is two
 planes. Aim up at a chain from below and the ray enters through the floor of
 its cell, so the next link goes underneath it, with `axis=y`.
 
+**And that was not enough, which took a second report to establish.** The
+entry face is the game's own answer and it is a *narrow gesture*: the ray
+has to cross the cell's floor inside its footprint, and a chain's planes sit
+in the middle of the cell, so the aim decides it. Measured at three blocks'
+range, against where on the chain the crosshair sits:
+
+| aimed at | look needed for the next link to go **below** |
+|---|---|
+| the bottom twentieth | 10 degrees up |
+| the bottom quarter | 30 degrees up |
+| halfway up | 60 degrees up |
+| the top | unreachable |
+
+From a level or a downward look it comes back with a side face and the next
+link goes beside the one clicked, which is what the game does too and is
+what was reported the first time. The second report said *not fixed at all*,
+and that was fair.
+
+**And the third report was about none of that: the ray was never reaching
+the chain at all.** The viewport raycasts the fused mesh, and a chain's mesh
+is two planes of zero thickness, 3 texels wide, crossed at the middle of its
+cell. Vanilla gives it a solid 3x16x3 column to click; here there was
+nothing to click, so the ray went past it and hit whatever stood behind --
+and *that* block took the placement.
+
+Traced against a real document, a chain hanging from a stone block. From
+**dead underneath** the two planes are edge-on and present no area at all,
+so the ray reached the stone's `down` face and the placement went into the
+cell the chain was already in -- refused, nothing happens. From above or to
+one side it reached the stone's **east** face, and the new chain went in
+beside it carrying `axis=x`. Which is the report, word for word, three
+times over, while every check written about the placement rules passed.
+
+`thinBoxes` in `block_hover.ts` is the answer and it is renderer-only: a
+cell whose geometry names no face of the cell, and is narrow with it, gets
+a stand-in box that the pick tests alongside the mesh. Four things about it
+are load-bearing:
+
+- **the classification is the pick's own predicate, read once more.**
+  `hasDominantAxis` is false exactly for geometry with no face on any axis,
+  which is a plane turned 45 degrees. One idea, two uses, and nothing to
+  list by name;
+- **the shape that qualifies is the shape that answers.** Exactly one of
+  the three axes is wide, and that one is the line the block is strung
+  along -- so the same measurement that decides a chain cannot be aimed at
+  decides which way a run of them goes;
+- **a cross is kept out by the width**, and that is not a detail. A flower
+  is drawn the same way and spans its cell corner to corner, so it is 11.3
+  units across against a chain's 2.12 -- already easy to hit, and a box
+  would make it impossible to click the ground behind it. The gap between
+  2.12 and 11.3 is why the threshold is not a tuning knob;
+- **the box is the geometry's own extent, not a transcribed collision
+  shape.** A chain comes out 2.12 across, which is its 3 texels turned 45
+  degrees, against vanilla's 3. Slightly narrow, and that is the right way
+  to be wrong: derived from what is drawn, it can never claim a shape the
+  block does not have. Per-shape interaction boxes remain the real version
+  of this, and would fix the outline too;
+- **a ray that starts inside a box is not a hit.** In flight the camera
+  passes through the build, and a box the camera is standing in would
+  otherwise be picked at zero range and beat everything on screen.
+
+The boxes ride on the chunk mesh they were built from, in `userData`, so
+they are evicted exactly when it is -- `chunkMeshes` is already keyed on
+layer *and* number for a stated reason, and a second map keyed the same way
+is a second chance to get that wrong. The void layer gets none, because
+nothing raycasts it.
+
+What it costs: a chain in front of a wall now takes the click that would
+have gone through it, in the fifth of a block it occupies. That is what the
+game does.
+
+**So the half of the block you clicked decides which end the next one goes
+on**, and that is a deliberate deviation, chosen by the user with the
+faithful answer in front of them. The argument is the one that already lets
+an iron door open here: faithful and useless is worse than useful. It is
+also not an invention out of nothing -- *which half of the block was
+clicked* is the question `placedInUpperHalf` asks of a slab, and vanilla's
+own placement context asks it of stairs and trapdoors.
+
+**Which half of *what* is the trap, and reading it vertically is the
+obvious way to fall into it.** A chain strung along `x` or `z` could then
+not be carried on at all -- click one and the next goes above or below it
+-- which is the deviation being paid for in the wrong place: the rule reads
+as a column and a chain is a *run*.
+
+It needs nothing new, because the stand-in box already knows: it is long on
+exactly one axis and narrow on the other two, and that axis is the run.
+`PlacementLook.run` carries it with how far along it the ray landed, so a
+hanging chain carries on down, one lying east-west carries on east or west,
+and the guard on the held block asks whether *that* value is legal rather
+than whether `y` is.
+
+`continuedPlacement` in `block_hover.ts` is the rule, plain for
+`selection_drag.ts`'s reason, and it is narrow in three ways that each
+matter:
+
+- **the block hit must have no end faces** (`PickedBlock.noEnds`, the tie
+  above). A fence, a slab, a stair, a full cube: untouched;
+- **the block held must carry an `axis`** -- so stone, or a torch, clicked
+  onto a flower goes exactly where it always went. That guard is load
+  bearing rather than tidy: a poppy is a cross precisely as a chain is, and
+  is *not* replaceable, so without it every plant in the game would have
+  become a thing you place above and below;
+- **that axis must be able to be `y`**, which is `nether_portal` excluding
+  itself. Its `axis` is `x|z`, so continuing a column with one would name a
+  cell above or below and write a state the game does not have -- the
+  orientation arm's own trap, one layer along, taking the same answer.
+
+It is **idempotent where the entry face already agreed**: aiming steeply
+from below gives `down` on its own, and the rule walks back along `against`
+and then forward along a face that is sometimes the very same one. Stepping
+twice there is the mistake the arithmetic invites, so it is checked.
+
+What it costs is stated rather than hidden: **you can no longer put a chain
+across the line of another one by clicking it** -- a click on a hanging
+chain always means up or down, and one on a chain lying east-west always
+means east or west. Start the other direction against a solid block's face,
+which is where a run has to start anyway.
+
+`against` moves with the cell, because everything downstream reads it -- the
+axis the block is born with, the slab merge, `use`, and the replaceable
+redirect, which steps back along it to find what was clicked.
+
 The epsilon is not a tuning knob and the rule is deliberately narrow: a tie
 means the existing answer was a coin toss, so only those change. Everything
 with a real winner keeps the answer it always had, which is why the lectern is
@@ -3462,9 +3585,9 @@ about the right place.
 camera is already looking down, at the depth of what was picked, so `lookAt`
 has nothing to do and nothing on screen moves at all. What changes is the
 *radius*, which is the whole of what was being asked for. It is what a 3D
-editor\'s "auto depth" does -- Blender sets the view\'s own offset along its
+editor's \"auto depth\" does -- Blender sets the view's own offset along its
 axis rather than pointing the camera at the surface it found -- and it is
-why the answer to "the camera snaps" is not a transition: there is nothing
+why the answer to \"the camera snaps\" is not a transition: there is nothing
 left to animate.
 
 `tests/ui.ts` reads the assignment out of the source, because both spellings

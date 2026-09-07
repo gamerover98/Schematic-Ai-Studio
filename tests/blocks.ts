@@ -767,6 +767,7 @@ console.log("\n--- shapes ---");
       direction: { x: -face[0], y: 0, z: -face[2] },
       against: clicked,
       cursorY: 0.5,
+      run: null,
     });
     const baked = await baker.bakeBlockstate(block("wall_torch", state));
     const base = allVertices(baked).filter((vertex) => vertex[1] < 0.35);
@@ -1830,6 +1831,7 @@ for (const name of AMETHYST) {
       direction: { x: 0, y: -1, z: 0 },
       against: "down",
       cursorY: 0,
+      run: null,
     }).facing,
     "down",
   );
@@ -1839,6 +1841,7 @@ for (const name of AMETHYST) {
       direction: { x: 0, y: 0, z: 1 },
       against: "north",
       cursorY: 0,
+      run: null,
     }).facing,
     "north",
   );
@@ -1848,6 +1851,7 @@ for (const name of AMETHYST) {
       direction: { x: 0, y: -1, z: 0 },
       against: null,
       cursorY: 0,
+      run: null,
     }).facing,
     "up",
   );
@@ -3558,7 +3562,7 @@ console.log("\n--- placement orientation ---");
     z: number,
     against: PlacementLook["against"],
     cursorY = 0,
-  ): PlacementLook => ({ direction: { x, y, z }, against, cursorY });
+  ): PlacementLook => ({ direction: { x, y, z }, against, cursorY, run: null });
 
   // North is -Z and east is +X, as Minecraft has it.
   const north = looking(0, 0, -1, "up");
@@ -4017,6 +4021,7 @@ console.log("\n--- the state a placed block starts in ---");
     direction: { x, y: 0, z },
     against: "up",
     cursorY: 0,
+    run: null,
   });
 
   const door = placementState("minecraft:oak_door", onFloor(0, -1));
@@ -4088,7 +4093,7 @@ console.log("\n--- the generated state table ---");
 
   // The reason the table exists, stated as a check: the blocks whose *shape* is
   // read out of their properties must arrive carrying them.
-  const onFloor: PlacementLook = { direction: { x: 0, y: 0, z: -1 }, against: "up", cursorY: 0 };
+  const onFloor: PlacementLook = { direction: { x: 0, y: 0, z: -1 }, against: "up", cursorY: 0, run: null };
   for (const [id, property] of [
     ["minecraft:oak_fence", "north"],
     ["minecraft:cobblestone_wall", "up"],

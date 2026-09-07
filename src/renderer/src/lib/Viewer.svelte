@@ -32,6 +32,9 @@ import { antialiasSamples, shaderPreset } from "./shader_modes.js";
     entryFace,
     facingNormal,
     hasDominantAxis,
+    rayBox,
+    thinBoxes,
+    type ThinBox,
     hoverSource,
     outlineCentre,
     pointerOnHandle,
@@ -147,6 +150,16 @@ import { isTyping } from "./typing.js";
      * face clicked is a side.
      */
     cursorY: number;
+    /**
+     * The line the block runs along and where on it the ray landed, for the
+     * blocks that are picked through a stand-in box rather than off their
+     * own geometry -- see `thinBoxes`. `null` for everything else.
+     *
+     * It is the box that knows: a chain is long on exactly one axis and thin
+     * on the other two. That is what lets `continuedPlacement` carry a run
+     * on in the direction it already goes, rather than always downwards.
+     */
+    run: { axis: "x" | "y" | "z"; at: number } | null;
   }
 
   /**
@@ -1038,6 +1051,42 @@ import { isTyping } from "./typing.js";
    * through the GLB. This needs no pipeline change at all, and is exact for
    * every shape the mesher emits, including the diagonal quads of a cross.
    */
+  /**
+   * The nearest stand-in box the ray meets, if any beats the mesh.
+   *
+   * Bounded by the chunk boxes three.js already keeps for frustum culling,
+   * so a document's worth of chains costs a handful of slab tests rather
+   * than a scan. The meshes carry no transform -- the pipeline emits none --
+   * so object space is world space here, as everywhere else in this file.
+   */
+  function nearestThinBox(
+    ray: THREE.Ray,
+    limit: number,
+  ): { box: ThinBox; face: Face; distance: number } | null {
+    if (!loaded) return null;
+    const origin: [number, number, number] = [ray.origin.x, ray.origin.y, ray.origin.z];
+    const direction: [number, number, number] = [
+      ray.direction.x,
+      ray.direction.y,
+      ray.direction.z,
+    ];
+    let best: { box: ThinBox; face: Face; distance: number } | null = null;
+    for (const child of loaded.children) {
+      const boxes = (child as THREE.Mesh).userData?.thin as ThinBox[] | undefined;
+      if (boxes === undefined || boxes.length === 0) continue;
+      const bounds = (child as THREE.Mesh).geometry.boundingBox;
+      if (bounds !== null && !ray.intersectsBox(bounds)) continue;
+      for (const box of boxes) {
+        const meets = rayBox(origin, direction, box.min, box.max);
+        if (meets === null) continue;
+        if (meets.distance >= limit) continue;
+        if (best !== null && meets.distance >= best.distance) continue;
+        best = { box, face: meets.face, distance: meets.distance };
+      }
+    }
+    return best;
+  }
+
   function pickBlockAt(clientX: number, clientY: number): PickedBlock | null {
     if (!camera || !loaded || !container) return null;
     const rect = container.getBoundingClientRect();
@@ -1047,6 +1096,43 @@ import { isTyping } from "./typing.js";
     );
     raycaster.setFromCamera(ndc, camera);
     const hit = raycaster.intersectObject(loaded, true)[0];
+
+    /*
+     * A block too thin to aim at answers first, if it is nearer than whatever
+     * the mesh found.
+     *
+     * This is the collision box the game has and the mesh does not. A chain
+     * is two planes of zero thickness at the middle of its cell, so the ray
+     * went past it and hit the block behind -- and that block took the
+     * placement. From dead underneath a hanging chain the planes are edge-on
+     * and present no area at all, so what answered was the ceiling it hangs
+     * from, and the new chain went into the cell the old one was already in,
+     * or beside it with the ceiling's own axis. See `thinBoxes`.
+     */
+    const thin = nearestThinBox(raycaster.ray, hit?.distance ?? Infinity);
+    if (thin !== null) {
+      const cell = thin.box.cell;
+      const [x, y, z] = cell;
+      const step = FACE_VECTOR[thin.face];
+      const at = raycaster.ray.at(thin.distance, new THREE.Vector3());
+      const along = thin.box.axis;
+      return {
+        x,
+        y,
+        z,
+        extend: false,
+        place: { x: x + step.x, y: y + step.y, z: z + step.z },
+        face: thin.face,
+        cursorY: at.y - y,
+        // Which way it is strung, and how far along it the ray landed --
+        // measured against the cell, like `cursorY`, so a half is a half.
+        run: {
+          axis: (["x", "y", "z"] as const)[along],
+          at: at.getComponent(along) - cell[along],
+        },
+      };
+    }
+
     if (!hit || !hit.face) return null;
 
     // Object space is world space here — the pipeline emits no node transform —
@@ -1117,6 +1203,13 @@ import { isTyping } from "./typing.js";
         place: { x: x + step.x, y: y + step.y, z: z + step.z },
         face,
         cursorY: hit.point.y - Math.floor(inside.y),
+        /*
+         * A cross reaches here -- a flower, a sapling, fire -- and it has no
+         * line to carry on. It spans its cell corner to corner on both
+         * horizontal axes, which is exactly why `thinBoxes` leaves it alone
+         * and why nobody stacks one.
+         */
+        run: null,
       };
     }
 
@@ -1145,7 +1238,7 @@ import { isTyping } from "./typing.js";
     // half exactly as one placed on a full block's side would.
     const cursorY = hit.point.y - Math.floor(inside.y);
 
-    return { x, y, z, extend: false, place, face, cursorY };
+    return { x, y, z, extend: false, place, face, cursorY, run: null };
   }
 
   /**
@@ -1265,6 +1358,7 @@ import { isTyping } from "./typing.js";
       direction: { x: heading.x, y: heading.y, z: heading.z },
       against: picked?.face ?? null,
       cursorY: picked?.cursorY ?? 0,
+      run: picked?.run ?? null,
     };
   }
 
@@ -1279,6 +1373,8 @@ import { isTyping } from "./typing.js";
       direction: { x: heading.x, y: heading.y, z: heading.z },
       against: "up",
       cursorY: 0,
+      // The build grid is a floor, and a floor is not a run of anything.
+      run: null,
     };
   }
 
@@ -4239,7 +4335,19 @@ import { isTyping } from "./typing.js";
     if (opaqueCount < chunk.indices.length) {
       geometry.addGroup(opaqueCount, chunk.indices.length - opaqueCount, 1);
     }
-    return new THREE.Mesh(geometry, materials);
+    const mesh = new THREE.Mesh(geometry, materials);
+    /*
+     * The stand-in collision boxes for the cells this chunk holds that are
+     * too thin to aim at -- see `thinBoxes`. They ride on the mesh rather
+     * than in a map of their own, so they are evicted exactly when it is:
+     * `chunkMeshes` is already keyed on layer *and* number for a reason,
+     * and a second map keyed the same way is a second chance to get that
+     * wrong. The void layer gets none, because nothing raycasts it.
+     */
+    if (chunk.layer !== "void") {
+      mesh.userData.thin = thinBoxes(chunk.positions, chunk.normals);
+    }
+    return mesh;
   }
 
   /**

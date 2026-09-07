@@ -61,6 +61,26 @@ export interface PlacementLook {
    * top-half slab from a bottom-half one.
    */
   readonly cursorY: number;
+  /**
+   * The line the block that was hit runs along, and how far up it the click
+   * landed -- `null` for everything that is not one.
+   *
+   * A chain has no face on its own axis at all: `boxFaces` drops the two
+   * with no area, so there is literally no end of a chain to aim at. It is
+   * picked through a stand-in box instead (`thinBoxes`), and that box knows
+   * which way the chain is strung -- it is long on exactly one axis and
+   * narrow on the other two.
+   *
+   * That is what makes continuing a run possible in **any** direction
+   * rather than only downwards: `at` says which half of the block was
+   * clicked, and `axis` says which two faces those halves are.
+   *
+   * `orientPlacement` does not read it, and that is not an oversight: this
+   * says nothing about which way a block points, only about what was under
+   * the pointer. `continuedPlacement` in the renderer's `block_hover.ts`
+   * is the one reader.
+   */
+  readonly run: { readonly axis: "x" | "y" | "z"; readonly at: number } | null;
 }
 
 /**
