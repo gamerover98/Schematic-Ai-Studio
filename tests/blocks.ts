@@ -1567,14 +1567,90 @@ console.log("\n--- planes ---");
   check("...by 45 degrees, so width and depth come out equal", Math.abs(span(0) - span(2)) < 1e-6);
   check("...trading width for depth", Math.abs(span(0) - (3 / 16) * Math.SQRT1_2) < 1e-6);
 
-  // A sideways chain lies along its axis instead of standing up. Only the
-  // geometry follows `axis`; the texture still runs across the plane, which is
-  // written down in block_shapes.ts rather than left to be discovered.
+  // A sideways chain lies along its axis instead of standing up.
   const sideways = await baker.bakeBlockstate(block("chain", { axis: "x" }));
   const sx = allVertices(sideways).map((v) => v[0]);
   equal("a chain on the x axis spans x", [Math.min(...sx), Math.max(...sx)], [0, 1]);
   const sy = allVertices(sideways).map((v) => v[1]);
   check("...and no longer spans y", Math.max(...sy) - Math.min(...sy) < 1);
+
+  /*
+   * **And it wears the same picture, laid along the run.** The horizontal
+   * variants are written out as their own boxes rather than rotated, and
+   * they were written without any `uv` at all -- so instead of the 3-wide
+   * strip of links they took coordinate-derived UVs across the whole tile.
+   * Measured on the shipped pack: the band they sampled (v 6.5..9.5 over all
+   * sixteen columns) is **16% opaque**, because every one of the 696 opaque
+   * texels in `iron_chain.png` lives in its first six columns. So a sideways
+   * chain was five sixths nothing, with a smear of link where it was not --
+   * reported as an incomplete mesh and a badly sewn texture, which is one
+   * fault seen from both sides.
+   *
+   * Two things are checked, and together they leave no freedom.
+   */
+  const runsAlong = (f: BakedFace): { long: number; short: number } => {
+    const at = (i: number, a: number) => f.positions[i * 3 + a];
+    const edge = (i: number, j: number) => ({
+      g: Math.hypot(at(j, 0) - at(i, 0), at(j, 1) - at(i, 1), at(j, 2) - at(i, 2)) * 16,
+      t: Math.hypot(f.uvs[j * 2] - f.uvs[i * 2], f.uvs[j * 2 + 1] - f.uvs[i * 2 + 1]) * 16,
+    });
+    const a = edge(0, 1);
+    const b = edge(0, 3);
+    return a.g > b.g ? { long: a.t, short: b.t } : { long: b.t, short: a.t };
+  };
+  /**
+   * Where the window's `v = 0` edge sits along the run.
+   *
+   * This is the half a span check cannot see: the strip can be laid the
+   * right way round or end for end, and both keep 16 texels on the long
+   * edge. `iron_chain.png` is not symmetric under a half turn -- 936 of the
+   * 1536 texels in the two strips differ from their opposite -- so it is a
+   * real choice and not a free one.
+   */
+  const vZeroAt = (f: BakedFace, axis: 0 | 1 | 2): number => {
+    const vs = [0, 1, 2, 3].map((i) => f.uvs[i * 2 + 1]);
+    const lowest = Math.min(...vs);
+    const ends = [0, 1, 2, 3]
+      .filter((i) => Math.abs(vs[i] - lowest) < 1e-9)
+      .map((i) => f.positions[i * 3 + axis] * 16);
+    return Math.min(...ends) === Math.max(...ends) ? Math.round(Math.min(...ends)) : -1;
+  };
+
+  /*
+   * The vertical chain is the reference and is untouched: the strip runs up
+   * it, and `v = 0` is at the top.
+   *
+   * The horizontal ones are that model turned, and the turn is the one the
+   * boxes already imply -- the tilt goes from `y` to `x`, and conjugating a
+   * 45 degree turn about Y into one about X takes a rotation about **Z**,
+   * `(x, y) -> (y, 16 - x)`. It sends `y = 16` to `x = 16`. The same
+   * argument for `axis=z`: the tilt moves to Z, so the rotation is about X,
+   * `(y, z) -> (16 - z, y)`, which sends `y = 16` to `z = 16`.
+   */
+  for (const [axis, along, end] of [["y", 1, 16], ["x", 0, 16], ["z", 2, 16]] as const) {
+    const baked = await baker.bakeBlockstate(block("chain", { axis }));
+    for (const face of baked.extraFaces) {
+      const { long, short } = runsAlong(face);
+      check(
+        `a chain on ${axis} wears its strip along the run`,
+        Math.abs(long - 16) < 1e-6 && Math.abs(short - 3) < 1e-6,
+        `${long.toFixed(2)} texels along, ${short.toFixed(2)} across`,
+      );
+      equal(`...the right way round on ${axis}`, vZeroAt(face, along), end);
+      /*
+       * And on the art rather than beside it. This is the one the
+       * proportion above cannot see: coordinate-derived UVs are 16 by 3 as
+       * well, they are simply 16 of the *wrong* texels. Every opaque texel
+       * in the sheet is in its first six columns.
+       */
+      const us = [0, 1, 2, 3].map((i) => face.uvs[i * 2] * 16);
+      check(
+        `...over the link art on ${axis}, not the empty two thirds of the tile`,
+        Math.min(...us) >= -1e-6 && Math.max(...us) <= 6 + 1e-6,
+        `u ${Math.min(...us).toFixed(1)}..${Math.max(...us).toFixed(1)}`,
+      );
+    }
+  }
 }
 
 // --- what is scattered on the floor -----------------------------------------

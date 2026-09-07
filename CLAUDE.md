@@ -4200,6 +4200,30 @@ knowing:
   full-block texture and wrong for blocks whose texture is a *sheet* of parts
   (lantern, chain, bell). Those carry an explicit `uv` window per face,
   transcribed from the vanilla model.
+
+  **A chain lying along `x` or `z` had none**, because those two variants are
+  written out as their own boxes rather than rotated, and the windows did not
+  come with them. All 696 opaque texels of `iron_chain.png` are in its first
+  six columns, so the band the derived UVs sampled -- `v 6.5..9.5` across all
+  sixteen -- is **16% opaque**: five sixths of every horizontal chain drew
+  nothing at all, and the rest wore a 3-pixel band of link stretched along the
+  run. Reported as an incomplete mesh *and* a badly sewn texture, which is one
+  fault seen from both sides.
+
+  Two measured facts put the windows back with no freedom left: the 16-texel
+  axis follows the length (which is what the `uvRotation`s are for -- the
+  turn transposes the quad's axes, the anvil's case), and the `v = 0` edge
+  sits where the turn sends the vertical chain's top. The turn is derivable
+  rather than guessed: the tilt moves from `y` to `x`, and conjugating a 45
+  degree turn about Y into one about X takes a rotation about **Z**,
+  `(x, y) -> (y, 16 - x)`, so `y = 16` goes to `x = 16`.
+
+  Both halves are checked, and the second is why: the sheet is **not**
+  symmetric under a half turn -- 936 of the 1536 texels in the two strips
+  differ from their opposite -- so the strip laid end for end is visible.
+  And a proportion check alone cannot see the original fault either, because
+  coordinate-derived UVs are 16 by 3 as well; they are 16 of the *wrong*
+  texels. `tests/blocks.ts` states all three.
 - **An animated texture is its frames stacked vertically in one PNG**
   (`lantern.png` is 3 frames tall). `firstAnimationFrame` crops to frame 0 on
   load — without it the atlas squashes the strip into a square tile and every

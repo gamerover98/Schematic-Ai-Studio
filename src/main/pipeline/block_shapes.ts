@@ -2127,14 +2127,39 @@ function lantern(entry: PaletteEntry): BlockShape {
  * mirroring a face, and `windowUvsFrom` does no ordering check, so they carry
  * across unchanged.
  *
- * ## What a horizontal chain does not get
+ * ## A horizontal chain is that model turned, picture and all
  *
- * `axis` is honoured for the geometry, which is the part that reads as broken:
- * a chain strung sideways lies along its axis instead of standing up. Its
- * *texture* still runs across the plane rather than along it, because the
- * blockstate rotates the whole model 90 degrees about X and a UV window cannot
- * transpose a quad's axes. Chains hang; this is the rare case, and a wrong
- * silhouette was the visible half.
+ * The `x` and `z` variants are written out as their own boxes rather than
+ * rotated -- and were written with **no `uv` at all**, so instead of the
+ * 3-wide strip of links they took coordinate-derived UVs running the whole
+ * width of the tile. Measured on the shipped pack: all 696 opaque texels of
+ * `iron_chain.png` live in its first six columns, so the band a sideways
+ * chain sampled -- `v 6.5..9.5` across all sixteen -- came out **16%
+ * opaque**. Five sixths of it drew nothing, and the sixth that did drew a
+ * 3-pixel band of link stretched along the whole run. Reported as an
+ * incomplete mesh *and* a badly sewn texture, which is one fault seen from
+ * both sides.
+ *
+ * The windows below are the vertical chain's, laid along the run, and two
+ * measured facts fix them with no freedom left:
+ *
+ * - the window's **16-texel axis follows the length** and its 3-texel axis
+ *   goes across, which is what the `uvRotation`s are for: the quad's own
+ *   axes are transposed by the turn, and a window without the rotation
+ *   names the right texels and lays them sideways -- the anvil's case;
+ * - the window's **`v = 0` edge sits where the turn sends the vertical
+ *   chain's top**. The turn is not a guess: the tilt goes from `y` to `x`,
+ *   and conjugating a 45 degree turn about Y into one about X takes a
+ *   rotation about **Z**, `(x, y) -> (y, 16 - x)`, which sends `y = 16` to
+ *   `x = 16`. For `axis=z` the tilt moves to Z, so the rotation is about X,
+ *   `(y, z) -> (16 - z, y)`, and `y = 16` goes to `z = 16`.
+ *
+ * The second is a real choice rather than a free one: the sheet is **not**
+ * symmetric under a half turn -- 936 of the 1536 texels in the two strips
+ * differ from their opposite -- so laying the strip end for end is visible,
+ * and a check on the proportion alone would not see it. Which is also why
+ * that check exists beside this one: coordinate-derived UVs are 16 by 3 as
+ * well. They are simply 16 of the wrong texels.
  */
 const CHAIN_TILT: BoxRotation = { origin: [8, 8, 8], axis: "y", angle: 45 };
 
@@ -2142,14 +2167,34 @@ function chain(entry: PaletteEntry): BlockShape {
   const axis = entry.properties.axis ?? "y";
   if (axis === "x") {
     return boxes(
-      { box: [0, 6.5, 8, 16, 9.5, 8], rotation: { ...CHAIN_TILT, axis: "x" } },
-      { box: [0, 8, 6.5, 16, 8, 9.5], rotation: { ...CHAIN_TILT, axis: "x" } },
+      {
+        box: [0, 6.5, 8, 16, 9.5, 8],
+        rotation: { ...CHAIN_TILT, axis: "x" },
+        uv: { north: [3, 0, 0, 16], south: [0, 0, 3, 16] },
+        uvRotation: { north: 90, south: 270 },
+      },
+      {
+        box: [0, 8, 6.5, 16, 8, 9.5],
+        rotation: { ...CHAIN_TILT, axis: "x" },
+        uv: { down: [3, 0, 6, 16], up: [6, 0, 3, 16] },
+        uvRotation: { down: 270, up: 270 },
+      },
     );
   }
   if (axis === "z") {
     return boxes(
-      { box: [6.5, 8, 0, 9.5, 8, 16], rotation: { ...CHAIN_TILT, axis: "z" } },
-      { box: [8, 6.5, 0, 8, 9.5, 16], rotation: { ...CHAIN_TILT, axis: "z" } },
+      {
+        box: [6.5, 8, 0, 9.5, 8, 16],
+        rotation: { ...CHAIN_TILT, axis: "z" },
+        uv: { down: [0, 0, 3, 16], up: [3, 0, 0, 16] },
+        uvRotation: { down: 0, up: 180 },
+      },
+      {
+        box: [8, 6.5, 0, 8, 9.5, 16],
+        rotation: { ...CHAIN_TILT, axis: "z" },
+        uv: { west: [6, 0, 3, 16], east: [3, 0, 6, 16] },
+        uvRotation: { west: 270, east: 90 },
+      },
     );
   }
   return boxes(
