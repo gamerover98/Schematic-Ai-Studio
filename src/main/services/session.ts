@@ -34,8 +34,10 @@ import {
   markSaved,
   normalizeRegion,
   paletteHistogram,
+  paletteTally,
   regionVolume,
   setBlock,
+  type Region,
   type SchematicDocument,
 } from "../domain/document.js";
 import {
@@ -63,19 +65,25 @@ import {
 } from "../domain/clipboard.js";
 import { flattenNbt, setNbtValue } from "../domain/nbt_edit.js";
 import {
+  applyRegionScale,
   applyRegionTransform,
   describeTransform,
   NotSquareError,
+  scaledExtent,
+  scaleWouldDrop,
   type RegionTransform,
+  type ScaleSpec,
 } from "../domain/transform.js";
 
 export { NotSquareError, type RegionTransform };
 import { loadStructure } from "../pipeline/loader.js";
 import type { PaletteEntry } from "../pipeline/types.js";
-import { paletteEntryCacheKey } from "../pipeline/types.js";
+import { matchesBlockPattern, paletteEntryCacheKey } from "../pipeline/types.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
-import { hasProperty, isOpenable } from "../../shared/block_states.js";
+import { hasProperty, isOpenable, isReplaceable } from "../../shared/block_states.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
+import { standsOn, type SupportBelow } from "../../shared/block_support.js";
+import { coversFace } from "../pipeline/block_shapes.js";
 import { normaliseVoidBlock, voidSources } from "../../shared/settings.js";
 import { mcVersion, refusalFor } from "../../shared/mc_versions.js";
 import {
@@ -94,6 +102,7 @@ import {
   growthToInclude,
   orderRegion,
   shiftRegion,
+  type Extent,
 } from "../domain/grow.js";
 import { peelEmptyFaces } from "../domain/shrink.js";
 
@@ -291,8 +300,8 @@ export function adoptDocument(doc: SchematicDocument, history?: History): Docume
  * The cost is already paid. `paletteHistogram` walks every voxel and runs on
  * every state push either way; dropping the `.slice` adds payload, not work.
  */
-function paletteCounts(doc: SchematicDocument): PaletteCount[] {
-  return [...paletteHistogram(doc).entries()]
+function paletteCounts(histogram: ReadonlyMap<string, number>): PaletteCount[] {
+  return [...histogram.entries()]
     .filter(([block]) => !block.startsWith("minecraft:air"))
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .map(([block, count]) => ({ block, count }));
@@ -300,6 +309,9 @@ function paletteCounts(doc: SchematicDocument): PaletteCount[] {
 
 export function documentState(session: DocumentSession): DocumentState {
   const { doc, history } = session;
+  // One walk for both numbers. This runs on every mutating handler, and a
+  // selection-face drag reaches it many times a second.
+  const tally = paletteTally(doc);
   return {
     filePath: doc.filePath,
     fileName: doc.filePath === null ? null : path.basename(doc.filePath),
@@ -308,8 +320,8 @@ export function documentState(session: DocumentSession): DocumentState {
     size: [doc.width, doc.height, doc.length],
     offset: doc.offset === null ? null : ([...doc.offset] as [number, number, number]),
     worldOrigin: doc.worldOrigin === null ? null : ([...doc.worldOrigin] as [number, number, number]),
-    blockCount: countBlocks(doc),
-    palette: paletteCounts(doc),
+    blockCount: tally.blocks,
+    palette: paletteCounts(tally.histogram),
     dirty: isDirty(history),
     canUndo: canUndo(history),
     undoDepth: history.undoStack.length,
@@ -490,6 +502,24 @@ export class DocumentTooLargeError extends Error {
  * because an oak slab does not merge into a stone one; complementary half,
  * because two bottom slabs are not a full block and never become one.
  */
+/**
+ * What is under the cell being placed into, in the shape `standsOn` reads.
+ *
+ * `null` at y=0, which is the floor of the document and is *not* a floor:
+ * there is nothing below it and the rule's answer is the same as for air.
+ * `covers` is `coversFace`'s, which is `isFaceSturdy`'s question -- so a
+ * bottom slab, a stair's flat half and a full block all carry a wire, and
+ * `occludesNeighbours` would have refused the first two.
+ */
+function floorUnder(
+  doc: SchematicDocument,
+  request: { readonly x: number; readonly y: number; readonly z: number },
+): SupportBelow | null {
+  if (request.y <= 0) return null;
+  const below = getBlock(doc, request.x, request.y - 1, request.z);
+  return { name: below.namespacedName, covers: coversFace(below, "up") };
+}
+
 function doubleSlabTarget(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number; against?: string },
@@ -581,6 +611,27 @@ interface OpenTarget {
  * The far half is only taken when it is the same block. A door with something
  * else above it is already broken, and opening half of it would not mend it.
  */
+/**
+ * The cell that was clicked, one step back along `against`.
+ *
+ * `request.x/y/z` is where the block would *go*, which is the cell across the
+ * face; the renderer computes it and main only ever steps back. Written out
+ * here rather than reusing `openTarget`, which asks a different question and
+ * answers `null` for everything that is not a door.
+ */
+function clickedCell(request: {
+  x: number;
+  y: number;
+  z: number;
+  against?: string;
+}): { x: number; y: number; z: number } | null {
+  const against = request.against;
+  if (against === undefined) return null;
+  const step = FACE_VECTOR[against as keyof typeof FACE_VECTOR];
+  if (step === undefined) return null;
+  return { x: request.x - step.x, y: request.y - step.y, z: request.z - step.z };
+}
+
 function openTarget(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number; against?: string },
@@ -829,13 +880,21 @@ export function applyEdit(
    *
    * Whole entries rather than names, because the key needs the properties.
    */
-  const voidKey =
+  const voidPattern =
     options.voidBlock === undefined || options.voidBlock === ""
       ? null
-      : paletteEntryCacheKey(parsePaletteEntry(options.voidBlock));
+      : parsePaletteEntry(options.voidBlock);
+  /*
+   * ...and a **pattern**, not an exact state. `fillVoid` draws the void by the
+   * same rule, and the two have to agree cell for cell or a break into a cell
+   * that is drawn as empty space would not count as emptying it -- so the box
+   * would not peel back. They disagreed: both compared full state strings, and
+   * a barrier from a file carries `[waterlogged=false]` while the setting says
+   * `minecraft:barrier`.
+   */
   const emptiness = (entry: PaletteEntry): boolean =>
     entry.namespacedName === "minecraft:air" ||
-    (voidKey !== null && paletteEntryCacheKey(entry) === voidKey);
+    (voidPattern !== null && matchesBlockPattern(entry, voidPattern));
 
   /*
    * Every block *written* by this edit has to exist in the schematic's
@@ -901,7 +960,83 @@ export function applyEdit(
   }
 
   if (request.kind === "setBlock") {
-    const entry = placeable(floodedPlacement(doc, request, toEntry(request.block)));
+    /*
+     * A placement writes over a **replaceable** block and never over anything
+     * else, and this arm never asked.
+     *
+     * Vanilla's rule, from the wiki's own sentence: *blocks placed on, against,
+     * or in the same location as the replaceable block replace it rather than
+     * being placed on or against it*. Two halves, and both are here.
+     *
+     * Nothing in this repo had the concept -- `replaceable`, `canBeReplaced`
+     * and every other spelling appeared zero times -- and the existing
+     * predicates cannot stand in for it. `isSeeThrough` holds glass, leaves,
+     * ice, slime and honey, all of them solid blocks a placement must not
+     * destroy, and it is a rendering answer besides; `FLUIDS` is five names.
+     *
+     * The reported case is a fence: its post is inset to 6..10 of the cell, so
+     * a click on the exposed side gives `place = the cell next door`, and that
+     * cell's iron block was simply written over. Every non-cube with inset
+     * faces does it -- walls, stairs, torches, chains, lanterns, panes, pots.
+     */
+    /*
+     * **The redirect.** Clicking *on* tall grass or a snow layer puts the block
+     * in the grass's own cell, not above it. `against` is deliberately left
+     * alone -- vanilla's `BlockPlaceContext` keeps `getClickedFace()` and moves
+     * only `getClickedPos()`, and the orientation rules want the face that was
+     * clicked rather than the cell that was chosen.
+     */
+    /*
+     * **Only for a placement**, and that is not a refinement of the rule --
+     * it is what makes the coordinates mean what this arithmetic assumes.
+     *
+     * A placement's `x/y/z` is the cell *across* the face, so one step back
+     * along `against` is the block that was clicked. A **break** names the
+     * block itself and carries the same `against`, so the step back lands on
+     * the empty cell the ray came in through -- which is replaceable, always.
+     * The redirect then moved the break into that empty cell, wrote the void
+     * over the void, and reported `changed: 0` while the block the user was
+     * looking at stayed exactly where it was. Every break in the app, from
+     * the moment the redirect landed.
+     */
+    const held = toEntry(request.block);
+    const clicked = emptiness(held) ? null : clickedCell(request);
+    const target =
+      clicked !== null && isReplaceable(getBlock(doc, clicked.x, clicked.y, clicked.z).namespacedName)
+        ? { ...request, x: clicked.x, y: clicked.y, z: clicked.z }
+        : request;
+    const entry = placeable(floodedPlacement(doc, target, held));
+
+    /*
+     * **The refusal**, and three boundaries on it.
+     *
+     * *Silently, and only from the hand*: this arm is the click, and a fill, a
+     * paste, a transform and every agent tool go through `runTransaction`
+     * bodies that never reach it -- the same reach the slab merge, the
+     * two-part rule and the redstone guard already have. The block in the way
+     * is on screen, which says as much as a message would, and this path is
+     * also `use`'s, where there is nobody to word it for.
+     *
+     * *Breaking is not placing*: a break is `setBlock` with the void, and it
+     * empties a cell rather than building in one. `emptiness` is the predicate
+     * this arm already owns.
+     *
+     * *Empty space is replaceable whatever block it is made of*: with barrier
+     * chosen as the void block a cell that reads as empty holds a barrier,
+     * which is not in the tag -- deciding from the tag alone would make it
+     * impossible to build inside your own empty space.
+     *
+     * Before the growth below, for the redstone guard's stated reason: a
+     * refused placement must not have resized the document on its way out.
+     */
+    const standing = getBlock(doc, target.x, target.y, target.z);
+    if (
+      !emptiness(entry) &&
+      !emptiness(standing) &&
+      !isReplaceable(standing.namespacedName)
+    ) {
+      return 0;
+    }
 
     /*
      * Two slabs meeting in one cell are one double slab.
@@ -922,7 +1057,26 @@ export function applyEdit(
      * than guessed: merging on a side click that meant "place beside it" would
      * destroy the slab already there.
      */
-    const merged = doubleSlabTarget(doc, request, entry);
+    /*
+     * Redstone dust is refused in mid-air and on a pond.
+     *
+     * Silently, and only here. Silently because that is already what this
+     * arm does when a door's far half is blocked, and because a message would
+     * have to be worded for a person while this path is also `use`'s. Only
+     * here because `applyEdit`'s `setBlock` arm is the *hand* -- a fill, a
+     * paste, a transform and every agent tool go through `runTransaction`
+     * bodies that never reach it, which is the same reach the slab merge and
+     * the two-part rule have and is deliberate: a fill of redstone across
+     * mixed ground should lay what it can rather than refuse the lot.
+     *
+     * Before the growth below it, or a refused placement would still have
+     * resized the document.
+     */
+    if (!standsOn(entry.namespacedName, floorUnder(doc, target))) {
+      return 0;
+    }
+
+    const merged = doubleSlabTarget(doc, target, entry);
     if (merged !== null) {
       return runTransaction(doc, history, `Place ${entry.namespacedName}`, (tx) =>
         tx.setBlock(merged.x, merged.y, merged.z, merged.entry) ? 1 : 0,
@@ -939,18 +1093,18 @@ export function applyEdit(
      * the document, or a door hung at the ceiling, makes room for itself
      * exactly as a single block does.
      */
-    const pair = twoPartPlacement(doc, request, entry);
+    const pair = twoPartPlacement(doc, target, entry);
     // The far cell has something in it. The game does not place it either, and
     // the block in the way is on screen.
     if (pair === "blocked") return 0;
 
     const cell = {
-      minX: Math.min(request.x, pair?.other.x ?? request.x),
-      minY: Math.min(request.y, pair?.other.y ?? request.y),
-      minZ: Math.min(request.z, pair?.other.z ?? request.z),
-      maxX: Math.max(request.x, pair?.other.x ?? request.x),
-      maxY: Math.max(request.y, pair?.other.y ?? request.y),
-      maxZ: Math.max(request.z, pair?.other.z ?? request.z),
+      minX: Math.min(target.x, pair?.other.x ?? target.x),
+      minY: Math.min(target.y, pair?.other.y ?? target.y),
+      minZ: Math.min(target.z, pair?.other.z ?? target.z),
+      maxX: Math.max(target.x, pair?.other.x ?? target.x),
+      maxY: Math.max(target.y, pair?.other.y ?? target.y),
+      maxZ: Math.max(target.z, pair?.other.z ?? target.z),
     };
     /*
      * Breaking is `setBlock` with air, and growing to make room for air would
@@ -995,7 +1149,7 @@ export function applyEdit(
         if (growth !== null) tx.resize(growth.size, growth.shift);
         if (pair !== null) {
           const [sx, sy, sz] = growth?.shift ?? [0, 0, 0];
-          const here = tx.setBlock(request.x + sx, request.y + sy, request.z + sz, pair.here) ? 1 : 0;
+          const here = tx.setBlock(target.x + sx, target.y + sy, target.z + sz, pair.here) ? 1 : 0;
           const there = tx.setBlock(
             pair.other.x + sx,
             pair.other.y + sy,
@@ -1556,6 +1710,15 @@ export function inspect(session: DocumentSession, x: number, y: number, z: numbe
  */
 let clipboard: Clipboard | null = null;
 
+/**
+ * Empty space, when nothing else has been chosen.
+ *
+ * A constant rather than an object literal at each call site: `cutSelection`
+ * and `moveRegion` each wrote their own, which is how they came to ignore the
+ * document's void block while `applyEdit`'s break path honoured it -- an
+ * underwater build cut and pasted came back with air pockets in it.
+ */
+const AIR_ENTRY: PaletteEntry = { namespacedName: "minecraft:air", properties: {} };
 export function currentClipboard(): Clipboard | null {
   return clipboard;
 }
@@ -1566,13 +1729,23 @@ export function copySelection(session: DocumentSession, request: RegionSpec): Cl
   return clipboard;
 }
 
-/** Copies, then clears — one undoable step for the clearing half. */
-export function cutSelection(session: DocumentSession, request: RegionSpec): Clipboard {
+/**
+ * Copies, then clears — one undoable step for the clearing half.
+ *
+ * What is left behind is the document's empty space rather than the word air,
+ * for `applyEdit`'s reason: with water chosen as the void, a cut that wrote air
+ * would punch a dry hole in a pond.
+ */
+export function cutSelection(
+  session: DocumentSession,
+  request: RegionSpec,
+  options: RegionEditOptions = {},
+): Clipboard {
   const { doc, history } = session;
   const region = normalizeRegion(doc, request);
   clipboard = copyRegion(doc, region);
   runTransaction(doc, history, "Cut the selection", (tx) =>
-    tx.fill(region, { namespacedName: "minecraft:air", properties: {} }),
+    tx.fill(region, emptyEntry(options.voidBlock)),
   );
   return clipboard;
 }
@@ -1584,20 +1757,99 @@ export class EmptyClipboardError extends Error {
   }
 }
 
-/** Pastes the clipboard with its corner at `at`, as one undoable step. */
+/**
+ * Pastes the clipboard with its corner at `at`, as one undoable step.
+ *
+ * It grows to hold what lands, or refuses by name -- `moveRegion`'s rule,
+ * which had not reached here. `pasteClipboard` clips by letting `tx.setBlock`
+ * return false, so a paste over the edge came back with a short count and
+ * nothing anywhere saying why, which is the silence this file records over and
+ * over. It was survivable while a paste landed at the corner of a box somebody
+ * had just drawn around the thing they were pasting; the stamp is what made
+ * carrying the box somewhere else first the ordinary gesture.
+ */
 export function pasteSelection(
   session: DocumentSession,
   at: { x: number; y: number; z: number },
-  options: PasteOptions = {},
+  options: RegionEditOptions & { includeAir?: boolean; skipEmpty?: boolean } = {},
 ): number {
   if (clipboard === null) {
     throw new EmptyClipboardError();
   }
   const held = clipboard;
   const { doc, history } = session;
-  return runTransaction(doc, history, "Paste", (tx) =>
-    pasteClipboard(doc, tx, held, at, options),
-  );
+  /*
+   * The boolean is the renderer's -- "leave the empty space where it falls" --
+   * and *which* block that is is the session's, resolved here. The renderer
+   * says the intent and main supplies the fact, which is `EditOptions.voidBlock`
+   * arriving at the same arrangement from the other side.
+   */
+  const keepUnder = options.skipEmpty === true ? emptyEntry(options.voidBlock) : null;
+  const landing = pasteLanding(held, at, options.includeAir === true, keepUnder);
+  const growth = landing === null ? null : growthFor(doc, landing, options.autoGrow !== false);
+  return runTransaction(doc, history, "Paste", (tx) => {
+    // The resize first and alone in its command, for `moveRegion`'s reason: a
+    // block delta recorded before it would index the old shape.
+    if (growth !== null) tx.resize(growth.size, growth.shift);
+    const shift = growth?.shift ?? ([0, 0, 0] as const);
+    return pasteClipboard(
+      doc,
+      tx,
+      held,
+      { x: at.x + shift[0], y: at.y + shift[1], z: at.z + shift[2] },
+      { includeAir: options.includeAir, keepUnder },
+    );
+  });
+}
+
+/**
+ * The box a paste actually occupies, or `null` when it writes nothing.
+ *
+ * Not the clipboard's own box, and the difference is what the document is
+ * asked to grow to. A clipboard holds only the cells that carry something --
+ * air is never stored -- and `keepUnder` takes more of them out again, so
+ * growing to the box would make room for cells that will never be written:
+ * a resize nobody asked for and would have to undo, which is `replace`'s
+ * stated reason for not growing at all.
+ *
+ * `includeAir` is the exception rather than an oversight. It clears the whole
+ * destination box before writing, so under it the box genuinely is what lands.
+ */
+function pasteLanding(
+  held: Clipboard,
+  at: { x: number; y: number; z: number },
+  includeAir: boolean,
+  keepUnder: PaletteEntry | null,
+): Region | null {
+  if (includeAir) {
+    return {
+      minX: at.x,
+      minY: at.y,
+      minZ: at.z,
+      maxX: at.x + held.width - 1,
+      maxY: at.y + held.height - 1,
+      maxZ: at.z + held.length - 1,
+    };
+  }
+  let box: Region | null = null;
+  for (const cell of held.cells) {
+    if (keepUnder !== null && matchesBlockPattern(cell.entry, keepUnder)) continue;
+    const x = at.x + cell.dx;
+    const y = at.y + cell.dy;
+    const z = at.z + cell.dz;
+    box =
+      box === null
+        ? { minX: x, minY: y, minZ: z, maxX: x, maxY: y, maxZ: z }
+        : {
+            minX: Math.min(box.minX, x),
+            minY: Math.min(box.minY, y),
+            minZ: Math.min(box.minZ, z),
+            maxX: Math.max(box.maxX, x),
+            maxY: Math.max(box.maxY, y),
+            maxZ: Math.max(box.maxZ, z),
+          };
+  }
+  return box;
 }
 
 /**
@@ -1616,17 +1868,121 @@ export function pasteSelection(
  * destination keeps whatever was already standing inside the moved box, so
  * dragging a hollow room three blocks along would smear its walls.
  */
+/**
+ * What every region edit may be told, beyond the region itself.
+ *
+ * The three questions are the same for a move, a turn and a scale, and before
+ * this they were answered in three different places or not at all: `autoGrow`
+ * reached only `applyEdit`, so a move that carried blocks past the edge lost
+ * them silently -- `pasteClipboard` clips by letting `tx.setBlock` return
+ * false, and `changed` came back short with nothing to say why.
+ */
+export interface RegionEditOptions {
+  /** Whether the schematic grows to hold the result. Refuses by name when off. */
+  autoGrow?: boolean;
+  /**
+   * What the region leaves behind: the document's own empty space.
+   *
+   * A string, the way `EditOptions.voidBlock` is, and parsed here for the same
+   * reason -- so a caller passes what the session holds rather than converting
+   * it. Before this, `cutSelection` and `moveRegion` each wrote
+   * `minecraft:air` inline, so an underwater build cut and pasted came back
+   * with air pockets where the water had been.
+   */
+  voidBlock?: string;
+}
+
+/** The block a region leaves behind, from whatever the session was told. */
+function emptyEntry(voidBlock: string | undefined): PaletteEntry {
+  if (voidBlock === undefined || voidBlock === "") return AIR_ENTRY;
+  return parsePaletteEntry(voidBlock);
+}
+
+/**
+ * The growth a destination box needs, refusing rather than clipping.
+ *
+ * One place, because the alternative is this rule written out at three call
+ * sites and wrong at whichever is added next -- which is exactly how move,
+ * paste and transform came to ignore the setting while `applyEdit` honoured it.
+ */
+function growthFor(
+  doc: SchematicDocument,
+  box: Region,
+  mayGrow: boolean,
+): { size: Extent; shift: readonly [number, number, number] } | null {
+  const growth = growthToInclude(doc, orderRegion(box));
+  if (growth === null) return null;
+  if (!mayGrow) throw new OutsideDocumentError();
+  if (extentVolume(growth.size) > MAX_DOCUMENT_VOLUME) {
+    throw new DocumentTooLargeError(extentVolume(growth.size));
+  }
+  return growth;
+}
+
+/** The box a region occupies once a transform has been applied to it. */
+function transformedBox(
+  region: Region,
+  transform: RegionTransform,
+  to: { x: number; y: number; z: number } | null,
+): Region {
+  const width = region.maxX - region.minX + 1;
+  const height = region.maxY - region.minY + 1;
+  const length = region.maxZ - region.minZ + 1;
+  const quarter = transform.kind === "rotate" && (transform.steps === 1 || transform.steps === 3);
+  const size = quarter
+    ? { width: length, height, length: width }
+    : { width, height, length };
+  const corner = to ?? { x: region.minX, y: region.minY, z: region.minZ };
+  return {
+    minX: corner.x,
+    minY: corner.y,
+    minZ: corner.z,
+    maxX: corner.x + size.width - 1,
+    maxY: corner.y + size.height - 1,
+    maxZ: corner.z + size.length - 1,
+  };
+}
+
 export function moveRegion(
   session: DocumentSession,
   request: RegionSpec,
   to: { x: number; y: number; z: number },
+  options: RegionEditOptions = {},
 ): number {
   const { doc, history } = session;
   const region = normalizeRegion(doc, request);
+  const volume = regionVolume(region);
+  if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+
+  const landing: Region = {
+    minX: to.x,
+    minY: to.y,
+    minZ: to.z,
+    maxX: to.x + (region.maxX - region.minX),
+    maxY: to.y + (region.maxY - region.minY),
+    maxZ: to.z + (region.maxZ - region.minZ),
+  };
+  const growth = growthFor(doc, landing, options.autoGrow !== false);
   const held = copyRegion(doc, region);
+  const empty = emptyEntry(options.voidBlock);
+
   return runTransaction(doc, history, "Move the selection", (tx) => {
-    let changed = tx.fill(region, { namespacedName: "minecraft:air", properties: {} });
-    changed += pasteClipboard(doc, tx, held, to, { includeAir: true });
+    /*
+     * The resize comes first, and alone in its command: a voxel index means
+     * nothing except against the dimensions in force when it was recorded, so a
+     * block delta written before it would index the old shape.
+     */
+    if (growth !== null) tx.resize(growth.size, growth.shift);
+    const shift = growth?.shift ?? ([0, 0, 0] as const);
+    const source = growth === null ? region : shiftRegion(region, growth.shift);
+    let changed = tx.fill(source, empty);
+    changed += pasteClipboard(
+      doc,
+      tx,
+      held,
+      { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] },
+      { includeAir: true },
+    );
     return changed;
   });
 }
@@ -1650,12 +2006,48 @@ export async function regionMesh(
   options: DocumentPreviewOptions,
 ): Promise<{ chunks: ChunkGeometry[]; atlasVersion: number }> {
   const region = normalizeRegion(session.doc, request);
-  const held = copyRegion(session.doc, region);
+  return meshDetached(copyRegion(session.doc, region), session.doc.format, options);
+}
+
+/**
+ * The clipboard's own contents as geometry, for the ghost a copy leaves behind.
+ *
+ * The clipboard and not the region it was taken from, and a **cut** is what
+ * makes the difference visible: by the time the ghost is asked for that region
+ * is empty, so a picture meshed from it would be nothing at all -- on the one
+ * gesture where seeing what you are holding matters most. It has to outlive the
+ * region in the ordinary case too, because the whole point of the ghost is that
+ * the box then moves away from where the blocks were copied.
+ *
+ * An empty clipboard is not a failure. It is the state before the first copy,
+ * and it answers the way an all-air region does: nothing to draw.
+ */
+export async function clipboardMesh(
+  session: DocumentSession,
+  options: DocumentPreviewOptions,
+): Promise<{ chunks: ChunkGeometry[]; atlasVersion: number }> {
+  if (clipboard === null) return { chunks: [], atlasVersion: -1 };
+  return meshDetached(clipboard, session.doc.format, options);
+}
+
+/**
+ * A detached snapshot meshed on its own, in coordinates from its own corner.
+ *
+ * A one-off document of exactly the snapshot's size, run through the same
+ * pipeline as everything else -- so a preview cannot disagree with what the
+ * edit produces, for the same reason a block icon cannot disagree with the
+ * viewport.
+ */
+async function meshDetached(
+  held: Clipboard,
+  format: SchematicDocument["format"],
+  options: DocumentPreviewOptions,
+): Promise<{ chunks: ChunkGeometry[]; atlasVersion: number }> {
   const scratch = createDocument({
     width: held.width,
     height: held.height,
     length: held.length,
-    format: session.doc.format,
+    format,
   });
   for (const cell of held.cells) {
     setBlock(scratch, cell.dx, cell.dy, cell.dz, cell.entry);
@@ -1677,15 +2069,140 @@ export async function regionMesh(
  * The mechanics live in `domain/transform.ts` so the agent can drive the same
  * code inside its own transaction; this is only the UI's wrapper around them.
  */
+/**
+ * Turns or reflects a region, optionally landing it somewhere else.
+ *
+ * The destination is what makes the gizmo's pivot work: turning about a corner
+ * is turning in place and then moving, and doing that as two transactions would
+ * let Ctrl+Z take back half of one gesture. It is also what removes
+ * `NotSquareError` for callers that supply one -- an oblong quarter-turn is
+ * simply a box of the other shape, and only the demand that it land back on its
+ * own footprint ever made it impossible.
+ */
 export function transformRegion(
   session: DocumentSession,
   request: RegionSpec,
   transform: RegionTransform,
+  options: RegionEditOptions & { to?: { x: number; y: number; z: number } | null } = {},
 ): number {
   const { doc, history } = session;
-  return runTransaction(doc, history, describeTransform(transform), (tx) =>
-    applyRegionTransform(doc, tx, request, transform),
-  );
+  const region = normalizeRegion(doc, request);
+  const volume = regionVolume(region);
+  if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+
+  const to = options.to ?? null;
+  const landing = transformedBox(region, transform, to);
+  const growth = growthFor(doc, landing, options.autoGrow !== false);
+
+  return runTransaction(doc, history, describeTransform(transform), (tx) => {
+    if (growth !== null) tx.resize(growth.size, growth.shift);
+    const shift = growth?.shift ?? ([0, 0, 0] as const);
+    const source = growth === null ? region : shiftRegion(region, growth.shift);
+    const corner =
+      to === null
+        ? null
+        : { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] };
+    return applyRegionTransform(doc, tx, source, transform, {
+      to: corner,
+      empty: emptyEntry(options.voidBlock),
+    });
+  });
+}
+
+/**
+ * What a scale did, when the count of written cells does not say it.
+ *
+ * `VersionChangeResult`'s shape, for its reason: multiplying writes n^3 cells
+ * per block and loses nothing, dividing writes far fewer and *discards* the
+ * rest, and one number would report the two identically.
+ *
+ * This used to be a refusal -- counted first and thrown as
+ * `ScaleWouldLoseBlocksError` unless the caller passed `confirmLoss`, which is
+ * `resizeSession`'s shape. It was the wrong shape borrowed: a resize is a
+ * number typed blind into a panel that has a second button, while a scale is a
+ * cube dragged with the destination drawn under the pointer and one Ctrl+Z
+ * away. So the refusal named a confirmation that did not exist anywhere in the
+ * app -- «Confirm to go ahead», with nothing to press -- and the gesture was
+ * simply cancelled. Reported as exactly that.
+ */
+export interface ScaleResult {
+  /** Cells written. */
+  changed: number;
+  /** Non-air cells a division threw away. Always 0 for a multiplication. */
+  dropped: number;
+  /** A sentence, or `""` when nothing was lost. */
+  notes: string;
+}
+
+/**
+ * Resamples a region by a whole factor.
+ *
+ * The least useful of the gizmo's four modes and the one most able to destroy
+ * something, which is why it is the only one that ever asks first.
+ */
+export function scaleRegion(
+  session: DocumentSession,
+  request: RegionSpec,
+  spec: ScaleSpec,
+  options: RegionEditOptions & {
+    to?: { x: number; y: number; z: number } | null;
+  } = {},
+): ScaleResult {
+  const { doc, history } = session;
+  const region = normalizeRegion(doc, request);
+  const size = {
+    width: region.maxX - region.minX + 1,
+    height: region.maxY - region.minY + 1,
+    length: region.maxZ - region.minZ + 1,
+  };
+  const out = scaledExtent(size, spec);
+  /*
+   * The *destination* is what has to fit, not the source: multiplying by three
+   * turns a hundred blocks a side into twenty-seven million cells, which is
+   * past what one edit may touch and well past what the process survives.
+   */
+  const volume = out.width * out.height * out.length;
+  if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+
+  /*
+   * Counted before the write, and reported rather than refused. Before the
+   * pass because after it the source cells have already been overwritten and
+   * there is nothing left to count.
+   */
+  const dropped = scaleWouldDrop(doc, region, spec);
+
+  const to = options.to ?? { x: region.minX, y: region.minY, z: region.minZ };
+  const landing: Region = {
+    minX: to.x,
+    minY: to.y,
+    minZ: to.z,
+    maxX: to.x + out.width - 1,
+    maxY: to.y + out.height - 1,
+    maxZ: to.z + out.length - 1,
+  };
+  const growth = growthFor(doc, landing, options.autoGrow !== false);
+  const label = spec.kind === "multiply" ? `Scale up ${spec.factor}x` : `Scale down ${spec.factor}x`;
+
+  const changed = runTransaction(doc, history, label, (tx) => {
+    if (growth !== null) tx.resize(growth.size, growth.shift);
+    const shift = growth?.shift ?? ([0, 0, 0] as const);
+    const source = growth === null ? region : shiftRegion(region, growth.shift);
+    return applyRegionScale(doc, tx, source, spec, {
+      to: { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] },
+      empty: emptyEntry(options.voidBlock),
+    });
+  });
+
+  return {
+    changed,
+    dropped,
+    notes:
+      dropped === 0
+        ? ""
+        : `Discarded ${dropped.toLocaleString()} block${dropped === 1 ? "" : "s"}: only the ` +
+          `cell at the low corner of each ${spec.factor}x${spec.factor}x${spec.factor} group ` +
+          `survives. CTRL+Z puts them back.`,
+  };
 }
 
 export class NoBlockEntityError extends Error {

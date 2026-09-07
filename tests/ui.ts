@@ -25,8 +25,28 @@ import {
   isWithinBounds,
   placePopover,
 } from "../src/renderer/src/lib/floating.js";
-import { blocksInDocument, PANEL_SIZE, voidSources } from "../src/shared/settings.js";
-import { facingNormal, hoverSource, outlineCentre } from "../src/renderer/src/lib/block_hover.js";
+import {
+  AA_LEVELS,
+  blocksInDocument,
+  PANEL_SIZE,
+  SHADER_MODES,
+  voidSources,
+} from "../src/shared/settings.js";
+import {
+  antialiasSamples,
+  shaderPreset,
+} from "../src/renderer/src/lib/shader_modes.js";
+import {
+  continuedPlacement,
+  entryFace,
+  rayBox,
+  thinBoxes,
+  facingNormal,
+  hasDominantAxis,
+  hoverSource,
+  outlineCentre,
+  pointerOnHandle,
+} from "../src/renderer/src/lib/block_hover.js";
 import {
   blockLabel,
   gridWindow,
@@ -38,8 +58,11 @@ import { buildLegacyIndex } from "../src/shared/legacy_ids.js";
 import {
   emptyTimeline,
   recordDocumentEdit,
+  recordEditSelection,
   recordSelection,
   redoTarget,
+  takeEditRedo,
+  takeEditUndo,
   takeRedo,
   takeUndo,
   undoTarget,
@@ -60,12 +83,25 @@ import {
   dragFace,
   moveDestination,
   movedRegion,
+  translatedRegion,
   dragPlaneNormal,
   faceCentre,
   intersectPlane,
   plateScale,
   type Ray,
 } from "../src/renderer/src/lib/selection_drag.js";
+import {
+  defaultPivot,
+  dragAlongAxis,
+  gizmoOrigin,
+  quartersBetween,
+  regionCentre,
+  regionFits,
+  ringAngleAt,
+  scaleFromRatio,
+  scaledRegion,
+  transformedRegion,
+} from "../src/renderer/src/lib/gizmo.js";
 import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
 
@@ -88,6 +124,8 @@ import {
   ORBIT_FOV,
   orthoBounds,
   orthoFrustumHeight,
+  pivotDepth,
+  zoomAfterPivot,
 } from "../src/renderer/src/lib/framing.js";
 import {
   dotColor,
@@ -118,7 +156,11 @@ import {
   projectAxis,
   type Quat,
 } from "../src/renderer/src/lib/compass.js";
-import { FACE_VECTOR, type Face } from "../src/shared/block_orientation.js";
+import {
+  FACE_VECTOR,
+  type Face,
+  type PlacementLook,
+} from "../src/shared/block_orientation.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const RENDERER = path.join(here, "..", "src", "renderer", "src");
@@ -835,6 +877,369 @@ console.log("\n--- moving a region ---");
     movedRegion(region, { x: region.minX, y: region.minY, z: region.minZ }),
     region,
   );
+
+  /*
+   * And the box carried by a growth that moved the document.
+   *
+   * The grid has no negative index, so an edit reaching below the origin makes
+   * room by moving everything already there up and out of the way. Main has
+   * always done that and never said so, and the renderer holds three things
+   * naming a cell in the frame that moved: the selection, the pivot, and the
+   * stamp's ghost, which is derived from the selection.
+   *
+   * A translation, not a `movedRegion`: the box keeps its size **and its place
+   * relative to the blocks**, which is the whole point of following.
+   */
+  equal("a shifted box keeps its size and its contents", translatedRegion(region, [4, 0, 0]), {
+    minX: 8,
+    minY: 2,
+    minZ: 6,
+    maxX: 11,
+    maxY: 3,
+    maxZ: 6,
+  });
+  // The identity has to be the identity, because it is the case that runs on
+  // every edit that did not grow -- which is very nearly all of them.
+  equal("...and a growth that moved nothing moves it nowhere", translatedRegion(region, [0, 0, 0]), region);
+  equal(
+    "...on every axis at once",
+    translatedRegion(region, [1, 2, 3]),
+    { minX: 5, minY: 4, minZ: 9, maxX: 8, maxY: 5, maxZ: 9 },
+  );
+
+  /*
+   * The wiring, which needs an IPC round trip this harness does not make.
+   *
+   * `runDocument` is the one place every edit passes through, so the live
+   * selection, its anchor and the pivot are carried there -- and each of the
+   * four commits that *replace* the selection afterwards has to restate its
+   * destination in the new frame, or the box lands back where the blocks used
+   * to be. Four sites, so four is the number checked: three commits translate
+   * their own destination and `commitMove` translates a `movedRegion`.
+   */
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const run = app.slice(app.indexOf("async function runDocument"));
+  const runBody = run.slice(0, run.indexOf("\n  }"));
+  check("every edit carries what the renderer aims at", /followShift\(response\.shift\)/.test(runBody));
+  // Sliced to `runDocument` itself, or the comparison would be against the
+  // first `refreshDocument` anywhere in the file and would prove nothing.
+  check(
+    "...before the document is redrawn from it",
+    runBody.indexOf("followShift(response.shift)") < runBody.indexOf("await refreshDocument()"),
+  );
+  equal(
+    "the four commits restate their destination in the new frame",
+    (app.match(/translatedRegion\(/g) ?? []).length,
+    4,
+  );
+  /*
+   * And the timeline is **not** carried. Its entries are in the frame the
+   * document had when they were recorded, and undoing the growth puts the
+   * document back into that frame -- so translating them would be right twice
+   * and wrong on the one press that matters.
+   */
+  const follow = app.slice(app.indexOf("function followShift"));
+  check(
+    "...and the recorded history is left in the frame it was written in",
+    !follow.slice(0, follow.indexOf("\n  }")).includes("selectionTimeline"),
+  );
+}
+
+console.log("\n--- the transform gizmo ---");
+{
+  /*
+   * The arithmetic behind the handles. Everything that draws runs from
+   * `requestAnimationFrame`, which this harness does not turn, so what is
+   * checked here is what a drag *decides* -- and in particular the two signs
+   * that no screenshot can catch: which way a ring turns, and which way a
+   * mirror reflects.
+   */
+  const cell = (x: number, y: number, z: number) => ({
+    minX: x,
+    minY: y,
+    minZ: z,
+    maxX: x,
+    maxY: y,
+    maxZ: z,
+  });
+  const down = (x: number, z: number) => ({
+    origin: { x, y: 10, z },
+    direction: { x: 0, y: -1, z: 0 },
+  });
+
+  // Where it stands.
+  equal("a single cell's middle is at its own centre", regionCentre(cell(0, 0, 0)), {
+    x: 0.5,
+    y: 0.5,
+    z: 0.5,
+  });
+  equal(
+    "with no pivot the gizmo stands in the middle of the region",
+    gizmoOrigin({ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 1, maxZ: 3 }, null),
+    { x: 2, y: 1, z: 2 },
+  );
+  equal(
+    "...and on the pivot's own cell once one is placed",
+    gizmoOrigin({ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 1, maxZ: 3 }, { x: 7, y: 2, z: 9 }),
+    { x: 7.5, y: 2.5, z: 9.5 },
+  );
+  equal(
+    "a fresh pivot lands on the cell the middle falls in",
+    defaultPivot({ minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 }),
+    { x: 1, y: 1, z: 1 },
+  );
+
+  /*
+   * Dragging an arrow. The answer is a difference from where the press
+   * landed, which is what lets an arrow be grabbed anywhere along its length
+   * without the region jumping to sit under the cursor.
+   */
+  const origin = { x: 0.5, y: 0.5, z: 0.5 };
+  equal(
+    "an arrow drag answers in whole cells",
+    dragAlongAxis({ origin, axis: "x", ray: down(4.4, 0.5), view: { x: 0, y: -1, z: 0 }, grab: 0.5 }),
+    4,
+  );
+  equal(
+    "...and a drag back to where it was grabbed is zero, not a jump",
+    dragAlongAxis({ origin, axis: "x", ray: down(0.5, 0.5), view: { x: 0, y: -1, z: 0 }, grab: 0.5 }),
+    0,
+  );
+  /*
+   * An axis pointed straight at the camera has no usable drag plane: the
+   * region would travel the length of the schematic for one pixel. `null` is
+   * "leave it alone", and the caller must not read it as zero -- doing so
+   * would snap the region back to the start the moment a drag grazed that
+   * angle.
+   */
+  equal(
+    "an axis pointed at the camera refuses rather than guessing",
+    dragAlongAxis({ origin, axis: "z", ray: down(0, 0), view: { x: 0, y: 0, z: 1 }, grab: 0 }),
+    null,
+  );
+
+  /*
+   * The ring, and the sign that matters. Main turns a region by
+   * `(x, z) -> (length - 1 - z, x)`, which sends **east to south**; the ring
+   * has to read the same way round or dragging clockwise would turn the build
+   * anticlockwise. Stated as the four compass points rather than as one
+   * predicate, so a failure names which one went wrong.
+   */
+  const angle = (x: number, z: number) => ringAngleAt({ origin, axis: "y", ray: down(x, z) });
+  equal("the Y ring reads east as its zero", angle(4.5, 0.5), 0);
+  equal("...south as a quarter turn on", angle(0.5, 4.5), Math.PI / 2);
+  equal("...and west as a half turn", Math.abs(angle(-3.5, 0.5) ?? 0), Math.PI);
+  check(
+    "...with north on the other side of zero",
+    (angle(0.5, -3.5) ?? 0) < 0,
+    String(angle(0.5, -3.5)),
+  );
+  equal("a ring grabbed exactly at its centre has no angle", angle(0.5, 0.5), null);
+
+  equal("east to south is one quarter turn", quartersBetween(0, Math.PI / 2), 1);
+  equal("...and it wraps rather than counting past four", quartersBetween(0, 2 * Math.PI), 0);
+  equal("...backwards is three, not minus one", quartersBetween(0, -Math.PI / 2), 3);
+  equal("a twitch is no turn at all", quartersBetween(0, 0.2), 0);
+
+  /*
+   * Where a turn puts the region. The pivot is the whole point of this one:
+   * a square turned about its own middle must not move, and a cell turned
+   * about a *different* cell must swing round it. Without the second check a
+   * pivot that was quietly ignored would pass.
+   */
+  const square = { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 };
+  equal(
+    "a square turned about its own middle stays where it is",
+    transformedRegion(square, gizmoOrigin(square, null), { kind: "rotate", axis: "y", steps: 1 }),
+    square,
+  );
+  equal(
+    "a cell two east of the pivot lands two south of it",
+    transformedRegion(cell(2, 0, 0), origin, { kind: "rotate", axis: "y", steps: 1 }),
+    cell(0, 0, 2),
+  );
+  equal(
+    "...and four steps is where it started",
+    transformedRegion(cell(2, 0, 0), origin, { kind: "rotate", axis: "y", steps: 0 }),
+    cell(2, 0, 0),
+  );
+  /*
+   * An oblong is the case a turn in place cannot do at all -- main refuses it
+   * with `NotSquareError`, because the destination is the source. With a
+   * destination it is simply a box of the other shape.
+   */
+  equal(
+    "an oblong turns into its own transpose",
+    transformedRegion(
+      { minX: 0, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 2 },
+      gizmoOrigin({ minX: 0, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 2 }, null),
+      { kind: "rotate", axis: "y", steps: 1 },
+    ),
+    { minX: 1, minY: 0, minZ: -1, maxX: 3, maxY: 0, maxZ: 3 },
+  );
+
+  /*
+   * Mirroring, in continuous coordinates rather than on the inclusive index.
+   * Cell 2 spans [2, 3); reflected about 0.5 that is (-2, -1], which is cell
+   * -2. Doing it on `maxX` directly is off by one, and only on regions of
+   * even width -- the half of the cases a hand-picked example misses.
+   */
+  equal(
+    "a mirror reflects the cell, not its index",
+    transformedRegion(cell(2, 0, 0), origin, { kind: "mirror", axis: "x" }),
+    cell(-2, 0, 0),
+  );
+  equal(
+    "...and an even-width region keeps its width",
+    transformedRegion({ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, origin, {
+      kind: "mirror",
+      axis: "x",
+    }),
+    { minX: -3, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 },
+  );
+  equal(
+    "mirroring twice is where it started",
+    transformedRegion(
+      transformedRegion(cell(2, 0, 0), origin, { kind: "mirror", axis: "y" }),
+      origin,
+      { kind: "mirror", axis: "y" },
+    ),
+    cell(2, 0, 0),
+  );
+
+  /*
+   * Scaling. The dead band is deliberately wide: every ratio between 0.75 and
+   * 1.5 means "I have not decided", and snapping to x2 on a twitch would make
+   * a destructive edit out of a nudge.
+   */
+  equal("a nudge is not a scale", scaleFromRatio(1.2), null);
+  equal("...nor is a small shrink", scaleFromRatio(0.9), null);
+  equal("doubling is a whole factor", scaleFromRatio(2.1), { kind: "multiply", factor: 2 });
+  equal("halving is its own shape", scaleFromRatio(0.5), { kind: "divide", factor: 2 });
+  equal("...and never a factor of one", scaleFromRatio(0.75), { kind: "divide", factor: 2 });
+  equal("a runaway ratio is capped", scaleFromRatio(500), { kind: "multiply", factor: 8 });
+  equal("a ratio of nothing is refused", scaleFromRatio(0), null);
+
+  equal(
+    "doubling about the low corner grows away from it",
+    scaledRegion({ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }, { x: 0, y: 0, z: 0 }, {
+      kind: "multiply",
+      factor: 2,
+    }),
+    { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 3, maxZ: 3 },
+  );
+  /*
+   * A thin axis divided away would leave an empty region, which nothing else
+   * in the editor has an answer for. One cell is kept instead -- worse
+   * arithmetic, and the only option that produces a region at all.
+   */
+  equal(
+    "halving never divides an axis out of existence",
+    scaledRegion(cell(0, 0, 0), { x: 0, y: 0, z: 0 }, { kind: "divide", factor: 2 }),
+    cell(0, 0, 0),
+  );
+
+  const size = { width: 8, height: 8, length: 8 };
+  check("a region inside the document fits", regionFits(cell(0, 0, 0), size));
+  check("...one past the far face does not", !regionFits(cell(8, 0, 0), size));
+  check("...and neither does one below the origin", !regionFits(cell(0, -1, 0), size));
+}
+console.log("\n--- the gizmo takes the press, and gives the camera back ---");
+{
+  /*
+   * Pointer choreography, which this harness cannot drive: there is no canvas,
+   * no camera and no render loop. Read out of the source instead, the way the
+   * framing call site and the flight-mode key gate already are.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+
+  /*
+   * Placing a block in orbit is gone, and with it the only thing that ever
+   * happened without Shift. That is what frees the plain left press for the
+   * gizmo's handles -- the two halves are one change, so the absence is checked
+   * rather than assumed.
+   */
+  check(
+    "a plain orbit press no longer places a block",
+    !viewer.includes("placeCandidate"),
+    "placeCandidate is still in Viewer.svelte",
+  );
+  check(
+    "...and the build grid is drawn in flight, where placing went",
+    viewer.includes("gridCellAtCrosshair"),
+  );
+
+  /*
+   * The one that would be silently wrong. A press on a handle that never moved
+   * still ends as a click, and without `draggedThisGesture` it falls through to
+   * `clickIntent` -- which picks whatever block is behind the gizmo and
+   * collapses the selection the user was about to transform.
+   */
+  const grabAt = viewer.indexOf("const handle = selection === null ? null : gizmoAt(");
+  const shiftGate = viewer.indexOf("if (!event.shiftKey) return;");
+  const grab = viewer.slice(grabAt, shiftGate);
+  check("the gizmo grab is found at all", grab.length > 0);
+  check(
+    "a handle press marks the gesture as a drag",
+    grab.includes("draggedThisGesture = true"),
+    "a stationary press on a handle would fall through to clickIntent",
+  );
+  check(
+    "...and takes the left button from the camera",
+    grab.includes("controls.enabled = false"),
+    "LEFT is THREE.MOUSE.PAN, so the camera would pan instead",
+  );
+  check(
+    "...without asking for Shift",
+    grabAt >= 0 && shiftGate > grabAt,
+    "a handle is drawn for this gesture; behind the Shift gate it would need one",
+  );
+
+  /*
+   * And the release puts the camera back. Written as `cameraMode !== "fly"`
+   * rather than `true`, because re-enabling OrbitControls while the pointer is
+   * locked would give the flight camera a second controller.
+   */
+  check(
+    "the release hands the button back",
+    viewer.includes('if (controls) controls.enabled = cameraMode !== "fly";'),
+  );
+
+  /*
+   * Rotation is offered on one axis, and that is a decision rather than an
+   * omission: a quarter turn about X or Z would have to write `facing=up` on a
+   * staircase, which is a state no version of the game has. Checked so that
+   * "completing" the set is a deliberate act.
+   */
+  check(
+    "only the vertical ring is built",
+    viewer.includes('gizmoMode === "rotate" ? (["y"] as const)'),
+    "a horizontal ring would write block states the game cannot hold",
+  );
+
+  /*
+   * The ground patch yields to a handle as well. Reported as an arrow with a
+   * lit cell on the floor behind it -- two indicators, one of which was about
+   * to do nothing.
+   */
+  check(
+    "the build grid asks whether the pointer is on a handle",
+    viewer.includes("pointerOnHandle({"),
+  );
+  /*
+   * And the hover is refreshed before the two things that read it. After
+   * them, each would be deciding from the previous frame's answer -- which
+   * on a 50ms throttle is a visible flicker as the pointer crosses a handle.
+   */
+  const order = (name: string) => viewer.indexOf(`${name}(performance.now())`);
+  check(
+    "the hover is refreshed before the outline that reads it",
+    order("updateHover") >= 0 && order("updateHover") < order("updateBlockHighlight"),
+  );
+  check(
+    "...and before the build grid",
+    order("updateHover") < order("updateBuildGrid"),
+  );
 }
 
 // --- the camera's own input -------------------------------------------------
@@ -967,9 +1372,45 @@ console.log("\n--- the MCP indicator ---");
     calls: 0,
     message: null,
     bridge: "C:/app/resources/mcp-bridge.mjs",
+    requiresAuth: true,
+    bindAddress: "127.0.0.1",
     ...over,
   });
 
+  /*
+   * The fifth state, and the reason it outranks the other two.
+   *
+   * A server with no token is the most permissive thing this app can be doing,
+   * and `active` would hide it at exactly the wrong moment: somebody connecting
+   * is when "anybody could" stops being hypothetical. So it wins over both.
+   *
+   * Read from the status rather than from the setting, like everything else
+   * here -- `requiresAuth` is what the listener is doing, and the checkbox is
+   * only what was asked for.
+   */
+  equal("a listening server with no token warns", dotFor(listening({ requiresAuth: false })), "unauthenticated");
+  equal(
+    "...and goes on warning once a client arrives",
+    dotFor(listening({ requiresAuth: false, clients: 3 })),
+    "unauthenticated",
+  );
+  equal("a listening server that wants one does not", dotFor(listening()), "listening");
+  equal("...and still says when somebody is using it", dotFor(listening({ clients: 1 })), "active");
+  /*
+   * Off is off. The warning is about a server that is serving, and a dot that
+   * warned about a stopped one would be the boy who cried wolf.
+   */
+  equal(
+    "a server that is not running warns about nothing",
+    dotFor(listening({ state: "off", requiresAuth: false })),
+    "off",
+  );
+  /*
+   * Its own colour, and not `--danger`: nothing has gone wrong. A red dot over
+   * a working server teaches people that red means nothing.
+   */
+  equal("the warning has its own colour", dotColor("unauthenticated"), "--warn");
+  check("...which is not the error colour", dotColor("unauthenticated") !== dotColor("error"));
   /*
    * The whole reason this is a function of `McpStatus` and not of the setting.
    *
@@ -1023,6 +1464,18 @@ console.log("\n--- the MCP indicator ---");
   const command = connectCommand("http://127.0.0.1:4571/mcp", "s3cret");
   check("the connect command names the transport", command.includes("--transport http"), command);
   check("...and carries the token as a bearer header", command.includes("Bearer s3cret"), command);
+  /*
+   * ...and omits it when there is none, which authentication being off is.
+   * An empty `Bearer ` would be a command that looks right, runs, and fails to
+   * connect -- with an error naming authentication on a server not asking for
+   * any.
+   */
+  check(
+    "no token, no header",
+    !connectCommand("http://127.0.0.1:4571/mcp", null).includes("--header"),
+    connectCommand("http://127.0.0.1:4571/mcp", null),
+  );
+  check("...and the address is still there", connectCommand("http://x/mcp", null).includes("http://x/mcp"));
 
   /*
    * The stdio form quotes the path, and that is not cosmetic: the bridge ships
@@ -1538,6 +1991,152 @@ console.log("\n--- orthographic projection ---");
   check("the floor still wins by depth-buffer steps, not by world units", COPLANAR_OFFSET.units >= 1);
 }
 
+// --- the orbit turns around what you are looking at --------------------------
+//
+// `controls.target` used to be written exactly twice in the app's life: the
+// box centre when a document opens, and 24 blocks ahead when flight hands
+// back. Nothing but a pan moved it in between, because three's dolly changes
+// the radius and never the target unless `zoomToCursor` says otherwise -- and
+// it defaults to false. So on a large build every rotation swung on the radius
+// the whole structure was framed at, and the compass, which faithfully kept
+// that target, flew over the middle of the build wherever you were standing.
+//
+// The pivot itself is reseated from a raycast in a pointer handler, which this
+// harness cannot drive. What *is* testable is the arithmetic that keeps the
+// picture still while it moves -- and that is the half that would be left out.
+console.log("\n--- the orbit turns around what you are looking at ---");
+{
+  /*
+   * Orthographic frames from the distance to the target, so moving the pivot
+   * with the camera still would resize the build on screen. The visible height
+   * is `2 * d * tan(fov / 2) / zoom`, so scaling `d` by `k` has to scale `zoom`
+   * by `k` -- exact, rather than a correction factor.
+   */
+  const visible = (distance: number, zoom: number): number =>
+    orthoFrustumHeight(ORBIT_FOV, distance) / zoom;
+
+  equal("a pivot that did not move leaves the zoom alone", zoomAfterPivot(2.5, 80, 80), 2.5);
+  for (const [before, after] of [
+    [80, 40],
+    [40, 80],
+    [819, 12],
+  ]) {
+    const zoom = zoomAfterPivot(1.75, before, after);
+    check(
+      `${before} to ${after} shows the same slice of the world`,
+      Math.abs(visible(after, zoom) - visible(before, 1.75)) < 1e-9,
+      `${visible(after, zoom)} against ${visible(before, 1.75)}`,
+    );
+  }
+  /*
+   * The target can be reached exactly -- fly into the middle of a build and
+   * come back to orbit -- and a zoom of zero or infinity is a degenerate
+   * projection matrix that draws nothing and reports nothing. Same guard, and
+   * the same reason, as `orthoFrustumHeight`'s clamp.
+   */
+  equal("a pivot reached exactly changes nothing", zoomAfterPivot(1.5, 80, 0), 1.5);
+  equal("...and neither does starting from nowhere", zoomAfterPivot(1.5, 0, 80), 1.5);
+
+  /*
+   * And the pivot itself lands on the **view axis**, which is the whole of
+   * why moving it disturbs nothing. OrbitControls re-aims at the target on
+   * every `update()`, so a target set to the cell that was under the pointer
+   * -- off to one side by however far the pointer was from the middle --
+   * turns the camera to face it, before the drag that asked for it has
+   * begun. Reported as the camera snapping.
+   */
+  {
+    // Straight ahead: the depth is the distance, and the target lands exactly
+    // where it was picked.
+    equal(
+      "a point dead ahead gives its own distance",
+      pivotDepth([0, 0, 0], [0, 0, -1], [0, 0, -40]),
+      40,
+    );
+    /*
+     * Off to the side by 30 degrees: the depth is the *projection*, which is
+     * shorter than the distance to it. Taking the distance instead would be
+     * the same snap by a longer route -- the pivot would sit past what was
+     * picked, on the axis.
+     */
+    const off = pivotDepth([0, 0, 0], [0, 0, -1], [40 * Math.tan(Math.PI / 6), 0, -40]);
+    equal("...and one off to the side gives its projection, not its range", off, 40);
+    check(
+      "...which is shorter than the range itself",
+      Math.hypot(40 * Math.tan(Math.PI / 6), 40) > off,
+    );
+    // Behind the camera is negative, which is what the caller refuses on.
+    check("a point behind the camera is negative", pivotDepth([0, 0, 0], [0, 0, -1], [0, 0, 8]) < 0);
+    // The camera's own position is zero, not a small positive number: the
+    // guard is `> minDistance` rather than `!== 0` for exactly this.
+    equal("the camera's own position is no distance at all", pivotDepth([3, 4, 5], [0, 1, 0], [3, 4, 5]), 0);
+  }
+  /*
+   * And the wiring, which runs from a pointer event and from a click on an
+   * element, neither of which this harness delivers.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  check(
+    "the wheel pulls the pivot towards the pointer",
+    /next\.zoomToCursor = true;/.test(viewer),
+  );
+  // A pivot that moves makes reaching it easy rather than theoretical, and at
+  // zero distance there is nothing left to rotate about.
+  check("...and the dolly has a floor under it", /next\.minDistance = [0-9.]+;/.test(viewer));
+
+  check(
+    "the rotate press reseats the pivot",
+    /event\.button === 2 &&[\s\S]{0,400}?repivotAt\(event\.clientX, event\.clientY\)/.test(viewer),
+  );
+  /*
+   * ...along the direction the camera is already facing, and **not** to the
+   * point that was picked. Written the obvious way -- `controls.target.set`
+   * with the cell's own centre -- it typechecks, it rotates about the right
+   * place, and it snaps the view a fraction of a second before the drag.
+   * Nothing else in this file can see the difference, because both spellings
+   * put the pivot on the thing under the pointer.
+   */
+  const repivot = viewer.slice(viewer.indexOf("function repivotAt"));
+  const inRepivot = repivot.slice(0, repivot.indexOf("\n  }"));
+  check(
+    "...on the axis the camera is already looking down",
+    /controls\.target\.copy\(camera\.position\)\.addScaledVector\(pivotForward, after\)/.test(
+      inRepivot,
+    ),
+  );
+  check(
+    "...and never at the point that was picked",
+    !/controls\.target\.set\(/.test(inRepivot),
+  );
+  // The depth is what the orthographic zoom is compensated against too, or
+  // the sides would be recomputed from a distance the target no longer has.
+  check(
+    "...and the orthographic zoom is compensated against that same depth",
+    /zoomAfterPivot\(ortho\.zoom, before, after\)/.test(inRepivot),
+  );
+  /*
+   * The compass reseats it too, and from the **centre of the canvas** rather
+   * than from the pointer -- the pointer is over the compass, which is its own
+   * element and not the scene. Without this the flight still goes round
+   * `controls.target`, correctly, and that target is still the middle of the
+   * document: the bug survives every check written about `orbitFor` and
+   * `arcBetween`, which is why it is stated here about the call site.
+   */
+  const fly = viewer.slice(viewer.indexOf("function flyToAxis"));
+  check(
+    "the compass reseats it from the middle of the canvas",
+    /repivotAt\(box\.left \+ box\.width \/ 2, box\.top \+ box\.height \/ 2\)/.test(
+      fly.slice(0, fly.indexOf("\n  }")),
+    ),
+  );
+  // ...before it reads the target it is going to fly around, or it would fly
+  // around the one it was replacing.
+  check(
+    "...before it reads the target",
+    fly.indexOf("repivotAt(") < fly.indexOf("const target = controls.target;"),
+  );
+}
+
 // --- the compass in the corner ----------------------------------------------
 //
 // A viewport that orbits freely has no other answer to which way you are
@@ -1777,6 +2376,136 @@ console.log("\n--- compass ---");
   check("...it is a scissored pass over the one there is", viewerSource.includes("setScissorTest(true)"));
 }
 
+// --- how the viewport is drawn ----------------------------------------------
+//
+// Four graphics settings, and the two halves that can be stated here: the
+// preset table, which is a pure module for exactly that reason, and the shape
+// of the renderer code that consumes it, read out of the source the way every
+// other fact about `Viewer.svelte` is.
+console.log("\n--- how the viewport is drawn ---");
+{
+  /*
+   * `vanilla` is the identity, and has to be spelled out rather than asserted
+   * loosely: a preset called neutral that moved *anything* would change the
+   * look for everyone who never opens the pane, which is a change nobody
+   * asked for arriving in an upgrade.
+   */
+  const vanilla = shaderPreset("vanilla");
+  check("vanilla changes nothing about the renderer", vanilla.toneMapping === "none" && vanilla.exposure === 1);
+  check("...nor about either light", vanilla.sun === 1 && vanilla.ambient === 1);
+  check("...nor about the environment", vanilla.environment === 1);
+
+  /*
+   * Total, for `Projection`'s reason: `coerceSettings` spreads `preview` over
+   * the defaults without validating it, and that is only safe while a junk
+   * value is indistinguishable from an absent one.
+   */
+  check("an unknown mode is vanilla", shaderPreset("banana") === vanilla);
+  check("...and so is nothing at all", shaderPreset("") === vanilla);
+
+  /*
+   * And every offered mode does something. A mode in the picker that resolved
+   * to the same numbers as another would be a name with nothing behind it --
+   * which is what a preset list quietly rots into.
+   */
+  const shapes = SHADER_MODES.map((mode) => JSON.stringify(shaderPreset(mode)));
+  check("every offered mode is a different look", new Set(shapes).size === SHADER_MODES.length, shapes.join(" | "));
+  check("flat has no directional light at all", shaderPreset("flat").sun === 0);
+
+  /*
+   * The multisampling level is read the same way, and its fallback is the
+   * *default* rather than zero: a value this build does not recognise -- one
+   * a newer build wrote, or a hand-edited file -- must not turn anti-aliasing
+   * off in silence.
+   */
+  for (const level of AA_LEVELS) {
+    check(`${level} samples is offered and kept`, antialiasSamples(level) === level);
+  }
+  check("a level nobody offers falls back", antialiasSamples(16) === DEFAULT_PREVIEW_SETTINGS.antialias);
+  check("...and so does a string", antialiasSamples("4") === DEFAULT_PREVIEW_SETTINGS.antialias);
+  check("...and the fallback is not off", antialiasSamples(undefined) !== 0);
+
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+
+  /*
+   * The context is created without its own anti-aliasing, and the scene is
+   * drawn into a multisampled target instead. That flag is fixed for the life
+   * of the context, so a setting built on it could only apply at the next
+   * launch -- a live control that does nothing, which is the Stop button's
+   * fault in another pane.
+   */
+  check("the context asks for no anti-aliasing of its own", viewer.includes("antialias: false"));
+  check("...and the samples go on a render target", viewer.includes("new THREE.WebGLRenderTarget("));
+
+  /*
+   * The copy to the canvas happens after the compass, so the compass is inside
+   * the multisampled picture. Drawn after it, it would be the one unaliased
+   * thing on screen.
+   */
+  check("the frame is copied out after the compass is in it", viewer.indexOf("renderer.render(aaScene") > viewer.indexOf("drawCompass();"));
+
+  /*
+   * The counter reports a whole frame, and a frame is three or four renders.
+   * `info` resets itself at the start of each one unless told not to, so
+   * without this the triangle count is the compass's.
+   */
+  check("the counter is told not to reset itself per render", viewer.includes("renderer.info.autoReset = false"));
+
+  /*
+   * The two lights are written in exactly one place. `applySky` decides what
+   * the hour asks for and the preset scales it; a second site writing an
+   * intensity outright is how the mode comes to be silently overruled by
+   * whichever ran last.
+   */
+  const writes = (what: string) => (viewer.match(new RegExp(`${what}\\.intensity =`, "g")) ?? []).length;
+  equal("the sun's intensity is written once", writes("sun"), 1);
+  equal("...and the ambient's once", writes("ambient"), 1);
+
+  /*
+   * And global illumination needs the sky, because the environment *is* the
+   * sky dome. Turning the sky off has to take it down with it, or the last one
+   * built stays on the scene lighting the build from a sky nobody is drawing.
+   */
+  const usingEnv = viewer.slice(
+    viewer.indexOf("function usingEnvironment"),
+    viewer.indexOf("function usingEnvironment") + 200,
+  );
+  check("the environment needs the sky as well as the setting", usingEnv.includes("globalIllumination && sky"));
+}
+
+// --- invisible from the inside ----------------------------------------------
+//
+// The block mesh is drawn front-side only, so a wall's far face is rejected at
+// the raster stage instead of being shaded and then thrown away by the depth
+// test. What makes that safe is `tests/blocks.ts`: every face's winding agrees
+// with the normal it declares. What makes it *narrow* is here -- the other two
+// layers stay double-sided, and each has a reason a screenshot would not give
+// back.
+//
+// Source, because a material is a fact about a renderer this harness has no
+// frames from.
+console.log("\n--- invisible from the inside ---");
+{
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const between = (from: string, to: string): string =>
+    viewer.slice(viewer.indexOf(from), viewer.indexOf(to));
+
+  const opaque = between("function ensureMaterial", "function ensureBlendedMaterial");
+  check("there is an opaque block material to check", opaque.length > 0);
+  check("the block mesh is drawn front-side only", opaque.includes("side: THREE.FrontSide"));
+
+  /*
+   * Water is the surface of a pond seen from underneath, which is a place a
+   * person in this app actually stands: single-sided it would have no ceiling.
+   * The void block is the medium the work happens *inside*, so its inside is
+   * the ordinary view. Neither is an oversight, so both are stated.
+   */
+  const water = between("function ensureBlendedMaterial", "function ensureVoidMaterial");
+  const empty = between("function ensureVoidMaterial", "function shadeWithBakedLight");
+  check("...the water is not, because a pond has an underside", water.includes("side: THREE.DoubleSide"));
+  check("...nor is the void, which is stood inside", empty.includes("side: THREE.DoubleSide"));
+}
+
 // --- the schematic's own box -------------------------------------------------
 //
 // The build inside a document is not its edge: empty room at the top of a box
@@ -1962,6 +2691,94 @@ console.log("\n--- selection history ---");
 // visible slice has to be computed from a scroll offset -- and a scroll offset
 // is not something this harness can produce, so the arithmetic lives apart from
 // the component and only the scrolling stays unobservable.
+console.log("\n--- a gesture that moved both is one press ---");
+{
+  /*
+   * The gizmo's move, turn and scale change the blocks *and* the box. Recorded
+   * apart they cost two presses of Ctrl+Z: one to put the box back on the space
+   * the blocks had left, one to put the blocks back. Reported as exactly that.
+   *
+   * The pairing is a step keyed to the depth *before* the edit and flagged, so
+   * it does not answer `undoTarget` while the depth is up -- and `takeEditUndo`
+   * hands it back the moment the document comes down to meet it.
+   */
+  const box = (n: number) => ({ minX: n, minY: 0, minZ: 0, maxX: n, maxY: 0, maxZ: 0 });
+  const at = (n: number): SelectionState => ({ selection: box(n), anchor: { x: n, y: 0, z: 0 } });
+
+  // Depth was 4 before the edit and is 5 after it.
+  const paired = recordEditSelection(emptyTimeline(), 4, at(1), at(7));
+
+  equal(
+    "a step that rode in with an edit does not claim the press",
+    undoTarget(paired, 5, true),
+    "document",
+  );
+  equal(
+    "...and is handed back once the document has come back to it",
+    takeEditUndo(paired, 4)?.state.selection,
+    box(1),
+  );
+  equal(
+    "...but not at a depth it does not belong to",
+    takeEditUndo(paired, 5),
+    null,
+  );
+  /*
+   * And once the document is back down at it -- undone by something that did
+   * not go through `undoAnything`, which the chat panel's per-message undo does
+   * -- the box is the thing left to put back, so it claims the press after all.
+   * The undo side deliberately has no `withEdit` clause; the redo side does.
+   */
+  equal(
+    "...and once the blocks are back it is the box that is left",
+    undoTarget(paired, 4, true),
+    "selection",
+  );
+
+  /*
+   * The check that separates the pair from the ordinary case. Without it the
+   * flag could be ignored everywhere and every one of these would still pass:
+   * a selection somebody made on purpose has to go on claiming its own press,
+   * and must not be swallowed by an undo of the edit above it.
+   */
+  const ordinary = recordSelection(emptyTimeline(), 4, at(1), at(7));
+  equal(
+    "an ordinary step at the current depth still claims it",
+    undoTarget(ordinary, 4, true),
+    "selection",
+  );
+  equal(
+    "...and is not swallowed by a document undo",
+    takeEditUndo(ordinary, 4),
+    null,
+  );
+
+  /*
+   * The redo side, which has to be asked *before* main is told -- a redo raises
+   * the depth exactly as a fresh edit does, so the depth watcher clears the redo
+   * stack and the step would already be gone.
+   */
+  const undone = takeEditUndo(paired, 4);
+  equal("undoing the pair leaves it on the redo stack", undone?.timeline.redo.length, 1);
+  equal(
+    "...where the redo does not claim the press either",
+    redoTarget(undone?.timeline ?? emptyTimeline(), 4, true),
+    "document",
+  );
+  equal(
+    "...and it comes back pointing forwards",
+    takeEditRedo(undone?.timeline ?? emptyTimeline(), 4)?.state.selection,
+    box(7),
+  );
+  equal(
+    "a redo of nothing paired is nothing",
+    takeEditRedo(emptyTimeline(), 4),
+    null,
+  );
+
+  // A gesture that moved nothing is not a step, paired or otherwise.
+  equal("a pair that changed nothing records nothing", recordEditSelection(emptyTimeline(), 4, at(1), at(1)).undo.length, 0);
+}
 console.log("\n--- creative inventory ---");
 {
   const base = { count: 100, columns: 10, rowHeight: 50, viewportHeight: 200 };
@@ -2172,6 +2989,7 @@ console.log("\n--- the block under the pointer ---");
     loaded: true,
     pointer: { x: 120, y: 80 },
     overHandle: false,
+    overGizmo: false,
     dragging: false,
   } as const;
 
@@ -2226,16 +3044,37 @@ console.log("\n--- the block under the pointer ---");
     { kind: "none" },
   );
   equal("and a face drag keeps it", hoverSource({ ...base, dragging: true }), { kind: "none" });
+  /*
+   * A gizmo arrow says exactly the same thing, and it is a separate field
+   * because it comes from a separate raycast: outlining the block behind an
+   * arrow promises a click that will move the region instead.
+   */
+  equal(
+    "a gizmo handle takes it too",
+    hoverSource({ ...base, overGizmo: true }),
+    { kind: "none" },
+  );
+  check(
+    "the two handles and the drag are one question",
+    pointerOnHandle({ overHandle: false, overGizmo: true, dragging: false }) &&
+      pointerOnHandle({ overHandle: true, overGizmo: false, dragging: false }) &&
+      pointerOnHandle({ overHandle: false, overGizmo: false, dragging: true }),
+  );
+  check(
+    "...and an idle pointer is over none of them",
+    !pointerOnHandle({ overHandle: false, overGizmo: false, dragging: false }),
+  );
 
   // Neither of those is flight's business: there are no handles under a
   // crosshair, and a gesture in orbit must not reach across the mode switch.
   equal(
-    "flight ignores both",
+    "flight ignores all three",
     hoverSource({
       ...base,
       cameraMode: "fly",
       flying: true,
       overHandle: true,
+      overGizmo: true,
       dragging: true,
     }),
     { kind: "crosshair" },
@@ -2282,6 +3121,456 @@ console.log("\n--- which side of a surface the block is on ---");
   // cannot be hit at all, and falls to the front branch rather than flipping.
   equal("a grazing hit keeps its side", facingNormal(up, [0.999, -0.01, 0]), up);
   equal("a perpendicular one is left alone", facingNormal(up, [1, 0, 0]), up);
+}
+
+/*
+ * A normal with no dominant axis, and the face the ray came in through.
+ *
+ * `pickBlockAt` turns a hit normal into a face of the cell by taking its
+ * largest component, which is exact wherever there is one -- and a coin toss
+ * where there is not. A cross's planes are turned 45 degrees, so the two
+ * horizontal terms are exactly equal and the vertical term is zero: the
+ * winner is decided by which way a `>=` leans, and `up` and `down` can never
+ * win at all.
+ *
+ * A chain is what that cost. Its planes run the whole height of the cell, so
+ * `boxFaces` drops their `up` and `down` faces for having no area and there
+ * is no end of a chain to aim at -- so a column could not be built. The next
+ * chain always went in a cell beside the one clicked, carrying that sideways
+ * face's axis, which is the report word for word.
+ */
+console.log("\n--- a normal that names no face ---");
+{
+  // Axis-aligned, and the lectern's desk at -22.5 degrees: both have a clear
+  // winner and must keep the answer they always had.
+  check("an axis-aligned normal has a dominant axis", hasDominantAxis([0, 1, 0]));
+  check(
+    "...and so does a tilted box, at 0.924 against 0.383",
+    hasDominantAxis([0, 0.9239, 0.3827]),
+  );
+  // The cross. Both spellings, because the sign is what varies between the
+  // two planes and neither is more of a tie than the other.
+  check("a cross quad does not", !hasDominantAxis([0.7071, 0, -0.7071]));
+  check("...whichever diagonal it is on", !hasDominantAxis([-0.7071, 0, -0.7071]));
+  check("a zero normal has no axis either", !hasDominantAxis([0, 0, 0]));
+
+  /*
+   * `entryFace` stands in for the full-cell collision box this app does not
+   * have. Named from the side the ray came *from*, so it is the face a
+   * neighbour would share and a placement one step along it lands outside.
+   */
+  const cell = { x: 4, y: 2, z: 7 };
+  const AT: readonly (readonly [
+    string,
+    readonly [number, number, number],
+    readonly [number, number, number],
+  ])[] = [
+    ["down", [4.5, -10, 7.5], [0, 1, 0]],
+    ["up", [4.5, 20, 7.5], [0, -1, 0]],
+    ["west", [-10, 2.5, 7.5], [1, 0, 0]],
+    ["east", [20, 2.5, 7.5], [-1, 0, 0]],
+    ["north", [4.5, 2.5, -10], [0, 0, 1]],
+    ["south", [4.5, 2.5, 20], [0, 0, -1]],
+  ];
+  for (const [face, origin, direction] of AT) {
+    equal(
+      `a ray from the ${face} side enters through it`,
+      entryFace(origin, direction, cell),
+      face,
+    );
+  }
+
+  /*
+   * The case the whole change exists for: aiming *up* at a chain from below
+   * and slightly to one side. The ray is mostly vertical, so the last slab it
+   * enters is the floor of the cell -- and the placement one step along
+   * `down` is the cell underneath, which is the next link of the column.
+   */
+  equal(
+    "aiming up from below and to the side still enters through the floor",
+    entryFace([4.9, 0.2, 7.9], [-0.2, 0.96, -0.2], cell),
+    "down",
+  );
+  // ...and the mirror of it, so a column can be built upwards as well.
+  equal(
+    "aiming down from above enters through the ceiling",
+    entryFace([4.1, 9, 7.1], [0.2, -0.96, 0.2], cell),
+    "up",
+  );
+  /*
+   * A shallow, mostly-horizontal ray is a side hit and must stay one: that is
+   * the answer the app already gave for a chain seen at eye level, and it was
+   * the right one. Only the vertical case was unreachable.
+   */
+  equal(
+    "a shallow ray still enters through the side",
+    entryFace([-6, 2.6, 7.5], [0.99, 0.14, 0], cell),
+    "west",
+  );
+  /*
+   * A component of exactly zero is parallel to that pair of planes and offers
+   * no entry at all. Without the guard the division yields an infinity, which
+   * then wins the `t > best` comparison and names a face the ray never
+   * crossed.
+   */
+  equal(
+    "an axis the ray does not travel along cannot win",
+    entryFace([-10, 2.5, 7.5], [1, 0, 0], cell),
+    "west",
+  );
+
+  /*
+   * And the wiring, which runs from a pointer event and cannot be driven
+   * here. Both halves are greppable and both matter: the tie has to be asked
+   * about **before** the dominant-axis block, or it decides nothing, and it
+   * has to be the ray that answers rather than the normal a second time.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const pick = viewer.slice(viewer.indexOf("function pickBlockAt"));
+  const tie = pick.indexOf("if (!hasDominantAxis(");
+  const dominant = pick.indexOf("const ax = Math.abs(normal.x);");
+  check("the pick asks whether the normal names a face", tie > 0);
+  check(
+    "...before it takes a dominant axis anyway",
+    tie > 0 && dominant > 0 && tie < dominant,
+    `tie at ${tie}, dominant at ${dominant}`,
+  );
+  check(
+    "...and answers from the ray, not from the normal again",
+    /entryFace\(\s*\r?\n?\s*\[raycaster\.ray\.origin/.test(pick),
+  );
+}
+
+// --- a block too thin to aim at ---------------------------------------------
+//
+// The viewport raycasts the fused mesh, and a chain's mesh is two planes of
+// zero thickness, 3 texels wide, crossed at the middle of its cell. Vanilla
+// gives it a solid 3x16x3 column to click; here there was nothing to click, so
+// the ray went past it and hit whatever stood behind -- and that block took
+// the placement.
+//
+// Measured against a real document, a chain hanging from stone: from dead
+// underneath the planes are edge-on and present no area at all, so the ray
+// reached the stone's `down` face and the placement went into the cell the
+// chain was already in; from above or to one side it reached the stone's
+// *east* face and the new chain went in beside it with `axis=x`. Reported
+// three times, and never actually about the placement rules.
+console.log("\n--- a block too thin to aim at ---");
+{
+  /** One quad, as `buildMesh` lays it out: four positions, the normal four times. */
+  const quad = (
+    corners: readonly (readonly [number, number, number])[],
+    normal: readonly [number, number, number],
+  ): { positions: number[]; normals: number[] } => ({
+    positions: corners.flatMap((c) => [...c]),
+    normals: [0, 1, 2, 3].flatMap(() => [...normal]),
+  });
+  const buffers = (quads: { positions: number[]; normals: number[] }[]) => ({
+    positions: new Float32Array(quads.flatMap((q) => q.positions)),
+    normals: new Float32Array(quads.flatMap((q) => q.normals)),
+  });
+
+  /*
+   * A chain: two planes 3/16 wide, turned 45 degrees about the cell's
+   * middle, running its full height. Both diagonals, so both normals are
+   * ties -- which is the whole of how this set is recognised.
+   */
+  const s = 0.5 - (1.5 / 16) * Math.SQRT1_2;
+  const e = 0.5 + (1.5 / 16) * Math.SQRT1_2;
+  const d = Math.SQRT1_2;
+  const chain = buffers([
+    quad([[s, 0, e], [e, 0, s], [e, 1, s], [s, 1, e]], [d, 0, d]),
+    quad([[e, 0, s], [s, 0, e], [s, 1, e], [e, 1, s]], [-d, 0, -d]),
+    quad([[s, 0, s], [e, 0, e], [e, 1, e], [s, 1, s]], [d, 0, -d]),
+    quad([[e, 0, e], [s, 0, s], [s, 1, s], [e, 1, e]], [-d, 0, d]),
+  ]);
+  const found = thinBoxes(chain.positions, chain.normals);
+  equal("a chain is one cell the pointer would pass through", found.length, 1);
+  equal("...named by the cell it is in", found[0]?.cell, [0, 0, 0]);
+  /*
+   * ...and by the line it runs along, which is the axis it is *not* narrow
+   * on. That is the same fact twice: what makes a chain unaimable is what
+   * says which way it is strung, so the shape that qualifies also answers
+   * the question a run needs answered.
+   */
+  equal("...and the axis it is strung along", found[0]?.axis, 1);
+  /*
+   * The box is the geometry's **own** extent, not a transcribed collision
+   * shape: 2.12 across, which is 3 turned 45 degrees, against vanilla's
+   * 3x16x3. A little narrower, and deliberately so -- it is derived from
+   * what is drawn, so it cannot claim a shape the block does not have.
+   */
+  check(
+    "...as wide as the geometry is, which is 3 texels turned 45 degrees",
+    Math.abs((found[0].max[0] - found[0].min[0]) * 16 - 3 * Math.SQRT1_2) < 1e-4 &&
+      Math.abs(found[0].max[1] - found[0].min[1] - 1) < 1e-6,
+    `${((found[0].max[0] - found[0].min[0]) * 16).toFixed(2)} wide`,
+  );
+
+  /*
+   * A **cross** is drawn exactly the same way and must not be in the set. It
+   * spans its cell corner to corner, so it is 11.3 units across rather than
+   * 2.1 and is already easy to hit -- and a box would make it impossible to
+   * click the ground behind a flower, which is a thing people do.
+   */
+  const cross = buffers([
+    quad([[0, 0, 1], [1, 0, 0], [1, 1, 0], [0, 1, 1]], [d, 0, d]),
+    quad([[1, 0, 0], [0, 0, 1], [0, 1, 1], [1, 1, 0]], [-d, 0, -d]),
+    quad([[0, 0, 0], [1, 0, 1], [1, 1, 1], [0, 1, 0]], [d, 0, -d]),
+    quad([[1, 0, 1], [0, 0, 0], [0, 1, 0], [1, 1, 1]], [-d, 0, d]),
+  ]);
+  equal("a flower is not one of them", thinBoxes(cross.positions, cross.normals).length, 0);
+
+  /*
+   * A chain lying flat is the same thing turned, and the axis has to turn
+   * with it -- reading the run as vertical whatever it was is what made a
+   * sideways chain impossible to carry on, which was reported.
+   */
+  const flat = buffers([
+    quad([[0, s, e], [0, e, s], [1, e, s], [1, s, e]], [0, d, d]),
+    quad([[0, e, s], [0, s, e], [1, s, e], [1, e, s]], [0, -d, -d]),
+    quad([[0, s, s], [0, e, e], [1, e, e], [1, s, s]], [0, d, -d]),
+    quad([[0, e, e], [0, s, s], [1, s, s], [1, e, e]], [0, -d, d]),
+  ]);
+  const lying = thinBoxes(flat.positions, flat.normals);
+  equal("a chain lying along x is one of them too", lying.length, 1);
+  equal("...strung along x, not down", lying[0]?.axis, 0);
+
+  // And nothing axis-aligned ever is, whatever its size: a face of a cube, a
+  // slab, a fence rail all name an axis, so they are aimable by construction.
+  const slab = buffers([
+    quad([[0, 0.5, 0], [1, 0.5, 0], [1, 0.5, 1], [0, 0.5, 1]], [0, 1, 0]),
+    quad([[0, 0, 0], [0, 0.5, 0], [0, 0.5, 1], [0, 0, 1]], [-1, 0, 0]),
+  ]);
+  equal("a slab is not one of them", thinBoxes(slab.positions, slab.normals).length, 0);
+
+  /*
+   * The box test itself. Six faces, and each one is a direction the ray can
+   * come from -- this is what `entryFace` does on the unit cell, answering
+   * for an arbitrary box and reporting the range as well.
+   */
+  const min: readonly [number, number, number] = [0.4, 0, 0.4];
+  const max: readonly [number, number, number] = [0.6, 1, 0.6];
+  for (const [label, from, towards, face] of [
+    ["from below", [0.5, -3, 0.5], [0, 1, 0], "down"],
+    ["from above", [0.5, 4, 0.5], [0, -1, 0], "up"],
+    ["from the east", [3, 0.5, 0.5], [-1, 0, 0], "east"],
+    ["from the west", [-3, 0.5, 0.5], [1, 0, 0], "west"],
+    ["from the south", [0.5, 0.5, 3], [0, 0, -1], "south"],
+    ["from the north", [0.5, 0.5, -3], [0, 0, 1], "north"],
+  ] as const) {
+    equal(
+      `a ray ${label} enters by that face`,
+      rayBox(from, towards, min, max)?.face,
+      face,
+    );
+  }
+  equal("...at the range it actually meets it", rayBox([0.5, -3, 0.5], [0, 1, 0], min, max)?.distance, 3);
+
+  // A ray that misses the column entirely, which is most of them: the box is
+  // a fifth of a block across.
+  equal("a ray beside it is not a hit", rayBox([0.9, -3, 0.9], [0, 1, 0], min, max), null);
+  /*
+   * A ray that starts **inside** is not a hit either, and that one is load
+   * bearing: in flight the camera passes through the build, and a box the
+   * camera is standing in would be picked at zero range and beat everything
+   * else on screen.
+   */
+  equal("...and neither is one starting inside it", rayBox([0.5, 0.5, 0.5], [0, 1, 0], min, max), null);
+  // Parallel to a pair of planes, and outside them: the division would be an
+  // infinity that then wins the comparison, which is `entryFace`'s own trap.
+  equal("a ray parallel to it and past it misses", rayBox([0.9, 0.5, 0.5], [0, 0, 1], min, max), null);
+  equal("a ray pointing away from it misses", rayBox([0.5, -3, 0.5], [0, -1, 0], min, max), null);
+
+  /*
+   * And the wiring, which needs a scene. Two things: the boxes are built
+   * where the chunk's mesh is, so they are evicted exactly when it is; and
+   * the pick asks for them **before** it reads the mesh hit, bounded by that
+   * hit's own distance so a nearer wall still wins.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  check(
+    "the boxes ride with the chunk mesh they came from",
+    /mesh\.userData\.thin = thinBoxes\(chunk\.positions, chunk\.normals\)/.test(viewer),
+  );
+  check(
+    "...and the void layer gets none, because nothing raycasts it",
+    /if \(chunk\.layer !== "void"\) \{\s*\r?\n\s*mesh\.userData\.thin/.test(viewer),
+  );
+  const pick = viewer.slice(viewer.indexOf("function pickBlockAt"));
+  check(
+    "the pick asks for a stand-in box, bounded by what the mesh found",
+    /nearestThinBox\(raycaster\.ray, hit\?\.distance \?\? Infinity\)/.test(pick),
+  );
+  check(
+    "...before it gives up on a ray the mesh missed",
+    pick.indexOf("nearestThinBox(") < pick.indexOf("if (!hit || !hit.face) return null;"),
+  );
+}
+// --- a run of chains --------------------------------------------------------
+//
+// The entry face is the game's own answer and it is a narrow gesture,
+// measured: the ray has to cross the cell's floor inside its footprint, so
+// aiming at the middle of a chain needs a look steeper than 45 degrees and a
+// shallower one comes back with a side face. Reported twice as a column being
+// unbuildable -- the second time as *not fixed at all*, which was fair.
+//
+// So the half of the block that was clicked decides which end the next one
+// goes on. It is a deliberate deviation, and it is the question a slab
+// already asks of `cursorY`.
+//
+// **Which end of *what* is the trap**, and reading the half vertically is
+// the obvious way to fall into it: a chain strung along x or z could then not
+// be continued at all, because a click on one would send the next above or
+// below it. The box the block is picked through already knows better -- it is
+// long on exactly one axis and narrow on the other two, and that axis is the
+// run. Both directions are stated below for that reason.
+console.log("\n--- a run of chains ---");
+{
+  const AT = { x: 4, y: 7, z: 9 };
+  const hitting = (
+    against: PlacementLook["against"],
+    axis: "x" | "y" | "z",
+    at: number,
+  ): PlacementLook => ({
+    direction: { x: 1, y: 0, z: 0 },
+    against,
+    cursorY: 0.5,
+    run: { axis, at },
+  });
+
+  /*
+   * Clicked on the west side of a chain hanging vertically, low down: `at`
+   * is the cell to the west, so the chain that was hit is one step back
+   * east, and the next link goes under *it* rather than beside it.
+   */
+  const low = continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:chain");
+  equal("clicking the low half of a hanging chain sends the next one under it", low?.at, {
+    x: AT.x + 1,
+    y: AT.y - 1,
+    z: AT.z,
+  });
+  equal("...against the face that gives it the vertical axis", low?.against, "down");
+
+  const high = continuedPlacement(AT, hitting("west", "y", 0.8), "minecraft:chain");
+  equal("clicking the high half sends it over the top", high?.at, {
+    x: AT.x + 1,
+    y: AT.y + 1,
+    z: AT.z,
+  });
+  equal("...and against the other one", high?.against, "up");
+
+  /*
+   * **And a chain lying flat carries on flat**, which is the half that was
+   * wrong: reading the half vertically whatever the run was made a sideways
+   * chain impossible to extend at all. The run comes from the box, so this
+   * needs no second rule -- only the axis it was already given.
+   */
+  const west = continuedPlacement(AT, hitting("up", "x", 0.2), "minecraft:chain");
+  equal("clicking the west half of a chain strung along x carries it west", west?.against, "west");
+  equal("...into the cell that way", west?.at, { x: AT.x - 1, y: AT.y - 1, z: AT.z });
+  const east = continuedPlacement(AT, hitting("up", "x", 0.8), "minecraft:chain");
+  equal("...and the east half carries it east", east?.against, "east");
+
+  const north = continuedPlacement(AT, hitting("up", "z", 0.2), "minecraft:chain");
+  equal("a chain along z goes north from its north half", north?.against, "north");
+  const south = continuedPlacement(AT, hitting("up", "z", 0.8), "minecraft:chain");
+  equal("...and south from its south half", south?.against, "south");
+
+  /*
+   * The renamed spelling, because that is the half of a rename that gets left
+   * behind -- `chain` became `iron_chain` at 1.21.9 and this app offers both.
+   * Asking the registry for `axis` is what covers the pair with no list.
+   */
+  equal(
+    "...and iron_chain, which is the same block after 1.21.9",
+    continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:iron_chain")?.against,
+    "down",
+  );
+  equal(
+    "...and a copper one",
+    continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:waxed_copper_chain")?.against,
+    "down",
+  );
+
+  /*
+   * **Idempotent where the entry face already agreed.** Aiming steeply from
+   * below gives `against: "down"` on its own, and the rule must then name the
+   * same cell rather than stepping a second time -- which is the mistake the
+   * arithmetic invites, because it walks back along `against` and then
+   * forward along a face that is sometimes the very same one.
+   */
+  const already = continuedPlacement(AT, hitting("down", "y", 0.1), "minecraft:chain");
+  equal("a face the ray already found is not stepped along twice", already?.at, AT);
+
+  /*
+   * And the guards, each of which is a way this could reach a placement it has
+   * no business changing.
+   */
+  equal(
+    "a block picked off its own geometry is left alone",
+    continuedPlacement(
+      AT,
+      { against: "west", run: null },
+      "minecraft:chain",
+    ),
+    null,
+  );
+  /*
+   * A poppy is a cross exactly as a chain is, and is not replaceable, so this
+   * is the guard that keeps ordinary building unchanged: stone clicked onto a
+   * chain goes where it always went.
+   */
+  equal(
+    "...and so is a block with no axis to continue",
+    continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:stone"),
+    null,
+  );
+  equal(
+    "...and a click that landed on no face at all",
+    continuedPlacement(AT, hitting(null, "y", 0.2), "minecraft:chain"),
+    null,
+  );
+  /*
+   * `nether_portal` carries an `axis` of `x|z` and no `y`. The guard is about
+   * the *value* rather than about the block, which is what the orientation
+   * arm does one layer along -- so it is refused on a vertical run and
+   * allowed on a horizontal one, and stating both is what says which.
+   */
+  equal(
+    "...and a run whose axis the held block has no value for",
+    continuedPlacement(AT, hitting("west", "y", 0.2), "minecraft:nether_portal"),
+    null,
+  );
+  equal(
+    "...while one it does have is allowed",
+    continuedPlacement(AT, hitting("up", "x", 0.2), "minecraft:nether_portal")?.against,
+    "west",
+  );
+
+  // And the wiring: the rule has to be asked before the request is built, and
+  // never for a break, whose coordinates name the block itself.
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check(
+    "the placement asks it, and a break does not",
+    /const along =\s*\r?\n?\s*action === \"break\" \? null : continuedPlacement\(at, look, held\.namespacedName\)/.test(
+      app,
+    ),
+  );
+  check(
+    "...and the cell it names is the one that is sent",
+    /x: cell\.x,\r?\n\s*y: cell\.y,\r?\n\s*z: cell\.z,/.test(app),
+  );
+  check(
+    "...with the face that goes with it",
+    /\.\.\.\(facing\.against === null \? \{\} : \{ against: facing\.against \}\)/.test(app),
+  );
+  // The block is born from that same face, or it would carry the axis of the
+  // side it was clicked on while standing in the cell beyond it.
+  check(
+    "...and the block is oriented from it too",
+    /placementState\(held\.namespacedName, facing\)/.test(app),
+  );
 }
 
 /*
@@ -2338,6 +3627,99 @@ console.log("\n--- in flight Ctrl belongs to the camera ---");
   check(
     "...and no longer refuses Ctrl outright",
     !/isTyping\(event\.target\) \|\| event\.ctrlKey/.test(hotbar),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ctrl+A selects the schematic, not the window.
+//
+// The keystroke was always the app's: `onWindowKey` calls `selectAll` and
+// `preventDefault`s the browser's. What handed it back were the early returns,
+// and the first of them is the gate checked just above -- Ctrl in flight
+// belongs to the camera, so Ctrl+A there is sprint-plus-strafe-left and the
+// handler leaves before it can suppress anything. Every strafe under sprint
+// highlighted every word in the app.
+//
+// The gate cannot go, so the fix is that there is nothing to highlight. Which
+// makes the thing to check the thing the fix must *not* do: a CSS rule that
+// quietly disabled a keyboard gesture would fail nothing anywhere else.
+console.log("\n--- Ctrl+A selects the schematic, not the window ---");
+{
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8");
+
+  /*
+   * The shell, and then the opt-ins **by name**.
+   *
+   * A list of selectors rather than one predicate over the file, because the
+   * failure this guards against is one surface losing its selection while the
+   * rest keep theirs -- and then the message has to say which.
+   */
+  check(
+    "the shell of the window refuses text selection",
+    /html,\s*\r?\nbody,\s*\r?\n#app \{[^}]*user-select: none;/.test(css),
+  );
+  // Sliced from the end of the previous rule rather than from the shell rule,
+  // so that losing the shell fails one check by name instead of cascading
+  // through every opt-in and burying it.
+  const optInEnd = css.indexOf("user-select: text;");
+  const optIn = css.slice(css.lastIndexOf("}", optInEnd) + 1, optInEnd);
+  for (const selector of [
+    "input",
+    "select",
+    "textarea",
+    '[contenteditable="true"]',
+    // A code block and the NBT dump exist to be copied, and `TraceView` writes
+    // its arguments and results as `pre`/`code` too -- so both are covered
+    // here rather than by a class repeated in three components.
+    "pre",
+    "code",
+    ".selectable",
+  ]) {
+    check(
+      `...but ${selector} still selects`,
+      optIn.includes(`\n${selector},`) || optIn.includes(`\n${selector} {`),
+    );
+  }
+
+  // The chat log is prose somebody copies, and it is not a form control, so it
+  // is the one surface that has to say so for itself.
+  const chat = readFileSync(path.join(RENDERER, "lib", "ChatPanel.svelte"), "utf8");
+  check("the chat log opts back in", /class="log selectable"/.test(chat));
+
+  /*
+   * `AboutModal` keeps its own rule, and that is load-bearing now rather than
+   * decorative: with the shell refusing selection, deleting that line would
+   * silently make the one row in the app that exists to be pasted into a bug
+   * report unselectable. A value set directly on an element beats an inherited
+   * one, which is the whole mechanism these opt-ins run on.
+   */
+  const about = readFileSync(path.join(RENDERER, "lib", "AboutModal.svelte"), "utf8");
+  check("the version row keeps its own", /\.runtime \{[^}]*user-select: text;/.test(about));
+
+  /*
+   * And the half that must not have moved: the keystroke itself.
+   *
+   * In orbit, with a document open and the caret outside a field, Ctrl+A still
+   * means the schematic -- `preventDefault` and then `selectAll`, in that
+   * order, because suppressing the browser's after selecting would be a race
+   * with nothing enforcing it.
+   */
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const from = app.indexOf("function onWindowKey");
+  const handler = app.slice(from, app.indexOf("\n  }", from));
+  const branch = handler.slice(handler.indexOf('if (key === \"a\")'));
+  check(
+    "Ctrl+A still selects the whole schematic",
+    /^if \(key === "a"\) \{\s*\r?\n\s*event\.preventDefault\(\);\s*\r?\n\s*selectAll\(\);/.test(
+      branch,
+    ),
+  );
+  // ...and still stands aside for a field, which is what a blanket
+  // `user-select: none` would otherwise have been reached for instead of.
+  check(
+    "...and stands aside for a text field",
+    handler.indexOf("if (editingText || hasTextSelection())") <
+      handler.indexOf('if (key === \"a\")'),
   );
 }
 
@@ -2523,14 +3905,37 @@ console.log("\n--- what a change of empty space converts from ---");
       [...blocksInDocument(palette, [4, 4, 4], 64)].sort(),
       ["minecraft:stone"],
     );
+    /*
+     * Both spellings, and this check used to say the opposite.
+     *
+     * A source may be bare or stated -- every preset is bare, and anything
+     * somebody types may not be -- while a palette entry is always a full
+     * state string. Keeping only the bare name made a *stated* source
+     * unmatchable, so the button died over an edit that would have worked;
+     * keeping only the full key would make every preset unmatchable.
+     *
+     * Holding both is `matchesBlockPattern`'s rule as a set: bare finds the
+     * block in any state, stated finds only that state.
+     */
     const stairs: PaletteCount[] = [
       { block: "minecraft:oak_stairs[facing=north]", count: 1 },
       { block: "minecraft:oak_stairs[facing=east]", count: 1 },
     ];
-    equal(
-      "...and a block state is not a second block",
-      [...blocksInDocument(stairs, [4, 4, 4], 64)],
-      ["minecraft:oak_stairs"],
+    const held = blocksInDocument(stairs, [4, 4, 4], 64);
+    check(
+      "a bare source finds the block whatever state it is in",
+      held.has("minecraft:oak_stairs"),
+      [...held].join(" "),
+    );
+    check(
+      "...and a stated one finds that state",
+      held.has("minecraft:oak_stairs[facing=east]"),
+      [...held].join(" "),
+    );
+    check(
+      "...and not a state the document does not have",
+      !held.has("minecraft:oak_stairs[facing=south]"),
+      [...held].join(" "),
     );
 
     /*
@@ -2905,6 +4310,125 @@ console.log("\n--- the right button opens, and Shift places ---");
   check(
     "the left button still breaks",
     /event\.button === 0\)\s*\{\s*\n?\s*onbuild\("break"/.test(viewer.replace(/\r/g, "")),
+  );
+}
+
+// --- the picture a copy leaves behind ------------------------------------------
+//
+// Ctrl+C arms a translucent copy of what is held, drawn where Ctrl+V would put
+// it, and the gizmo's arrows then carry that box rather than the blocks -- so
+// «copy, move, paste, move, paste» is one gesture repeated until the selection
+// is dropped. None of this is drivable here: there is no canvas and no preload
+// bridge, so it is read out of the source the way the framing call site and the
+// flight-mode key gate already are.
+console.log("\n--- the picture a copy leaves behind ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf-8");
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf-8");
+
+  /*
+   * The mode is armed by the copy; the picture arrives afterwards. Written the
+   * other way round -- mesh first, state after -- a mesh that failed would
+   * leave the arrows moving blocks with no ghost anywhere on screen, which is
+   * a different gesture happening in silence.
+   */
+  const arm = app.slice(
+    app.indexOf("async function armStamp"),
+    app.indexOf("async function armGhost"),
+  );
+  check("the stamp is armed at all", arm.length > 0);
+  check(
+    "the copy arms the mode before the picture is asked for",
+    arm.indexOf("stamp = armed") < arm.indexOf("await api()"),
+    "a mesh that failed would silently change what the next drag did",
+  );
+  check(
+    "...and the picture is the clipboard's, not a region's",
+    arm.includes("api().clipboardMesh()") && !arm.includes("regionMesh"),
+    "a cut has emptied that region by the time the ghost is asked for",
+  );
+  check(
+    "...and a late answer cannot overwrite a newer copy",
+    arm.includes("stamp !== armed"),
+  );
+
+  /*
+   * With a stamp armed the arrows carry the box. Both halves, because either
+   * alone is a working app doing the wrong thing: without the early return a
+   * second ghost is fetched and drawn over this one, and without the branch in
+   * `commitMove` the release moves the original -- which is precisely what
+   * copying it somewhere else must not do.
+   */
+  const ghost = app.slice(
+    app.indexOf("async function armGhost"),
+    app.indexOf("function movePivot"),
+  );
+  check(
+    "a stamp is already the ghost, so no region is fetched for it",
+    ghost.indexOf("if (stamp !== null) return;") >= 0 &&
+      ghost.indexOf("if (stamp !== null) return;") < ghost.indexOf("regionMesh"),
+  );
+  const commit = app.slice(
+    app.indexOf("async function commitMove"),
+    app.indexOf("async function gizmoTransform"),
+  );
+  check("the move commit is found at all", commit.length > 0);
+  check(
+    "a stamped move carries the box and asks main for nothing",
+    commit.indexOf("if (stamp !== null) {") >= 0 &&
+      commit.indexOf("if (stamp !== null) {") < commit.indexOf("api().moveRegion"),
+    "the original would move instead of being stamped somewhere else",
+  );
+
+  /*
+   * And what is aimed at the selection goes when the selection does, from one
+   * place. Seven of the eight sites that drop a selection had already
+   * forgotten the pivot, so an eighth line was never the answer.
+   */
+  const clearAt = app.indexOf("function clearSelection");
+  check(
+    "clearing the selection does not spell the rule out again",
+    clearAt >= 0 && !app.slice(clearAt, clearAt + 200).includes("pivot = null"),
+  );
+  check(
+    "...because one effect owns it",
+    /\$effect\(\(\) => \{\s*if \(selection !== null\) return;\s*if \(pivot !== null\) pivot = null;\s*if \(stamp !== null\) stamp = null;/.test(
+      app.replace(/\r/g, ""),
+    ),
+  );
+
+  /*
+   * The ghost stands at the corner a paste lands on, and a drag hands the
+   * position back when it ends -- without which a cancelled stamp drag would
+   * leave the picture wherever the pointer let go of it.
+   */
+  check("the stamp is drawn when no move ghost is up", app.includes("ghost={moving ?? stamp}"));
+  check("...at the selection's corner", app.includes("ghostAt={selection"));
+  const endDrag = viewer.slice(
+    viewer.indexOf("function endGizmoDrag"),
+    viewer.indexOf("function updateHover"),
+  );
+  check(
+    "a drag hands the ghost's position back when it ends",
+    endDrag.includes("ghostGroup?.position.set(ghostHome"),
+  );
+
+  /*
+   * And the toolbar's third clipboard control, which can only mean something
+   * where empty space is not air: air is never stored in a clipboard, so a
+   * paste never writes it and there is nothing to leave alone. Disabled and
+   * reading as pressed rather than hidden -- both halves, because either one
+   * alone is a lie. A live control that does nothing is the Stop button's
+   * fault; an unpressed one would claim a paste was about to stamp air.
+   */
+  const bar = readFileSync(path.join(RENDERER, "lib", "GizmoBar.svelte"), "utf-8");
+  check(
+    "the skip toggle is dead where it could do nothing",
+    bar.includes("disabled={busy || emptyIsAir}"),
+  );
+  check(
+    "...and says so by reading as pressed rather than by vanishing",
+    bar.includes("aria-pressed={emptyIsAir || skipEmpty}"),
   );
 }
 

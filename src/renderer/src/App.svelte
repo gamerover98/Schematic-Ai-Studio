@@ -33,6 +33,7 @@ import {
 import NbtModal from "./lib/NbtModal.svelte";
   import SettingsModal from "./lib/SettingsModal.svelte";
   import SelectionTools from "./lib/SelectionTools.svelte";
+import GizmoBar from "./lib/GizmoBar.svelte";
     import ToolWindow from "./lib/ToolWindow.svelte";
   import { findOpenCodeModel, loadOpenCodeModels } from "./lib/models.svelte.js";
   import SidebarSplitter from "./lib/SidebarSplitter.svelte";
@@ -47,8 +48,11 @@ import VersionsModal from "./lib/VersionsModal.svelte";
     emptyTimeline,
     forgetTimeline,
     recordDocumentEdit,
+    recordEditSelection,
     recordSelection,
     redoTarget,
+    takeEditRedo,
+    takeEditUndo,
     takeRedo,
     takeUndo,
     undoTarget,
@@ -62,7 +66,18 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
   import { blocksIn } from "../../shared/block_versions.js";
   import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
-  import { movedRegion } from "./lib/selection_drag.js";
+  import { continuedPlacement } from "./lib/block_hover.js";
+  import { movedRegion, translatedRegion } from "./lib/selection_drag.js";
+import {
+  gizmoOrigin,
+  scaledRegion,
+  transformedRegion,
+  type Axis,
+  type Cell,
+  type GizmoMode,
+  type RegionTransform,
+  type ScaleSpec,
+} from "./lib/gizmo.js";
   import { t, tn, setLocale } from "./lib/i18n.svelte.js";
   import {
     openCodeModelRequiresKey,
@@ -218,7 +233,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   /** The selection as it was when the timeline last agreed with the screen. */
   let lastSelection: SelectionState = { selection: null, anchor: null };
   /** True while a step is being put back, so restoring is not itself recorded. */
-  let restoringSelection = false;
   /**
    * Where a drag started, or `null` when no drag is in progress.
    *
@@ -751,6 +765,21 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (busy) return;
     const held = parseBlock(placingBlock);
     /*
+     * A chain has no end to click, so the column is continued by the half of
+     * it that was clicked. The rule and the whole argument for it are in
+     * `continuedPlacement`; `null` means the ordinary answer stands, which is
+     * every placement in the app but this one family.
+     *
+     * A **break** is exempt, and not incidentally: its `x/y/z` names the
+     * block itself rather than the cell across the face, so the step back
+     * this rule takes would land somewhere else entirely. That is the same
+     * confusion that made the replaceable redirect swallow every break in the
+     * app, one layer down.
+     */
+    const along = action === "break" ? null : continuedPlacement(at, look, held.namespacedName);
+    const cell = along?.at ?? at;
+    const facing: PlacementLook = along === null ? look : { ...look, against: along.against };
+    /*
      * Breaking writes the *void block*, which is air unless somebody chose
      * otherwise.
      *
@@ -766,7 +795,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         : {
             ...held,
             properties: {
-              ...placementState(held.namespacedName, look),
+              ...placementState(held.namespacedName, facing),
               ...(held.properties ?? {}),
             },
           };
@@ -789,15 +818,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     await runDocument(label, () =>
       api().applyEdit({
         kind: action === "use" ? "use" : "setBlock",
-        x: at.x,
-        y: at.y,
-        z: at.z,
+        x: cell.x,
+        y: cell.y,
+        z: cell.z,
         block,
         // Only main can see what was clicked -- the renderer holds no schematic
         // -- so it needs the direction to look in. Two slabs meeting reads it,
         // and so does `use`: the block that might open is one step back along
         // this face from the cell a placement would fill.
-        ...(look.against === null ? {} : { against: look.against }),
+        ...(facing.against === null ? {} : { against: facing.against }),
       }),
     );
   }
@@ -823,14 +852,25 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     };
   }
 
+  /**
+   * Puts a remembered selection back without recording it as a new change.
+   *
+   * What suppresses the re-record is `lastSelection`, not a flag. There used
+   * to be a `restoringSelection` boolean here, set and cleared around these
+   * three lines, with a comment claiming the recorder ran synchronously off
+   * the writes. It does not: the recorder is a plain `$effect`, which flushes
+   * in a later microtask, by which time the flag was already back to false.
+   * It never suppressed anything, and it was the first thing the gizmo's
+   * commit handlers reached for.
+   *
+   * Fast-forwarding `lastSelection` works because it is a plain local read at
+   * flush time: `recordSelection` then finds `before` and `after` equal and
+   * returns the timeline untouched.
+   */
   function restoreSelection(state: SelectionState): void {
-    restoringSelection = true;
     selection = state.selection === null ? null : { ...state.selection };
     anchor = state.anchor === null ? null : { ...state.anchor };
     lastSelection = state;
-    // Cleared after the assignments rather than in an effect: the recorder
-    // below runs synchronously off these writes.
-    restoringSelection = false;
   }
 
   /**
@@ -866,7 +906,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   $effect(() => {
     const now = selectionNow();
     untrack(() => {
-      if (restoringSelection || gestureFrom !== null) {
+      if (gestureFrom !== null) {
         lastSelection = now;
         return;
       }
@@ -935,6 +975,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const target = undoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canUndo === true);
     if (target === "document") {
       await runDocument(t("task.undoing"), () => api().undo());
+      /*
+       * A gizmo gesture moved the blocks *and* the box. Its selection step is
+       * keyed to the depth the document has just come back to, so asking here
+       * -- after the undo -- is what makes one press take back the whole
+       * gesture rather than half of it.
+       */
+      const paired = takeEditUndo(selectionTimeline, docState?.undoDepth ?? 0);
+      if (paired !== null) {
+        selectionTimeline = paired.timeline;
+        restoreSelection(paired.state);
+      }
       return;
     }
     if (target !== "selection") return;
@@ -948,7 +999,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (busy) return;
     const target = redoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canRedo === true);
     if (target === "document") {
+      /*
+       * Taken *before* the redo, unlike its opposite number. A redo raises the
+       * depth exactly as a fresh edit does and the watcher below cannot tell
+       * them apart, so it clears the redo stack and the step would be gone by
+       * the time we asked. Reassigning afterwards also puts back the rest of
+       * that stack, which is a fix rather than a side effect: nothing was
+       * branched away from.
+       */
+      const paired = takeEditRedo(selectionTimeline, docState?.undoDepth ?? 0);
       await runDocument(t("task.redoing"), () => api().redo());
+      if (paired !== null) {
+        selectionTimeline = paired.timeline;
+        restoreSelection(paired.state);
+      }
       return;
     }
     if (target !== "selection") return;
@@ -969,7 +1033,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     at: { x: number; y: number; z: number },
     look: PlacementLook,
   ): Promise<void> {
-    if (busy || cameraMode !== "orbit") return;
+    if (busy || cameraMode !== "fly") return;
     await onBuild("place", at, look);
   }
 
@@ -1524,18 +1588,43 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       !inventoryOpen &&
       schematicDialog === null
     ) {
-      if (event.key === "Escape" && moving !== null) {
-        // A move in flight is what Escape means first: it is the thing on
-        // screen that is mid-gesture, and cancelling it must not also throw
-        // away the selection it was going to land on.
-        event.preventDefault();
-        cancelMove();
-        return;
-      }
       if (event.key === "Escape" && selection !== null) {
         event.preventDefault();
         clearSelection();
         return;
+      }
+      /*
+       * The gizmo's modes and its three mirrors.
+       *
+       * Unmodified letters, which is what every 3D editor uses and what this
+       * app has room for -- `E` is the inventory and `R` reframes the camera,
+       * and neither of those is reachable from here. They sit below the
+       * pointer-lock gate at the top of this function, so in flight they are
+       * the camera's: `G` and `Y` are nothing there, but the rule is about not
+       * having to re-judge each new shortcut against the movement keys.
+       */
+      if (selection !== null && !busy) {
+        const GIZMO_KEYS: Record<string, GizmoMode> = {
+          g: "move",
+          t: "rotate",
+          y: "scale",
+          p: "pivot",
+        };
+        const wanted = GIZMO_KEYS[event.key.toLowerCase()];
+        if (wanted !== undefined && !event.shiftKey) {
+          event.preventDefault();
+          gizmoMode = wanted;
+          return;
+        }
+        // Shift+X/Y/Z reflects. Shift because a bare X would be one keystroke
+        // away from a mode switch, and this one changes blocks.
+        const MIRROR_KEYS: Record<string, Axis> = { x: "x", y: "y", z: "z" };
+        const axis = MIRROR_KEYS[event.key.toLowerCase()];
+        if (axis !== undefined && event.shiftKey) {
+          event.preventDefault();
+          void mirrorSelection(axis);
+          return;
+        }
       }
       if (event.key === "Delete" && docState !== null && !busy && selection !== null) {
         event.preventDefault();
@@ -2398,10 +2487,49 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * Every document call funnels through here so failures cannot go unreported.
    * Returns how many blocks changed, or `null` if the call did not succeed.
    */
+  /**
+   * What an edit did: how many voxels moved, and how far the *document* moved.
+   *
+   * The second is almost always `[0, 0, 0]` and is required anyway, for
+   * `EditSuccess.shift`'s reason: the bug being fixed is exactly that it could
+   * be left out.
+   */
+  type EditOutcome = {
+    readonly changed: number;
+    readonly shift: readonly [number, number, number];
+  };
+
+  /**
+   * Everything in the renderer that names a cell, carried by a growth.
+   *
+   * Growing below the origin moves every block already in the document, and
+   * this window holds three things that point at particular cells: the
+   * selection with its anchor, the pivot, and -- through the selection it is
+   * derived from -- the stamp's ghost. Leaving them behind is the report: the
+   * structure slides one way and the box stays where the pointer left it,
+   * outside the document, to be clamped by the next `normalizeRegion`.
+   *
+   * The **timeline is deliberately not moved**. Its entries are in the frame
+   * the document had when they were recorded, and undoing the growth puts the
+   * document back into that frame -- so translating them would be right twice
+   * and wrong on the press that matters.
+   */
+  function followShift(shift: readonly [number, number, number]): void {
+    if (shift[0] === 0 && shift[1] === 0 && shift[2] === 0) return;
+    if (selection !== null) selection = translatedRegion(selection, shift);
+    if (anchor !== null) {
+      anchor = { x: anchor.x + shift[0], y: anchor.y + shift[1], z: anchor.z + shift[2] };
+    }
+    if (pivot !== null) {
+      pivot = { x: pivot.x + shift[0], y: pivot.y + shift[1], z: pivot.z + shift[2] };
+    }
+    lastSelection = selectionNow();
+  }
+
   async function runDocument(
     doing: string,
     call: () => Promise<EditResponse>,
-  ): Promise<number | null> {
+  ): Promise<EditOutcome | null> {
     busy = true;
     try {
       const response = await call();
@@ -2410,6 +2538,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         return null;
       }
       docState = response.state;
+      // Before anything else reads a cell: `refreshDocument` below redraws
+      // from a document that has already moved.
+      followShift(response.shift);
+      /*
+       * What the edit did, when the count alone does not say it.
+       *
+       * `warn` rather than `info`, because an edit only sends one of these when
+       * something happened that `changed` cannot report -- and so far that means
+       * something was lost. Shown here rather than at each call site so an edit
+       * that starts producing one is heard without being wired up.
+       */
+      if (response.notes !== undefined && response.notes !== "") {
+        status = { tone: "warn", text: response.notes };
+      }
       await refreshDocument();
       // The inspected block may well have been one of the ones that changed --
       // a fill over it, or an undo of the edit that made it. Showing what it
@@ -2417,7 +2559,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       if (inspectedAt) {
         await inspectBlock(inspectedAt.x, inspectedAt.y, inspectedAt.z);
       }
-      return response.changed;
+      return { changed: response.changed, shift: response.shift };
     } catch (err) {
       failed(err, doing);
       return null;
@@ -3054,6 +3196,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           count: response.clipboard.blocks.toLocaleString(),
         }),
       };
+      // Not awaited: the copy is done, and the picture is only a picture.
+      void armStamp();
     } catch (err) {
       failed(err, cut ? t("task.cutting") : t("task.copying"));
     } finally {
@@ -3071,8 +3215,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   async function pasteHere(): Promise<void> {
     if (!selection) return;
     const at = { x: selection.minX, y: selection.minY, z: selection.minZ };
-    const changed = await runDocument(t("task.pasting"), () => api().pasteClipboard(at));
-    reportChange(changed);
+    const outcome = await runDocument(t("task.pasting"), () =>
+      api().pasteClipboard({ ...at, skipEmpty: pasteKeepsUnder }),
+    );
+    reportChange(outcome?.changed ?? null);
   }
 
   /**
@@ -3085,42 +3231,132 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   async function transformSelection(transform: TransformRequest["transform"]): Promise<void> {
     if (!selection) return;
     const region = selection;
-    const changed = await runDocument(t("task.transforming"), () =>
+    const outcome = await runDocument(t("task.transforming"), () =>
       api().transformRegion({ region: forIpc(region), transform }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   /**
-   * The region being moved, and its contents as geometry.
+   * The region being dragged by the gizmo, and its contents as geometry.
    *
-   * A mode rather than a drag, because the gesture does not start on the box:
-   * a press on the selection is already the camera's, and taking it would cost
-   * the one thing that made orbiting bearable. So Move arms it, the pointer
-   * places it, a click puts it down, and Escape puts it back.
+   * It used to be a *mode*: Move armed it, the pointer carried it, a click put
+   * it down. That shape existed because a press on the selection was already
+   * the camera's, so there was no drag to hang it on. There is now -- the
+   * gizmo's arrows are drawn for exactly this and a press on one can only mean
+   * this -- so the mode is gone and this is a drag like any other.
+   *
+   * Fetched at the press rather than held for every selection: meshing a region
+   * is real work and a face drag changes the selection many times a second. The
+   * gesture does not wait for it; until it lands the viewport draws the
+   * destination as a box.
    */
   let moving = $state<{ region: RegionSpec; chunks: ChunkGeometry[] } | null>(null);
 
-  async function startMove(): Promise<void> {
-    if (!selection || busy) return;
-    const region = selection;
-    busy = true;
+  /**
+   * Which handles the gizmo is showing.
+   *
+   * Not persisted, for `cameraMode`'s reason: it is what you are doing right
+   * now, not how you like the app set up.
+   */
+  let gizmoMode = $state<GizmoMode>("move");
+
+  /**
+   * The cell transforms turn and reflect about, or null for the region's middle.
+   *
+   * Kept while a selection exists and dropped with it: a pivot is a point
+   * chosen against a particular box, and carrying it onto the next selection
+   * would rotate that one about somewhere nobody pointed at.
+   */
+  let pivot = $state<Cell | null>(null);
+
+  /**
+   * What Ctrl+C leaves behind: the clipboard, drawn where Ctrl+V would put it.
+   *
+   * A copy used to be invisible. The status line said how many blocks, and
+   * nothing on screen said what was held or where it would land -- so pasting
+   * somewhere else meant drawing a new selection by hand, guessing, and
+   * looking at the result. This is the move gesture's own ghost put to that
+   * job: the picture follows the box, Ctrl+V stamps at its corner, and the
+   * two repeat until the selection is dropped.
+   *
+   * The geometry is the **clipboard's**, not the selection's -- see
+   * `clipboardMesh` in main. A cut is what makes that difference visible.
+   *
+   * While it is armed the gizmo's arrows carry the box and touch no block.
+   * That is what makes «move it and paste again» a gesture rather than a
+   * request to redraw the selection each time, and it is why the mode is
+   * armed by the copy itself rather than by the picture arriving: a mesh that
+   * failed would otherwise change what the next drag did, silently.
+   */
+  let stamp = $state<{ chunks: ChunkGeometry[] } | null>(null);
+
+  /**
+   * Whether a paste leaves this document's empty space where it falls.
+   *
+   * WorldEdit's `//paste -a`, for the half this app did not already do: air is
+   * never stored in a clipboard, but a `barrier` or a `water` chosen as empty
+   * space is a real block in the copy and a paste stamps it over what was
+   * standing there.
+   *
+   * Not persisted, for `gizmoMode`'s reason: it is a fact about what is on the
+   * clipboard right now, not about how you like the app set up.
+   */
+  let pasteKeepsUnder = $state(false);
+
+  /*
+   * What is aimed at the selection goes when the selection does.
+   *
+   * The pivot names a cell inside a particular box and the stamp is drawn at
+   * its corner, so neither means anything once that box is gone. A rule here
+   * rather than a line in `clearSelection`, because that is one of eight
+   * places the selection is dropped -- the other seven are documents opening,
+   * closing and being restored, and every one of them already forgot the
+   * pivot. Writing what it reads is safe: the second run finds both null.
+   */
+  $effect(() => {
+    if (selection !== null) return;
+    if (pivot !== null) pivot = null;
+    if (stamp !== null) stamp = null;
+  });
+
+  /**
+   * Arms the stamp, and fetches its picture without making the copy wait.
+   *
+   * Identity on the armed object is what keeps a second Ctrl+C from being
+   * overwritten by the first one's answer arriving late -- the same trick the
+   * chunked mesher uses to decide a chunk moved.
+   */
+  async function armStamp(): Promise<void> {
+    const armed: { chunks: ChunkGeometry[] } = { chunks: [] };
+    stamp = armed;
     try {
-      const response = await api().regionMesh(forIpc(region));
-      if (!response.ok) {
-        status = { tone: "warn", text: response.message };
-        return;
-      }
-      moving = { region: { ...region }, chunks: response.chunks };
-    } catch (err) {
-      failed(err, t("task.moving"));
-    } finally {
-      busy = false;
+      const response = await api().clipboardMesh();
+      if (!response.ok || stamp !== armed) return;
+      stamp = { chunks: response.chunks };
+    } catch {
+      // A missing picture costs the preview and nothing else: the box is drawn
+      // either way, and Ctrl+V pastes at its corner either way.
     }
   }
 
-  function cancelMove(): void {
-    moving = null;
+  /** The gizmo grabbed a move handle: fetch the ghost it will drag. */
+  async function armGhost(): Promise<void> {
+    // A stamp is already the ghost, and it is what the arrows drag: the move
+    // about to happen is the box's, so there is no region to fetch.
+    if (stamp !== null) return;
+    if (!selection || moving !== null) return;
+    const region = { ...selection };
+    try {
+      const response = await api().regionMesh(forIpc(region));
+      // The drag may have ended while this was in flight, and a ghost that
+      // arrived after the release would sit on the build until the next one.
+      if (!response.ok || !selection) return;
+      moving = { region, chunks: response.chunks };
+    } catch {
+      // A missing ghost costs the preview, not the gesture: the destination
+      // box is drawn either way, and the move itself is main's.
+    }
   }
 
   /**
@@ -3130,21 +3366,181 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * empty space they came from would make the very next operation act on
    * nothing, and every editor that moves a thing leaves it selected.
    */
-  async function commitMove(to: { x: number; y: number; z: number }): Promise<void> {
-    const held = moving;
-    if (held === null) return;
-    moving = null;
-    const changed = await runDocument(t("task.moving"), () =>
-      api().moveRegion({ region: forIpc(held.region), to }),
-    );
-    if (changed !== null) {
-      selection = movedRegion(held.region, to);
-      anchor = { x: to.x, y: to.y, z: to.z };
-    }
-    reportChange(changed);
+  /**
+   * Moves the box because the blocks moved, as one undoable act.
+   *
+   * Every gizmo commit ends here. The catch-all recorder would otherwise stamp
+   * the step with the depth it finds at flush time -- which, because these
+   * handlers write `selection` only after awaiting the edit, is the depth
+   * *after* it. `undoTarget` then reads the step as the newest thing that
+   * happened and hands it the press, so Ctrl+Z put the box back and left the
+   * blocks where they were, and a second press was needed for the rest.
+   *
+   * So the depth is captured before the await and the step recorded here, with
+   * `lastSelection` fast-forwarded so the recorder finds nothing of its own to
+   * do -- see `restoreSelection` for why that, and not a flag.
+   *
+   * An edit that pushed no transaction leaves the depth where it was, and then
+   * there is nothing to pair with: it is recorded as an ordinary selection
+   * change, which is reachable, rather than as a paired one, which would not be.
+   */
+  function adoptEditedSelection(
+    before: SelectionState,
+    next: RegionSpec,
+    depthBefore: number,
+  ): void {
+    selection = { ...next };
+    anchor = { x: next.minX, y: next.minY, z: next.minZ };
+    const now = selectionNow();
+    lastSelection = now;
+    const depth = docState?.undoDepth ?? 0;
+    selectionTimeline =
+      depth > depthBefore
+        ? recordEditSelection(selectionTimeline, depthBefore, before, now)
+        : recordSelection(selectionTimeline, depth, before, now);
   }
 
-  /** Drops the selection without touching a block. */
+  /** Carries the pivot along with the box whose cell it names. */
+  function movePivot(from: RegionSpec, to: { x: number; y: number; z: number }): void {
+    if (pivot === null) return;
+    pivot = {
+      x: pivot.x + (to.x - from.minX),
+      y: pivot.y + (to.y - from.minY),
+      z: pivot.z + (to.z - from.minZ),
+    };
+  }
+
+  async function commitMove(to: { x: number; y: number; z: number }): Promise<void> {
+    /*
+     * With a stamp armed the arrows carry the box and nothing else. That is
+     * the whole of «copy, move, paste, again»: the blocks arrive with Ctrl+V
+     * and the source stays where it was, so it can be stamped a second time.
+     * No transaction is pushed, so this is an ordinary selection step at the
+     * depth the document already had -- which `adoptEditedSelection` decides
+     * for itself by comparing the two.
+     */
+    if (stamp !== null) {
+      const held = selection;
+      if (!held) return;
+      const before = selectionNow();
+      adoptEditedSelection(before, movedRegion(held, to), docState?.undoDepth ?? 0);
+      movePivot(held, to);
+      return;
+    }
+    /*
+     * The region comes from the selection rather than from the ghost, because
+     * the ghost is a preview that may never have arrived -- a short drag on a
+     * big region commits before its mesh does. Losing the picture is fine;
+     * losing the move because the picture was slow is not.
+     */
+    const region = moving?.region ?? selection;
+    moving = null;
+    if (!region) return;
+    const before = selectionNow();
+    const depthBefore = docState?.undoDepth ?? 0;
+    const outcome = await runDocument(t("task.moving"), () =>
+      api().moveRegion({ region: forIpc(region), to }),
+    );
+    if (outcome !== null) {
+      /*
+       * `to` is in the frame the document had when the drag started, and a
+       * move that made room below the origin has moved the frame under it.
+       * `runDocument` has already carried the live selection and the pivot;
+       * this is the destination being restated in the same frame, or the box
+       * would land back where the blocks used to be.
+       */
+      adoptEditedSelection(before, translatedRegion(movedRegion(region, to), outcome.shift), depthBefore);
+      // The pivot moved with the blocks, or it would name a cell the region
+      // has left -- and the next turn would swing it round empty space. The
+      // delta is the same in either frame, so this composes with the shift
+      // rather than fighting it.
+      movePivot(region, to);
+    }
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /**
+   * A ring or a mirror button was released: turn or reflect the region.
+   *
+   * The origin comes from the viewport because the pivot lives there as a
+   * point; main is told the *destination box*, which is what lets a turn about
+   * a corner be one transaction rather than a turn followed by a move.
+   */
+  async function gizmoTransform(
+    transform: RegionTransform,
+    origin: { x: number; y: number; z: number },
+  ): Promise<void> {
+    if (!selection || busy) return;
+    /*
+     * Only the vertical axis turns, and the viewport draws only that ring --
+     * this is the second half of that rule, kept here so a caller that grew a
+     * third ring would fail loudly rather than write states the game has no
+     * spelling for. A staircase turned about X would have to face up.
+     */
+    if (transform.kind === "rotate" && transform.axis !== "y") return;
+    const region = { ...selection };
+    const to = transformedRegion(region, origin, transform);
+    const before = selectionNow();
+    const depthBefore = docState?.undoDepth ?? 0;
+    const outcome = await runDocument(t("task.transforming"), () =>
+      api().transformRegion({
+        region: forIpc(region),
+        transform:
+          transform.kind === "mirror"
+            ? { kind: "mirror", axis: transform.axis }
+            : { kind: "rotate", steps: transform.steps },
+        to: { x: to.minX, y: to.minY, z: to.minZ },
+      }),
+    );
+    if (outcome !== null) {
+      // The box follows the blocks, exactly as it does after a move: leaving it
+      // on the space they came from would make the next operation act on air.
+      // ...and follows the *document* too, where the turn made room below the
+      // origin and moved everything up.
+      adoptEditedSelection(before, translatedRegion(to, outcome.shift), depthBefore);
+    }
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /**
+   * Reflects the selection through the pivot, on one axis.
+   *
+   * A button rather than a handle because a reflection has no continuous
+   * gesture: there is nothing to drag, only an axis to name. The origin is
+   * computed here rather than reported by the viewport, because a mirror is
+   * not a drag and so never passed through one.
+   */
+  async function mirrorSelection(axis: Axis): Promise<void> {
+    if (!selection || busy) return;
+    await gizmoTransform({ kind: "mirror", axis }, gizmoOrigin(selection, pivot));
+  }
+
+  /** A scale handle was released. */
+  async function gizmoScale(
+    spec: ScaleSpec,
+    origin: { x: number; y: number; z: number },
+  ): Promise<void> {
+    if (!selection || busy) return;
+    const region = { ...selection };
+    const to = scaledRegion(region, origin, spec);
+    const before = selectionNow();
+    const depthBefore = docState?.undoDepth ?? 0;
+    const outcome = await runDocument(t("task.scaling"), () =>
+      api().scaleRegion({ region: forIpc(region), spec, to: { x: to.minX, y: to.minY, z: to.minZ } }),
+    );
+    if (outcome !== null) {
+      adoptEditedSelection(before, translatedRegion(to, outcome.shift), depthBefore);
+    }
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /**
+   * Drops the selection without touching a block.
+   *
+   * The pivot and the stamp go with it, but not from here -- the effect
+   * beside them owns that, because this is only one of the ways a selection
+   * ends.
+   */
   function clearSelection(): void {
     selection = null;
     anchor = null;
@@ -3161,25 +3557,25 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   async function deleteSelection(): Promise<void> {
     if (!selection) return;
     const region = selection;
-    const changed = await runDocument(t("task.deleting"), () =>
+    const outcome = await runDocument(t("task.deleting"), () =>
       api().applyEdit({ kind: "fill", region: forIpc(region), block: { namespacedName: "minecraft:air" } }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   async function fillSelection(block: string): Promise<void> {
     if (!selection) return;
     const region = selection;
-    const changed = await runDocument(t("task.filling"), () =>
+    const outcome = await runDocument(t("task.filling"), () =>
       api().applyEdit({ kind: "fill", region: forIpc(region), block: parseBlock(block) }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   async function replaceInSelection(from: string, to: string): Promise<void> {
     if (!selection) return;
     const region = selection;
-    const changed = await runDocument(t("task.replacing"), () =>
+    const outcome = await runDocument(t("task.replacing"), () =>
       api().applyEdit({
         kind: "replace",
         region: forIpc(region),
@@ -3187,7 +3583,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         to: parseBlock(to),
       }),
     );
-    reportChange(changed);
+    reportChange(outcome?.changed ?? null);
   }
 
   /**
@@ -3676,6 +4072,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   {busy}
   onpickoutputdir={() => pick("directory")}
   onrevealoutputdir={() => api().revealPath(settings.outputDir || defaultOutputDir)}
+  onrevealpath={(target) => void api().revealPath(target)}
   onclose={() => {
     settingsOpen = false;
     settingsCategory = null;
@@ -4094,6 +4491,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         onopenrecent={openDocumentAt}
         onopenartifact={(artifact) => void openDocumentAt(artifact.path)}
         onrevealartifact={(artifact) => api().revealPath(artifact.path)}
+        legacyProfile={keyStatus?.legacyProfile ?? null}
+        onrevealpath={(target) => void api().revealPath(target)}
       />
     {/if}
 
@@ -4140,6 +4539,28 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           &#x00d7;
         </button>
       </div>
+    {/if}
+
+    <!--
+      The gizmo's own controls. Only with a selection, because every one of
+      them acts on one -- and only in orbit, because in flight the pointer is
+      locked and there is nothing to press them with.
+    -->
+    {#if docState && selection !== null && cameraMode === "orbit"}
+      <GizmoBar
+        mode={gizmoMode}
+        onmode={(next) => (gizmoMode = next)}
+        moved={pivot !== null}
+        onresetpivot={() => (pivot = null)}
+        onmirror={(axis) => void mirrorSelection(axis)}
+        oncopy={() => void copySelection(false)}
+        onpaste={() => void pasteHere()}
+        canPaste={clipboard !== null}
+        skipEmpty={pasteKeepsUnder}
+        onskipempty={(next) => (pasteKeepsUnder = next)}
+        emptyBlock={docState?.voidBlock ?? ""}
+        {busy}
+      />
     {/if}
 
     <!--
@@ -4206,16 +4627,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           onreplacefromchange={(next) => (replaceBlock = next)}
           onbrowse={browseBlocks}
           palette={docState?.palette ?? []}
-          {clipboard}
           onfill={fillSelection}
           onreplace={replaceInSelection}
-          ontransform={transformSelection}
-          oncopy={() => void copySelection(false)}
-          oncut={() => void copySelection(true)}
-          onpaste={pasteHere}
           ondelete={() => void deleteSelection()}
-          moving={moving !== null}
-          onmove={() => (moving === null ? void startMove() : cancelMove())}
           onclearselection={clearSelection}
           onselectall={selectAll}
         />
@@ -4286,8 +4700,18 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       onselectionchange={docState ? onSelectionDragged : undefined}
       onselectiongesture={docState ? onSelectionGesture : undefined}
       onpickmaterial={docState ? onPickMaterial : undefined}
-      ghost={moving}
+      ghost={moving ?? stamp}
+      ghostAt={selection
+        ? { x: selection.minX, y: selection.minY, z: selection.minZ }
+        : null}
       onghostcommit={(to) => void commitMove(to)}
+      {gizmoMode}
+      {pivot}
+      autoGrow={settings.editing.autoGrow}
+      onpivotchange={(next) => (pivot = next)}
+      ongizmograb={() => void armGhost()}
+      ontransform={(transform, origin) => void gizmoTransform(transform, origin)}
+      onscale={(spec, origin) => void gizmoScale(spec, origin)}
       documentSize={docState?.size ?? null}
       ongridselect={docState ? onGridSelect : undefined}
       ongridplace={docState ? (at, look) => void onGridPlace(at, look) : undefined}
@@ -4295,6 +4719,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       renderScale={settings.preview.renderScale}
       maxDrawDistance={settings.preview.maxDrawDistance}
       projection={settings.preview.projection}
+      antialias={settings.preview.antialias}
+      globalIllumination={settings.preview.globalIllumination}
+      showFps={settings.preview.showFps}
+      shaderMode={settings.preview.shaderMode}
       showGrid={settings.preview.showGrid}
       showBounds={settings.preview.showBounds}
       voidOpacity={settings.editing.voidOpacity}

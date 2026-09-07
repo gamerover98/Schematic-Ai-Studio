@@ -30,9 +30,10 @@ import { createHash } from "node:crypto";
 import AdmZip from "adm-zip";
 import { PNG } from "pngjs";
 
+import { defaultStateFor } from "../../shared/block_states.js";
 import { DEFAULT_BIOME_COLOR, DEFAULT_WATER_COLOR } from "../../shared/settings.js";
 import { shapeFor, type BlockShape, type BoxRotation, type UvWindow } from "./block_shapes.js";
-import type { BakedFace, PaletteEntry, RgbaImage } from "./types.js";
+import type { BakedFace, CellFace, PaletteEntry, RgbaImage } from "./types.js";
 import { paletteEntryCacheKey } from "./types.js";
 
 /**
@@ -101,6 +102,66 @@ export interface SpecialFaceRule {
  * about, and `tests/blocks.ts` re-checks all 920 ids on every run -- which is
  * how the 162 that reached the hashed-colour cube were found in the first place.
  */
+/**
+ * Blocks whose texture is chosen by `lit`, and the naming that makes it a
+ * table rather than a rule.
+ *
+ * `lit` was honoured for **light** -- `lighting.ts` has kept two default
+ * tables for it since it was written -- and nowhere else, so every redstone
+ * torch in every schematic was drawn burning while emitting nothing.
+ * `block/redstone_torch_off.png` is in the pack and was reachable from no
+ * code path at all. Walking the 52 blocks that carry the property found ten
+ * more in exactly that position: the redstone lamp, whose `_on` was equally
+ * unreachable, and the eight copper bulbs.
+ *
+ * A table, because vanilla's naming runs in three directions at once and no
+ * derivation covers them. The **torch**'s bare name is the lit one and `_off`
+ * is dark. The **lamp**'s bare name is dark and `_on` is lit. A **bulb** is
+ * `<name>[_lit][_powered]`, four textures for two booleans.
+ *
+ * Not in a shape function, which would see the property just as well. Here the
+ * swap is of the *whole block*, and two of the three families are
+ * `kind: "cube"` with no `ShapeBox` to hang a `texture` on. The campfire went
+ * into its shape function because it needed control per **face**, tied to
+ * geometry; this does not, and that is the whole of the difference.
+ *
+ * **`redstone_ore` and `deepslate_redstone_ore` are deliberately absent.**
+ * Vanilla ships one texture for each and `lit` there changes the light and
+ * nothing else, so they are two of the thirteen the walk found and two that
+ * were already right. `tests/blocks.ts` names them as the exception rather
+ * than skipping them quietly.
+ *
+ * The plain name rides along behind the chosen one, so a pack shipping only
+ * half of a pair is no worse off than it was.
+ */
+const LIT_TEXTURES: Readonly<Record<string, readonly [string, string]>> = {
+  // [unlit, lit]
+  redstone_torch: ["redstone_torch_off", "redstone_torch"],
+  redstone_lamp: ["redstone_lamp", "redstone_lamp_on"],
+};
+
+/** The four oxidation stages; the waxed eight reach these through the alias. */
+const COPPER_BULBS: ReadonlySet<string> = new Set([
+  "copper_bulb",
+  "exposed_copper_bulb",
+  "weathered_copper_bulb",
+  "oxidized_copper_bulb",
+]);
+
+/**
+ * A boolean property, falling back to the **block's own** default.
+ *
+ * Which is not one answer for all of them, and is the trap: a bare
+ * `redstone_torch` is lit and a bare `redstone_lamp` is not. Asking the
+ * registry rather than writing the flag into the table above is what stops
+ * this becoming a second copy of a fact `block_states.ts` already holds --
+ * `lighting.ts` keeps two sets for the identical reason and says so.
+ */
+function flagOf(entry: PaletteEntry, property: string): boolean {
+  const stated = entry.properties[property];
+  return (stated ?? defaultStateFor(entry.namespacedName)[property]) === "true";
+}
+
 const NAME_ALIASES: ReadonlyArray<(name: string) => string | null> = [
   // Waxing changes nothing you can see: the whole copper family shares its
   // unwaxed textures. 40 of the ids this fixes are these.
@@ -551,6 +612,25 @@ function boxFaceGeometry(
 const UNIT_BOX = [0, 0, 0, 1, 1, 1] as const;
 
 /**
+ * Where a box face has to lie for it to *be* the cell's face: which of the six
+ * scaled coordinates to read, and what it has to hold.
+ *
+ * This is vanilla's rule for when a model face carries `cullface`, derived
+ * rather than transcribed -- vanilla writes it out per face in the JSON, and
+ * it writes it on exactly the faces this arithmetic names. A box in the middle
+ * of the cell gets none, which is what keeps a candle's flame and a fence's
+ * rails on screen however they are surrounded.
+ */
+const CULL_BOUNDARY: Readonly<Record<CellFace, readonly [number, number]>> = {
+  west: [0, 0],
+  down: [1, 0],
+  north: [2, 0],
+  east: [3, 1],
+  up: [4, 1],
+  south: [5, 1],
+};
+
+/**
  * Textures Minecraft ships **greyscale** and tints at render time with the
  * biome's grass or foliage colour. Left untinted they come out a flat grey,
  * which is what made grass tops, leaves and vines look washed out next to
@@ -690,6 +770,38 @@ function firstAnimationFrame(image: RgbaImage): RgbaImage {
  * box bounds — it has to move the vertices. Normals are rotated with them, or
  * a leaning wall torch would be lit as though it stood upright.
  */
+/**
+ * The same quad seen from behind: the four vertices in reverse order, and the
+ * normal negated to match.
+ *
+ * Reversing the order is what reverses the winding, and `buildMesh` decides
+ * which side of a triangle is its front from the winding alone. Each uv pair
+ * travels with its own vertex, so the picture is the same picture -- mirrored,
+ * because that is what looking at it from the other side does.
+ *
+ * Only the cross needs it. Every other paper-thin element in the game is a box
+ * with `from` and `to` equal on one axis, and `boxFaces` already gives one of
+ * those the two real faces of the six.
+ */
+function reversedFace(face: BakedFace): BakedFace {
+  const positions = new Float32Array(12);
+  const uvs = new Float32Array(8);
+  for (let v = 0; v < 4; v += 1) {
+    const from = 3 - v;
+    positions[v * 3] = face.positions[from * 3];
+    positions[v * 3 + 1] = face.positions[from * 3 + 1];
+    positions[v * 3 + 2] = face.positions[from * 3 + 2];
+    uvs[v * 2] = face.uvs[from * 2];
+    uvs[v * 2 + 1] = face.uvs[from * 2 + 1];
+  }
+  return {
+    ...face,
+    positions,
+    uvs,
+    normal: [-face.normal[0], -face.normal[1], -face.normal[2]],
+  };
+}
+
 function tiltFace(face: BakedFace, rotation: BoxRotation): BakedFace {
   const radians = (rotation.angle * Math.PI) / 180;
   const cos = Math.cos(radians);
@@ -1308,8 +1420,43 @@ export class ModelBaker {
     if (name === undefined) {
       return fallback;
     }
-    const key = ModelBaker.normalizeTextureKey(name);
-    return (await this.ensureTextureCached(key)) ? key : fallback;
+    const [path, hex] = name.split("#");
+    const key = ModelBaker.normalizeTextureKey(path);
+    if (!(await this.ensureTextureCached(key))) {
+      return fallback;
+    }
+    return hex === undefined ? key : this.tintedTexture(key, hex);
+  }
+
+  /**
+   * A copy of one texture multiplied by a colour, under a key of its own.
+   *
+   * The tint in `ensureTextureCached` is keyed on the *texture path* and its
+   * colour is a constant of the baker, which is right for grass and water --
+   * every leaf in a document takes the same biome -- and cannot express a
+   * colour that varies with the block's **state**. A banner's cloth is one
+   * sheet in sixteen colours; redstone dust is one texture at sixteen
+   * powers. Neither can be a second `BIOME_TINTED` row.
+   *
+   * The way round it already existed, for the glyphs: mint a synthetic key
+   * and write the multiplied pixels into the cache under it. The atlas packs
+   * whatever is in `textures`, so nothing else has to know.
+   *
+   * An **animated** source is handed back untinted rather than half-done.
+   * `animationCache` is keyed on the texture as well, so a tinted copy would
+   * need its frames tinted too, and today nothing asks: the banner base and
+   * the redstone dust are both still images.
+   */
+  private tintedTexture(key: string, hex: string): string {
+    const source = this.textureCache[key];
+    if (source === undefined || this.animationCache[key] !== undefined) {
+      return key;
+    }
+    const tinted = `${key}#${hex}`;
+    if (!(tinted in this.textureCache)) {
+      this.textureCache[tinted] = applyTint(source, parseHexColor(hex));
+    }
+    return tinted;
   }
 
   /** Turns a `BlockShape` into geometry, once its textures are known. */
@@ -1378,6 +1525,20 @@ export class ModelBaker {
       for (const name of part.omit ?? []) {
         delete all[name];
       }
+      /*
+       * A face lying on the cell's own boundary can be covered by whatever is
+       * next door, and says so. A tilted box gets nothing: a wall torch leans
+       * 22.5 degrees off the wall, so none of its faces is on any plane, and
+       * asking whether it is *nearly* there is a question with no right answer.
+       */
+      if (part.rotation === undefined) {
+        for (const [name, face] of Object.entries(all)) {
+          const at = CULL_BOUNDARY[name as CellFace];
+          if (at !== undefined && scaled[at[0]] === at[1]) {
+            all[name] = { ...face, cullFace: name as CellFace };
+          }
+        }
+      }
       const built = Object.values(all);
       extraFaces.push(
         ...(part.rotation ? built.map((face) => tiltFace(face, part.rotation!)) : built),
@@ -1387,27 +1548,45 @@ export class ModelBaker {
   }
 
   /**
-   * Two diagonal quads, vanilla's shape for flowers, grass and saplings. They
-   * are drawn from both sides — the glTF material is `doubleSided` — so a
-   * flower is not invisible from half the compass.
+   * Two diagonal planes, vanilla's shape for flowers, grass and saplings --
+   * and **four** quads, because each plane is drawn from both sides.
+   *
+   * It used to be two, on the strength of the material being double-sided.
+   * That is not what vanilla says: `cross.json` states each element with a
+   * `north` face *and* a `south` face, which is two quads per plane, and it is
+   * the only spelling that survives the block material becoming single-sided.
+   * Written the other way a flower is invisible from half the compass, which
+   * is exactly what the old comment was afraid of.
+   *
+   * The back is the front with its vertices reversed, so the picture comes out
+   * mirrored -- which is again vanilla's answer, since its `north` and `south`
+   * faces of one element wear the same window read from opposite corners.
    */
   private static crossFaces(textureKey: string): BakedFace[] {
     const s = Math.SQRT1_2;
     const uvs = new Float32Array([0, 1, 1, 1, 1, 0, 0, 0]);
-    return [
+    /*
+     * The normals are the ones the winding actually produces, not their
+     * opposites, and they were their opposites for as long as nothing looked.
+     * A double-sided material flips the normal per side in the shader, so the
+     * sign never showed; single-sided, a quad whose declared normal points
+     * away from its visible face is lit by the sun that is behind it.
+     */
+    const front: BakedFace[] = [
       {
         positions: new Float32Array([0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0]),
         uvs: uvs.slice(),
-        normal: [-s, 0, s],
+        normal: [s, 0, -s],
         textureKey,
       },
       {
         positions: new Float32Array([1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0]),
         uvs: uvs.slice(),
-        normal: [-s, 0, -s],
+        normal: [s, 0, s],
         textureKey,
       },
     ];
+    return [...front, ...front.map(reversedFace)];
   }
 
   private async hashedColorCube(entry: PaletteEntry, shape: BlockShape): Promise<BakedBlock> {
@@ -1648,11 +1827,19 @@ export class ModelBaker {
     };
     if (HEADS[name] !== undefined) return HEADS[name];
 
-    // No sheet is usable for these: a banner's art is a base plus a stack of
-    // pattern layers this code cannot compose, and a shulker box's sheet is
-    // laid out for an animated lid. The dyed wool is the honest stand-in.
-    const banner = /^([a-z_]+?)_(?:wall_)?banner$/.exec(name);
-    if (banner) return `${banner[1]}_wool`;
+    /*
+     * A banner's pole and crossbar are on `entity/banner/banner_base`, and
+     * they are the only two parts of it that are not dyed -- so that sheet is
+     * the block's texture and `block_shapes.ts` names the cloth's separately,
+     * tinted. What is still not done is the **patterns**: they are a stack of
+     * layers in the block entity's NBT, and composing them is a different
+     * job. A plain banner of the right colour is not a stand-in for one.
+     */
+    if (/_(?:wall_)?banner$/.test(name)) return "entity/banner/banner_base";
+    /*
+     * A shulker box's sheet is laid out for an animated lid, so the dyed wool
+     * stays the honest stand-in there.
+     */
     const shulker = /^([a-z_]+)_shulker_box$/.exec(name);
     if (shulker) return `${shulker[1]}_wool`;
     return null;
@@ -1739,6 +1926,33 @@ export class ModelBaker {
     if (normalized === "pitcher_plant") {
       const half = entry.properties.half === "upper" ? "top" : "bottom";
       return [`pitcher_crop_${half}_stage_4`, `pitcher_crop_${half}`];
+    }
+
+    /*
+     * `lit` before `facing`, and **the order changes nothing today** -- which
+     * is worth writing down rather than leaving to be rediscovered, because
+     * the argument for putting it here is a good one and is not load-bearing.
+     *
+     * A `redstone_wall_torch` reaches here twice, once under its own name and
+     * once as `redstone_torch` through the `_wall_` alias, and it carries a
+     * `facing` -- so on the second pass the branch below answers `${normalized}`
+     * for the face the block points at, and for a torch the bare name is the
+     * **lit** texture. That collision is real and unreachable: a wall torch is
+     * a `boxes` shape, so every one of its faces takes the block's primary key
+     * and the per-face map is never consulted. Verified by moving this below
+     * the branch and watching nothing fail.
+     *
+     * It stays above because the day a block in this table is a cube with a
+     * `facing`, the collision stops being unreachable and nothing would say so.
+     */
+    const swap = LIT_TEXTURES[normalized];
+    if (swap !== undefined) {
+      return [swap[flagOf(entry, "lit") ? 1 : 0], normalized];
+    }
+    if (COPPER_BULBS.has(normalized)) {
+      const lit = flagOf(entry, "lit") ? `${normalized}_lit` : normalized;
+      const powered = flagOf(entry, "powered") ? `${lit}_powered` : lit;
+      return [powered, lit, normalized];
     }
 
     /*
@@ -1894,7 +2108,17 @@ export class ModelBaker {
       !texturePath.startsWith("block/") &&
       !texturePath.startsWith("item/") &&
       // Block entities (beds, chests, signs) live outside `block/`.
-      !texturePath.startsWith("entity/")
+      !texturePath.startsWith("entity/") &&
+      /*
+       * ...and so does a particle. `particle/flame` is the candle's, which
+       * vanilla draws as a particle rather than as geometry -- so this app
+       * approximates it and has to be able to name the sprite.
+       *
+       * Without this the path would be rewritten to `block/particle/flame`,
+       * resolve nothing, and `resolveBoxTexture` would fall back to the
+       * block's own texture: a flame made of candle wax, silently.
+       */
+      !texturePath.startsWith("particle/")
     ) {
       texturePath = `block/${texturePath}`;
     }

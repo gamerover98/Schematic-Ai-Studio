@@ -59,6 +59,7 @@ import {
   redoEdit,
   requireSession,
   saveSession,
+  scaleRegion,
   transformRegion,
   undoEdit,
 } from "../src/main/services/session.js";
@@ -81,7 +82,7 @@ import {
   takeCheckpoint,
   useCheckpointDirectory,
 } from "../src/main/services/checkpoints.js";
-import { isDirty, undo } from "../src/main/domain/history.js";
+import { contentShiftSince, isDirty, undo } from "../src/main/domain/history.js";
 import { anchorOf, countBlocks, createDocument, documentFromLoaded } from "../src/main/domain/document.js";
 import { UnrepresentableBlocksError } from "../src/main/services/writers.js";
 import { SpongeSchematicWriter } from "../src/main/services/schematic.js";
@@ -1516,6 +1517,373 @@ console.log("\n--- copying a region ---");
  * mean a move interrupted between them leaves a hole where the build used to
  * be.
  */
+console.log("\n--- a region edit stays inside the schematic ---");
+{
+  /*
+   * `autoGrow` reached `applyEdit` and nothing else, so a move that carried
+   * blocks past the edge lost them without a word: `pasteClipboard` clips by
+   * letting `tx.setBlock` return false, and `changed` came back short with
+   * nothing anywhere saying why. Turning and scaling had the same hole.
+   */
+  const session = newDocument({ width: 8, height: 4, length: 8 });
+  const rock = { namespacedName: "minecraft:stone", properties: {} };
+  const wood = { namespacedName: "minecraft:oak_planks", properties: {} };
+  setBlock(session.doc, 0, 0, 0, rock);
+  setBlock(session.doc, 1, 0, 0, rock);
+  session.history.undoStack.length = 0;
+
+  moveRegion(
+    session,
+    { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+    { x: 7, y: 0, z: 0 },
+    { autoGrow: true },
+  );
+  equal("a move past the edge grows the schematic", documentState(session).size, [9, 4, 8]);
+  equal(
+    "...and carries the block that would have fallen off",
+    getBlock(session.doc, 8, 0, 0).namespacedName,
+    "minecraft:stone",
+  );
+  equal("...in one undo step", session.history.undoStack.length, 1);
+  undoEdit(session);
+  equal("...which takes the size back too", documentState(session).size, [8, 4, 8]);
+  equal(
+    "...and the blocks with it",
+    getBlock(session.doc, 0, 0, 0).namespacedName,
+    "minecraft:stone",
+  );
+
+  let raised: unknown = null;
+  try {
+    moveRegion(
+      session,
+      { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+      { x: 7, y: 0, z: 0 },
+      { autoGrow: false },
+    );
+  } catch (err) {
+    raised = err;
+  }
+  check("with resizing off it is refused by name", raised instanceof OutsideDocumentError);
+  /*
+   * The half that matters: nothing was written, not even the block that fitted.
+   * A refusal that had already moved half the region would be worse than the
+   * silent clipping it replaces.
+   */
+  equal(
+    "...and nothing moved, not even the part that fitted",
+    getBlock(session.doc, 0, 0, 0).namespacedName,
+    "minecraft:stone",
+  );
+  equal("...and no step was pushed", session.history.undoStack.length, 0);
+  closeDocument();
+}
+
+// --- and a paste is a region edit too -----------------------------------------
+//
+// The same hole, one verb further on, and the stamp is what made it a daily
+// gesture: Ctrl+C now leaves a ghost that is carried somewhere else *before*
+// Ctrl+V, so landing past the edge stopped being a thing you had to go out of
+// your way to do. `pasteClipboard` clips by letting `tx.setBlock` return
+// false, so the overhang used to vanish with a short count and no sentence.
+console.log("\n--- a paste stays inside the schematic ---");
+{
+  const session = newDocument({ width: 8, height: 4, length: 8 });
+  const rock = { namespacedName: "minecraft:stone", properties: {} };
+  setBlock(session.doc, 0, 0, 0, rock);
+  setBlock(session.doc, 1, 0, 0, rock);
+  copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 });
+  session.history.undoStack.length = 0;
+
+  pasteSelection(session, { x: 7, y: 0, z: 0 }, { autoGrow: true });
+  equal("a paste past the edge grows the schematic", documentState(session).size, [9, 4, 8]);
+  equal(
+    "...and the overhanging block lands",
+    getBlock(session.doc, 8, 0, 0).namespacedName,
+    "minecraft:stone",
+  );
+  equal("...in one undo step", session.history.undoStack.length, 1);
+  undoEdit(session);
+  equal("...which takes the size back too", documentState(session).size, [8, 4, 8]);
+
+  let refused: unknown = null;
+  try {
+    pasteSelection(session, { x: 7, y: 0, z: 0 }, { autoGrow: false });
+  } catch (err) {
+    refused = err;
+  }
+  check("with resizing off it is refused by name", refused instanceof OutsideDocumentError);
+  // Nothing written, not even the half that fitted -- `moveRegion`'s rule.
+  equal(
+    "...and not even the part that fitted was written",
+    getBlock(session.doc, 7, 0, 0).namespacedName,
+    "minecraft:air",
+  );
+  equal("...and no step was pushed", session.history.undoStack.length, 0);
+  closeDocument();
+}
+
+// --- a paste can leave the empty space where it falls -------------------------
+//
+// WorldEdit's `//paste -a`, for the half this app did not already do. Air is
+// never stored in a clipboard and so is never pasted; a `barrier` or a `water`
+// chosen as empty space *is* a real block in the copy, so a paste stamped it
+// over whatever was standing there.
+console.log("\n--- a paste can leave the empty space where it falls ---");
+{
+  const stone = { namespacedName: "minecraft:stone", properties: {} };
+  const planks = { namespacedName: "minecraft:oak_planks", properties: {} };
+  /*
+   * With a state on it, deliberately. The setting is a bare `minecraft:barrier`
+   * and a barrier out of a file -- or out of this app's own placement, which
+   * writes the default state -- carries `[waterlogged=false]`. Compared
+   * exactly, neither spelling matches the other and the flag would do nothing
+   * on any real document; `matchesBlockPattern` is what makes a bare name mean
+   * the block in any state.
+   */
+  const barrier = {
+    namespacedName: "minecraft:barrier",
+    properties: { waterlogged: "false" },
+  };
+
+  {
+    const session = newDocument({ width: 8, height: 2, length: 8 });
+    setBlock(session.doc, 0, 0, 0, stone);
+    setBlock(session.doc, 1, 0, 0, barrier);
+    copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 });
+    setBlock(session.doc, 4, 0, 0, planks);
+    setBlock(session.doc, 5, 0, 0, planks);
+    session.history.undoStack.length = 0;
+
+    pasteSelection(session, { x: 4, y: 0, z: 0 }, {
+      voidBlock: "minecraft:barrier",
+      skipEmpty: true,
+    });
+    equal("the blocks still land", getBlock(session.doc, 4, 0, 0).namespacedName, "minecraft:stone");
+    equal(
+      "...and the empty space does not replace what was under it",
+      getBlock(session.doc, 5, 0, 0).namespacedName,
+      "minecraft:oak_planks",
+    );
+
+    undoEdit(session);
+    pasteSelection(session, { x: 4, y: 0, z: 0 }, { voidBlock: "minecraft:barrier" });
+    equal(
+      "...and without the flag it does, which is what was reported",
+      getBlock(session.doc, 5, 0, 0).namespacedName,
+      "minecraft:barrier",
+    );
+    closeDocument();
+  }
+
+  {
+    /*
+     * And the document grows to what actually lands rather than to the
+     * clipboard's box. Room made for cells that will never be written is a
+     * resize nobody asked for and would have to undo -- `replace`'s stated
+     * reason for not growing at all.
+     */
+    const session = newDocument({ width: 6, height: 2, length: 6 });
+    setBlock(session.doc, 0, 0, 0, stone);
+    setBlock(session.doc, 1, 0, 0, barrier);
+    copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 });
+    session.history.undoStack.length = 0;
+
+    pasteSelection(session, { x: 5, y: 0, z: 0 }, {
+      voidBlock: "minecraft:barrier",
+      skipEmpty: true,
+    });
+    equal("a paste does not grow for what it will not write", session.doc.width, 6);
+    equal("...and the block that does write lands", getBlock(session.doc, 5, 0, 0).namespacedName, "minecraft:stone");
+    closeDocument();
+  }
+}
+
+console.log("\n--- turning a region somewhere else ---");
+{
+  /*
+   * In place, a quarter turn has to land back on its own footprint, so an
+   * oblong one cannot -- that is `NotSquareError`, and it is right. With a
+   * destination the same turn is simply a box of the other shape, which is what
+   * lets the gizmo turn a selection about a corner rather than about its middle.
+   */
+  const session = newDocument({ width: 8, height: 4, length: 8 });
+  const rock = { namespacedName: "minecraft:stone", properties: {} };
+  const wood = { namespacedName: "minecraft:oak_planks", properties: {} };
+  setBlock(session.doc, 0, 0, 0, rock);
+  setBlock(session.doc, 4, 0, 0, wood);
+  const oblong = { minX: 0, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 2 };
+
+  let raised: unknown = null;
+  try {
+    transformRegion(session, oblong, { kind: "rotate", steps: 1 });
+  } catch (err) {
+    raised = err;
+  }
+  check("an oblong turned in place is still refused", raised instanceof NotSquareError);
+
+  session.history.undoStack.length = 0;
+  transformRegion(session, oblong, { kind: "rotate", steps: 1 }, { to: { x: 0, y: 0, z: 0 } });
+  equal(
+    "...and goes through when it is told where to land",
+    getBlock(session.doc, 2, 0, 0).namespacedName,
+    "minecraft:stone",
+  );
+  equal(
+    "...with the far end a quarter turn round",
+    getBlock(session.doc, 2, 0, 4).namespacedName,
+    "minecraft:oak_planks",
+  );
+  equal("a turn is one undo step", session.history.undoStack.length, 1);
+  undoEdit(session);
+  equal(
+    "...and one undo puts the row back",
+    getBlock(session.doc, 4, 0, 0).namespacedName,
+    "minecraft:oak_planks",
+  );
+  closeDocument();
+}
+
+console.log("\n--- flipping a region over ---");
+{
+  /*
+   * The vertical mirror, which is a different set of properties from the other
+   * two rather than the same rule with a letter changed. Stated one block at a
+   * time, because a failure has to name which family was forgotten -- and
+   * `face` and `attachment` are the two that get forgotten.
+   */
+  const session = newDocument({ width: 4, height: 4, length: 4 });
+  const rock = { namespacedName: "minecraft:stone", properties: {} };
+  const wood = { namespacedName: "minecraft:oak_planks", properties: {} };
+  const put = (y: number, name: string, properties: Record<string, string>) =>
+    setBlock(session.doc, 0, y, 0, { namespacedName: name, properties });
+
+  put(0, "minecraft:oak_stairs", { facing: "north", half: "bottom" });
+  put(1, "minecraft:oak_door", { facing: "north", half: "upper", hinge: "left" });
+  put(2, "minecraft:stone_slab", { type: "top" });
+  put(3, "minecraft:lever", { face: "floor", facing: "north" });
+
+  transformRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 3, maxZ: 0 }, {
+    kind: "mirror",
+    axis: "y",
+  });
+
+  // The column is turned over, so what was at y=0 is now at y=3.
+  equal("a stair's half turns over", getBlock(session.doc, 0, 3, 0).properties.half, "top");
+  equal(
+    "...and its facing does not",
+    getBlock(session.doc, 0, 3, 0).properties.facing,
+    "north",
+  );
+  equal("a door's upper half becomes its lower", getBlock(session.doc, 0, 2, 0).properties.half, "lower");
+  equal(
+    "...and a reflection swaps its hinge",
+    getBlock(session.doc, 0, 2, 0).properties.hinge,
+    "right",
+  );
+  equal("a slab's type turns over", getBlock(session.doc, 0, 1, 0).properties.type, "bottom");
+  equal(
+    "a lever on the floor ends up on the ceiling",
+    getBlock(session.doc, 0, 0, 0).properties.face,
+    "ceiling",
+  );
+
+  /*
+   * The one that cannot be reflected, and is therefore left exactly as it was.
+   * `ascending_north` upside down would be a rail going *down* to the north,
+   * and the game has no such state -- every rail that is not flat ascends. So
+   * the value stands rather than being turned into a neighbouring direction:
+   * inventing a state is the one thing this file may not do.
+   */
+  setBlock(session.doc, 1, 0, 0, {
+    namespacedName: "minecraft:rail",
+    properties: { shape: "ascending_north" },
+  });
+  transformRegion(session, { minX: 1, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 }, {
+    kind: "mirror",
+    axis: "y",
+  });
+  equal(
+    "an ascending rail has no reflection, and keeps its own",
+    getBlock(session.doc, 1, 0, 0).properties.shape,
+    "ascending_north",
+  );
+  closeDocument();
+}
+
+console.log("\n--- resampling a region ---");
+{
+  const session = newDocument({ width: 8, height: 8, length: 8 });
+  const rock = { namespacedName: "minecraft:stone", properties: {} };
+  const wood = { namespacedName: "minecraft:oak_planks", properties: {} };
+  setBlock(session.doc, 0, 0, 0, rock);
+  setBlock(session.doc, 1, 0, 0, wood);
+  session.history.undoStack.length = 0;
+
+  const doubled = scaleRegion(
+    session,
+    { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+    { kind: "multiply", factor: 2 },
+  );
+  // Multiplying loses nothing, so it has nothing to say beyond the count.
+  equal("doubling throws nothing away", doubled.dropped, 0);
+  equal("...and so says nothing", doubled.notes, "");
+  equal(
+    "doubling makes one block into a cube of itself",
+    getBlock(session.doc, 1, 1, 1).namespacedName,
+    "minecraft:stone",
+  );
+  equal(
+    "...and the block beside it follows",
+    getBlock(session.doc, 2, 0, 0).namespacedName,
+    "minecraft:oak_planks",
+  );
+  equal("a scale is one undo step", session.history.undoStack.length, 1);
+  undoEdit(session);
+  equal(
+    "...and one undo puts the row back",
+    getBlock(session.doc, 1, 0, 0).namespacedName,
+    "minecraft:oak_planks",
+  );
+
+  /*
+   * Halving discards seven cells in every eight, and says so rather than
+   * refusing.
+   *
+   * It used to refuse and ask to be called again with `confirmLoss`, which is
+   * `resizeSession`'s shape -- and the wrong shape borrowed. A resize is a
+   * number typed blind into a panel that has a second button; a scale is a
+   * cube dragged with the destination drawn under the pointer and one CTRL+Z
+   * away. So the refusal named a confirmation that existed nowhere in the app
+   * and the gesture was simply cancelled. Reported as exactly that.
+   */
+  setBlock(session.doc, 0, 0, 0, rock);
+  setBlock(session.doc, 1, 0, 0, rock);
+  setBlock(session.doc, 0, 0, 1, rock);
+  setBlock(session.doc, 1, 0, 1, rock);
+  const half = { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 };
+  const halved = scaleRegion(session, half, { kind: "divide", factor: 2 });
+  check("halving goes ahead rather than asking", halved.changed > 0, String(halved.changed));
+  // Four stone cells in, one out: three thrown away.
+  equal("...and counts what it threw away", halved.dropped, 3);
+  check(
+    "...in a sentence that names the number",
+    halved.notes.includes("3"),
+    halved.notes,
+  );
+  check(
+    "...and points at the way back",
+    halved.notes.includes("CTRL+Z"),
+    halved.notes,
+  );
+  equal(
+    "the cell at the low corner is the one that survives",
+    getBlock(session.doc, 0, 0, 0).namespacedName,
+    "minecraft:stone",
+  );
+  closeDocument();
+}
+
 console.log("\n--- moving a region ---");
 {
   const session = newDocument({ width: 8, height: 4, length: 8 });
@@ -1606,6 +1974,404 @@ console.log("\n--- moving a region ---");
   );
 }
 
+// --- a solid block is not replaced -------------------------------------------
+//
+// Vanilla's `#minecraft:replaceable` decides what a placement writes over, and
+// nothing in this repo had the concept: the `setBlock` arm never looked at the
+// destination cell at all. `floodedPlacement` reads it and only to decide
+// `waterlogged`; `floorUnder` reads the cell below; `doubleSlabTarget` reads
+// across the face; `twoPartPlacement` reads the *far* cell of a bed or a door
+// and its own comment states the missing rule for the near one.
+//
+// Reported with a fence: its post is inset to 6..10 of the cell, so a click on
+// the exposed side gives `place = the cell next door`, and the iron block
+// standing there was written over.
+console.log("\n--- a solid block is not replaced ---");
+{
+  const iron = { namespacedName: "minecraft:iron_block", properties: {} };
+  const fence = { namespacedName: "minecraft:oak_fence", properties: {} };
+  const stone = { namespacedName: "minecraft:stone", properties: {} };
+  const grass = { namespacedName: "minecraft:short_grass", properties: {} };
+  const water = { namespacedName: "minecraft:water", properties: { level: "0" } };
+
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 2, 0, 2, fence);
+    setBlock(session.doc, 1, 0, 2, iron);
+    // The click: the fence's west face, so the block would go into the cell at
+    // x = 1 -- which is where the iron block is.
+    const changed = applyEdit(session, {
+      kind: "setBlock",
+      x: 1,
+      y: 0,
+      z: 2,
+      against: "west",
+      block: { namespacedName: "minecraft:stone" },
+    });
+    equal("a placement into a solid block writes nothing", changed, 0);
+    equal(
+      "...and the block that was there is still there",
+      getBlock(session.doc, 1, 0, 2).namespacedName,
+      "minecraft:iron_block",
+    );
+    equal("...and nothing is left on the undo stack", session.history.undoStack.length, 0);
+  }
+
+  /*
+   * The case that diverges from the obvious reading of the report -- *refuse
+   * if either block is solid*. Vanilla asks only about the block already
+   * there, and water is replaceable, so stone goes in. This app supports that
+   * deliberately: `floodedPlacement` is the rule that makes what lands come
+   * out waterlogged.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 3, 0, 3, water);
+    equal(
+      "stone still goes into water",
+      applyEdit(session, {
+        kind: "setBlock",
+        x: 3,
+        y: 0,
+        z: 3,
+        block: { namespacedName: "minecraft:stone" },
+      }),
+      1,
+    );
+    equal(
+      "...and the cell holds it",
+      getBlock(session.doc, 3, 0, 3).namespacedName,
+      "minecraft:stone",
+    );
+  }
+
+  /*
+   * The other half of the wiki's sentence: a block placed **on** a replaceable
+   * one goes into its cell rather than above it. `against` is deliberately
+   * unchanged -- vanilla's `BlockPlaceContext` keeps the clicked face and
+   * moves only the clicked position.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 4, 0, 4, grass);
+    applyEdit(session, {
+      kind: "setBlock",
+      x: 4,
+      y: 1,
+      z: 4,
+      against: "up",
+      block: { namespacedName: "minecraft:stone" },
+    });
+    equal(
+      "a block placed on short grass takes its place",
+      getBlock(session.doc, 4, 0, 4).namespacedName,
+      "minecraft:stone",
+    );
+    equal(
+      "...rather than standing on top of it",
+      getBlock(session.doc, 4, 1, 4).namespacedName,
+      "minecraft:air",
+    );
+  }
+
+  /*
+   * Empty space is replaceable whatever block it is made of. With barrier
+   * chosen, a cell that reads as empty holds a barrier -- which is not in the
+   * tag -- so deciding from the tag alone would make it impossible to build
+   * inside your own empty space.
+   */
+  {
+    const barrier = { namespacedName: "minecraft:barrier", properties: {} };
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 5, 0, 5, barrier);
+    equal(
+      "a placement into the chosen empty space goes in",
+      applyEdit(
+        session,
+        { kind: "setBlock", x: 5, y: 0, z: 5, block: { namespacedName: "minecraft:stone" } },
+        { voidBlock: "minecraft:barrier" },
+      ),
+      1,
+    );
+    // ...and with air as the empty space, that same barrier is a block again.
+    const other = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(other.doc, 5, 0, 5, barrier);
+    equal(
+      "...and is refused where it is an ordinary block",
+      applyEdit(other, {
+        kind: "setBlock",
+        x: 5,
+        y: 0,
+        z: 5,
+        block: { namespacedName: "minecraft:stone" },
+      }),
+      0,
+    );
+  }
+
+  /*
+   * And the reach: this is the *hand*. A fill, a paste, a transform and every
+   * agent tool go through `runTransaction` bodies that never touch this arm,
+   * which is the same reach the slab merge, the two-part rule and the redstone
+   * guard have. A fill across mixed ground should lay what it can.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 6, 0, 6, iron);
+    applyEdit(session, {
+      kind: "fill",
+      region: { minX: 6, minY: 0, minZ: 6, maxX: 6, maxY: 0, maxZ: 6 },
+      block: { namespacedName: "minecraft:stone" },
+    });
+    equal(
+      "a fill still writes over a solid block",
+      getBlock(session.doc, 6, 0, 6).namespacedName,
+      "minecraft:stone",
+    );
+  }
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 0, 0, 0, stone);
+    setBlock(session.doc, 7, 0, 7, iron);
+    copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 });
+    pasteSelection(session, { x: 7, y: 0, z: 7 });
+    equal(
+      "...and so does a paste",
+      getBlock(session.doc, 7, 0, 7).namespacedName,
+      "minecraft:stone",
+    );
+  }
+
+  /*
+   * Breaking is not placing. A break is `setBlock` with the void, and it
+   * empties a cell rather than building in one -- so the rule has to stand
+   * aside for it, or nothing could ever be removed.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 1, 0, 1, iron);
+    equal(
+      "a break still empties a solid cell",
+      applyEdit(session, {
+        kind: "setBlock",
+        x: 1,
+        y: 0,
+        z: 1,
+        block: { namespacedName: "minecraft:air" },
+      }),
+      1,
+    );
+  }
+
+  /*
+   * **And a break carries `against`, which is what made the redirect a
+   * catastrophe rather than a nicety.**
+   *
+   * `Viewer.svelte` sends `lookAt(target)` for all three verbs, so a break
+   * names the block itself *and* the face the crosshair found. The redirect
+   * steps back along that face -- correct for a placement, where `x/y/z` is
+   * the cell across it, and meaningless here, where it lands on the empty
+   * cell the ray came in through. Empty is replaceable, always, so every
+   * break in the app moved into thin air, wrote the void over the void and
+   * came back `changed: 0` with the block still standing.
+   *
+   * The check has to carry the face. The one above does not, which is
+   * exactly why it went on passing.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 2, 1, 2, iron);
+    equal(
+      "a break aimed at a face still removes the block",
+      applyEdit(session, {
+        kind: "setBlock",
+        x: 2,
+        y: 1,
+        z: 2,
+        against: "west",
+        block: { namespacedName: "minecraft:air" },
+      }),
+      1,
+    );
+    equal(
+      "...and the cell it named is the one that is empty",
+      getBlock(session.doc, 2, 1, 2).namespacedName,
+      "minecraft:air",
+    );
+  }
+
+  /*
+   * Every face, because `against` is whichever one the ray found and the
+   * arithmetic is per axis: a break from above steps down, one from the
+   * south steps north, and each of the six lands somewhere different.
+   */
+  {
+    for (const against of ["up", "down", "north", "south", "east", "west"] as const) {
+      const session = newDocument({ width: 8, height: 4, length: 8 });
+      setBlock(session.doc, 3, 1, 3, iron);
+      applyEdit(session, {
+        kind: "setBlock",
+        x: 3,
+        y: 1,
+        z: 3,
+        against,
+        block: { namespacedName: "minecraft:air" },
+      });
+      equal(
+        `a break against ${against} removes what it was aimed at`,
+        getBlock(session.doc, 3, 1, 3).namespacedName,
+        "minecraft:air",
+      );
+    }
+  }
+
+  /*
+   * ...and with a void block chosen, where the break writes that block
+   * instead of air. `emptiness` is a pattern rather than a name, so this is
+   * the spelling that decides whether the guard asks the right question.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 4, 1, 4, iron);
+    applyEdit(
+      session,
+      {
+        kind: "setBlock",
+        x: 4,
+        y: 1,
+        z: 4,
+        against: "up",
+        block: { namespacedName: "minecraft:water", properties: { level: "0" } },
+      },
+      { voidBlock: "minecraft:water" },
+    );
+    equal(
+      "a break into a chosen empty space still empties the cell",
+      getBlock(session.doc, 4, 1, 4).namespacedName,
+      "minecraft:water",
+    );
+  }
+}
+
+// --- a growth that moves the build says so -----------------------------------
+//
+// The grid has no negative index, so making room *below* the origin can only
+// be done by moving everything already there up and out of the way.
+// `growthToInclude` does exactly that and `resizeDocument` compensates `offset`
+// and `worldOrigin` the other way, so the build keeps its place in the world.
+//
+// What had no answer was everything outside main: the renderer's selection, its
+// pivot and its stamp all name particular cells, and none of them was told. So
+// dragging a selection below the origin grew the schematic, slid the content
+// one way, and left the box where the pointer had put it -- outside the
+// document, to be clamped by the next `normalizeRegion`.
+//
+// The defect is **asymmetric**, and that is why it survived: past the *high*
+// faces the shift is zero and everything has always worked. Both are stated.
+console.log("\n--- a growth that moves the build says so ---");
+{
+  const rock = { namespacedName: "minecraft:stone", properties: {} };
+  const pane = { namespacedName: "minecraft:glass", properties: {} };
+  const marked = () => {
+    const doc = newDocument({ width: 16, height: 4, length: 16 });
+    // A block at each end of the region being moved, so the arrival can be
+    // read as an order rather than as a count.
+    setBlock(doc.doc, 0, 0, 0, rock);
+    setBlock(doc.doc, 3, 0, 0, pane);
+    return doc;
+  };
+
+  {
+    const session = marked();
+    const before = session.history.nextId;
+    moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: -4, y: 0, z: 0 });
+    const shift = contentShiftSince(session.history, before);
+
+    equal("a move below the origin moves the whole document", shift, [4, 0, 0]);
+    equal("...which is what the extra room cost", session.doc.width, 20);
+    /*
+     * And the blocks are where the shift says. The region was dragged to
+     * `x = -4`; the document moved up by 4, so the moved blocks land at 0..3
+     * and a selection still naming -4 is outside the document entirely.
+     */
+    equal(
+      "the moved blocks land where the shift puts them",
+      getBlock(session.doc, 0, 0, 0).namespacedName,
+      "minecraft:stone",
+    );
+    equal(
+      "...in order",
+      getBlock(session.doc, 3, 0, 0).namespacedName,
+      "minecraft:glass",
+    );
+  }
+
+  /*
+   * The half that has always worked, stated so that the asymmetry is on the
+   * record: growing past a high face adds room at the far side and moves
+   * nothing, which is why nobody found this by dragging outwards.
+   */
+  {
+    const session = marked();
+    const before = session.history.nextId;
+    moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: 20, y: 0, z: 0 });
+    equal("a move past the far face moves nothing", contentShiftSince(session.history, before), [
+      0, 0, 0,
+    ]);
+    equal("...and still makes the room", session.doc.width, 24);
+  }
+
+  // The other three ways to grow, because each computes its own growth and any
+  // one of them could be the one that forgets.
+  {
+    const session = marked();
+    copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 });
+    const before = session.history.nextId;
+    pasteSelection(session, { x: 0, y: -2, z: 0 });
+    equal("a paste below the origin says how far it moved", contentShiftSince(session.history, before), [
+      0, 2, 0,
+    ]);
+  }
+  {
+    const session = marked();
+    const before = session.history.nextId;
+    transformRegion(
+      session,
+      { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
+      { kind: "rotate", steps: 1 },
+      { to: { x: 0, y: 0, z: -3 } },
+    );
+    equal("a turn below the origin says so too", contentShiftSince(session.history, before), [
+      0, 0, 3,
+    ]);
+  }
+  {
+    const session = marked();
+    const before = session.history.nextId;
+    scaleRegion(
+      session,
+      { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 },
+      { kind: "multiply", factor: 2 },
+      { to: { x: -8, y: 0, z: 0 } },
+    );
+    equal("and so does a scale", contentShiftSince(session.history, before), [8, 0, 0]);
+  }
+
+  /*
+   * Read against an id captured *before* the call, which is what makes an edit
+   * that changed nothing report nothing rather than the previous edit's shift.
+   * `runTransaction` pushes no transaction for a recorder with no commands.
+   */
+  {
+    const session = marked();
+    moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: -4, y: 0, z: 0 });
+    const after = session.history.nextId;
+    equal("a later edit does not inherit an earlier shift", contentShiftSince(session.history, after), [
+      0, 0, 0,
+    ]);
+  }
+}
+
 // The default that makes paste usable: a copied box is mostly air, and writing
 // that air would punch a rectangular hole in whatever the paste lands on.
 console.log("\n--- pasted air leaves what is under it alone ---");
@@ -1648,10 +2414,16 @@ console.log("\n--- cutting, clipping, and an empty clipboard ---");
   undoEdit(session);
   equal("undoing a cut puts the blocks back", getBlock(session.doc, 0, 0, 0).namespacedName, "minecraft:stone");
 
-  // Pasting over an edge writes the part that fits rather than refusing.
+  /*
+   * Pasting over an edge makes room for it. This used to write the half that
+   * fitted and drop the rest, which is what `pasteClipboard` still does when
+   * it is reached -- and it is still what a refusal relies on never reaching.
+   * What changed is that `pasteSelection` decides first.
+   */
   const changed = pasteSelection(session, { x: 5, y: 0, z: 0 });
-  equal("the half that fits lands", changed, 1);
+  equal("a paste over the edge lands whole", changed, 2);
   equal("...at the edge", getBlock(session.doc, 5, 0, 0).namespacedName, "minecraft:stone");
+  equal("...having made room for the rest", session.doc.width, 7);
 
   closeDocument();
 }
@@ -2332,6 +3104,114 @@ console.log("\n--- placing into water floods the block ---");
 // wrong for building *to a size*, so it is a setting -- and with it off the
 // edit is refused by name rather than clipped, which is the failure this
 // codebase already wrote down once.
+// --- redstone needs a floor -------------------------------------------------
+//
+// The only placement this app refuses on physical grounds, and the reason it is
+// the only one: Minecraft refuses a great many -- a torch on sand, a flower on
+// stone -- and reproducing that would be faithful and useless in an editor.
+// What earns a rule is a block whose *appearance* lies without one, and dust
+// floating in the air or lying on a pond looks like a working circuit.
+console.log("\n--- redstone needs a floor ---");
+{
+  const put = (
+    session: ReturnType<typeof newDocument>,
+    at: readonly [number, number, number],
+    name: string,
+    properties: Record<string, string> = {},
+  ) =>
+    applyEdit(session, {
+      kind: "setBlock",
+      x: at[0],
+      y: at[1],
+      z: at[2],
+      block: { namespacedName: `minecraft:${name}`, properties },
+    });
+  const nameAt = (session: ReturnType<typeof newDocument>, at: readonly [number, number, number]) =>
+    getBlock(session.doc, at[0], at[1], at[2]).namespacedName;
+
+  const session = newDocument({ width: 8, height: 4, length: 2 });
+  put(session, [0, 0, 0], "stone");
+  equal("dust goes down on stone", put(session, [0, 1, 0], "redstone_wire"), 1);
+  equal("...and is really there", nameAt(session, [0, 1, 0]), "minecraft:redstone_wire");
+
+  equal("dust does not go down in mid-air", put(session, [1, 2, 0], "redstone_wire"), 0);
+  equal("...and nothing was written", nameAt(session, [1, 2, 0]), "minecraft:air");
+
+  put(session, [2, 0, 0], "water", { level: "0" });
+  equal("dust does not float on water", put(session, [2, 1, 0], "redstone_wire"), 0);
+  put(session, [3, 0, 0], "lava", { level: "0" });
+  equal("...nor on lava", put(session, [3, 1, 0], "redstone_wire"), 0);
+
+  /*
+   * `coversFace`, not `occludesNeighbours`, and the pair of slabs is why. A
+   * **top** slab reaches the cell's own ceiling, so the cell above it has a
+   * floor and vanilla's `isFaceSturdy(UP)` says yes; a **bottom** slab's
+   * surface is half way down its cell, so the cell above has nothing under it
+   * and the wire would hang in the air over it.
+   *
+   * Asking `occludesNeighbours` instead -- is this a *full opaque cube* --
+   * would refuse the top slab as well, and a false refusal in an editor is
+   * worse than a false allowance.
+   */
+  put(session, [4, 0, 0], "oak_slab", { type: "top" });
+  equal("dust goes down on a top slab", put(session, [4, 1, 0], "redstone_wire"), 1);
+  put(session, [5, 0, 0], "oak_slab", { type: "bottom" });
+  equal("...and not over a bottom one, which reaches nothing", put(session, [5, 1, 0], "redstone_wire"), 0);
+
+  // The floor of the document is not a floor: there is nothing under it, which
+  // is the same answer as air.
+  equal("dust does not go down on the grid itself", put(session, [6, 0, 0], "redstone_wire"), 0);
+
+  // Narrow by design: everything else places exactly as it did.
+  equal("stone still goes down in mid-air", put(session, [7, 2, 0], "stone"), 1);
+
+  /*
+   * And only the hand. A fill, a paste, a transform and every agent tool go
+   * through `runTransaction` bodies that never reach this arm -- the same reach
+   * the slab merge and the two-part rule have. A fill of dust across mixed
+   * ground should lay what it can rather than refuse the lot.
+   */
+  /*
+   * And the step, end to end: the rule, the cells it reads, and the cells the
+   * pass decides are stale.
+   *
+   * A wire reads two cells that are not faces of it -- the ones above and
+   * below each horizontal neighbour -- so `connect.ts` gathers eight more, and
+   * `deriveConnections` has to consider them stale as well. It is the same
+   * list on both sides for that reason: the set a wire *reads* is exactly the
+   * set that must be revisited when one of them moves. Split into two lists,
+   * the symptom is a wire that stops climbing until something else near it is
+   * edited -- which is what the block-level checks alone cannot see.
+   */
+  const step = newDocument({ width: 3, height: 4, length: 1 });
+  put(step, [0, 0, 0], "stone");
+  put(step, [1, 0, 0], "stone");
+  put(step, [1, 1, 0], "stone");
+  put(step, [0, 1, 0], "redstone_wire");
+  put(step, [1, 2, 0], "redstone_wire");
+  equal(
+    "the wire below runs up the step beside it",
+    getBlock(step.doc, 0, 1, 0).properties.east,
+    "up",
+  );
+  equal(
+    "...and the one on top runs down onto it",
+    getBlock(step.doc, 1, 2, 0).properties.west,
+    "side",
+  );
+
+  const filled = newDocument({ width: 4, height: 3, length: 1 });
+  equal(
+    "a fill of dust in mid-air is not refused",
+    applyEdit(filled, {
+      kind: "fill",
+      region: { minX: 0, minY: 2, minZ: 0, maxX: 3, maxY: 2, maxZ: 0 },
+      block: { namespacedName: "minecraft:redstone_wire", properties: {} },
+    }),
+    4,
+  );
+}
+
 console.log("\n--- dimensions ---");
 {
   const at = (session: ReturnType<typeof newDocument>, x: number, y: number, z: number) =>
@@ -2897,6 +3777,37 @@ console.log("\n--- choosing what empty space is made of ---");
     { voidBlock: "minecraft:water[level=0]" },
   );
   equal("a different state is an ordinary block and grows", session.doc.width, 10);
+}
+
+{
+  /*
+   * ...and the direction the two comments above never covered: a **bare**
+   * void block is that block in any state.
+   *
+   * Both halves used to compare full state strings, so `minecraft:barrier`
+   * chosen over a schematic full of `barrier[waterlogged=false]` matched
+   * nothing -- reported as the cells staying opaque and clickable, and here
+   * as a break that grows the box instead of emptying a cell. Every preset in
+   * the modal is a bare id and every block out of a file carries its state, so
+   * this is the ordinary case rather than an edge one.
+   *
+   * `matchesBlockPattern` is `replaceAny`'s rule, which is why the reported
+   * workaround went through *Replace*: that verb already knew.
+   */
+  const session = newDocument({ width: 4, height: 4, length: 4 });
+  const changed = applyEdit(
+    session,
+    {
+      kind: "setBlock",
+      x: 9,
+      y: 0,
+      z: 0,
+      block: { namespacedName: "minecraft:barrier", properties: { waterlogged: "false" } },
+    },
+    { voidBlock: "minecraft:barrier" },
+  );
+  equal("a bare void block matches a cell carrying a state", changed, 0);
+  equal("...so breaking into it does not grow either", session.doc.width, 4);
 }
 
 {

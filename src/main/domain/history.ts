@@ -36,6 +36,7 @@
 
 import {
   paletteEntryCacheKey,
+  matchesBlockPattern,
   type BlockEntityRecord,
   type EntityRecord,
   type NbtCompound,
@@ -180,6 +181,47 @@ export function nextUndoLabel(history: History): string | null {
 
 export function nextRedoLabel(history: History): string | null {
   return history.redoStack[history.redoStack.length - 1]?.label ?? null;
+}
+
+/**
+ * How far the transactions pushed since `sinceId` moved the document's content.
+ *
+ * The grid has no negative index, so making room *below* the origin can only
+ * be done by moving everything that is already there up and out of the way --
+ * `growthToInclude` says so in as many words, and `resizeDocument` compensates
+ * `offset` and `worldOrigin` in the opposite direction so the build keeps its
+ * place in the world.
+ *
+ * What had no answer was everything **outside** main. The renderer holds a
+ * selection, a pivot and a stamp, all of which name particular cells, and none
+ * of them was told. Drag a selection below the origin and the schematic grew,
+ * the content slid one way, and the box stayed where the pointer left it --
+ * outside the document, to be clamped by the next `normalizeRegion`.
+ *
+ * Derived here rather than returned by the five functions that grow, because
+ * `tx.resize` is the one place that knows and every one of them goes through
+ * it. Read against an id captured before the call: a body that changed nothing
+ * pushes no transaction, and then there is no shift to find rather than a
+ * stale one to report.
+ *
+ * Summed rather than taken from the newest, because a transaction is a list
+ * and nothing says a future one holds only a single resize.
+ */
+export function contentShiftSince(
+  history: History,
+  sinceId: number,
+): readonly [number, number, number] {
+  const total: [number, number, number] = [0, 0, 0];
+  for (const transaction of history.undoStack) {
+    if (transaction.id < sinceId) continue;
+    for (const command of transaction.commands) {
+      if (command.kind !== "resize") continue;
+      total[0] += command.shift[0];
+      total[1] += command.shift[1];
+      total[2] += command.shift[2];
+    }
+  }
+  return total;
 }
 
 /**
@@ -446,15 +488,15 @@ class Recorder implements TransactionScope {
     const wanted = new Uint8Array(this.doc.palette.length);
     let any = false;
     for (const pattern of from) {
-      const exact = Object.keys(pattern.properties).length > 0;
-      const key = paletteEntryCacheKey(pattern);
       for (let i = 0; i < this.doc.palette.length; i += 1) {
         if (wanted[i] === 1) continue;
-        const entry = this.doc.palette[i];
-        const hit = exact
-          ? paletteEntryCacheKey(entry) === key
-          : entry.namespacedName === pattern.namespacedName;
-        if (hit) {
+        /*
+         * `matchesBlockPattern` rather than the two-branch comparison this
+         * used to spell out for itself. The rule is unchanged; what changed
+         * is that it is now written in one place, because two other callers
+         * were asking the same question and answering it differently.
+         */
+        if (matchesBlockPattern(this.doc.palette[i], pattern)) {
           wanted[i] = 1;
           any = true;
         }

@@ -293,21 +293,43 @@ export function internPalette(doc: SchematicDocument, entry: PaletteEntry): numb
   return index;
 }
 
-/** How many voxels carry each palette entry, keyed by `paletteEntryCacheKey`. */
-export function paletteHistogram(doc: SchematicDocument): Map<string, number> {
+/**
+ * The materials list **and** the non-air count, from one walk over the voxels.
+ *
+ * `documentState` wants both and used to ask for them separately, which is two
+ * passes over every cell in the document on every mutating handler -- and a
+ * face-drag calls one of those many times a second. Measured on a dense
+ * 128x32x128: 7.9 ms and 8.2 ms, against a 25 ms mesh once the fused-mesh
+ * rebuild came out of the path.
+ *
+ * `blocks` is `countBlocks`' answer exactly, which is *not* the same as \"every
+ * entry the histogram did not call air\": index 0 is always air and is the only
+ * thing `countBlocks` excludes, so a `cave_air` interned at some other index
+ * counts as a block to it. Derived as `cells - counts[0]` rather than by
+ * filtering names, so the two cannot drift.
+ */
+export function paletteTally(doc: SchematicDocument): {
+  histogram: Map<string, number>;
+  blocks: number;
+} {
   const counts = new Int32Array(doc.palette.length);
   for (const index of doc.voxels) {
     if (index >= 0 && index < counts.length) {
       counts[index] += 1;
     }
   }
-  const out = new Map<string, number>();
+  const histogram = new Map<string, number>();
   doc.palette.forEach((entry, index) => {
     if (counts[index] > 0) {
-      out.set(paletteEntryCacheKey(entry), counts[index]);
+      histogram.set(paletteEntryCacheKey(entry), counts[index]);
     }
   });
-  return out;
+  return { histogram, blocks: doc.voxels.length - (counts[0] ?? 0) };
+}
+
+/** How many voxels carry each palette entry, keyed by `paletteEntryCacheKey`. */
+export function paletteHistogram(doc: SchematicDocument): Map<string, number> {
+  return paletteTally(doc).histogram;
 }
 
 /**

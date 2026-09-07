@@ -108,6 +108,29 @@ function build() {
     return `  { values: { ${valueRows} }, default: { ${defaultRows} } },`;
   });
 
+  /*
+   * Vanilla's `#minecraft:replaceable`, sorted and namespace-stripped.
+   *
+   * A second question about the same registry from the same project at the
+   * same two pinned releases, so it rides in this dataset rather than in an
+   * eighth one. Sorted here rather than trusted from the file, because the
+   * rule every generator here follows is that running it with nothing new
+   * must rewrite no bytes -- and the tag's own order is vanilla's, which
+   * moves when a block is added in the middle of it.
+   */
+  const replaceable = (source.replaceable ?? [])
+    .map((id) => id.replace(/^minecraft:/, ""))
+    .sort();
+  const known = new Set(names);
+  for (const name of replaceable) {
+    if (known.has(name)) continue;
+    process.stderr.write(
+      `${name} is in the replaceable tag and not in the registry; ` +
+        "the two halves of this file disagree about what a block is\n",
+    );
+    process.exit(1);
+  }
+
   const body = [
     "const SHAPES: readonly BlockStateShape[] = [",
     ...shapeLines,
@@ -116,9 +139,20 @@ function build() {
     "const BLOCK_SHAPE: Readonly<Record<string, number>> = {",
     recordLiteral(index, 2),
     "};",
+    "",
+    "const REPLACEABLE: ReadonlySet<string> = new Set([",
+    ...replaceable.map((name) => `  ${quote(name)},`),
+    "]);",
   ].join("\n");
 
-  return { body, shapes: shapes.length, blocks: names.length, names: new Set(names), source };
+  return {
+    body,
+    shapes: shapes.length,
+    blocks: names.length,
+    replaceable: replaceable.length,
+    names: new Set(names),
+    source,
+  };
 }
 
 function report(names) {
@@ -139,7 +173,7 @@ function report(names) {
   }
 }
 
-const { body, shapes, blocks, names, source } = build();
+const { body, shapes, blocks, replaceable, names, source } = build();
 report(names);
 
 const current = readFileSync(TARGET, "utf8");
@@ -157,12 +191,14 @@ const next =
 
 if (next === normalized) {
   process.stdout.write(
-    `already matches: ${blocks} blocks, ${shapes} distinct shapes, from ${source._source.minecraftVersion}\n`,
+    `already matches: ${blocks} blocks, ${shapes} distinct shapes, ` +
+      `${replaceable} replaceable, from ${source._source.minecraftVersion}\n`,
   );
   process.exit(0);
 }
 
 writeFileSync(TARGET, eol === "\r\n" ? next.replace(/\n/g, "\r\n") : next, "utf8");
 process.stdout.write(
-  `wrote ${blocks} blocks as ${shapes} distinct shapes, from ${source._source.minecraftVersion}\n`,
+  `wrote ${blocks} blocks as ${shapes} distinct shapes, ` +
+    `${replaceable} replaceable, from ${source._source.minecraftVersion}\n`,
 );

@@ -23,6 +23,7 @@ import {
 import { buildAtlas } from "../src/main/pipeline/atlas.js";
 import {
   buildChunkedMesh,
+  concatChunks,
   createChunkMeshCache,
   CHUNK_SIZE,
   type ChunkMeshCache,
@@ -31,7 +32,11 @@ import { buildMesh, culledFaces } from "../src/main/pipeline/mesher.js";
 import { fillVoid } from "../src/main/services/preview.js";
 import { readSignText, type SignText } from "../src/main/pipeline/sign_text.js";
 import { ModelBaker } from "../src/main/pipeline/model_baker.js";
+import { readFileSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import type { MeshBuffers, PaletteEntry } from "../src/main/pipeline/types.js";
+import { paletteEntryCacheKey } from "../src/main/pipeline/types.js";
 
 let failures = 0;
 
@@ -141,12 +146,12 @@ console.log("--- against the whole-structure mesher ---");
   const whole = buildMesh(faces, atlas.uvRects);
   const chunked = await fromScratch(doc);
 
-  equal("the same number of vertices", chunked.buffers.positions.length, whole.positions.length);
-  equal("the same number of indices", chunked.buffers.indices.length, whole.indices.length);
-  equal("the same number of UVs", chunked.buffers.uvs.length, whole.uvs.length);
+  equal("the same number of vertices", concatChunks(chunked.pieces).positions.length, whole.positions.length);
+  equal("the same number of indices", concatChunks(chunked.pieces).indices.length, whole.indices.length);
+  equal("the same number of UVs", concatChunks(chunked.pieces).uvs.length, whole.uvs.length);
   check(
     "every index still addresses a real vertex",
-    chunked.buffers.indices.every((i) => i < chunked.buffers.positions.length / 3),
+    concatChunks(chunked.pieces).indices.every((i) => i < concatChunks(chunked.pieces).positions.length / 3),
   );
 }
 
@@ -181,7 +186,7 @@ console.log("\n--- incremental equals from-scratch ---");
     clean.paletteIndex = new Map(doc.paletteIndex);
     const reference = await fromScratch(clean);
 
-    const same = fingerprint(result.buffers) === fingerprint(reference.buffers);
+    const same = fingerprint(concatChunks(result.pieces)) === fingerprint(concatChunks(reference.pieces));
     if (!same) mismatches += 1;
     check(`${label}: incremental matches a rebuild`, same);
   }
@@ -203,7 +208,7 @@ console.log("\n--- and it skips the untouched chunks ---");
   equal("meshing again with no edit rebuilds nothing", unchanged.rebuilt, 0);
   check(
     "...and produces the same geometry",
-    fingerprint(unchanged.buffers) === fingerprint(cold.buffers),
+    fingerprint(concatChunks(unchanged.pieces)) === fingerprint(concatChunks(cold.pieces)),
   );
 
   setBlock(doc, 5, 5, 5, STONE);
@@ -364,6 +369,57 @@ console.log("\n--- the void block ---");
   setBlock(withWater, 1, 1, 1, block("minecraft:water"));
   const both = fillVoid(toStructureData(withWater), "minecraft:water");
   equal("a placed void block is void as well", both.voidIndices.size, 2);
+
+  /*
+   * ...and the check above passes for a reason that is not good enough,
+   * which is why the ones below exist.
+   *
+   * It compares a stateless entry against a stateless string, so it holds
+   * however narrow the comparison inside `fillVoid` is -- and for a long time
+   * that comparison was full-state equality. Every document the suites build
+   * for themselves has stateless blocks in it, so nothing anywhere saw the
+   * gap: a barrier out of a file carries `[waterlogged=false]`, water carries
+   * `[level=0]`, and the modal's presets are bare ids.
+   *
+   * Reported as choosing barrier over a schematic already full of barrier and
+   * nothing happening -- the cells stayed opaque and clickable. The rule is
+   * `matchesBlockPattern`, which `replaceAny` had all along and this did not.
+   */
+  const stated = createDocument({ width: 4, height: 4, length: 4 });
+  setBlock(stated, 1, 1, 1, block("minecraft:barrier", { waterlogged: "false" }));
+  const bare = fillVoid(toStructureData(stated), "minecraft:barrier");
+  equal(
+    "a bare void block finds the block in any state",
+    bare.voidIndices.size,
+    2,
+  );
+
+  /*
+   * And naming a state still means that state, which is how somebody targets
+   * one water level and leaves the others. The looser rule must not become no
+   * rule at all.
+   */
+  const levels = createDocument({ width: 4, height: 4, length: 4 });
+  setBlock(levels, 1, 1, 1, block("minecraft:water", { level: "0" }));
+  setBlock(levels, 2, 1, 1, block("minecraft:water", { level: "8" }));
+  const exact = fillVoid(toStructureData(levels), "minecraft:water[level=0]");
+  equal(
+    "a stated void block finds only that state",
+    exact.voidIndices.size,
+    2,
+  );
+  /*
+   * Stated as *which* entry rather than only as a count, because two entries
+   * out of three is the right number whichever of the two waters it picked.
+   */
+  const drawn = [...exact.voidIndices].map((index) =>
+    paletteEntryCacheKey(exact.structure.palette[index]),
+  );
+  check(
+    "...which is the one it names",
+    drawn.includes("minecraft:water[level=0]") && !drawn.includes("minecraft:water[level=8]"),
+    drawn.join(" "),
+  );
 }
 
 console.log("\n--- the two layers ---");
@@ -423,8 +479,8 @@ console.log("\n--- the two layers ---");
    */
   equal(
     "the fused mesh is the structure, not the void",
-    fingerprint(voided.buffers),
-    fingerprint(plain.buffers),
+    fingerprint(concatChunks(voided.pieces)),
+    fingerprint(concatChunks(plain.pieces)),
   );
 
   const empty = createDocument({ width: 4, height: 4, length: 4 });
@@ -439,7 +495,7 @@ console.log("\n--- the two layers ---");
     null,
     emptyFilled.voidIndices,
   );
-  equal("a document with nothing in it still meshes as empty", emptyVoided.buffers.indices.length, 0);
+  equal("a document with nothing in it still meshes as empty", concatChunks(emptyVoided.pieces).indices.length, 0);
   check("...while its void has a shell", emptyVoided.voidPieces.length > 0);
 
   /*
@@ -610,6 +666,115 @@ console.log("\n--- changing the void block re-meshes ---");
   );
 }
 
+
+// --- the box comes from the chunks, not from the vertices ---------------------
+//
+// The viewport's caption wants the geometry's extent, and `preview.ts` used to
+// find it by walking every vertex of every chunk on every edit -- 39 ms of a
+// 207 ms edit on a dense 128x32x128, over chunks that had not moved. Each chunk
+// carries its own box now, so the union is O(chunks) and only a rebuilt chunk
+// pays for one. Fourth thing to ride with a chunk, after voxels, light and
+// sign text.
+//
+// The property to check is the one an incremental cache always has to have:
+// **the cheap answer equals the expensive one**, over a sequence of edits.
+console.log("\n--- the box comes from the chunks ---");
+{
+  const walked = (pieces: readonly MeshBuffers[]) => {
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (const piece of pieces) {
+      for (let i = 0; i < piece.positions.length; i += 3) {
+        for (let a = 0; a < 3; a += 1) {
+          const v = piece.positions[i + a];
+          if (v < min[a]) min[a] = v;
+          if (v > max[a]) max[a] = v;
+        }
+      }
+    }
+    return { min, max };
+  };
+
+  /*
+   * A floor and nothing else, deliberately not `seeded()`.
+   *
+   * `seeded()` has a column running the full height of the document, so its
+   * overall box never moves however the chunks are edited -- and a union that
+   * read stale per-chunk boxes would pass every comparison below. The extremes
+   * have to be the thing being edited, or the check is about nothing. Verified
+   * by making a rebuilt chunk hold on to its old box: against `seeded()` that
+   * fails nothing at all.
+   */
+  const doc = createDocument({ width: 40, height: 40, length: 40 });
+  for (let x = 0; x < 40; x += 1) {
+    for (let z = 0; z < 40; z += 1) setBlock(doc, x, 0, z, STONE);
+  }
+  const cold = await fromScratch(doc);
+  equal("a cold build\'s box is the box its vertices are in", cold.bounds, walked(cold.pieces));
+
+  /*
+   * And it survives editing, which is the half a cold build cannot show. A
+   * chunk carried forward by reference carries its box with it, so a stale one
+   * would only appear after an edit -- and only in the caption, which is
+   * exactly the kind of wrongness that survives.
+   */
+  let cache = cold.cache;
+  /*
+   * Outward first, which grows the box, then back, which shrinks it: a union
+   * that never forgot a chunk would pass the first and fail the second.
+   *
+   * `(5, 15, 5)` is the case that matters and is easy to leave out. It lands
+   * in a chunk that **already has geometry** -- the seeded floor -- so the
+   * chunk is rebuilt rather than created, and its box has to be rebuilt with
+   * it. An edit into an empty chunk cannot see that: there is no stale box to
+   * keep. Verified by making a rebuilt chunk hold on to its old box, which
+   * fails nothing at all without this row.
+   */
+  for (const [x, y, z, block] of [
+    [5, 15, 5, GLASS],
+    [39, 30, 39, GLASS],
+    [0, 30, 0, GLASS],
+    [5, 15, 5, AIR],
+    [39, 30, 39, AIR],
+    [0, 30, 0, AIR],
+  ] as const) {
+    setBlock(doc, x, y, z, block);
+    const next = await incremental(doc, cache);
+    cache = next.cache;
+    equal(
+      `...and after writing ${block.namespacedName} at ${x},${y},${z}`,
+      next.bounds,
+      walked(next.pieces),
+    );
+  }
+
+  /*
+   * And nothing in the app fuses the chunks any more.
+   *
+   * `concatChunks` had exactly one consumer -- `preview.ts` asking
+   * `buffers.indices.length === 0` -- and `pieces` only ever receives chunks
+   * that have indices, so the question was already answered. Building the
+   * fused mesh to ask it was **155 ms of a 207 ms edit**, some 264 MB
+   * allocated and copied per placed block. Putting it back would restore that
+   * silently: every check in this file would still pass, because this file is
+   * where the fusing legitimately happens.
+   */
+  const preview = readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "services", "preview.ts"),
+    "utf8",
+  );
+  // A *call*, not a mention: the comment there names it deliberately, and a
+  // check that forbade the word would be a check against writing the reason
+  // down.
+  check(
+    "the preview does not fuse the chunks to ask if they are empty",
+    !/concatChunks\(/.test(preview),
+  );
+  check(
+    "...it counts them instead",
+    /chunked\.pieces\.length === 0/.test(preview),
+  );
+}
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exitCode = failures === 0 ? 0 : 1;

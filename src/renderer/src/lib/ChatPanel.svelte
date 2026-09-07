@@ -220,7 +220,12 @@
     >
   </header>
 
-  <div class="log" bind:this={log}>
+  <!--
+  `selectable` because a model's answer is read and copied. The window's shell
+  is `user-select: none` so that Ctrl+A in flight stops highlighting the whole
+  app; `app.css` carries the reasoning.
+-->
+<div class="log selectable" bind:this={log}>
     {#if entries.length === 0 && live.length === 0}
       <div class="empty">
         <p>{hasDocument ? t("chat.emptyTitle") : t("chat.emptyBuildTitle")}</p>

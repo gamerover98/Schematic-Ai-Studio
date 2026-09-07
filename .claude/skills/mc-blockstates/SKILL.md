@@ -133,6 +133,71 @@ reports anything else as `degraded`. So:
 the exclusion — not only here — because this is precisely the kind of rule a
 future refresh removes for looking arbitrary.
 
+## The second question this file answers: what a placement writes over
+
+`resources/block_states.json` carries a `replaceable` array beside `blocks`.
+It is vanilla's **`#minecraft:replaceable`** block tag: what a placement
+overwrites rather than standing on. The wiki's *Block properties* page states
+it from the other side — «blocks placed on, against, or in the same location
+as the replaceable block replace it rather than being placed on or against
+it» — and both halves of that sentence are one predicate, `isReplaceable`.
+
+**It rides in this dataset rather than an eighth one** because it is the same
+project, the same two pinned releases and the same registry. The only
+difference is the branch: `-data` instead of `-summary`.
+
+```
+https://raw.githubusercontent.com/misode/mcmeta/<release>-data/data/minecraft/tags/block/replaceable.json
+```
+
+Take it from **both** pinned releases, as `blocks` is taken. They currently
+give the identical 29 entries, so the union is the same list rather than a
+merge — if they ever differ, that is a rename and both spellings belong in,
+for the reason `chain`/`iron_chain` is in `blocks`.
+
+Three things to know before editing it:
+
+- **it moves.** 25 entries at 1.21.4 and 29 now — `bush`, `short_dry_grass`,
+  `tall_dry_grass` and `leaf_litter` arrived since. That movement is the whole
+  argument against writing the list out by hand;
+- **no entry is a reference to another tag.** If one ever is — a `#minecraft:…`
+  string — it has to be resolved before vendoring, because nothing downstream
+  resolves tags;
+- **`minecraft:grass` is deliberately absent and is added by hand** in
+  `block_states.ts`, outside the generator's markers. It is the pre-Flattening
+  spelling of short grass and one of the four ids this app offers that the
+  modern registry has never named. Measured: every *other* replaceable block
+  reaches a 1.12.2 document under its modern name — `31:2` is `fern`, `31:0` is
+  `dead_bush`, `78:0` is `snow`, `175:2` is `tall_grass`, `217:0` is
+  `structure_void`, and water and lava carry all 32 of their states each.
+
+The generator refuses a name that is in the tag and not in the registry,
+because that means the two halves of one file disagree about what a block is.
+
+**Verifying it is not a matter of trusting the generator.** Place a block
+against the side of a fence with something solid behind it and check the solid
+block survives; then place one on a patch of short grass and check it takes
+the grass's cell rather than standing on it. Those are the two halves, and
+neither shows up in any picture the app draws.
+
+## What reads this downstream
+
+`isReplaceable` -- what a placement writes over, in `services/session.ts`. It
+is asked on every block placed by hand, and a name missing from the tag means
+a block that gets destroyed instead of a placement that is refused.
+
+`describe_block` -- the MCP tool a model asks before it places anything with a
+direction, a shape or an on/off state. Its `properties`, its legal `values` and
+its `placedAs` are this table, through `propertiesOf`, `legalValuesFor` and
+`toPlacedEntry`. Nothing is copied, so **a block added here is answered
+correctly over MCP with no code change at all.**
+
+What is *not* derived is whether the answer is still true, and that is the
+verification step: after a release, ask `describe_block` about two or three of
+its new blocks and read the reply, rather than trusting that the generator ran.
+A property missing from the table is a property a model will not know to set,
+and the block is placed bare -- which looks like nothing at all going wrong.
+
 ## Doing it
 
 1. **Read `resources/block_states.json`** to see what is known and when it was

@@ -4,7 +4,9 @@
     "file": "blocks/data.json",
     "urls": [
       "https://raw.githubusercontent.com/misode/mcmeta/26.2-summary/blocks/data.json",
-      "https://raw.githubusercontent.com/misode/mcmeta/1.21.8-summary/blocks/data.json"
+      "https://raw.githubusercontent.com/misode/mcmeta/1.21.8-summary/blocks/data.json",
+      "https://raw.githubusercontent.com/misode/mcmeta/26.2-data/data/minecraft/tags/block/replaceable.json",
+      "https://raw.githubusercontent.com/misode/mcmeta/1.21.8-data/data/minecraft/tags/block/replaceable.json"
     ],
     "minecraftVersion": "26.2",
     "unionWith": "1.21.8",
@@ -12,6 +14,38 @@
     "license": "MIT (as declared by the misode/mcmeta repository)",
     "note": "Each entry is [legal values per property, the vanilla default state], copied verbatim. The union exists because this app writes schematics for 1.8 through the present and a rename drops a name the older versions still use: chain became iron_chain in 1.21.9, and it is the only block 1.21.8 has that 26.2 does not. Where both snapshots carry a block, the newer one wins. Pinned to releases rather than the summary branch, which tracks snapshots."
   },
+  "replaceableNote": "Vanilla's `#minecraft:replaceable` block tag: what a placement writes over instead of standing on. Taken from the `-data` branch of the same two pinned releases as `blocks` above, which give the identical 29 entries -- so the union is the same list rather than a merge. It moves: 25 entries at 1.21.4 and 29 now, which is the argument against writing it out by hand. No entry is a reference to another tag, so nothing has to be resolved. `minecraft:grass` is deliberately absent and is added by hand in `block_states.ts`: it is the pre-Flattening spelling of short grass, one of the four ids this app offers that the modern registry does not name.",
+  "replaceable": [
+    "minecraft:air",
+    "minecraft:water",
+    "minecraft:lava",
+    "minecraft:short_grass",
+    "minecraft:fern",
+    "minecraft:dead_bush",
+    "minecraft:bush",
+    "minecraft:short_dry_grass",
+    "minecraft:tall_dry_grass",
+    "minecraft:seagrass",
+    "minecraft:tall_seagrass",
+    "minecraft:fire",
+    "minecraft:soul_fire",
+    "minecraft:snow",
+    "minecraft:vine",
+    "minecraft:glow_lichen",
+    "minecraft:resin_clump",
+    "minecraft:light",
+    "minecraft:tall_grass",
+    "minecraft:large_fern",
+    "minecraft:structure_void",
+    "minecraft:void_air",
+    "minecraft:cave_air",
+    "minecraft:bubble_column",
+    "minecraft:warped_roots",
+    "minecraft:nether_sprouts",
+    "minecraft:crimson_roots",
+    "minecraft:leaf_litter",
+    "minecraft:hanging_roots"
+  ],
   "blocks": {
     "acacia_button": [
       {

@@ -62,6 +62,7 @@ import {
   type PackTexture,
   type SchematicNbtResponse,
   type SetNbtRequest,
+  type ScaleRequest,
   type TransformRequest,
 } from "../shared/ipc.js";
 import type { Hotbar, KeyStorageStatus, Provider, Settings } from "../shared/settings.js";
@@ -147,6 +148,8 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.docNbtApply, request) as Promise<EditResponse>,
   setWorldOrigin: (origin: [number, number, number] | null) =>
     ipcRenderer.invoke(IPC.docSetOrigin, origin) as Promise<EditResponse>,
+  scaleRegion: (request: ScaleRequest) =>
+    ipcRenderer.invoke(IPC.docScale, request) as Promise<EditResponse>,
   transformRegion: (request: TransformRequest) =>
     ipcRenderer.invoke(IPC.docTransform, request) as Promise<EditResponse>,
   copyRegion: (region) => ipcRenderer.invoke(IPC.docCopy, region) as Promise<ClipboardResponse>,
@@ -156,6 +159,7 @@ const api: BgptApi = {
   moveRegion: (request: MoveRegionRequest) =>
     ipcRenderer.invoke(IPC.docMove, request) as Promise<EditResponse>,
   regionMesh: (region) => ipcRenderer.invoke(IPC.docRegionMesh, region) as Promise<RegionMeshResponse>,
+  clipboardMesh: () => ipcRenderer.invoke(IPC.docClipboardMesh) as Promise<RegionMeshResponse>,
   getSkyTextures: () => ipcRenderer.invoke(IPC.skyTextures) as Promise<SkyTextures>,
   getAnchorTexture: () => ipcRenderer.invoke(IPC.anchorTexture) as Promise<PackTexture | null>,
   setWorldEditAnchor: (anchor: [number, number, number] | null) =>

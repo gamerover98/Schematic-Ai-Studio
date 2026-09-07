@@ -201,8 +201,12 @@ export const IPC = {
   docPaste: "bgpt:doc:paste",
   /** Pick a region up and put it down elsewhere, as one step. */
   docMove: "bgpt:doc:move",
+  /** Resample the selection by a whole factor. */
+  docScale: "bgpt:doc:scale",
   /** A region's contents as standalone geometry, for the move preview. */
   docRegionMesh: "bgpt:doc:region:mesh",
+  /** The clipboard's contents as standalone geometry, for the paste ghost. */
+  docClipboardMesh: "bgpt:doc:clipboard:mesh",
   /**
    * renderer → main: where the 3D canvas sits in the window.
    *
@@ -1216,12 +1220,37 @@ export interface BlockInspection {
 }
 
 /**
- * Turning or reflecting a region. A quarter turn needs a square footprint and
- * is refused otherwise rather than cropped.
+ * Turning or reflecting a region.
+ *
+ * `to` is where the result's minimum corner lands, and it is what makes the
+ * gizmo's pivot mean something: turning about a corner is turning in place and
+ * then moving, and as two requests Ctrl+Z would take back half a gesture.
+ * Without it the region turns on its own footprint, which a quarter turn can
+ * only do when that footprint is square.
+ *
+ * The mirror axis includes `y`, which is the flip. It is not the other two with
+ * a letter changed -- a vertical reflection turns over `half`, `type`, `face`
+ * and `attachment` and touches none of the horizontal properties.
  */
 export interface TransformRequest {
   region: RegionSpec;
-  transform: { kind: "rotate"; steps: 0 | 1 | 2 | 3 } | { kind: "mirror"; axis: "x" | "z" };
+  transform:
+    | { kind: "rotate"; steps: 0 | 1 | 2 | 3 }
+    | { kind: "mirror"; axis: "x" | "y" | "z" };
+  to?: { x: number; y: number; z: number } | null;
+}
+
+/**
+ * Resampling a region by a whole factor.
+ *
+ * Whole factors only, because anything else is a build with a different number
+ * of blocks in every row. Multiplying is exact; dividing keeps the cell at the
+ * low corner of each group and says in `notes` how many it threw away.
+ */
+export interface ScaleRequest {
+  region: RegionSpec;
+  spec: { kind: "multiply"; factor: number } | { kind: "divide"; factor: number };
+  to?: { x: number; y: number; z: number } | null;
 }
 
 /**
@@ -1243,6 +1272,16 @@ export interface PasteRequest {
   z: number;
   /** Write the copied air too, erasing what it lands on. Off by default. */
   includeAir?: boolean;
+  /**
+   * Leave the document's empty space where it falls, rather than writing it.
+   *
+   * WorldEdit's `//paste -a`, for the half of it this app did not already do:
+   * air is never stored in the clipboard and so never pasted, but with
+   * `barrier` or `water` chosen as empty space those cells are real blocks in
+   * the copy and a paste stamps them over what was standing there. The block
+   * itself is the session's, so only the wish crosses.
+   */
+  skipEmpty?: boolean;
 }
 
 export interface SetNbtRequest {
@@ -1253,10 +1292,37 @@ export interface SetNbtRequest {
   value: string;
 }
 
+/**
+ * An edit that cannot make room below the origin moves nothing, and says so.
+ *
+ * Named rather than written out as a literal at each site, because the point
+ * of `EditSuccess.shift` being required is that every producer answers the
+ * question -- and \"this one cannot\" is an answer worth reading.
+ */
+export const NO_SHIFT: readonly [number, number, number] = [0, 0, 0];
+
 export interface EditSuccess {
   /** Voxels actually changed; 0 means the edit matched nothing. */
   changed: number;
   state: DocumentState;
+  /**
+   * How far the document's own content moved to make room for this edit.
+   *
+   * The grid has no negative index, so growing *below* the origin is done by
+   * moving everything already there up and out of the way. Main has always
+   * done that correctly and has never told anybody: the renderer holds a
+   * selection, a pivot and a stamp, every one of which names a cell, and all
+   * three stayed in the old frame while the blocks moved out from under them.
+   *
+   * Always `>= 0` on every axis, and non-zero only on the axes that went below
+   * zero -- so an edit dragged out past the *high* faces has always worked and
+   * always will, which is why this went unnoticed for so long.
+   *
+   * Required rather than optional, and that is deliberate: a field that can be
+   * left out is a field somebody leaves out, and leaving it out is exactly the
+   * bug. `NO_SHIFT` is what an edit that cannot grow says.
+   */
+  shift: readonly [number, number, number];
   /**
    * A sentence about what the edit did, when the count alone does not say it.
    *
@@ -1729,6 +1795,17 @@ export interface McpStatus {
    * them.
    */
   bridge: string | null;
+  /**
+   * Whether the running server is asking for a token.
+   *
+   * Reality, not the checkbox -- `McpSettings.requireAuth` is the intent, and
+   * this is what the listener is actually doing. They come apart while a
+   * change is in flight, and the direction that matters is the one where the
+   * pane says "required" over a server serving anybody.
+   */
+  requiresAuth: boolean;
+  /** The address it is bound to, so the pane can say what that means. */
+  bindAddress: string;
 }
 
 /** One line of the activity log: what was called, and when. */
@@ -1819,6 +1896,14 @@ export interface BgptApi {
   getDocumentMesh(request: DocumentMeshRequest): Promise<DocumentMeshResponse>;
   moveRegion(request: MoveRegionRequest): Promise<EditResponse>;
   regionMesh(region: RegionSpec): Promise<RegionMeshResponse>;
+  /**
+   * The clipboard's contents as geometry, for the ghost a copy leaves behind.
+   *
+   * Deliberately not `regionMesh` of the selection: a cut has already emptied
+   * that region by the time the ghost is asked for, and even a copy's box moves
+   * away from the blocks -- which is the whole gesture this draws.
+   */
+  clipboardMesh(): Promise<RegionMeshResponse>;
   getSkyTextures(): Promise<SkyTextures>;
   applyEdit(request: EditRequest): Promise<EditResponse>;
   /** Set the schematic's size. Refuses a lossy shrink without `confirmLoss`. */
@@ -1854,6 +1939,7 @@ export interface BgptApi {
   getAnchorTexture(): Promise<PackTexture | null>;
   /** Turn or reflect the selection. Undoable as one step. */
   transformRegion(request: TransformRequest): Promise<EditResponse>;
+  scaleRegion(request: ScaleRequest): Promise<EditResponse>;
   /**
    * Copy the selection out, or cut it. The clipboard lives in main and
    * deliberately outlives the open document, so it can carry between two.
