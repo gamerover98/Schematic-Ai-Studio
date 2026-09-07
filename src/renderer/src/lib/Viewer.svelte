@@ -27,7 +27,18 @@
   } from "../../../shared/ipc.js";
   import type { ResolvedTheme } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
-  import { facingNormal, hoverSource, outlineCentre } from "./block_hover.js";
+import { antialiasSamples, shaderPreset } from "./shader_modes.js";
+  import {
+    entryFace,
+    facingNormal,
+    hasDominantAxis,
+    rayBox,
+    thinBoxes,
+    type ThinBox,
+    hoverSource,
+    outlineCentre,
+    pointerOnHandle,
+  } from "./block_hover.js";
   import {
   cellFade,
   cellRegion,
@@ -46,6 +57,25 @@ import {
   type Axis,
   type Side,
 } from "./selection_drag.js";
+  import {
+    axisPointAt,
+    defaultPivot,
+    dragAlongAxis,
+    gizmoOrigin,
+    regionFits,
+    quartersBetween,
+    regionCentre,
+    ringAngleAt,
+    scaleFromRatio,
+    scaledRegion,
+    transformedRegion,
+    type Cell,
+    type GizmoHandle,
+    type GizmoMode,
+    type RegionTransform,
+    type ScaleSpec,
+    type Vec3,
+  } from "./gizmo.js";
   import { isSpuriousLook } from "./look_filter.js";
   import { api } from "./bridge.svelte.js";
   import { COPLANAR_OFFSET, GRID_DIVISIONS, GRID_SIZE } from "./depth.js";
@@ -55,6 +85,8 @@ import {
     ORBIT_FOV,
     orthoBounds,
     orthoFrustumHeight,
+    pivotDepth,
+    zoomAfterPivot,
   } from "./framing.js";
   import { skyAt, skyDistance } from "./sky.js";
   import { fitShadow } from "./shadow_fit.js";
@@ -118,10 +150,27 @@ import { isTyping } from "./typing.js";
      * face clicked is a side.
      */
     cursorY: number;
+    /**
+     * The line the block runs along and where on it the ray landed, for the
+     * blocks that are picked through a stand-in box rather than off their
+     * own geometry -- see `thinBoxes`. `null` for everything else.
+     *
+     * It is the box that knows: a chain is long on exactly one axis and thin
+     * on the other two. That is what lets `continuedPlacement` carry a run
+     * on in the direction it already goes, rather than always downwards.
+     */
+    run: { axis: "x" | "y" | "z"; at: number } | null;
   }
 
-  /** Placing or removing one block, from the crosshair in flight. */
-  export type BuildAction = "place" | "break";
+  /**
+   * What a click at the crosshair means.
+   *
+   * `"use"` is the right button on its own: **open what is under the
+   * crosshair, or place if it does not open.** Which of the two it turns
+   * out to be is main's to decide -- this component holds no schematic and
+   * cannot know whether that cell is a door.
+   */
+  export type BuildAction = "place" | "break" | "use";
 
   /** One of the six faces of the selection box, as a drag handle. */
   interface FaceHandle {
@@ -176,6 +225,27 @@ import { isTyping } from "./typing.js";
      * projection does not have one -- flying inside it means nothing.
      */
     projection?: Projection;
+    /**
+     * Multisampling, in samples per pixel; `0` draws straight to the canvas.
+     *
+     * The context is created with `antialias: false` and the scene is drawn
+     * into a multisampled render target instead, because the context flag
+     * cannot be changed once the context exists -- an anti-aliasing setting
+     * that only took effect at the next launch would be a control that does
+     * nothing, which is the Stop button's fault in another pane.
+     */
+    antialias?: number;
+    /**
+     * Whether the sky lights the build, as an environment map.
+     *
+     * Needs `sky`: the environment *is* the sky dome, so with it off there is
+     * nothing to gather light from.
+     */
+    globalIllumination?: boolean;
+    /** Frames per second, frame time, triangles and draw calls, in a corner. */
+    showFps?: boolean;
+    /** Which look to draw with. `shader_modes.ts` says what each one means. */
+    shaderMode?: string;
     /**
      * Draw the schematic's own box as a transparent cage.
      *
@@ -311,8 +381,61 @@ import { isTyping } from "./typing.js";
      * needs, and the destination is drawn in blocks rather than in outline.
      */
     ghost?: { chunks: ChunkGeometry[] } | null;
+    /**
+     * Where the ghost stands when no drag is moving it.
+     *
+     * The selection's corner, because that is where a paste lands -- so the
+     * stamp a copy leaves behind is a picture of what Ctrl+V will do, and it
+     * follows the box for as long as it is armed.
+     */
+    ghostAt?: { x: number; y: number; z: number } | null;
     /** The move was confirmed: put the region's corner here. */
     onghostcommit?: (to: { x: number; y: number; z: number }) => void;
+    /**
+     * What the transform gizmo is doing, and what it therefore draws.
+     *
+     * Owned by the app rather than here, because the floating bar and the
+     * keyboard both set it and neither of them is inside this component.
+     */
+    gizmoMode?: GizmoMode;
+    /**
+     * Whether an edit outside the schematic grows it.
+     *
+     * Read here only to *draw* the refusal: with it off, a destination that
+     * leaves the box is outlined in the danger colour while the drag is still
+     * happening. Main decides the actual refusal -- this is the warning, and a
+     * warning shown after the release would be a report.
+     */
+    autoGrow?: boolean;
+    /**
+     * The cell transforms turn and reflect about, or null for the region's
+     * own middle.
+     *
+     * A cell rather than a point so it reads off the same coordinates as
+     * everything else; `gizmoOrigin` puts the gizmo at that cell's centre,
+     * which is what keeps a mirror landing on cell boundaries.
+     */
+    pivot?: Cell | null;
+    /** The pivot was dragged somewhere else. */
+    onpivotchange?: (pivot: Cell) => void;
+    /**
+     * A ring or a mirror button was released: turn or reflect the region.
+     *
+     * The origin travels with it because the pivot is this component's to
+     * report -- main knows regions, not where a gizmo was standing.
+     */
+    ontransform?: (transform: RegionTransform, origin: { x: number; y: number; z: number }) => void;
+    /** A scale handle was released. */
+    onscale?: (spec: ScaleSpec, origin: { x: number; y: number; z: number }) => void;
+    /**
+     * A gizmo drag began, so the app can fetch the region's own geometry.
+     *
+     * Asked for at the press rather than held for every selection: meshing a
+     * region is real work, and a face-handle drag changes the selection many
+     * times a second. Until it arrives the destination is drawn as a box,
+     * which is why the gesture does not wait for it.
+     */
+    ongizmograb?: () => void;
     /**
      * The palette in force, already resolved against the OS preference.
      *
@@ -332,6 +455,10 @@ import { isTyping } from "./typing.js";
     renderScale,
     maxDrawDistance,
     projection = "perspective",
+    antialias = 4,
+    globalIllumination = false,
+    showFps = false,
+    shaderMode = "vanilla",
     showBounds = false,
     voidOpacity = 0.4,
     showGrid,
@@ -360,7 +487,15 @@ import { isTyping } from "./typing.js";
     onpickmaterial,
     onselectiongesture,
     ghost = null,
+    ghostAt = null,
     onghostcommit,
+    gizmoMode = "move",
+    autoGrow = true,
+    pivot = null,
+    onpivotchange,
+    ontransform,
+    onscale,
+    ongizmograb,
   }: Props = $props();
 
   /**
@@ -660,7 +795,23 @@ import { isTyping } from "./typing.js";
    * you are to it.
    */
   function flyToAxis(face: Face): void {
-    if (!camera || !controls) return;
+    if (!camera || !controls || !container) return;
+    /*
+     * What the flight goes round is what is in front of the camera *now*.
+     *
+     * The target and the distance were both kept faithfully before this, and
+     * the result was still wrong, because the target was the centre of the
+     * whole document and nothing had moved it since the file opened. Clicking
+     * `UP` therefore meant \"fly over the middle of the build\" wherever you
+     * happened to be standing, which is the report.
+     *
+     * The pick is at the **centre of the canvas** rather than under the
+     * pointer, because the pointer is over the compass -- it is its own
+     * element, not the scene. That is also the honest reading of \"what is in
+     * front of you\".
+     */
+    const box = container.getBoundingClientRect();
+    repivotAt(box.left + box.width / 2, box.top + box.height / 2);
     const target = controls.target;
     const distance = camera.position.distanceTo(target);
     flight = {
@@ -824,15 +975,6 @@ import { isTyping } from "./typing.js";
   /** Where a grid drag began, or null when no drag is in progress. */
   let gridAnchor: GridCell | null = null;
   /**
-   * The grid cell a plain press landed on, kept until the release decides.
-   *
-   * A placement cannot be committed on the press: the same press might be the
-   * start of an orbit, and the camera keeps the drag. So the cell is
-   * remembered and only used if the pointer never moved.
-   */
-  let placeCandidate: GridCell | null = null;
-
-  /**
    * Where a Shift-drag across the structure began, and where it has reached.
    *
    * Selecting a region used to need the build grid: on the blocks themselves a
@@ -909,6 +1051,42 @@ import { isTyping } from "./typing.js";
    * through the GLB. This needs no pipeline change at all, and is exact for
    * every shape the mesher emits, including the diagonal quads of a cross.
    */
+  /**
+   * The nearest stand-in box the ray meets, if any beats the mesh.
+   *
+   * Bounded by the chunk boxes three.js already keeps for frustum culling,
+   * so a document's worth of chains costs a handful of slab tests rather
+   * than a scan. The meshes carry no transform -- the pipeline emits none --
+   * so object space is world space here, as everywhere else in this file.
+   */
+  function nearestThinBox(
+    ray: THREE.Ray,
+    limit: number,
+  ): { box: ThinBox; face: Face; distance: number } | null {
+    if (!loaded) return null;
+    const origin: [number, number, number] = [ray.origin.x, ray.origin.y, ray.origin.z];
+    const direction: [number, number, number] = [
+      ray.direction.x,
+      ray.direction.y,
+      ray.direction.z,
+    ];
+    let best: { box: ThinBox; face: Face; distance: number } | null = null;
+    for (const child of loaded.children) {
+      const boxes = (child as THREE.Mesh).userData?.thin as ThinBox[] | undefined;
+      if (boxes === undefined || boxes.length === 0) continue;
+      const bounds = (child as THREE.Mesh).geometry.boundingBox;
+      if (bounds !== null && !ray.intersectsBox(bounds)) continue;
+      for (const box of boxes) {
+        const meets = rayBox(origin, direction, box.min, box.max);
+        if (meets === null) continue;
+        if (meets.distance >= limit) continue;
+        if (best !== null && meets.distance >= best.distance) continue;
+        best = { box, face: meets.face, distance: meets.distance };
+      }
+    }
+    return best;
+  }
+
   function pickBlockAt(clientX: number, clientY: number): PickedBlock | null {
     if (!camera || !loaded || !container) return null;
     const rect = container.getBoundingClientRect();
@@ -918,6 +1096,43 @@ import { isTyping } from "./typing.js";
     );
     raycaster.setFromCamera(ndc, camera);
     const hit = raycaster.intersectObject(loaded, true)[0];
+
+    /*
+     * A block too thin to aim at answers first, if it is nearer than whatever
+     * the mesh found.
+     *
+     * This is the collision box the game has and the mesh does not. A chain
+     * is two planes of zero thickness at the middle of its cell, so the ray
+     * went past it and hit the block behind -- and that block took the
+     * placement. From dead underneath a hanging chain the planes are edge-on
+     * and present no area at all, so what answered was the ceiling it hangs
+     * from, and the new chain went into the cell the old one was already in,
+     * or beside it with the ceiling's own axis. See `thinBoxes`.
+     */
+    const thin = nearestThinBox(raycaster.ray, hit?.distance ?? Infinity);
+    if (thin !== null) {
+      const cell = thin.box.cell;
+      const [x, y, z] = cell;
+      const step = FACE_VECTOR[thin.face];
+      const at = raycaster.ray.at(thin.distance, new THREE.Vector3());
+      const along = thin.box.axis;
+      return {
+        x,
+        y,
+        z,
+        extend: false,
+        place: { x: x + step.x, y: y + step.y, z: z + step.z },
+        face: thin.face,
+        cursorY: at.y - y,
+        // Which way it is strung, and how far along it the ray landed --
+        // measured against the cell, like `cursorY`, so a half is a half.
+        run: {
+          axis: (["x", "y", "z"] as const)[along],
+          at: at.getComponent(along) - cell[along],
+        },
+      };
+    }
+
     if (!hit || !hit.face) return null;
 
     // Object space is world space here — the pipeline emits no node transform —
@@ -927,9 +1142,11 @@ import { isTyping } from "./typing.js";
       .clone()
       .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld))
       .normalize();
-    // ...and turned to face the ray, because the material is `DoubleSide` and
-    // a paper-thin element can perfectly well be struck from behind. See
-    // `facingNormal`: this is the azalea's "unremovable air block above".
+    // ...and turned to face the ray. The opaque material is `FrontSide` now, so
+    // the opaque layer can no longer produce a back hit; the two layers that
+    // are still double-sided are raycast by nothing today, which is a fact
+    // about the call sites rather than about the rule. See `facingNormal`:
+    // this is the azalea's "unremovable air block above".
     const normal = new THREE.Vector3(
       ...facingNormal(
         [surface.x, surface.y, surface.z],
@@ -955,7 +1172,47 @@ import { isTyping } from "./typing.js";
      * The dominant axis rather than rounding each component, so a cross quad's
      * diagonal normal yields a real neighbour instead of a diagonal one that
      * shares no face.
+     *
+     * That was true and incomplete. It picks a real neighbour, and where there
+     * is **no** dominant axis it picks an arbitrary one: a cross's planes are
+     * turned 45 degrees, so the two horizontal terms are exactly equal, the
+     * winner is whichever way a `>=` leans, and the vertical term is zero and
+     * can never win at all.
+     *
+     * A chain is what that cost. Its planes run the full height of the cell, so
+     * `boxFaces` drops their `up` and `down` faces for having no area -- there
+     * is no end of a chain to aim at -- and a click from any angle put the next
+     * one in a cell *beside* it, carrying the axis of that sideways face.
+     * `entryFace` answers instead, with the face of the cell the ray came in
+     * through: what a full-cell collision box would give, which is the thing
+     * vanilla has here and this app does not, because it keeps interaction
+     * shapes apart from models and the viewport raycasts the model.
      */
+    if (!hasDominantAxis([normal.x, normal.y, normal.z])) {
+      const face = entryFace(
+        [raycaster.ray.origin.x, raycaster.ray.origin.y, raycaster.ray.origin.z],
+        [raycaster.ray.direction.x, raycaster.ray.direction.y, raycaster.ray.direction.z],
+        { x, y, z },
+      );
+      const step = FACE_VECTOR[face];
+      return {
+        x,
+        y,
+        z,
+        extend: false,
+        place: { x: x + step.x, y: y + step.y, z: z + step.z },
+        face,
+        cursorY: hit.point.y - Math.floor(inside.y),
+        /*
+         * A cross reaches here -- a flower, a sapling, fire -- and it has no
+         * line to carry on. It spans its cell corner to corner on both
+         * horizontal axes, which is exactly why `thinBoxes` leaves it alone
+         * and why nobody stacks one.
+         */
+        run: null,
+      };
+    }
+
     const ax = Math.abs(normal.x);
     const ay = Math.abs(normal.y);
     const az = Math.abs(normal.z);
@@ -981,7 +1238,7 @@ import { isTyping } from "./typing.js";
     // half exactly as one placed on a full block's side would.
     const cursorY = hit.point.y - Math.floor(inside.y);
 
-    return { x, y, z, extend: false, place, face, cursorY };
+    return { x, y, z, extend: false, place, face, cursorY, run: null };
   }
 
   /**
@@ -1047,10 +1304,13 @@ import { isTyping } from "./typing.js";
     const source = hoverSource({
       cameraMode,
       flying,
-      loaded: loaded !== undefined,
+      // `loaded` is declared `| null`, so the old `!== undefined` was always
+      // true and the empty-document guard in `hoverSource` never fired.
+      loaded: loaded !== null,
       pointer: pointerAt,
       overHandle: hovered !== null,
-      dragging: dragged !== null,
+      overGizmo: gizmoHover !== null,
+      dragging: dragged !== null || gizmoDrag !== null,
     });
     if (source.kind === "none") {
       box.visible = false;
@@ -1082,6 +1342,9 @@ import { isTyping } from "./typing.js";
   /** Reused, because this is read on every placement and allocates otherwise. */
   const heading = new THREE.Vector3();
 
+  /** The same, for the pivot -- a second one, so neither can clobber the other. */
+  const pivotForward = new THREE.Vector3();
+
   /**
    * The half of a placement that is about the camera rather than the target.
    *
@@ -1095,6 +1358,7 @@ import { isTyping } from "./typing.js";
       direction: { x: heading.x, y: heading.y, z: heading.z },
       against: picked?.face ?? null,
       cursorY: picked?.cursorY ?? 0,
+      run: picked?.run ?? null,
     };
   }
 
@@ -1109,6 +1373,8 @@ import { isTyping } from "./typing.js";
       direction: { x: heading.x, y: heading.y, z: heading.z },
       against: "up",
       cursorY: 0,
+      // The build grid is a floor, and a floor is not a run of anything.
+      run: null,
     };
   }
 
@@ -1266,6 +1532,19 @@ import { isTyping } from "./typing.js";
   }
 
   /**
+   * The grid cell the crosshair is over, which is what flight points with.
+   *
+   * `pickAtCrosshair`'s arrangement, for its reason: the crosshair is drawn
+   * at the centre of the canvas, so the centre of the canvas is where the
+   * ray has to be cast from.
+   */
+  function gridCellAtCrosshair(): GridCell | null {
+    if (!container) return null;
+    const rect = container.getBoundingClientRect();
+    return gridCellAt(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  }
+
+  /**
    * Follows the pointer across the grid, throttled like the other raycasts.
    *
    * Shares `HIGHLIGHT_INTERVAL_MS` deliberately: this is one more target in the
@@ -1274,14 +1553,40 @@ import { isTyping } from "./typing.js";
    * different answers to "where is the pointer" drawn on top of each other.
    */
   function updateBuildGrid(now: number): void {
-    if (cameraMode !== "orbit" || pointerAt === null || !documentSize) {
+    /*
+     * Drawn in both cameras, and centred on whatever "where am I pointing"
+     * means in each: the pointer in orbit, the crosshair in flight. In orbit
+     * it is an aid for reading where a selection would land; in flight it is
+     * the thing being clicked, because the grid is now the only way to put a
+     * block into an empty schematic.
+     */
+    /*
+     * The patch yields to a handle, for the block outline's reason one layer
+     * across: with the pointer on a gizmo arrow the press moves the region, so
+     * lighting a cell on the floor behind the arrow promises a placement that
+     * is not going to happen. In flight there are no handles to be over.
+     */
+    if (
+      !documentSize ||
+      (cameraMode === "orbit" &&
+        pointerOnHandle({
+          overHandle: hovered !== null,
+          overGizmo: gizmoHover !== null,
+          dragging: dragged !== null || gizmoDrag !== null,
+        }))
+    ) {
       if (gridCell !== null) gridCell = null;
       return;
     }
     if (now - lastGridAt < HIGHLIGHT_INTERVAL_MS) return;
     lastGridAt = now;
 
-    const cell = gridCellAt(pointerAt.x, pointerAt.y);
+    const cell =
+      cameraMode === "fly"
+        ? gridCellAtCrosshair()
+        : pointerAt === null
+          ? null
+          : gridCellAt(pointerAt.x, pointerAt.y);
     const same =
       cell === gridCell ||
       (cell !== null && gridCell !== null && cell.x === gridCell.x && cell.z === gridCell.z);
@@ -1309,7 +1614,7 @@ import { isTyping } from "./typing.js";
       (cellGrid.material as THREE.Material).dispose();
       cellGrid = undefined;
     }
-    if (gridCell === null || cameraMode !== "orbit") return;
+    if (gridCell === null) return;
 
     const centre = gridCell;
     const inside = themeColor("--selection", 0x6ea8fe);
@@ -1358,15 +1663,370 @@ import { isTyping } from "./typing.js";
     updateBuildGridMesh();
   });
 
+  // ---------------------------------------------------------------------------
+  // The transform gizmo
+  // ---------------------------------------------------------------------------
+
+  /**
+   * How big the gizmo is, as a fraction of the distance to the camera.
+   *
+   * Constant on screen rather than in the world, and that is not decoration: in
+   * world units it is unreachable on a selection two hundred blocks across and
+   * covers everything on a selection of two. The arithmetic is in `gizmo.ts`'s
+   * spirit but has to live here, because only this component has the camera.
+   */
+  const GIZMO_REACH = 0.17;
+
+  /** Built at unit reach and scaled per frame, so one geometry serves every size. */
+  let gizmoGroup: THREE.Group | null = null;
+  let gizmoHover = $state<GizmoHandle | null>(null);
+  const gizmoOrigin3 = new THREE.Vector3();
+
+  /**
+   * The handle being dragged, and what the press knew.
+   *
+   * `grab` is a scalar in the units the mode reads -- a world coordinate along
+   * the axis for an arrow, an angle for a ring -- so every mode's move handler
+   * is the same subtraction. `region` is frozen at the press because the
+   * preview is a function of where the drag started, not of what the last frame
+   * decided; recomputing from the live selection would compound.
+   */
+  let gizmoDrag: {
+    handle: GizmoHandle;
+    origin: THREE.Vector3;
+    grab: number;
+    region: Region;
+  } | null = null;
+
+  /** What the drag has decided so far: drawn, not yet written. */
+  let gizmoResult:
+    | { kind: "move"; to: { x: number; y: number; z: number }; region: Region }
+    | { kind: "pivot"; cell: Cell }
+    | { kind: "transform"; transform: RegionTransform; region: Region }
+    | { kind: "scale"; spec: ScaleSpec; region: Region }
+    | null = null;
+
+  let gizmoPreviewBox: THREE.LineSegments | null = null;
+
+  function axisColour(axis: Axis): THREE.Color {
+    const fallback = axis === "x" ? 0xe05260 : axis === "y" ? 0x6fbf5f : 0x5b8dd9;
+    return themeColor(`--axis-${axis}`, fallback);
+  }
+
+  /**
+   * One arrow, ring or cube, pointing down `axis`.
+   *
+   * The shapes are authored along +Y because that is what three's cylinder and
+   * cone do, and turned into place -- the same trick `ensureHandles` uses for
+   * the face plates, and for the same reason: one geometry, three orientations.
+   */
+  function gizmoPart(kind: GizmoHandle["kind"], axis: Axis): THREE.Object3D {
+    const material = new THREE.MeshBasicMaterial({
+      color: axisColour(axis),
+      depthTest: false,
+      transparent: true,
+      opacity: 0.9,
+    });
+    const part = new THREE.Group();
+
+    if (kind === "ring") {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.022, 8, 56), material);
+      // A torus is authored in XY with its axis on +Z; turn that axis onto ours.
+      if (axis === "x") ring.rotation.y = Math.PI / 2;
+      else if (axis === "y") ring.rotation.x = Math.PI / 2;
+      ring.userData.handle = { kind, axis } satisfies GizmoHandle;
+      part.add(ring);
+    } else {
+      const shaft = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.018, 0.018, 0.78, 8),
+        material,
+      );
+      shaft.position.y = 0.39;
+      shaft.userData.handle = { kind, axis } satisfies GizmoHandle;
+      part.add(shaft);
+
+      const tip =
+        kind === "cube"
+          ? new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.13, 0.13), material)
+          : new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.2, 10), material);
+      tip.position.y = kind === "cube" ? 0.85 : 0.88;
+      tip.userData.handle = { kind, axis } satisfies GizmoHandle;
+      part.add(tip);
+
+      if (axis === "x") part.rotation.z = -Math.PI / 2;
+      else if (axis === "z") part.rotation.x = Math.PI / 2;
+    }
+    return part;
+  }
+
+  function disposeGizmo(): void {
+    if (gizmoGroup === null) return;
+    scene?.remove(gizmoGroup);
+    disposeObject(gizmoGroup);
+    gizmoGroup = null;
+  }
+
+  /**
+   * Builds the handles the current mode uses.
+   *
+   * `pivot` draws the same arrows as `move` on purpose: it is the mode where
+   * they carry the gizmo instead of the blocks, and giving it a different shape
+   * would suggest a different gesture when it is the same one.
+   */
+  function buildGizmo(): void {
+    disposeGizmo();
+    if (!scene || selection === null) return;
+    const group = new THREE.Group();
+    group.renderOrder = 1000;
+    const kind: GizmoHandle["kind"] =
+      gizmoMode === "rotate" ? "ring" : gizmoMode === "scale" ? "cube" : "arrow";
+    /*
+     * Three handles, except for rotation, which gets one.
+     *
+     * A quarter turn about X or Z tumbles the build, and Minecraft's block
+     * states cannot follow it: `facing` on a staircase, a door, a bed or a
+     * chest names one of four horizontal directions and has no spelling for
+     * up or down. Turning them would mean writing a state no version of the
+     * game has -- which saves, loads, and misbehaves -- or silently leaving
+     * a fraction of the build facing the wrong way. WorldEdit's own `//rotate`
+     * takes one angle, about the vertical, for the same reason.
+     *
+     * So the ring that is not offered is the one that would be a lie. Mirroring
+     * *is* offered on all three axes, because a vertical reflection has a
+     * spelling for everything it touches: `half`, `type`, `face`, `attachment`.
+     */
+    const axes = gizmoMode === "rotate" ? (["y"] as const) : (["x", "y", "z"] as const);
+    for (const axis of axes) group.add(gizmoPart(kind, axis));
+    gizmoGroup = group;
+    scene.add(group);
+  }
+
+  /**
+   * Where the gizmo stands and how big it is, per frame.
+   *
+   * In flight it is not drawn at all: the pointer is locked, so there is
+   * nothing to grab a handle with, and a widget that cannot be used is worse
+   * than one that is not there.
+   */
+  function updateGizmo(): void {
+    if (gizmoGroup === null) return;
+    if (selection === null || cameraMode !== "orbit" || !camera) {
+      gizmoGroup.visible = false;
+      return;
+    }
+    gizmoGroup.visible = true;
+    const origin = gizmoOrigin(selection, pivot);
+    gizmoOrigin3.set(origin.x, origin.y, origin.z);
+    gizmoGroup.position.copy(gizmoOrigin3);
+
+    const reach =
+      camera instanceof THREE.OrthographicCamera
+        ? ((camera.top - camera.bottom) / camera.zoom) * GIZMO_REACH
+        : camera.position.distanceTo(gizmoOrigin3) * GIZMO_REACH;
+    gizmoGroup.scale.setScalar(Math.max(0.4, reach));
+  }
+
+  /** The handle under the pointer, or null. */
+  function gizmoAt(clientX: number, clientY: number): GizmoHandle | null {
+    if (gizmoGroup === null || !gizmoGroup.visible || !camera || !container) return null;
+    const rect = container.getBoundingClientRect();
+    raycaster.setFromCamera(
+      new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      ),
+      camera,
+    );
+    const hit = raycaster.intersectObjects(gizmoGroup.children, true)[0];
+    const handle = hit?.object.userData.handle as GizmoHandle | undefined;
+    return handle ?? null;
+  }
+
+  /** The scalar a press on this handle reads: a position, or an angle. */
+  function gizmoGrabAt(handle: GizmoHandle, origin: Vec3, ray: Ray): number | null {
+    if (handle.kind === "ring") return ringAngleAt({ origin, axis: handle.axis, ray });
+    camera?.getWorldDirection(heading);
+    return axisPointAt({
+      origin,
+      axis: handle.axis,
+      ray,
+      view: { x: heading.x, y: heading.y, z: heading.z },
+    });
+  }
+
+  /** Draws the box a drag would land on, in the warning colour when it cannot. */
+  function showGizmoPreview(region: Region | null): void {
+    if (gizmoPreviewBox !== null) {
+      scene?.remove(gizmoPreviewBox);
+      gizmoPreviewBox.geometry.dispose();
+      (gizmoPreviewBox.material as THREE.Material).dispose();
+      gizmoPreviewBox = null;
+    }
+    if (region === null || !scene) return;
+    const size = new THREE.Vector3(
+      region.maxX - region.minX + 1,
+      region.maxY - region.minY + 1,
+      region.maxZ - region.minZ + 1,
+    );
+    /*
+     * Red when the destination leaves the schematic and automatic resizing is
+     * off, because then the release will be refused -- said during the gesture
+     * rather than after it, which is the whole difference between a warning
+     * and a report.
+     */
+    const beyond =
+      !autoGrow &&
+      documentSize !== null &&
+      !regionFits(region, {
+        width: documentSize[0],
+        height: documentSize[1],
+        length: documentSize[2],
+      });
+    const box = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+      new THREE.LineBasicMaterial({
+        color: beyond ? themeColor("--danger", 0xe05260) : themeColor("--selection", 0x6ea8fe),
+        depthTest: false,
+      }),
+    );
+    box.position.set(
+      region.minX + size.x / 2,
+      region.minY + size.y / 2,
+      region.minZ + size.z / 2,
+    );
+    box.renderOrder = 999;
+    gizmoPreviewBox = box;
+    scene.add(box);
+  }
+
+  /** One frame of a gizmo drag: decide, and draw what was decided. */
+  function gizmoDragTo(clientX: number, clientY: number): void {
+    if (gizmoDrag === null) return;
+    const ray = rayThrough(clientX, clientY);
+    if (ray === null) return;
+    const { handle, region } = gizmoDrag;
+    const origin = {
+      x: gizmoDrag.origin.x,
+      y: gizmoDrag.origin.y,
+      z: gizmoDrag.origin.z,
+    };
+    camera?.getWorldDirection(heading);
+    const view = { x: heading.x, y: heading.y, z: heading.z };
+
+    if (handle.kind === "ring") {
+      const angle = ringAngleAt({ origin, axis: handle.axis, ray });
+      if (angle === null) return;
+      const steps = quartersBetween(gizmoDrag.grab, angle);
+      const transform: RegionTransform = { kind: "rotate", axis: handle.axis, steps };
+      gizmoResult = steps === 0 ? null : { kind: "transform", transform, region };
+      showGizmoPreview(steps === 0 ? region : transformedRegion(region, origin, transform));
+      return;
+    }
+
+    if (handle.kind === "cube") {
+      const along = axisPointAt({ origin, axis: handle.axis, ray, view });
+      if (along === null || gizmoDrag.grab === 0) return;
+      const start = gizmoDrag.grab - originComponent(origin, handle.axis);
+      if (Math.abs(start) < 1e-6) return;
+      const spec = scaleFromRatio((along - originComponent(origin, handle.axis)) / start);
+      gizmoResult = spec === null ? null : { kind: "scale", spec, region };
+      showGizmoPreview(spec === null ? region : scaledRegion(region, origin, spec));
+      return;
+    }
+
+    const delta = dragAlongAxis({ origin, axis: handle.axis, ray, view, grab: gizmoDrag.grab });
+    if (delta === null) return;
+    const step = { x: 0, y: 0, z: 0 };
+    step[handle.axis] = delta;
+
+    if (gizmoMode === "pivot") {
+      /*
+       * The one mode that moves nothing. It writes the pivot cell and leaves
+       * the region alone, which is why it draws no destination box -- there is
+       * no destination, and drawing the region where it already is would read
+       * as a move that had not taken.
+       */
+      const base = pivot ?? defaultPivot(region);
+      gizmoResult = {
+        kind: "pivot",
+        cell: { x: base.x + step.x, y: base.y + step.y, z: base.z + step.z },
+      };
+      gizmoOrigin3.set(
+        gizmoDrag.origin.x + step.x,
+        gizmoDrag.origin.y + step.y,
+        gizmoDrag.origin.z + step.z,
+      );
+      gizmoGroup?.position.copy(gizmoOrigin3);
+      return;
+    }
+
+    const to = { x: region.minX + step.x, y: region.minY + step.y, z: region.minZ + step.z };
+    gizmoResult = delta === 0 ? null : { kind: "move", to, region };
+    const moved: Region = {
+      minX: to.x,
+      minY: to.y,
+      minZ: to.z,
+      maxX: to.x + (region.maxX - region.minX),
+      maxY: to.y + (region.maxY - region.minY),
+      maxZ: to.z + (region.maxZ - region.minZ),
+    };
+    showGizmoPreview(moved);
+    ghostGroup?.position.set(to.x, to.y, to.z);
+  }
+
+  function originComponent(origin: Vec3, axis: Axis): number {
+    return axis === "x" ? origin.x : axis === "y" ? origin.y : origin.z;
+  }
+
+  /** Ends the drag, whatever it decided, and puts the camera back. */
+  function endGizmoDrag(commit: boolean): void {
+    const result = gizmoResult;
+    const origin = gizmoDrag === null ? null : { ...gizmoDrag.origin };
+    gizmoDrag = null;
+    gizmoResult = null;
+    showGizmoPreview(null);
+    // Whatever the drag decided, the ghost goes back to its home: a cancelled
+    // one belongs where it was standing, and a committed one is about to be
+    // given a new home by the app on the very next line.
+    ghostGroup?.position.set(ghostHome.x, ghostHome.y, ghostHome.z);
+    if (controls) controls.enabled = cameraMode !== "fly";
+    onselectiongesture?.("end");
+    if (!commit || result === null || origin === null) return;
+    if (result.kind === "move") onghostcommit?.(result.to);
+    else if (result.kind === "pivot") onpivotchange?.(result.cell);
+    else if (result.kind === "transform") ontransform?.(result.transform, origin);
+    else onscale?.(result.spec, origin);
+  }
+
   /** Refreshes the hovered face, throttled like the crosshair highlight. */
   function updateHover(now: number): void {
-    if (dragged !== null) return;
-    if (cameraMode !== "orbit" || pointerAt === null || !handles?.visible) {
+    if (dragged !== null || gizmoDrag !== null) return;
+    if (cameraMode !== "orbit" || pointerAt === null) {
       if (hovered !== null) hovered = null;
+      if (gizmoHover !== null) gizmoHover = null;
       return;
     }
     if (now - lastHoverAt < HIGHLIGHT_INTERVAL_MS) return;
     lastHoverAt = now;
+
+    /*
+     * The gizmo is asked first and wins, because it is drawn on top of the
+     * plates and a press decides the same way -- two answers to "what is under
+     * the pointer" that disagreed would put a resize cursor over a handle that
+     * moves the region.
+     */
+    const handle = gizmoAt(pointerAt.x, pointerAt.y);
+    if (handle?.axis !== gizmoHover?.axis || handle?.kind !== gizmoHover?.kind) {
+      gizmoHover = handle;
+    }
+    if (handle !== null) {
+      if (hovered !== null) hovered = null;
+      return;
+    }
+    if (!handles?.visible) {
+      if (hovered !== null) hovered = null;
+      return;
+    }
 
     const face = faceAt(pointerAt.x, pointerAt.y);
     const same =
@@ -1693,18 +2353,31 @@ import { isTyping } from "./typing.js";
    * the light is, and how much of the sky-light channel counts. Splitting
    * them into separate effects would be four chances for them to disagree.
    */
+  /**
+   * What the hour asked for, before the shader mode has its say.
+   *
+   * Kept apart because the two are different questions and both write the
+   * same two lights: `applySky` decides how bright the sun is at this time of
+   * day, and the preset decides how much of the scene's light is directional
+   * at all. A preset that wrote intensities outright would be a second
+   * opinion about what time it is, and whichever ran last would win.
+   */
+  let sunBase = 1;
+  let ambientBase = 0.9;
+
   function applySky(): void {
     const state = skyAt(timeOfDay, (sunAzimuth * 180) / Math.PI);
     daylight.value = sky ? state.daylight : 1;
+    // The sky moved, so the environment built from it is out of date.
+    environmentStale = true;
 
     if (!sky) {
       // The manual light, which is what the two angle sliders are for.
       setSunFromAngles(sunAzimuth, sunElevation);
-      if (sun) {
-        sun.color.setRGB(1, 1, 1);
-        sun.intensity = 1;
-      }
-      if (ambient) ambient.intensity = 0.9;
+      if (sun) sun.color.setRGB(1, 1, 1);
+      sunBase = 1;
+      ambientBase = 0.9;
+      applyLook();
       if (scene) scene.background = themeColor("--viewport-bg", 0x0b0f14);
       placeShadow();
       return;
@@ -1718,10 +2391,10 @@ import { isTyping } from "./typing.js";
       const from = state.night ? state.moonDirection : state.sunDirection;
       sun.position.set(from[0] * 2000, from[1] * 2000, from[2] * 2000);
       sun.color.setRGB(state.lightColor[0], state.lightColor[1], state.lightColor[2]);
-      sun.intensity = state.lightIntensity;
+      sunBase = state.lightIntensity;
     }
     if (ambient) {
-      ambient.intensity = 0.35 + 0.55 * state.daylight;
+      ambientBase = 0.35 + 0.55 * state.daylight;
       ambient.color.setRGB(state.zenith[0], state.zenith[1], state.zenith[2]);
       ambient.groundColor.setRGB(0.1, 0.11, 0.14);
     }
@@ -1755,8 +2428,49 @@ import { isTyping } from "./typing.js";
     // set would paint over nothing but would be a second answer to the same
     // question, and the first one to be wrong after a theme change.
     if (scene) scene.background = null;
+    applyLook();
     // Last, because it reads where the light ended up.
     placeShadow();
+  }
+
+  /**
+   * How far the hemisphere light gives way when the sky is lighting the
+   * build for real. Not zero: the environment reaches only what the baked sky
+   * light lets it, and a cell the flood never reached would go black.
+   */
+  const GI_AMBIENT = 0.45;
+
+  /**
+   * The shader mode, applied to the renderer and to the two lights.
+   *
+   * The lights are *scaled*, not set: `applySky` owns what the hour asks for
+   * and this owns how much of it is directional.
+   *
+   * The hemisphere light also gives way to global illumination when that is
+   * on, and that is not a taste: a hemisphere light is a cheap stand-in for
+   * exactly the sky bounce the environment map then supplies for real, so
+   * leaving it at full strength counts the sky twice.
+   */
+  function applyLook(): void {
+    const preset = shaderPreset(shaderMode);
+    if (sun) sun.intensity = sunBase * preset.sun;
+    if (ambient) {
+      ambient.intensity = ambientBase * preset.ambient * (usingEnvironment() ? GI_AMBIENT : 1);
+    }
+    if (renderer) {
+      renderer.toneMapping =
+        preset.toneMapping === "aces" ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
+      renderer.toneMappingExposure = preset.exposure;
+    }
+    for (const target of [material, blended, voidMaterial]) {
+      // A uniform, so no recompile: `envMapIntensity` is read per fragment.
+      if (target) target.envMapIntensity = preset.environment;
+    }
+  }
+
+  /** Whether the sky is actually lighting the build right now. */
+  function usingEnvironment(): boolean {
+    return globalIllumination && sky;
   }
 
   /**
@@ -1896,10 +2610,94 @@ import { isTyping } from "./typing.js";
       MIDDLE: THREE.MOUSE.DOLLY,
       RIGHT: THREE.MOUSE.ROTATE,
     };
+    /*
+     * The wheel pulls the camera towards the pointer, and takes the pivot
+     * with it.
+     *
+     * Left at three's default of `false` the dolly is a pure change of radius
+     * along the camera-to-target line: it never moves the target. So the pivot
+     * was written exactly twice in the app's life -- the box centre when a
+     * document opens, and 24 blocks ahead when flight hands back -- and every
+     * rotation in between swung on `max(dimension) * 1.6`, which on a 512-block
+     * build is 819. That is the whole of \"the orbit fixes on the distance
+     * rather than on what is in front of you\".
+     */
+    next.zoomToCursor = true;
+    /*
+     * And a floor under it, which three leaves at zero.
+     *
+     * A pivot that moves makes reaching it easy rather than theoretical, and
+     * at zero distance there is nothing left to rotate about: the view sticks
+     * and the only way out is a pan. Small enough to still get inside a block.
+     */
+    next.minDistance = 0.25;
     next.target.copy(target);
     next.enabled = cameraMode !== "fly";
     next.update();
     return next;
+  }
+
+  /**
+   * Puts the orbit's pivot on what is in front of the camera.
+   *
+   * Rotating turns about `controls.target`, and until now that target was the
+   * **centre of the document** for the whole of a session: `documentFraming`
+   * writes it when a file opens, and nothing but a pan moved it afterwards. On
+   * a large build that means every rotation swings on the radius the whole
+   * structure was framed at, so reaching a far corner is a fight -- and it is
+   * why clicking `UP` on the compass flew over the middle of the build rather
+   * than over what was being looked at.
+   *
+   * The source, in order, and each step is a fallback rather than a preference:
+   * the block under the ray, then the build grid's cell where there is no
+   * block, then nothing at all -- which leaves the target exactly where it was
+   * and is therefore the behaviour this replaces, unchanged, for the case it
+   * cannot improve on.
+   *
+   * **Only the depth of what was picked is taken, never its position**, and
+   * without that the camera *snaps*. OrbitControls re-aims at
+   * `controls.target` on every `update()`, so a target set to the cell that
+   * was actually under the pointer -- off to one side, by however far the
+   * pointer was from the middle -- turns the view to face it before the drag
+   * that asked for it has started. Reported exactly that way. Taking the
+   * depth alone leaves the target on the axis the camera is already looking
+   * down, so `lookAt` has nothing to do: nothing moves, and what changes is
+   * the radius, which is the thing being asked for. `pivotDepth` is the
+   * arithmetic, and it is what an editor's "auto depth" does.
+   *
+   * **Orthographic needs the zoom compensating.** `applyProjection` derives the
+   * frustum from the distance to the target and its comment leans on that
+   * distance not moving; moving the pivot with the camera still would resize
+   * the build on screen. `zoomAfterPivot` is the arithmetic and `applyProjection`
+   * has to run again immediately, or the sides are left at the old distance
+   * while the zoom is at the new one.
+   */
+  function repivotAt(clientX: number, clientY: number): void {
+    if (!camera || !controls || !container) return;
+    const block = pickBlockAt(clientX, clientY);
+    const cell = block ?? gridCellAt(clientX, clientY);
+    if (cell === null) return;
+    const at = outlineCentre(cell);
+
+    camera.getWorldDirection(pivotForward);
+    const after = pivotDepth(
+      [camera.position.x, camera.position.y, camera.position.z],
+      [pivotForward.x, pivotForward.y, pivotForward.z],
+      [at.x, at.y, at.z],
+    );
+    // Behind the camera, or on top of it. The pointer's ray leans away from
+    // the view axis, so a cell at the very edge of a wide field of view can
+    // be a great deal nearer along it than it is along the ray -- and a
+    // pivot at zero is a rotation with nothing to turn about.
+    if (!(after > controls.minDistance)) return;
+
+    const before = camera.position.distanceTo(controls.target);
+    controls.target.copy(camera.position).addScaledVector(pivotForward, after);
+    if (camera === ortho && ortho !== undefined) {
+      ortho.zoom = zoomAfterPivot(ortho.zoom, before, after);
+      applyProjection((container.clientWidth || 1) / (container.clientHeight || 1));
+    }
+    controls.update();
   }
 
   /**
@@ -1940,8 +2738,147 @@ import { isTyping } from "./typing.js";
     const height = container.clientHeight || 1;
     applyProjection(width / height);
     renderer.setSize(width, height, false);
+    sizeAaTarget();
     reportRect();
   }
+
+  /**
+   * The multisampled target the scene is drawn into, when there is one.
+   *
+   * A context's `antialias` flag cannot be changed once the context exists,
+   * so a setting built on it could only take effect at the next launch --
+   * a control that does nothing while you look at it. WebGL2 can resolve a
+   * multisampled *render target* instead, which three does on its own when
+   * the target is unbound, so this is a live setting at the cost of one
+   * fullscreen copy per frame.
+   *
+   * `null` at zero samples, and then the scene is drawn straight to the
+   * canvas exactly as it always was.
+   */
+  let aaTarget: THREE.WebGLRenderTarget | null = null;
+  let aaScene: THREE.Scene | null = null;
+  let aaCamera: THREE.OrthographicCamera | null = null;
+  let aaQuad: THREE.Mesh | null = null;
+
+  /**
+   * Sized in *drawing buffer* pixels, not CSS ones.
+   *
+   * `maxDpr` and `renderScale` are already folded into the renderer's pixel
+   * ratio, and a target at CSS size would quietly undo both.
+   */
+  function sizeAaTarget(): void {
+    if (!renderer || aaTarget === null) return;
+    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    aaTarget.setSize(Math.max(1, size.x), Math.max(1, size.y));
+  }
+
+  function disposeAaTarget(): void {
+    aaTarget?.dispose();
+    aaTarget = null;
+  }
+
+  /**
+   * Builds or drops the target when the level changes.
+   *
+   * The quad and its camera are built once and kept: they cost nothing, and
+   * rebuilding them on every change is one more thing to get wrong.
+   */
+  function applyAntialias(samples: number): void {
+    if (!renderer) return;
+    if (samples <= 0) {
+      disposeAaTarget();
+      return;
+    }
+    if (aaTarget !== null && aaTarget.samples === samples) return;
+    disposeAaTarget();
+    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    aaTarget = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
+      samples,
+      depthBuffer: true,
+      stencilBuffer: false,
+    });
+    if (aaScene === null) {
+      aaScene = new THREE.Scene();
+      aaCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      /*
+       * `toneMapped` is deliberately left at its default, which is on.
+       *
+       * three applies tone mapping only when it is drawing to the *canvas*,
+       * so with a target bound the scene pass emits linear colour and this
+       * copy is where the curve belongs. With no target the scene pass does
+       * it itself. Either way it happens exactly once, which is the property
+       * that has to hold: turning anti-aliasing on must not change how the
+       * picture is graded.
+       */
+      aaQuad = new THREE.Mesh(
+        new THREE.PlaneGeometry(2, 2),
+        new THREE.MeshBasicMaterial({ depthTest: false, depthWrite: false }),
+      );
+      aaScene.add(aaQuad);
+    }
+    if (aaQuad) (aaQuad.material as THREE.MeshBasicMaterial).map = aaTarget.texture;
+  }
+
+  /**
+   * The sky, convolved into an environment map, so a surface takes the
+   * colour of the sky it faces.
+   *
+   * It multiplies into the baked sky light rather than replacing it, and that
+   * falls out of `shadeWithBakedLight` rather than being arranged: the
+   * injection dims `diffuseColor` by the sky-light channel *before* three
+   * computes the indirect contribution from the environment, so a sealed room
+   * takes none of it. The flood fill still decides what the sky can reach and
+   * this decides what colour it is when it gets there.
+   */
+  let pmrem: THREE.PMREMGenerator | null = null;
+  let environment: THREE.WebGLRenderTarget | null = null;
+  let environmentStale = true;
+  let environmentAt = 0;
+
+  /**
+   * How often the environment may be rebuilt, in milliseconds.
+   *
+   * The sky moves continuously with the daylight cycle and a cube render plus
+   * a PMREM convolution is not a per-frame cost. A second is far below what
+   * the eye reads as a step in a sky that takes twenty minutes to cross.
+   */
+  const ENVIRONMENT_MS = 1000;
+
+  function dropEnvironment(): void {
+    environment?.dispose();
+    environment = null;
+    if (scene) scene.environment = null;
+  }
+
+  function buildEnvironment(): void {
+    if (!renderer || !scene || !skyScene || !skyGroup) return;
+    if (pmrem === null) pmrem = new THREE.PMREMGenerator(renderer);
+    /*
+     * The dome rides with the camera and is scaled to the far plane, both of
+     * which are written every frame. `fromScene` renders from the origin, so
+     * it is put back there at a size that comfortably contains it first; the
+     * next frame moves it again.
+     */
+    skyGroup.position.set(0, 0, 0);
+    skyGroup.scale.setScalar(10);
+    const built = pmrem.fromScene(skyScene, 0, 0.1, 100);
+    environment?.dispose();
+    environment = built;
+    scene.environment = built.texture;
+    environmentStale = false;
+    environmentAt = performance.now();
+  }
+
+  /**
+   * What the counter shows, rewritten twice a second rather than per frame.
+   *
+   * A `$state` written at 60Hz would run Svelte's effects at 60Hz to move a
+   * number nobody can read that fast.
+   */
+  let fps = $state<{ fps: number; ms: number; triangles: number; calls: number } | null>(null);
+  const FPS_MS = 500;
+  let fpsFrames = 0;
+  let fpsAt = 0;
 
   /**
    * Gives the active camera the frustum this viewport's shape asks for.
@@ -2026,7 +2963,18 @@ import { isTyping } from "./typing.js";
 
   onMount(() => {
     try {
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      /*
+       * `antialias: false`, deliberately, and the multisampling is done on a
+       * render target instead. The flag is fixed for the life of the context,
+       * so a setting built on it could only ever apply at the next launch.
+       */
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+      /*
+       * The counter reports a whole frame, and a frame is three or four
+       * renders. `info` resets itself at the start of every one of them
+       * unless told not to, so it would otherwise report the compass.
+       */
+      renderer.info.autoReset = false;
       scene = new THREE.Scene();
       scene.background = themeColor("--viewport-bg", 0x0b0f14);
 
@@ -2137,14 +3085,32 @@ import { isTyping } from "./typing.js";
         } else {
           controls?.update();
         }
+        // Before the outline and the grid, both of which read what it writes:
+        // after them, each would be acting on the previous frame's hover.
+        updateHover(performance.now());
         updateBlockHighlight(performance.now());
         // Clocked on wall time, not on frames: the game states its animations
         // in ticks of 50ms, and a 144Hz display must not run the water four
         // times too fast.
         playAnimations(performance.now());
-        updateHover(performance.now());
         updateBuildGrid(performance.now());
+        // Every frame rather than on the throttle: the gizmo is sized from the
+        // distance to the camera, so it would visibly swell and shrink in steps
+        // during an orbit if it only kept up twenty times a second.
+        updateGizmo();
         if (renderer && scene && camera) {
+          renderer.info.reset();
+          /*
+           * Rebuilt here rather than in an effect, and before anything is
+           * drawn: `fromScene` binds render targets of its own, which is not
+           * something to do in the middle of drawing into one.
+           */
+          if (globalIllumination && sky && skyScene) {
+            if (environmentStale && performance.now() - environmentAt > ENVIRONMENT_MS) {
+              buildEnvironment();
+            }
+          }
+          if (aaTarget !== null) renderer.setRenderTarget(aaTarget);
           /*
            * The sky first, then the depth buffer cleared, then the world.
            *
@@ -2186,6 +3152,36 @@ import { isTyping } from "./typing.js";
             renderer.render(scene, camera);
           }
           drawCompass();
+          /*
+           * ...and the whole frame, resolved, onto the canvas. The compass is
+           * inside it: it is part of the picture, and a pass that landed on
+           * the canvas after the copy would be the one unaliased thing on
+           * screen.
+           */
+          if (aaTarget !== null && aaScene && aaCamera) {
+            renderer.setRenderTarget(null);
+            const wasAutoClear = renderer.autoClear;
+            renderer.autoClear = false;
+            renderer.render(aaScene, aaCamera);
+            renderer.autoClear = wasAutoClear;
+          }
+          fpsFrames += 1;
+          const now = performance.now();
+          if (fpsAt === 0) fpsAt = now;
+          if (showFps && now - fpsAt >= FPS_MS) {
+            const seconds = (now - fpsAt) / 1000;
+            fps = {
+              fps: Math.round(fpsFrames / seconds),
+              ms: Math.round(((now - fpsAt) / fpsFrames) * 10) / 10,
+              triangles: renderer.info.render.triangles,
+              calls: renderer.info.render.calls,
+            };
+            fpsFrames = 0;
+            fpsAt = now;
+          } else if (!showFps) {
+            fpsFrames = 0;
+            fpsAt = now;
+          }
         }
       };
       animate();
@@ -2231,6 +3227,33 @@ import { isTyping } from "./typing.js";
             : null;
 
         /*
+         * The right button rotates, so this is the moment to decide what it
+         * rotates *about*.
+         *
+         * Reseated at the press rather than followed continuously: the pivot
+         * has to hold still for the whole drag, or the camera would chase
+         * whatever the rotation swung into view. It moves the pivot and not
+         * the camera, so nothing on screen jumps -- what changes is the centre
+         * the next drag turns around.
+         *
+         * `pointerOnHandle` is the same rule the block outline and the build
+         * grid already ask: a press that belongs to a handle is not a press on
+         * what is behind it. A flight owns the camera outright while it runs.
+         */
+        if (
+          event.button === 2 &&
+          cameraMode === "orbit" &&
+          flight === null &&
+          !pointerOnHandle({
+            overHandle: hovered !== null,
+            overGizmo: gizmoHover !== null,
+            dragging: gizmoDrag !== null,
+          })
+        ) {
+          repivotAt(event.clientX, event.clientY);
+        }
+
+        /*
          * A press on a face handle takes over the gesture.
          *
          * Disabling OrbitControls is not optional here: the left button is
@@ -2239,8 +3262,47 @@ import { isTyping } from "./typing.js";
          * gesture alive if the pointer leaves the canvas mid-drag.
          */
         // A move owns the pointer while it lasts; the camera keeps the drag.
-        if (ghost !== null) return;
         if (event.button !== 0 || cameraMode !== "orbit") return;
+
+        /*
+         * A gizmo handle takes the press, and takes it **without Shift**.
+         *
+         * Every other selection gesture here needs Shift because it starts on
+         * empty space or on the build, where a plain press is already the
+         * camera's -- `LEFT` is `THREE.MOUSE.PAN`. A handle is not: it is a
+         * thing drawn for exactly this, so pressing it can only mean this, and
+         * the same argument the compass's own button makes.
+         *
+         * `draggedThisGesture` is what stops a press that never moved from
+         * falling through to `clickIntent` and collapsing the selection to
+         * whatever block is behind the handle.
+         */
+        const handle = selection === null ? null : gizmoAt(event.clientX, event.clientY);
+        if (handle !== null) {
+          const origin = gizmoOrigin(selection as Region, pivot);
+          const ray = rayThrough(event.clientX, event.clientY);
+          const grab = ray === null ? null : gizmoGrabAt(handle, origin, ray);
+          if (grab !== null) {
+            gizmoDrag = {
+              handle,
+              origin: new THREE.Vector3(origin.x, origin.y, origin.z),
+              grab,
+              region: selection as Region,
+            };
+            gizmoResult = null;
+            draggedThisGesture = true;
+            if (controls) controls.enabled = false;
+            try {
+              (event.target as Element).setPointerCapture(event.pointerId);
+            } catch {
+              // Capture is a nicety; the drag still works without it.
+            }
+            if (gizmoMode === "move") ongizmograb?.();
+            onselectiongesture?.("start");
+            event.preventDefault();
+          }
+          return;
+        }
 
         /*
          * Selecting takes Shift; a plain drag belongs to the camera.
@@ -2252,19 +3314,18 @@ import { isTyping } from "./typing.js";
          * the button away from OrbitControls — which is exactly why they cannot
          * also be the default.
          */
-        if (!event.shiftKey) {
-          /*
-           * One thing survives without Shift: a stationary click on the build
-           * grid still places a block. That gesture is how an empty schematic
-           * gets its first block, and it cannot be confused with an orbit —
-           * an orbit moves the pointer, and this only fires when it did not.
-           * The camera keeps the drag either way, so nothing is taken.
-           */
-          const cell = gridCellAt(event.clientX, event.clientY);
-          placeCandidate =
-            cell !== null && pickBlockAt(event.clientX, event.clientY) === null ? cell : null;
-          return;
-        }
+        /*
+         * A plain press is the camera's, and nothing else.
+         *
+         * It used to place a block: a stationary click on the build grid, which
+         * was the only way an empty schematic got its first one. That cost more
+         * than it bought -- the grid reaches hundreds of blocks past the edge
+         * and every framing click that happened not to move landed a block in
+         * it. Placing is the flight camera's job now, where the crosshair says
+         * exactly which cell is meant, and starting an empty schematic is a
+         * selection and a fill.
+         */
+        if (!event.shiftKey) return;
 
         const face = faceAt(event.clientX, event.clientY);
         if (face === null) {
@@ -2319,30 +3380,13 @@ import { isTyping } from "./typing.js";
         event.preventDefault();
       };
 
-      /**
-       * Where a move would put the region, from whatever is under the pointer.
-       *
-       * A block's *outside* face rather than the block itself, so hovering the
-       * top of a wall lands the ghost on top of it rather than inside it —
-       * the same cell `onbuild` places into. The build grid answers when
-       * nothing solid is under the pointer, which is how a region gets moved
-       * across open ground.
-       */
-      const ghostTarget = (clientX: number, clientY: number) => {
-        const hit = pickBlockAt(clientX, clientY);
-        if (hit?.place) return moveDestination(hit.place);
-        const cell = gridCellAt(clientX, clientY);
-        return cell === null ? null : moveDestination(cell);
-      };
-
       const onPointerMove = (event: PointerEvent) => {
         pointerAt = { x: event.clientX, y: event.clientY };
-        if (ghost !== null) {
-          const to = ghostTarget(event.clientX, event.clientY);
-          if (to !== null) {
-            ghostAt = to;
-            ghostGroup?.position.set(to.x, to.y, to.z);
-          }
+        // The gizmo owns the pointer for the whole of its drag. Not throttled,
+        // for `dragTo`'s reason: a handle that lags the cursor by 50ms reads as
+        // a handle that is not attached to anything.
+        if (gizmoDrag !== null) {
+          gizmoDragTo(event.clientX, event.clientY);
           return;
         }
         if (dragged !== null) {
@@ -2381,8 +3425,17 @@ import { isTyping } from "./typing.js";
       const onPointerUp = (event: PointerEvent) => {
         const start = downAt;
         downAt = null;
-        const candidate = placeCandidate;
-        placeCandidate = null;
+
+        if (gizmoDrag !== null) {
+          try {
+            (event.target as Element).releasePointerCapture(event.pointerId);
+          } catch {
+            // Nothing captured; nothing to release.
+          }
+          endGizmoDrag(event.button === 0);
+          draggedThisGesture = false;
+          return;
+        }
         const stayed =
           start !== null && Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 4;
 
@@ -2422,14 +3475,6 @@ import { isTyping } from "./typing.js";
             draggedThisGesture = false;
             return;
           }
-        }
-
-        // A plain, stationary click on the build grid: put a block there.
-        if (candidate !== null && gridAnchor === null) {
-          if (stayed) {
-            ongridplace?.({ x: candidate.x, y: candidate.y, z: candidate.z }, lookAtGrid());
-          }
-          return;
         }
 
         if (gridAnchor !== null) {
@@ -2489,22 +3534,36 @@ import { isTyping } from "./typing.js";
           }
           if (!onbuild) return;
           const target = pickAtCrosshair();
-          if (!target) return;
+          if (!target) {
+            /*
+             * Nothing under the crosshair, so the build grid answers instead.
+             * This is the whole of how an empty schematic gets its first block,
+             * now that a plain orbit click no longer places one -- and it is the
+             * right camera for it, because the crosshair names one cell rather
+             * than wherever the pointer happened to be resting.
+             *
+             * The right button only. Breaking air is nothing, and `use` on an
+             * empty cell is nothing either.
+             */
+            if (event.button !== 2) return;
+            const cell = gridCellAtCrosshair();
+            if (cell !== null) ongridplace?.({ x: cell.x, y: cell.y, z: cell.z }, lookAtGrid());
+            return;
+          }
           if (event.button === 0) {
             onbuild("break", { x: target.x, y: target.y, z: target.z }, lookAt(target));
           } else if (event.button === 2 && target.place) {
-            onbuild("place", target.place, lookAt(target));
+            /*
+             * Shift places, the right button alone uses -- which is the game's
+             * own split, and Shift is already the descend key here, so
+             * sneak-to-place costs nothing and collides with nothing.
+             *
+             * Ctrl is deliberately not consulted: with the pointer locked it
+             * belongs to the camera, and this is a mouse button rather than
+             * one of the shortcuts that rule is about.
+             */
+            onbuild(event.shiftKey ? "place" : "use", target.place, lookAt(target));
           }
-          return;
-        }
-        /*
-         * A stationary click puts the region down, and nothing else here runs
-         * while a move is in flight: the panel and Escape are the two ways out
-         * of it, and a click that also re-selected would end the gesture by
-         * throwing away the thing being moved.
-         */
-        if (ghost !== null) {
-          if (stayed && event.button === 0) onghostcommit?.({ ...ghostAt });
           return;
         }
         if (!start || !onpick || !stayed) return;
@@ -2578,6 +3637,13 @@ import { isTyping } from "./typing.js";
         }
         fly?.dispose();
         controls?.dispose();
+        disposeAaTarget();
+        if (aaQuad) {
+          aaQuad.geometry.dispose();
+          (aaQuad.material as THREE.Material).dispose();
+        }
+        environment?.dispose();
+        pmrem?.dispose();
         renderer?.dispose();
       };
     } catch (err) {
@@ -2587,6 +3653,32 @@ import { isTyping } from "./typing.js";
   });
 
   // --- reactive prop application -------------------------------------------
+
+  $effect(() => {
+    if (!renderer) return;
+    applyAntialias(antialiasSamples(antialias));
+  });
+
+  /*
+   * Global illumination, and the two ways it can be off: the setting, and the
+   * sky it is built from. Reading both here is what makes turning the sky off
+   * take the environment down with it -- otherwise the last one built would
+   * stay on the scene, lighting the build from a sky that is no longer drawn.
+   */
+  $effect(() => {
+    if (!renderer || !scene) return;
+    if (usingEnvironment()) {
+      environmentStale = true;
+    } else {
+      dropEnvironment();
+    }
+    applyLook();
+  });
+
+  $effect(() => {
+    void shaderMode;
+    applyLook();
+  });
 
   $effect(() => {
     if (!renderer) return;
@@ -2745,6 +3837,24 @@ import { isTyping } from "./typing.js";
   });
 
   /**
+   * Rebuilds the gizmo when the mode or the palette changes.
+   *
+   * Rebuilt rather than re-shaped, unlike the plates below: the three modes
+   * are different geometry, and switching mode is a keystroke rather than
+   * something that happens twenty times a second. It reads whether there *is*
+   * a selection and not the selection itself -- where the gizmo stands is the
+   * render loop's business, and depending on the box here would rebuild three
+   * meshes on every frame of a face drag.
+   */
+  $effect(() => {
+    void gizmoMode;
+    void scene;
+    void theme;
+    void (selection === null);
+    buildGizmo();
+  });
+
+  /**
    * Re-shapes the six drag handles onto the current box.
    *
    * Separate from the wire box above because it does not rebuild anything:
@@ -2768,7 +3878,12 @@ import { isTyping } from "./typing.js";
    * on `.viewer` still applies when nothing is hovered.
    */
   $effect(() => {
-    if (container) container.style.cursor = cursorFor(hovered);
+    // A gizmo handle says "grab" rather than a resize arrow: it moves the
+    // region, it does not change the box's size.
+    if (container) {
+      container.style.cursor =
+        gizmoHover !== null ? (gizmoDrag === null ? "grab" : "grabbing") : cursorFor(hovered);
+    }
   });
 
   /**
@@ -2886,10 +4001,28 @@ import { isTyping } from "./typing.js";
    * One instance rather than one per chunk: they are identical, and three.js
    * compiles a shader program per material.
    *
-   * `MASK`/0.5 and double-sided, matching what the glTF this replaced declared
-   * — cross-quads (flowers, grass) are single planes that must be lit and drawn
-   * from both faces, and cutout foliage needs a hard alpha test rather than
+   * `MASK`/0.5 because cutout foliage needs a hard alpha test rather than
    * blending, or leaves sort against each other.
+   *
+   * **`FrontSide`, so the build is invisible from inside it.** It was
+   * double-sided, on the reasoning that a cross-quad is a single plane that has
+   * to be seen from both directions -- which was true of the geometry and not
+   * of the material: `crossFaces` emits four quads now, two per plane, which is
+   * what vanilla's `cross.json` states anyway. Every other paper-thin element
+   * in the game is a box with two coincident faces and always had both.
+   *
+   * What it buys is fill rate. The back of every wall in a build is behind the
+   * front of it, so the fragments were shaded and then thrown away by the depth
+   * test; a single-sided material rejects them at the raster stage instead.
+   * It also reaches the picker for free -- `Mesh.raycast` honours
+   * `material.side`, so a ray can no longer come back holding the *back* of a
+   * face, which is the fault `facingNormal` exists to repair.
+   *
+   * The rule underneath it is `tests/blocks.ts`'s: every face's declared normal
+   * agrees with the winding `buildMesh` gives it. Single-sided, a face that
+   * disagrees is simply not drawn, and two of them disagreed.
+   *
+   * The other two materials below stay double-sided, each for its own reason.
    */
   function ensureMaterial(texture: THREE.Texture): THREE.MeshStandardMaterial {
     if (!material) {
@@ -2898,12 +4031,13 @@ import { isTyping } from "./typing.js";
         metalness: 0,
         roughness: 1,
         alphaTest: 0.5,
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide,
         // The three channels main baked into every vertex: block light, sky
         // light, occlusion. Declared here so the attribute is bound; what is
         // done with it is the injection below, because three's own use of
         // vertex colour is a plain multiply and these are not colours.
         vertexColors: true,
+        envMapIntensity: shaderPreset(shaderMode).environment,
       });
       shadeWithBakedLight(material);
     } else if (material.map !== texture) {
@@ -2926,6 +4060,9 @@ import { isTyping } from "./typing.js";
    * So main splits each chunk's indices, this draws the tail of them, and the
    * two share one geometry. Three things about it are deliberate:
    *
+   * - **It stays `DoubleSide`, where the opaque material no longer is.** The
+   *   surface of a pond is seen from underneath in the game, and this is the
+   *   layer somebody swims in: a single-sided pond would have no ceiling.
    * - **`depthWrite` stays on.** Minecraft's water is a surface, not a fog;
    *   with depth writes a pond hides the sand under its far side exactly as it
    *   should, and the ordering artefacts left are between one water surface and
@@ -2946,6 +4083,7 @@ import { isTyping } from "./typing.js";
         depthWrite: true,
         side: THREE.DoubleSide,
         vertexColors: true,
+        envMapIntensity: shaderPreset(shaderMode).environment,
       });
       shadeWithBakedLight(blended);
     } else if (blended.map !== texture) {
@@ -2973,6 +4111,9 @@ import { isTyping } from "./typing.js";
    *
    * Same `shadeWithBakedLight` as the other two, or the void would be the
    * one surface in the viewport that ignored the sun.
+   *
+   * `DoubleSide` for the reason the opaque material is not: the void is the
+   * medium the work happens *inside*, so its inside is the ordinary view.
    */
   function ensureVoidMaterial(texture: THREE.Texture): THREE.MeshStandardMaterial {
     if (!voidMaterial) {
@@ -2984,6 +4125,7 @@ import { isTyping } from "./typing.js";
         depthWrite: false,
         side: THREE.DoubleSide,
         vertexColors: true,
+        envMapIntensity: shaderPreset(shaderMode).environment,
       });
       shadeWithBakedLight(voidMaterial);
     } else if (voidMaterial.map !== texture) {
@@ -3193,7 +4335,19 @@ import { isTyping } from "./typing.js";
     if (opaqueCount < chunk.indices.length) {
       geometry.addGroup(opaqueCount, chunk.indices.length - opaqueCount, 1);
     }
-    return new THREE.Mesh(geometry, materials);
+    const mesh = new THREE.Mesh(geometry, materials);
+    /*
+     * The stand-in collision boxes for the cells this chunk holds that are
+     * too thin to aim at -- see `thinBoxes`. They ride on the mesh rather
+     * than in a map of their own, so they are evicted exactly when it is:
+     * `chunkMeshes` is already keyed on layer *and* number for a reason,
+     * and a second map keyed the same way is a second chance to get that
+     * wrong. The void layer gets none, because nothing raycasts it.
+     */
+    if (chunk.layer !== "void") {
+      mesh.userData.thin = thinBoxes(chunk.positions, chunk.normals);
+    }
+    return mesh;
   }
 
   /**
@@ -3292,8 +4446,25 @@ import { isTyping } from "./typing.js";
    */
   let ghostGroup: THREE.Group | null = null;
   let ghostMaterial: THREE.MeshBasicMaterial | undefined;
-  /** Where the ghost currently sits, in block coordinates. */
-  let ghostAt: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 };
+  /**
+   * Where the ghost stands when nothing is dragging it.
+   *
+   * A move drag writes the group's position outright, every frame; this is
+   * the rest of the time, which is the whole life of a stamp. It used to be a
+   * hardcoded origin that nothing ever assigned, so a ghost that arrived
+   * mid-drag stood at (0, 0, 0) until the next frame moved it -- invisible
+   * only because a drag has a next frame, and a stamp does not.
+   */
+  let ghostHome: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 };
+
+  $effect(() => {
+    ghostHome = ghostAt ?? { x: 0, y: 0, z: 0 };
+    // A drag owns the position while it lasts, and `endGizmoDrag` hands it
+    // back -- so a selection that moves under a drag cannot snap the ghost.
+    if (gizmoDrag === null) {
+      ghostGroup?.position.set(ghostHome.x, ghostHome.y, ghostHome.z);
+    }
+  });
 
   function disposeGhost(): void {
     if (!ghostGroup) return;
@@ -3329,7 +4500,9 @@ import { isTyping } from "./typing.js";
       mesh.renderOrder = 997;
       group.add(mesh);
     }
-    group.position.set(ghostAt.x, ghostAt.y, ghostAt.z);
+    const at = untrack(() => ghostAt);
+    if (at !== null && at !== undefined) ghostHome = at;
+    group.position.set(ghostHome.x, ghostHome.y, ghostHome.z);
     ghostGroup = group;
     scene.add(group);
   });
@@ -3449,6 +4622,17 @@ import { isTyping } from "./typing.js";
 
 <div class="viewer" bind:this={container}>
   <canvas bind:this={canvas}></canvas>
+  <!--
+    Not only frames per second: the triangle count is what makes this a
+    diagnosis rather than a number, and it is free -- `renderer.info` is
+    counting either way.
+  -->
+  {#if showFps && fps}
+    <div class="fps" aria-hidden="true">
+      <strong>{fps.fps}</strong> fps &middot; {fps.ms} ms<br />
+      {fps.triangles.toLocaleString()} tris &middot; {fps.calls} draws
+    </div>
+  {/if}
   {#if error}
     <div class="error">
       {t("viewport.unavailable")}<br />
@@ -3512,6 +4696,25 @@ import { isTyping } from "./typing.js";
     display: block;
     width: 100%;
     height: 100%;
+  }
+
+  /*
+   * Top right, where the overlay is not: the two would otherwise sit on each
+   * other, which is the fault the gizmo bar had against the notifications.
+   */
+  .fps {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    padding: 6px 10px;
+    background: var(--overlay-bg);
+    border-radius: 6px;
+    backdrop-filter: blur(6px);
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+    text-align: right;
+    pointer-events: none;
   }
 
   .overlay {

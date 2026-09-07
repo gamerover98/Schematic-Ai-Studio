@@ -71,26 +71,45 @@ export function gridWindow(params: {
 }
 
 /**
- * The blocks to offer, filtered by the search and by what the target version
- * can hold.
+ * The blocks to offer, filtered by the search and by what this schematic can
+ * actually hold.
  *
- * The version filter is a promise this app cannot fully keep and the honest
- * thing is to say so rather than pretend: the block list is one flat set with
- * no per-version introduction data behind it, so filtering by version would
- * mean guessing when each block was added. **Mostly showing a block that does
- * not exist yet is harmless — it fails at save time by name. Hiding one that
- * does exist is the mistake nobody can work around.** So the list is not cut by
- * version, and the caller shows the target version beside it instead.
+ * `placeable` is the set of block names the document's Minecraft version can
+ * name, or `null` for no restriction. Both eras supply one now, from two
+ * tables, and which one answers is decided by the era rather than by merging
+ * them -- each is authoritative exactly where the other says nothing:
  *
- * When per-block introduction data exists — it is the obvious next use of
- * `scripts/gen-mc-versions.mjs`'s provenance discipline — this is the one place
- * that has to change.
+ * - Before 1.13 a block is a numeric `ID:DATA` pair, and
+ *   `resources/legacy_blocks.json` enumerates every one of them. That is not a
+ *   guess -- it is the same table `buildMcEdit` decides the save on, so what
+ *   the inventory hides is exactly what the writer would refuse.
+ * - From 1.13 on, `resources/block_versions.json` records when each block
+ *   arrived, so a 1.21.4 schematic stops offering the ninety-odd blocks 26.2
+ *   added after it.
+ *
+ * The comment here used to argue against filtering by version at all, and the
+ * argument was worth keeping even though the conclusion has gone: **showing a
+ * block that does not exist yet is recoverable, and hiding one that does is
+ * the mistake nobody can work around.** That is still why `blocksIn` is a
+ * narrow answer used to *filter a list* while `blockExistsIn` is a generous
+ * one used to *guard a placement*, and why a block outside the table is
+ * allowed everywhere. What changed is only that there is now a record to read
+ * rather than a date to invent.
+ *
+ * Air is always excluded, whatever the era: there is nothing to pick up.
  */
-export function inventoryBlocks(all: readonly string[], query: string): string[] {
-  const offered = all.filter((block) => !isAir(block));
+export function inventoryBlocks(
+  all: readonly string[],
+  query: string,
+  placeable: ReadonlySet<string> | null = null,
+): string[] {
+  const offered = all.filter(
+    (block) => !isAir(block) && (placeable === null || placeable.has(block)),
+  );
   const trimmed = query.trim();
   return trimmed === "" ? offered : searchBlocks(offered, trimmed);
 }
+
 
 /**
  * Air is not a block you can hold.

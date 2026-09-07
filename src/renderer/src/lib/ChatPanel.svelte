@@ -167,7 +167,7 @@
   const BUILD_EXAMPLES = ["chat.build1", "chat.build2", "chat.build3"];
   const examples = $derived(hasDocument ? EDIT_EXAMPLES : BUILD_EXAMPLES);
 
-  let log = $state<HTMLDivElement | undefined>(undefined);
+  let log = $state<HTMLDivElement | null>(null);
   /** Which agent turns have had their tool list opened, by index. */
   let expanded = $state<Record<number, boolean>>({});
 
@@ -220,7 +220,12 @@
     >
   </header>
 
-  <div class="log" bind:this={log}>
+  <!--
+  `selectable` because a model's answer is read and copied. The window's shell
+  is `user-select: none` so that Ctrl+A in flight stops highlighting the whole
+  app; `app.css` carries the reasoning.
+-->
+<div class="log selectable" bind:this={log}>
     {#if entries.length === 0 && live.length === 0}
       <div class="empty">
         <p>{hasDocument ? t("chat.emptyTitle") : t("chat.emptyBuildTitle")}</p>

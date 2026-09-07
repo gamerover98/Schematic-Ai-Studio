@@ -72,7 +72,22 @@ import {
   type RegionTransform,
 } from "../domain/transform.js";
 import { executeJsBuild } from "../core.js";
-import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { loadLegacyBlockTable, parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { legacyBlockNames } from "../services/writers.js";
+import {
+  buildLegacyIndex,
+  legacyIdLabel,
+  type LegacyIndex,
+} from "../../shared/legacy_ids.js";
+import {
+  MC_VERSION_NAMES,
+  documentEra,
+  documentVersionName,
+  mcVersion,
+  versionNameOf,
+  versionRangesSentence,
+} from "../../shared/mc_versions.js";
+import { versionRangeOf } from "../../shared/block_versions.js";
 import { paletteEntryCacheKey, type PaletteEntry } from "../pipeline/types.js";
 import { MAX_DOCUMENT_VOLUME, MAX_EDIT_VOLUME } from "../services/session.js";
 import { orderRegion } from "../domain/grow.js";
@@ -188,6 +203,62 @@ function toEntry(block: string): PaletteEntry {
  * `shared/block_states.ts` -- so this inherits that policy rather than opening
  * a second one.
  */
+/**
+ * The legacy index, memoised on the table it came from.
+ *
+ * `buildLegacyIndex` walks 1,682 rows, and `describe_block` may be called once
+ * per block in a batch. `loadLegacyBlockTable` already hands back the same
+ * object every time, which is what makes identity a sound key here.
+ */
+/**
+ * When a block arrived and, if it has gone, when -- as version labels.
+ *
+ * A label because "1.16" is something a model can reason about and 2566 is not,
+ * the same reason `versionLabel` exists next door. `until` is almost always a
+ * **rename** rather than a removal, so the answer says which: told only that
+ * `chain` ends at 1.21.8, a model would conclude the block was deleted and
+ * stop offering it, when what it needs is the name to use instead.
+ */
+function versionSpan(name: string): { since: string | null; until: string | null } | null {
+  const range = versionRangeOf(name);
+  if (range === null) return null;
+  const label = (dataVersion: number): string | null => {
+    const found = versionNameOf(dataVersion);
+    return found === null ? null : (mcVersion(found)?.label ?? null);
+  };
+  return {
+    since: label(range.since),
+    until: range.until === null ? null : label(range.until),
+  };
+}
+/** `"35:14"`, or `null` for a block the pre-Flattening game never had. */
+function legacyIdOf(index: LegacyIndex | null, name: string): string | null {
+  if (index === null) return null;
+  const found = index.byName.get(name);
+  return found === undefined ? null : legacyIdLabel(found);
+}
+
+let cachedIdIndex: { table: object; index: LegacyIndex } | null = null;
+function legacyIdIndex(table: Readonly<Record<string, string>>): LegacyIndex {
+  if (cachedIdIndex !== null && cachedIdIndex.table === table) return cachedIdIndex.index;
+  const index = buildLegacyIndex(table);
+  cachedIdIndex = { table, index };
+  return index;
+}
+
+/**
+ * How to say this document's Minecraft version to a model.
+ *
+ * A label rather than the raw `DataVersion`, because 1343 is not something a
+ * model can reason about and "1.12.2" is. `documentVersionName` falls back
+ * inside the document's own era, so a legacy file that names no version still
+ * gets a legacy answer rather than a flat one.
+ */
+function versionLabel(doc: SchematicDocument): string {
+  const name = documentVersionName(doc.format, doc.dataVersion);
+  return (name === null ? null : mcVersion(name)?.label) ?? "an unstated version";
+}
+
 function toPlacedEntry(block: string): PaletteEntry {
   const entry = toEntry(block);
   return {
@@ -318,7 +389,65 @@ function resolveRegion(context: ToolContext, args: Partial<RegionArgs>): Resolve
   return resolved;
 }
 
-function checkBlockAllowed(context: ToolContext, entry: PaletteEntry): void {
+/**
+ * Whether a model may write this block into the open document.
+ *
+ * Two questions, and they fail for different reasons and want different
+ * sentences. **Can this app place it at all** is the registry, and a failure
+ * there is a typo. **Can this schematic hold it** is the version, and a
+ * failure there is a block that exists in Minecraft but not in the one this
+ * file is for -- `minecraft:deepslate` in a 1.12 schematic. Telling a model
+ * "check the spelling" about a correctly spelled block sends it round a loop
+ * it cannot get out of.
+ *
+ * The version half only ever restricts a *legacy* document, from the same
+ * table `buildMcEdit` decides the save on. There is no equivalent data for the
+ * flat era, and inventing it would refuse blocks that do exist.
+ *
+ * Async because the table is read from disk. It is memoised, so this costs a
+ * map lookup after the first call in a session.
+ */
+/**
+ * How many names one `list_blocks` answer may carry.
+ *
+ * The whole set is around nine hundred ids, which is a wall of tokens for a
+ * question that is almost always narrower than that. The cap is on the *answer*
+ * and the count of matches is reported beside it, so nothing is hidden -- see
+ * the note in the tool.
+ */
+const MAX_LISTED_BLOCKS = 400;
+
+/** `minecraft:oak_stairs` -> `oak_stairs`. */
+function bareBlockName(id: string): string {
+  return id.includes(":") ? (id.split(":").pop() ?? id) : id;
+}
+
+/**
+ * The names this document can actually hold.
+ *
+ * **`checkBlockAllowed` read backwards**, and it has to stay that way: that
+ * function asks the allowlist, and then the pre-Flattening table when the
+ * document is legacy. Both questions, in that order, from the same inputs --
+ * anything else is a second opinion, and a list that disagrees with the verb
+ * that places blocks is worse than no list.
+ *
+ * Air is left out for `get_palette`'s reason: it is a real id everywhere else,
+ * and it is not a thing anybody builds *with*.
+ */
+async function placeableNames(context: ToolContext): Promise<ReadonlySet<string>> {
+  const allowed = new Set(
+    [...context.allowedBlocks].filter((name) => name !== "minecraft:air"),
+  );
+  const { format, dataVersion } = context.doc;
+  if (documentEra(format, dataVersion) !== "legacy") return allowed;
+  const tablePath = context.legacyBlocksPath;
+  // No table, no claim -- `checkBlockAllowed`'s own words. Narrowing the list
+  // because a resource is missing would hide blocks that would place fine.
+  if (tablePath === undefined || tablePath === null) return allowed;
+  const names = legacyBlockNames(await loadLegacyBlockTable(tablePath));
+  return new Set([...allowed].filter((name) => names.has(name)));
+}
+async function checkBlockAllowed(context: ToolContext, entry: PaletteEntry): Promise<void> {
   if (!context.allowedBlocks.has(entry.namespacedName)) {
     // Named, not silently swapped for stone: the model can correct a typo or
     // choose something else, but only if it is told.
@@ -327,6 +456,26 @@ function checkBlockAllowed(context: ToolContext, entry: PaletteEntry): void {
         `Use get_palette to see what the schematic already uses.`,
     );
   }
+  if (entry.namespacedName === "minecraft:air") return;
+
+  const { format, dataVersion } = context.doc;
+  if (documentEra(format, dataVersion) !== "legacy") return;
+  const tablePath = context.legacyBlocksPath;
+  // No table, no claim. Refusing everything because a resource is missing
+  // would be worse than the problem it guards against.
+  if (tablePath === undefined || tablePath === null) return;
+
+  const names = legacyBlockNames(await loadLegacyBlockTable(tablePath));
+  if (names.has(entry.namespacedName)) return;
+  const name = documentVersionName(format, dataVersion);
+  const label = (name === null ? null : mcVersion(name)?.label) ?? "this version";
+  throw new Error(
+    `${entry.namespacedName} does not exist in Minecraft ${label}, which is what ` +
+      `this schematic is for. Before 1.13 blocks were numeric ids and the set is ` +
+      `much smaller. Use get_schematic_info to see the version, get_palette to ` +
+      `see what this schematic already uses, or ask the user to change the ` +
+      `schematic's Minecraft version.`,
+  );
 }
 
 function describeRegion(region: Region): string {
@@ -399,7 +548,22 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           type: "string",
           enum: ["sponge3", "sponge2", "mcedit", "litematic", "mcfunction"],
         },
-        version: { type: "string" },
+        /*
+         * Enumerated and described, and it was neither -- a bare
+         * `{ type: "string" }`, so a model had nothing at all to go on. The
+         * list is built from the table so a release added tomorrow arrives
+         * here by itself; a hand-written one would go stale exactly as the
+         * `JE_1_20_4` example in `create_document` did.
+         */
+        version: {
+          type: "string",
+          enum: [...MC_VERSION_NAMES],
+          description:
+            `Which Minecraft version to stamp on the result, by name ` +
+            `(${MC_VERSION_NAMES[0]}) or by label. Left out, the source file's own ` +
+            `version is kept. ` +
+            versionRangesSentence(),
+        },
         namespace: { type: "string" },
       },
       required: ["source", "target", "format"],
@@ -440,7 +604,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "get_schematic_info",
     description:
-      "Size, block count and format of the schematic being edited, plus the user's current selection if they have one. Call this first.",
+      "Size, block count, container format and **Minecraft version** of the schematic " +
+      "being edited, plus the user's current selection if they have one. Call this " +
+      "first: the version decides which blocks may be placed at all, and before 1.13 " +
+      "that set is much smaller than the modern one.",
     schema: {
       type: "object",
       properties: {},
@@ -455,6 +622,30 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         length: doc.length,
         blockCount: countBlocks(doc),
         format: doc.format,
+        /*
+         * The version, said three ways, because the model needs a different one
+         * for each job: `era` decides which blocks it may place, `version` is
+         * what a person calls it, and `dataVersion` is the raw tag -- `null`
+         * when the file carries none, which MCEdit never does.
+         *
+         * None of this was reported before. The model was told the container and
+         * not the version, so on a 1.12 schematic it placed modern blocks all
+         * turn and met the objection at save time, from a writer, about blocks
+         * it had long since built around.
+         */
+        dataVersion: doc.dataVersion,
+        version: versionLabel(doc),
+        era: documentEra(doc.format, doc.dataVersion),
+        blocks:
+          documentEra(doc.format, doc.dataVersion) === "legacy"
+            ? `This schematic is for Minecraft ${versionLabel(doc)}, which is before the ` +
+              `Flattening. Blocks are stored as numeric id:data pairs there, so only the ` +
+              `few hundred that existed then can be placed -- minecraft:deepslate and ` +
+              `anything else added in 1.13 or later will be refused by name. Name blocks ` +
+              `the modern way anyway (minecraft:oak_fence); the conversion is this app's ` +
+              `job. describe_block says whether one exists here.`
+            : `This schematic is for Minecraft ${versionLabel(doc)}. Blocks are named the ` +
+              `flattened way, minecraft:oak_stairs[facing=north].`,
         coordinates:
           "x is 0..width-1, y is 0..height-1 (y up), z is 0..length-1. All coordinates are inclusive.",
         selection: selection ? normalizeRegion(doc, selection) : null,
@@ -462,6 +653,105 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
   },
 
+  {
+    /*
+     * What may be placed here, which nothing could ask before.
+     *
+     * ## Why it exists
+     *
+     * The app's own generation splices the whole block list into its prompt, so
+     * the model it drives has always known the answer. A model driving this
+     * table had no way to get it: `describe_block` answers about ids you already
+     * have, `get_palette` lists what the schematic already uses, and nothing
+     * enumerated. So a model building with `run_build_script` guessed names and
+     * found out by refusal -- one round trip per guess, and a wrong guess about
+     * a *family* (`minecraft:jungle_hanging_sign`) costs several.
+     *
+     * This arrived when `generate_schematic` left. That tool handed the whole
+     * job to the app's own model, which is the thing this server is explicitly
+     * not for; what it was genuinely carrying was this list, and this is that
+     * without the second model or the second API key.
+     *
+     * ## It must be the inverse of `checkBlockAllowed`, not a second opinion
+     *
+     * The one rule. That function accepts a block if it is in `allowedBlocks`
+     * **and**, on a pre-Flattening document, in `legacy_blocks.json` -- so this
+     * asks both, in the same order, from the same inputs. A list that offered
+     * something `set_block` then refused would be worse than no list at all: it
+     * would send a model to build with names that cannot land, confidently.
+     *
+     * Which is why it needs a document rather than sitting in `NO_DOCUMENT`
+     * beside `describe_block`. Without one there is no era, and the legacy
+     * answer -- 216 names instead of nine hundred -- is half of what this is
+     * for.
+     */
+    name: "list_blocks",
+    description:
+      "Every block this schematic can hold, which is not every block in the game: a pre-Flattening schematic has a few hundred. Use `contains` to narrow it — \"stairs\", \"copper\", \"jungle\" — rather than pulling the whole list. Names only; describe_block gives a block's states.",
+    schema: {
+      type: "object",
+      properties: {
+        contains: {
+          type: "string",
+          description:
+            "Substring of the block name, matched without the minecraft: prefix. Left out, the whole list up to `limit`.",
+        },
+        limit: {
+          type: "integer",
+          description:
+            `At most ${MAX_LISTED_BLOCKS} names come back, and 'total' reports how many matched.`,
+        },
+      },
+      additionalProperties: false,
+    },
+    async run(context, args: { contains?: string; limit?: number }, id) {
+      /*
+       * Stripped from the *query*, not matched against the id.
+       *
+       * `block_search.ts` had this exact bug and CLAUDE.md tells the story: every
+       * block here is `minecraft:something`, so matching the namespaced id makes
+       * every letter of `minecraft:` return the entire registry -- measured at
+       * 1197 for `a`, `m`, `e`, `c`, `r` and `t` each. One place decides, and the
+       * namespace cannot come back as a way of matching everything.
+       */
+      const query = String(args?.contains ?? "").trim().toLowerCase().replace(/^minecraft:/, "");
+
+      const placeable = await placeableNames(context);
+      const matches = [...placeable]
+        .filter((name) => query === "" || bareBlockName(name).includes(query))
+        .sort();
+
+      const asked = Number(args?.limit);
+      const limit = Number.isFinite(asked) && asked > 0
+        ? Math.min(Math.trunc(asked), MAX_LISTED_BLOCKS)
+        : MAX_LISTED_BLOCKS;
+      const shown = matches.slice(0, limit);
+
+      step(
+        context,
+        "list_blocks",
+        query === ""
+          ? `listing ${matches.length} placeable blocks`
+          : `${matches.length} blocks matching ${query}`,
+        id,
+      );
+
+      /*
+       * Both numbers, always. `ROW_LIMIT`'s rule in the block picker: a limit
+       * bounds what comes back, never what was found, and a list truncated in
+       * silence is how a model concludes a block does not exist. `total` is the
+       * unbounded count and `blocks` is the bounded list.
+       */
+      return {
+        blocks: shown,
+        total: matches.length,
+        shown: shown.length,
+        ...(shown.length < matches.length
+          ? { note: `Narrow it with \`contains\`, or raise \`limit\` to at most ${MAX_LISTED_BLOCKS}.` }
+          : {}),
+      };
+    },
+  },
   {
     name: "get_palette",
     description:
@@ -546,6 +836,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         id,
       );
 
+      /*
+       * The pre-Flattening table, when this build can reach it. `null` means
+       * the answer is simply not offered -- better than claiming every block is
+       * modern because a resource file could not be read.
+       */
+      const legacy =
+        context.legacyBlocksPath === undefined || context.legacyBlocksPath === null
+          ? null
+          : legacyIdIndex(await loadLegacyBlockTable(context.legacyBlocksPath));
       const blocks = asked.map((each) => {
         // Deliberately not `toPlacedEntry` for the *name*: an id the caller
         // spelled with states already is still a question about the block, and
@@ -588,6 +887,32 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           // no entry in the state registry; a misspelling has neither.
           placeable: context.allowedBlocks.has(name),
           known: isKnownBlock(name),
+          /*
+           * What this block was before the Flattening, or `null` if it was
+           * nothing -- which is the same as saying it did not exist yet.
+           *
+           * The era question, asked in the only way this tool is allowed to ask
+           * it. `describe_block` is in `NO_DOCUMENT`: it is answered before any
+           * schematic exists and its `doc` is a proxy that throws on every read,
+           * so it cannot say whether *this* document can hold the block. It can
+           * say whether Minecraft ever could before 1.13, which is a fact about
+           * the game and is what the question is really after.
+           */
+          legacyId: legacyIdOf(legacy, name),
+          /*
+           * The flat era's half of the same question, and the one that stops a
+           * model reaching for a block the open schematic's version predates.
+           * Absent for a block this build has no record of, which is a real
+           * answer and not the same as "it never existed".
+           */
+          ...(() => {
+            const span = versionSpan(name);
+            if (span === null) return {};
+            return {
+              since: span.since,
+              ...(span.until === null ? {} : { until: span.until }),
+            };
+          })(),
           placedAs: paletteEntryCacheKey(placed),
           properties,
           note: !context.allowedBlocks.has(name)
@@ -651,7 +976,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "fill_region",
     description:
-      "Fill a region with one block. Defaults to the user's selection. Use minecraft:air to clear.",
+      "Fill a region with one block. Defaults to the user's selection. Use minecraft:air to " +
+      "clear. The block has to exist in the schematic's Minecraft version, which " +
+      "get_schematic_info reports.",
     schema: {
       type: "object",
       properties: { ...regionSchema.properties, block: { type: "string" } },
@@ -661,7 +988,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     async run(context, args: Partial<RegionArgs> & { block: string }, id) {
       const { region, ...notes } = resolveRegion(context, args ?? {});
       const entry = toPlacedEntry(args.block);
-      checkBlockAllowed(context, entry);
+      await checkBlockAllowed(context, entry);
       if (regionVolume(region) > MAX_EDIT_VOLUME) {
         throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
       }
@@ -673,7 +1000,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "replace_blocks",
     description:
-      "Replace one block with another inside a region. Defaults to the user's selection. Block states must match exactly — check get_palette for the spelling.",
+      "Replace one block with another inside a region. Defaults to the user's selection. " +
+      "Naming `from` without states matches the block in every state it appears in; " +
+      "spell the states out to match only that one. get_palette shows what is there.",
     schema: {
       type: "object",
       properties: {
@@ -689,7 +1018,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       // `from` is a pattern and `to` is a placement -- see `toPlacedEntry`.
       const from = toEntry(args.from);
       const to = toPlacedEntry(args.to);
-      checkBlockAllowed(context, to);
+      await checkBlockAllowed(context, to);
       step(
         context,
         "replace_blocks",
@@ -701,11 +1030,21 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         changed,
         region,
         ...notes,
-        // A zero here is the single most common way an edit "does nothing":
-        // the state string did not match. Say so rather than reporting success.
+        /*
+         * A zero is the commonest way an edit does nothing, so it is said out
+         * loud rather than reported as success.
+         *
+         * It used to advise checking the spelling *including block states*,
+         * which was advice for a rule that no longer holds: a name on its own
+         * now matches the block in every state. So a miss means the block is
+         * not in the region, and sending the model back to add states would
+         * only narrow a search that already found nothing.
+         */
         note:
           changed === 0
-            ? `Nothing matched ${paletteEntryCacheKey(from)}. Check get_palette for the exact spelling, including block states.`
+            ? `Nothing matched ${paletteEntryCacheKey(from)}. A name on its own matches the ` +
+              `block in every state, so it is not in this region at all. get_palette shows ` +
+              `what the schematic actually contains.`
             : undefined,
       };
     },
@@ -713,7 +1052,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
 
   {
     name: "set_block",
-    description: "Place a single block at one coordinate.",
+    description:
+      "Place a single block at one coordinate. The block has to exist in the schematic's " +
+      "Minecraft version -- get_schematic_info reports it, and before 1.13 the set is much " +
+      "smaller.",
     schema: {
       type: "object",
       properties: {
@@ -727,7 +1069,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     async run(context, args: { x: number; y: number; z: number; block: string }, id) {
       const entry = toPlacedEntry(args.block);
-      checkBlockAllowed(context, entry);
+      await checkBlockAllowed(context, entry);
       step(context, "set_block", `placing ${entry.namespacedName} at (${args.x},${args.y},${args.z})`, id);
       const changed = context.tx.setBlock(args.x, args.y, args.z, entry);
       return {

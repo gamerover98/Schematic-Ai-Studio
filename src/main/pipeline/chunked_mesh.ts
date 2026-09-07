@@ -28,9 +28,19 @@
  *
  * ## What invalidates everything
  *
- * The dimensions changing (a resize renumbers every index) and the atlas
- * changing (cached UVs address the old layout). The palette growing does not:
- * it is append-only, so an index cached earlier still means the same block.
+ * The dimensions changing (a resize renumbers every index), the atlas
+ * changing (cached UVs address the old layout), and the void block changing
+ * (`fillVoid` rewrites the palette under the same indices). The palette
+ * *growing* does not: it is append-only, so an index cached earlier still
+ * means the same block.
+ *
+ * That third one is the odd member and is worth reading twice, because it is
+ * the only invalidator that is not a fact about the document. `fillVoid` hands
+ * this function a structure whose palette has been rewritten -- index 0 is
+ * water rather than air -- over the document's own voxels, which have not
+ * moved. Every empty cell in the schematic changes appearance while all three
+ * grids compare equal, so the cache carried every chunk forward and the answer
+ * shipped was a correct one to the wrong question. See `voidDigest`.
  */
 
 import type { MeshBuffers, StructureData } from "./types.js";
@@ -39,6 +49,7 @@ import type { Shading } from "./mesher.js";
 import { buildMesh, culledFaces } from "./mesher.js";
 import { signDigest, type SignText } from "./sign_text.js";
 import type { ModelBaker } from "./model_baker.js";
+import { paletteEntryCacheKey } from "./types.js";
 import type { UVRect } from "./types.js";
 
 export const CHUNK_SIZE = 16;
@@ -58,9 +69,41 @@ export const CHUNK_SIZE = 16;
  * `filler` is empty for every document until somebody chooses a void block,
  * which is the default.
  */
+/** A box in world units, or `null` for geometry with no vertices in it. */
+export interface MeshBounds {
+  readonly min: readonly [number, number, number];
+  readonly max: readonly [number, number, number];
+}
+
 export interface ChunkLayers {
   readonly solid: MeshBuffers;
   readonly filler: MeshBuffers;
+  /**
+   * The solid layer's box, computed once when the chunk is meshed.
+   *
+   * The fourth thing to ride with a chunk, after its voxels, its light and its
+   * sign text, and for the same arithmetic: the viewport's caption wants the
+   * geometry's extent, and walking every vertex of every chunk to find it cost
+   * **39 ms of a 207 ms edit** on a dense 128x32x128 -- on every placed block,
+   * over chunks that had not moved. A chunk carried forward by reference
+   * carries its box with it and the union is O(chunks).
+   */
+  readonly bounds: MeshBounds | null;
+}
+
+/** The box of one chunk's geometry, walked once, when it is built. */
+function boundsOf(buffers: MeshBuffers): MeshBounds | null {
+  if (buffers.positions.length === 0) return null;
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < buffers.positions.length; i += 3) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = buffers.positions[i + axis];
+      if (value < min[axis]) min[axis] = value;
+      if (value > max[axis]) max[axis] = value;
+    }
+  }
+  return { min, max };
 }
 
 export interface ChunkMeshCache {
@@ -92,12 +135,30 @@ export interface ChunkMeshCache {
    * with one per cell.
    */
   signs: Map<number, string>;
+  /**
+   * What the void block was, as `voidDigest` renders it.
+   *
+   * The three grids above are the document; this is not. It is the one input
+   * to a chunk's appearance that arrives beside the structure rather than in
+   * it, and the reason it needs recording is that `fillVoid` expresses itself
+   * as a *palette* rewrite -- which the voxel diff, being about indices, is
+   * blind to by construction.
+   */
+  voidKey: string;
   /** Chunk key -> that chunk's geometry, in both layers. */
   chunks: Map<number, ChunkLayers>;
 }
 
 export interface ChunkedMeshResult {
-  buffers: MeshBuffers;
+  /**
+   * The box the solid geometry occupies, unioned from the chunks' own.
+   *
+   * This replaced a `buffers` field holding the whole fused mesh, whose only
+   * consumer asked it `indices.length === 0` -- a question `pieces.length ===
+   * 0` answers for nothing, because `pieces` only ever receives chunks that
+   * have indices. See `concatChunks`, which survives for the tests.
+   */
+  bounds: MeshBounds;
   /**
    * The same geometry, still separated by chunk.
    *
@@ -162,8 +223,22 @@ function emptyBuffers(): MeshBuffers {
  * Indices are per-chunk — each chunk numbers its vertices from zero — so they
  * are shifted by the running vertex count as they are copied. That shift is the
  * only per-element work here; everything else is `set`, which is a memcpy.
+ *
+ * **Nothing in the app calls this, and that is the point.** It used to run on
+ * every build, and its result had exactly one consumer: `preview.ts` asking
+ * `buffers.indices.length === 0`. Since `ordered` only ever receives pieces
+ * that already have indices, that question is `pieces.length === 0` — so the
+ * whole fusion was provably redundant. Measured on a dense 128x32x128, it was
+ * **155 ms of a 207 ms edit**, allocating and copying about 264 MB per placed
+ * block to answer *is it empty*.
+ *
+ * It stays exported because `tests/chunks.ts` needs it: the property that
+ * whole suite rests on is that an incrementally updated mesh is byte-identical
+ * to one built from scratch, and comparing them means fusing them. Doing that
+ * in the test rather than in the pipeline is the right way round -- the fusing
+ * is what the check is *about*.
  */
-function concatChunks(pieces: readonly MeshBuffers[]): MeshBuffers {
+export function concatChunks(pieces: readonly MeshBuffers[]): MeshBuffers {
   let positionCount = 0;
   let uvCount = 0;
   let indexCount = 0;
@@ -250,6 +325,34 @@ function markDirty(
   }
 }
 
+/**
+ * What the void block is doing to this structure, as one comparable string.
+ *
+ * Derived from the two arguments the mesher already receives rather than
+ * taken as a third, so it cannot drift from what was actually drawn: it names
+ * every palette index `fillVoid` marked **and what that index now holds**.
+ * Both halves are load-bearing and neither is enough on its own.
+ *
+ * The indices alone would miss a swap -- water and lava are both written over
+ * index 0, so the set is `{0}` either way and two entirely different documents
+ * would compare equal. The entries alone would miss a cell that a *break* had
+ * filled with the void block for real, which is void by the same rule and gets
+ * an index of its own.
+ *
+ * It is a handful of entries at most, so this costs nothing beside the grids
+ * next to it.
+ */
+function voidDigest(struct: StructureData, voidIndices: ReadonlySet<number> | null): string {
+  if (voidIndices === null || voidIndices.size === 0) return "";
+  return [...voidIndices]
+    .sort((a, b) => a - b)
+    .map((index) => {
+      const entry = struct.palette[index];
+      return entry === undefined ? String(index) : index + "=" + paletteEntryCacheKey(entry);
+    })
+    .join(",");
+}
+
 export function createChunkMeshCache(): ChunkMeshCache {
   return {
     width: -1,
@@ -259,6 +362,7 @@ export function createChunkMeshCache(): ChunkMeshCache {
     voxels: new Int32Array(0),
     light: new Uint8Array(0),
     signs: new Map(),
+    voidKey: "",
     chunks: new Map(),
   };
 }
@@ -303,11 +407,13 @@ export async function buildChunkedMesh(
   const [nx, ny, nz] = chunkCounts(width, height, length);
 
   const light = packLight(shading?.light ?? null, struct.voxels.length);
+  const voidKey = voidDigest(struct, voidIndices);
   const reusable =
     cache.width === width &&
     cache.height === height &&
     cache.length === length &&
     cache.atlasVersion === atlasVersion &&
+    cache.voidKey === voidKey &&
     cache.voxels.length === struct.voxels.length &&
     cache.light.length === light.length;
 
@@ -388,9 +494,13 @@ export async function buildChunkedMesh(
      */
     const solidFaces = faces.filter((face) => face.voidFill !== true);
     const voidFaces = voidIndices === null ? [] : faces.filter((face) => face.voidFill === true);
+    const solid = buildMesh(solidFaces, atlasUv, (name) => baker.isTextureTranslucent(name));
     const layers: ChunkLayers = {
-      solid: buildMesh(solidFaces, atlasUv, (name) => baker.isTextureTranslucent(name)),
+      solid,
       filler: buildMesh(voidFaces, atlasUv, (name) => baker.isTextureTranslucent(name)),
+      // Walked here, where the chunk is already being built, so a chunk carried
+      // forward by reference carries its box with it.
+      bounds: boundsOf(solid),
     };
     if (layers.solid.indices.length === 0 && layers.filler.indices.length === 0) {
       // An all-air chunk holds nothing; dropping it keeps the concatenation
@@ -426,8 +536,27 @@ export async function buildChunkedMesh(
     }
   }
 
+  /*
+   * The union, over chunks rather than over vertices.
+   *
+   * `Infinity` for an empty build, which is what the caller's `isFinite` guard
+   * already reads as \"nothing here\" -- there is no box for geometry with no
+   * vertices, and inventing one at the origin would frame a document that has
+   * nothing in it as though it had something at (0, 0, 0).
+   */
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (const key of orderedKeys) {
+    const box = chunks.get(key)?.bounds;
+    if (box === undefined || box === null) continue;
+    for (let axis = 0; axis < 3; axis += 1) {
+      if (box.min[axis] < min[axis]) min[axis] = box.min[axis];
+      if (box.max[axis] > max[axis]) max[axis] = box.max[axis];
+    }
+  }
+
   return {
-    buffers: concatChunks(ordered),
+    bounds: { min, max },
     pieces: ordered,
     pieceKeys: orderedKeys,
     voidPieces: orderedVoid,
@@ -442,6 +571,7 @@ export async function buildChunkedMesh(
       voxels: Int32Array.from(struct.voxels),
       light,
       signs: written,
+      voidKey,
       chunks,
     },
     rebuilt: dirty.size,

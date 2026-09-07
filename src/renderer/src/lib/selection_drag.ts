@@ -306,3 +306,32 @@ export function movedRegion(
     maxZ: to.z + (region.maxZ - region.minZ),
   };
 }
+
+/**
+ * A region carried along by a growth that moved the document's content.
+ *
+ * The grid has no negative index, so an edit that makes room *below* the
+ * origin does it by moving everything already there up and out of the way.
+ * Main has always done that and never said so, and the box the user drew is
+ * one of three things in the renderer naming a cell in a frame that has since
+ * moved -- the pivot and the stamp are the other two.
+ *
+ * A translation and not a `movedRegion`: the box keeps its size and its place
+ * relative to the blocks, which is the whole point. `EditSuccess.shift` is
+ * always `>= 0` on each axis, so this only ever moves a region further from
+ * the origin.
+ */
+export function translatedRegion(
+  region: Region,
+  by: readonly [number, number, number],
+): Region {
+  if (by[0] === 0 && by[1] === 0 && by[2] === 0) return region;
+  return {
+    minX: region.minX + by[0],
+    minY: region.minY + by[1],
+    minZ: region.minZ + by[2],
+    maxX: region.maxX + by[0],
+    maxY: region.maxY + by[1],
+    maxZ: region.maxZ + by[2],
+  };
+}

@@ -107,6 +107,51 @@ before it would index the old shape. The grid has no negative coordinates, so
 reaching below the origin moves the *content* up and the region with it; that
 sign is the part that fails silently.
 
+**And a growth that moves the content has to say so, because nothing outside
+main could see it.** That arithmetic was right from the day it was written:
+`growthToInclude` sets `shift = -min(0, region.min)` per axis, `resizeDocument`
+moves the voxels, the block entities and the entities, and compensates `offset`
+and `worldOrigin` the opposite way so the build keeps its place in the world.
+
+What had no answer was the **renderer**, which holds three things naming a
+particular cell — the selection with its anchor, the pivot, and the stamp's
+ghost, derived from the selection. Drag a selection below the origin and the
+schematic grew, the content slid one way, and the box stayed where the pointer
+had left it: outside the document, to be clamped by the next
+`normalizeRegion`. Reported as the structure shifting *and* the selection
+ending up in the wrong place, which is one fault seen from both sides.
+
+**The defect is asymmetric, and that is why it survived.** Past the *high*
+faces the shift is zero and everything has always worked — so the ordinary way
+of building outwards never showed it, and only the one direction that has no
+index did.
+
+`EditSuccess.shift` is the wire, and it is **required rather than optional**:
+a field that can be left out is a field somebody leaves out, and leaving it
+out is exactly the bug. `NO_SHIFT` is what an edit that cannot grow says, and
+the compiler names every producer that forgets. What it cannot name is a
+producer that answers `NO_SHIFT` where the honest answer is derived — that
+typechecks and passes everything — so `tests/services.ts` reads the five
+handlers that call `growthFor` out of the source and requires each to derive
+it. Found by sabotage: making `docMove` claim `NO_SHIFT` failed nothing at
+all until that check existed.
+
+**It is derived from the transaction rather than returned by five functions.**
+`tx.resize` is the one place that knows and every growing path goes through
+it, so `contentShiftSince(history, id)` sums the resizes pushed since an id
+captured before the call. The id is what makes an edit that changed nothing
+report nothing rather than inherit the previous edit's answer —
+`runTransaction` pushes no transaction for a recorder with no commands.
+
+In the renderer `runDocument` carries the live selection, its anchor and the
+pivot, because it is the one place every edit passes through. The four commits
+that *replace* the selection afterwards restate their destination in the new
+frame themselves — `to` was computed in the old one. The **timeline is
+deliberately not carried**: its entries are in the frame the document had when
+they were recorded, and undoing the growth puts the document back into that
+frame, so translating them would be right twice and wrong on the one press
+that matters.
+
 **A single placed block grows it too, and for a while it did not.** That
 asymmetry was invisible from either side: `document.setBlock` refuses an
 out-of-bounds write by returning `null`, so a block placed past the edge came
@@ -131,6 +176,90 @@ needs where on the face the cursor was, which does not travel. Merging on a side
 click that meant "place beside it" would destroy the slab already there. A fill
 carries no `against`, which is what keeps this a click gesture rather than
 something that halves a filled region.
+
+**A placement writes over a *replaceable* block and never over anything else,
+and this app had no such concept at all.** `replaceable`, `canBeReplaced`,
+`isReplaceable` — every spelling appeared **zero times** across `src/`,
+`tests/` and `resources/`. The `setBlock` arm never looked at the destination
+cell: `floodedPlacement` reads it and only to decide `waterlogged`,
+`floorUnder` reads the cell below, `doubleSlabTarget` reads across the face,
+and `twoPartPlacement` reads the *far* cell of a bed or a door — its own
+comment stating the missing rule for the near one.
+
+Reported with a fence, which is exactly the shape of it: a fence post is inset
+to 6..10 of its cell, so a click on the exposed side gives `place = the cell
+next door`, and the iron block standing there was written over. Every non-cube
+with inset faces does it — walls, stairs, torches, chains, lanterns, panes,
+pots.
+
+The rule is vanilla's `#minecraft:replaceable`, and the wiki's *Block
+properties* page states it from the other side: «blocks placed **on, against,
+or in the same location as** the replaceable block replace it rather than
+being placed on or against it». Both halves of that sentence are here — the
+**refusal** when the destination is not replaceable, and the **redirect** when
+the block that was *clicked* is, which is what makes a block placed on tall
+grass take the grass's cell instead of standing above it. `against` is
+deliberately unchanged by the redirect: vanilla's `BlockPlaceContext` keeps
+`getClickedFace()` and moves only `getClickedPos()`, and the orientation rules
+want the face that was clicked.
+
+**The existing predicates cannot serve and must not be reached for.**
+`isSeeThrough` holds glass, leaves, ice, slime and honey — every one of them a
+solid block a placement must not destroy — and it is a *rendering* answer
+besides. `FLUIDS` in `block_support.ts` is five names.
+
+Three boundaries, each a way to be wrong:
+
+- **silently, and only from the hand.** That is already what this arm does
+  when a door's far half is blocked, and the block in the way is on screen. A
+  fill, a paste, a transform and every agent tool go through `runTransaction`
+  bodies that never reach it — the same reach the slab merge, the two-part
+  rule and the redstone guard have, and for the same reason: a fill across
+  mixed ground should lay what it can rather than refuse the lot;
+- **breaking is not placing**, and saying that of the *refusal* alone is not
+  enough. Both halves stand behind `emptiness`, the predicate this arm
+  already owns, and leaving the **redirect** out of it stops any block being
+  broken at all.
+
+  The two verbs do not mean the same thing by `x/y/z`. A placement names the
+  cell *across* the face, so one step back along `against` is the block that
+  was clicked; a break names the block **itself** and carries the same
+  `against`, because `Viewer.svelte` sends `lookAt(target)` for all three
+  verbs. So the step back lands on the empty cell the ray came in through --
+  and empty is replaceable, always. An unguarded redirect therefore moves
+  every break into thin air, writes the void over the void, and answers
+  `changed: 0` with the block still standing.
+
+  It is checked with the face, and with all six of them: a check that sends
+  no `against` passes either way, and no `against` is the one thing the app
+  never does.
+- **empty space is replaceable whatever block it is made of.** With `barrier`
+  chosen as the void block a cell that reads as empty holds a barrier, which
+  is not in the tag — deciding from the tag alone would make it impossible to
+  build inside your own empty space.
+
+**The user's own reading of the report was «refuse if either block is solid»,
+and that differs from the game on one case this app supports deliberately:**
+stone placed *into water*. Water is replaceable, so it goes in and comes out
+waterlogged, which is the rule directly below this one. On every case actually
+reported the two readings agree.
+
+The set is vendored into `resources/block_states.json` beside `blocks` rather
+than into an eighth dataset: same project, same two pinned releases, same
+registry, and only the branch differs (`-data`, not `-summary`). It **moves** —
+25 entries at 1.21.4 and 29 now — which is the argument against writing it out
+by hand, and both pinned releases give the identical 29, so the union is the
+same list rather than a merge.
+
+**One name cannot come from the registry.** `minecraft:grass` is the
+pre-Flattening spelling of short grass and one of the four ids this app
+deliberately offers that the modern registry has never named, so it is
+hand-written outside the generator's markers — `SPUN_LEGACY`'s arrangement for
+`SPUN_LEGACY`'s reason. Measured, and this is why it is a list of one: every
+*other* replaceable block reaches a 1.12.2 document under its modern name.
+`31:2` is `fern`, `31:0` is `dead_bush`, `78:0` is `snow[layers=1]`, `175:2`
+is `tall_grass`, `217:0` is `structure_void`, and water and lava carry all 32
+of their states each.
 
 **A block placed into water comes out waterlogged.** That is what the game does
 — a fence, a slab or a stair put into a pond displaces nothing, it floods — and
@@ -179,6 +308,271 @@ room for air is a resize and nothing else — the same reason `replace` does not
 Nothing sends a break from outside the box today, because a break comes from a
 pick and the block therefore exists; the guard exists so that stays true, and
 `tests/session.ts` fails without it.
+
+**A schematic's Minecraft version can be changed in place, and the container
+deliberately cannot.** `setDocumentVersion` moves `doc.dataVersion` and stops
+there. `doc.format` is what a plain Save writes back, so flipping it under an
+open file would leave the next Ctrl+S writing MCEdit bytes into something still
+called `.schem`; a version the open container cannot carry is refused with
+`refusalFor`'s own sentence and the panel points at Save As and Convert, which
+change the pair together.
+
+It is **one transaction**, so Ctrl+Z takes back the version *and* the blocks a
+backport dropped, together. That costs nothing to arrange -- `HeaderState` has
+captured and restored `dataVersion` since it existed -- and getting it wrong
+would leave the one edit nobody could undo being the one that changed what game
+the file is for.
+
+A backport is **refused first and counted**, and only goes through with
+`dropUnrepresentable`: a warning shown after the blocks are gone is not a
+warning. That is `resizeSession`'s shape and it reuses its `FailureKind` --
+`needs-confirmation`, so the panel offers the second press **without reading the
+sentence**. A renderer matching on wording turns a rephrased message into a
+silent dead end.
+
+**A version change does three things, and the order decides between renaming
+and demolishing.** Rename first, restate second, drop third:
+
+- **rename** — `chain` becomes `iron_chain` going past 1.21.9 and back again
+  coming under it. Nothing is lost, nothing is counted, nothing is asked;
+- **restate** — a wall's `north=tall` becomes `north=true` before 1.16, which
+  is where a wall connection stopped being a boolean;
+- **drop** what is left, and only that.
+
+Asking existence before renaming is not a worse version of this. `iron_chain`
+is genuinely absent from 1.16, so a backport that checked first would replace
+every one of them with empty space — while the correct answer, `chain`, is a
+name that version has had since it shipped. `tests/session.ts` states it as
+seven named checks, and deleting the rename step fails all seven.
+
+**What replaces a dropped block is the document's empty space, not air.** A
+break already writes it, and an underwater build coming back full of bubbles
+would have lost exactly what `editing.voidBlock` exists to preserve. It falls
+back to air when the empty space block is itself too new for the target —
+`structure_void` being 1.10, that is a real case rather than a defensive one.
+
+**Two tables, and which one answers is decided by the era rather than by
+merging them.** `legacy_blocks.json` enumerates the pre-Flattening set exactly;
+`block_versions.json` is the flat era only and its generator refuses a
+pre-Flattening label outright. Each is authoritative where the other says
+nothing, and asking both would be two answers to one question.
+
+**That split reaches the inspector, and it did not.** The panel lists the union
+of what the entry carries and what the game says it may carry, and the second
+half asked the modern registry — which has nothing true to say about a numeric
+`ID:DATA` block. So a 1.12.2 schematic offered `waterlogged` on every fence,
+stair, slab and pane in it: a property 1.13 introduced, on a document from a
+version with no such idea. `block_versions.json` cannot answer either, and
+saying why is the point — it dates `waterlogged` only where it *arrived after*
+1.13 (leaves at 1.19, rails at 1.17), and `propertyExistsIn` fails open, so for
+a 1.12.2 fence it answers `true`.
+
+`legacy_blocks.json` answers, because that is the era it is authoritative for:
+its 1,682 rows give 216 names with their states and **not one `waterlogged`
+anywhere**. `buildLegacyIndex` derives the per-name sets in the walk it was
+already doing, so both processes get one answer. What the entry *carries* is
+still listed whatever the era says — that is what lets somebody see a property
+another tool wrote and delete it — and a block the era cannot name contributes
+nothing rather than falling back to the registry, because falling back is the
+claim being removed.
+
+The panel used to declare the limit instead: *«this build has no record of
+which release each block arrived in»*, which was true and is the sentence the
+seventh dataset removed. Saying nothing there would have read as "checked,
+nothing to lose", which is a promise it could not keep — the same reason the
+impossible versions are shown **disabled** rather than filtered out.
+
+**And the count distinguishes the three.** One number for all of them would
+report a rename and a demolition identically, so `EditSuccess.notes` carries
+the sentence. It is `DocumentSession.notes`' rule in a second place and has no
+other user: most edits do one kind of thing, so `changed` is the whole answer,
+and a field filled by everything would be a field nobody reads.
+
+`TransactionScope.replaceAny` exists for this one caller. Calling `replace` per
+offending entry is N passes over the voxels, and a backport can name fifty
+blocks across a document of tens of millions of cells -- one pass is the
+difference between a wait and a hang.
+
+**`TransactionScope.remap` is its sibling and exists for the same arithmetic
+one step further on.** The three steps above as three `replaceAny` calls are
+three passes over the voxels, and this is the one edit that genuinely may touch
+every block in the document. `remap` asks its function **once per palette
+entry** and reads the answer per cell. The palette grows underneath the pass —
+`setBlock` interns a target that is new — so an index past the end of the
+target array reads as `undefined`, which is falsy and is the right answer: a row
+added during the pass is something the pass just wrote, and rewriting it again
+would chase its own tail.
+
+**A `replace`'s `from` is a pattern, and naming no state means the block in any
+state.** That is what the rest of the codebase already assumed: it is the stated
+reason `replace_blocks` parses its `from` with `toEntry` rather than
+`toPlacedEntry`, so that "take out the campfires" does not quietly become "take
+out the ones that happen to face north and be alight".
+
+It was not one. `from` was interned and compared as an exact palette index, so a
+bare name matched only an entry carrying no properties at all -- and interning it
+*added* that entry, leaving a dead row behind on every miss.
+
+On a flat document that reads as an occasional puzzle. **On a legacy one it is
+total**, which is where it was found and why it took a report to find:
+`legacy_blocks.json` gives a state to **1,449 of its 1,682 rows**, so a
+`.schematic` opens holding `grass_block[snowy=false]` and
+`oak_fence[east=false,south=false,north=false,west=false]` and *nothing a person
+can type* matches any of it. Every replace answered `changed: 0`. The suites
+missed it because they replace inside fixtures they built themselves, where the
+entry has no state to disagree about.
+
+Spelling the state out still means exactly that state, which is how you take out
+one stair orientation and leave the others. The match is decided once over the
+palette into a `Uint8Array` and read per voxel, so it costs what the interned
+index cost. The palette may grow underneath the pass -- `setBlock` interns `to`
+if it is new -- and reading past the end yields `undefined`, which is falsy and
+is the right answer: a row added during the pass *is* `to`.
+
+**A search that matches the namespace matches everything, and that was the
+load behind a total freeze.** `rank` in `block_search.ts` ended with
+`id.includes(query)` on the **namespaced** id. Every block here is
+`minecraft:something`, so every letter of `minecraft:` returned the whole
+registry — measured on the shipped list of 1197: `a`, `m`, `e`, `c`, `r` and
+`t` each returned all 1197, and **`mi` returned 1197 to show the one block
+whose name contains it.**
+
+Nine of the commonest letters in English, each mounting one row per match —
+some five thousand DOM nodes built and thrown away per keystroke, inside a
+floating panel a few rows tall where almost none of them is visible. Reported
+as typing `aaa` into the selection panel's block field: fine after the first
+`a`, dead the instant the second arrived, because that is the keystroke that
+takes 1197 keyed rows to nothing.
+
+A query may still *carry* the namespace — pasting `minecraft:sto` has to work
+— so it is stripped from the query rather than matched in the id. One place
+decides, and the namespace cannot come back as a way of matching everything.
+`tests/blocks.ts` states it letter by letter rather than as one predicate, so
+a failure names which letter; the check it replaced compared against
+`b.includes(q)` on the full id, which did not merely miss the fault, it stated
+it as the requirement.
+
+**`blockRegistry` is `$state.raw`, and the line below it says why.** Plain
+`$state` on an array is a deep proxy, so reading it inside a `$derived`
+registers a signal per entry. It sat next to `legacyIndex`, which had been
+moved to `raw` for exactly that, with the post-mortem written on it — and it
+was missed.
+
+It stayed dormant for a reason that then expired, which is the part worth
+knowing: `placeableBlocks` used to be `null` for every flat document, so
+`offered` was `blocks` itself and nothing allocated. **Giving flat documents a
+per-version block set turned that alias into a fresh 1197-element array per
+keystroke**, and woke the fault for every schematic rather than only the legacy
+ones. A dormant hazard and a feature that removes the thing keeping it dormant
+are one change apart.
+
+**`ROW_LIMIT` bounds the rows that exist, not the matches that are found.**
+The picker's own header forbids a cap, and is right: *«a search that genuinely
+had 41 answers quietly showed 40 with nothing to say it had»*. This is not
+that. The line above the list reports `matches.length`, so both numbers are on
+screen and nothing is hidden silently — which is the property that paragraph
+is actually about. Reporting `shown.length` there would turn it back into the
+cap it argues against, so `tests/ui.ts` checks that the count comes from the
+unbounded list and the rows from the bounded one.
+
+**And no `onmouseenter` writing the highlighted row.** The effect beside it
+writes `list.scrollTop`; scrolling moves a different row under a *stationary*
+pointer, the browser fires `mouseenter` for it, and that writes the highlight
+again. The CSS `:hover` already draws the row under the pointer, so the handler
+bought one nicety — Enter taking the hovered row — and cost a feedback path.
+
+**`bind:this` writes `null`, and a binding typed `| undefined` is a lie the
+compiler cannot catch.** That was the freeze, all of it. The picker's scroll
+effect guarded `list === undefined` on a `$state<HTMLUListElement | undefined>`
+— so at exactly the moment the element went away the guard was **false**, and
+the next line read `.children` off `null` *inside the effect flush*, where
+Svelte has nowhere to put it. The scheduler is left broken and takes every
+effect in the window with it.
+
+The trigger is any query that matches nothing, because that is what unmounts
+the list: `aa` in a block field, or `zzzz` after Ctrl+K. **`CommandPalette` had
+the identical fault and nobody had reported it** — which is the argument for
+fixing the class rather than the site.
+
+So every `bind:this` target in the renderer is declared `| null` and
+initialised `null`. That makes `=== undefined` a **compile** error, TS2367, and
+it named all three sites the moment the types changed rather than waiting for
+somebody to type `aa`.
+
+`tests/ui.ts` still checks it, and the reason is worth keeping: **`tsc` catches
+the mismatch, not the mistake.** Put the declaration and the guard back
+*together* and it compiles clean and freezes the window — verified by doing
+exactly that. What has to be refused is the declaration, so the check walks
+every `bind:this` and reads the type behind it, with comments stripped first
+because these sites are recognisable precisely by the prose explaining them.
+
+The two in `Viewer.svelte` are named exceptions rather than skipped: they are
+not inside a conditional, so they live as long as the component and are only
+read from `onMount` and from handlers bound to them.
+
+**Three things were fixed before this one that were not this one**, and the
+distinction is worth keeping: the namespace search returning all 1197 blocks,
+the deep `$state` proxy over the registry, and the unbounded rows were the
+*load*. This was the *crash*. Correcting the load made the picker faster and
+the search right, and would never have closed the report.
+
+**The dialog hands over the report.** It copies the whole thing — app version,
+platform, Electron, Chromium, Node, then the message and the stack — and opens
+a pre-filled issue on the repository `package.json` already names, imported
+rather than written out a second time. It publishes nothing; the Submit is the
+user's.
+
+Two details that are not decoration. The dialog is **shown again** after a
+copy, because copying is not an answer to "what do you want to do about the
+window" — closing on it would leave the app just as dead with the report in
+hand. And **the URL carries an abridged body while the clipboard carries
+everything**: GitHub takes the body as a query parameter, a stack clears that
+ceiling easily, and a body truncated by a browser looks exactly like a complete
+one. `abridgeTrace`'s rule — cap on the way out and say what was dropped.
+
+**The window can now say that it died, and could not before.** There was no
+`window.onerror`, no `unhandledrejection`, and nothing in main for
+`render-process-gone` or `unresponsive`: zero occurrences across `src/`. So a
+loop that Svelte or the browser aborts took every effect in the window with it
+and **nothing anywhere heard**, which is why the same failure was reported
+twice with a clean console.
+
+`IPC.rendererFailed` is an **event, not a request**, and that is the design: it
+is sent from a window that may be moments from being unable to run anything,
+and a promise to await is exactly what would never come back. The renderer's
+entry registers the listeners **before the mount**, so a failure during mount
+is reported too, and reports **once** — an error handler that reports a loop is
+a loop of reports. Main counts what follows and says so in the dialog.
+
+Offering a reload is safe to offer for a reason worth stating: **autosave is
+main's**, on a 20-second timer, and main is the half still working. So the
+snapshot is current however long the window has been dead, and
+`failure_prompt.ts` says so rather than leaving somebody to weigh a reload
+against an unknown. It is Electron-free for `discard_prompt.ts`'s reason, and
+`ipcMain.on` is a third way to serve a channel that `tests/services.ts`'s walk
+had to be taught — it knew `handle` and `send`, and called a served channel
+unserved.
+
+**`scrollIntoView` scrolls every scrollable ancestor, and this app has a
+floating panel that watches its own geometry.** `BlockPicker`'s dropdown keeps
+the highlighted row in view; it did so with `scrollIntoView({block:"nearest"})`,
+which was harmless only because the row could not overflow. Making that row a
+flex container -- to push a legacy `ID:DATA` to the trailing edge -- removed
+that accident: a flex item does not shrink below its content without
+`min-width: 0`, so a long block id made the row wider than the button.
+
+From there: the browser scrolled the panel the list sits in, `ToolWindow`'s
+`ResizeObserver` found the panel out of bounds and called `onmove`, the panel
+moved, and the observer fired again. The browser stops that loop by emitting an
+*ErrorEvent*, not a console error -- so the app simply stopped updating while
+the viewport went on drawing (its own `requestAnimationFrame` chain owes Svelte
+nothing) and the main process went on answering (the menu still opened). A
+silent, total freeze with a clean console, reachable only by typing in the one
+field whose value changes per keystroke.
+
+The list's own CSS had already written the rule down -- *"The list scrolls, not
+the panel"* -- and `scrollIntoView` had been quietly breaking it. It writes
+`list.scrollTop` now, which touches nothing above itself.
 
 **`replace` deliberately does not grow.** It rewrites blocks that are already
 there and there are none outside the box, so growing first would add air and
@@ -864,6 +1258,163 @@ is found by moving `1e-3` along `-normal` from the hit point and flooring. Half
 a block is the obvious choice and is wrong: a pressure plate is a sixteenth
 tall, so stepping half a block in from its top face lands underneath it.
 
+**And a normal with no dominant axis names no face of the cell.** Which face
+the placement goes to is the hit normal's largest component, and that is exact
+wherever there is a largest — a slab's top, a stair's riser, the lectern's desk
+at 0.924 against 0.383. A **cross** has none: its planes are turned 45° about
+y, so the two horizontal terms are exactly equal, the winner is whichever way a
+`>=` leans, and the vertical term is zero and can never win at all. Every
+chain, flower, sapling, amethyst bud and fire in the game is one of those.
+
+**A chain is what that cost, and the two halves compound.** Its planes run the
+full height of the cell, so `boxFaces` drops their `up` and `down` faces for
+having no area: there is *no end of a chain to aim at*. So a click from any
+angle broke the tie sideways and put the next link in the cell **beside** the
+one clicked, carrying that sideways face's axis. Reported exactly that way —
+placed laterally, and with a different `axis` — and a column was unbuildable.
+
+`entryFace` in `block_hover.ts` answers where the tie is: the face of the cell
+the **ray** came in through, by the slab method on the unit cube. That is what
+a full-cell **collision box** would give, and it is the thing vanilla has here
+and this app does not — the game keeps interaction shapes apart from models,
+and a chain's box is a full-height 3×3 column while the model it draws is two
+planes. Aim up at a chain from below and the ray enters through the floor of
+its cell, so the next link goes underneath it, with `axis=y`.
+
+**And that was not enough, which took a second report to establish.** The
+entry face is the game's own answer and it is a *narrow gesture*: the ray
+has to cross the cell's floor inside its footprint, and a chain's planes sit
+in the middle of the cell, so the aim decides it. Measured at three blocks'
+range, against where on the chain the crosshair sits:
+
+| aimed at | look needed for the next link to go **below** |
+|---|---|
+| the bottom twentieth | 10 degrees up |
+| the bottom quarter | 30 degrees up |
+| halfway up | 60 degrees up |
+| the top | unreachable |
+
+From a level or a downward look it comes back with a side face and the next
+link goes beside the one clicked, which is what the game does too and is
+what was reported the first time. The second report said *not fixed at all*,
+and that was fair.
+
+**And the third report was about none of that: the ray was never reaching
+the chain at all.** The viewport raycasts the fused mesh, and a chain's mesh
+is two planes of zero thickness, 3 texels wide, crossed at the middle of its
+cell. Vanilla gives it a solid 3x16x3 column to click; here there was
+nothing to click, so the ray went past it and hit whatever stood behind --
+and *that* block took the placement.
+
+Traced against a real document, a chain hanging from a stone block. From
+**dead underneath** the two planes are edge-on and present no area at all,
+so the ray reached the stone's `down` face and the placement went into the
+cell the chain was already in -- refused, nothing happens. From above or to
+one side it reached the stone's **east** face, and the new chain went in
+beside it carrying `axis=x`. Which is the report, word for word, three
+times over, while every check written about the placement rules passed.
+
+`thinBoxes` in `block_hover.ts` is the answer and it is renderer-only: a
+cell whose geometry names no face of the cell, and is narrow with it, gets
+a stand-in box that the pick tests alongside the mesh. Four things about it
+are load-bearing:
+
+- **the classification is the pick's own predicate, read once more.**
+  `hasDominantAxis` is false exactly for geometry with no face on any axis,
+  which is a plane turned 45 degrees. One idea, two uses, and nothing to
+  list by name;
+- **the shape that qualifies is the shape that answers.** Exactly one of
+  the three axes is wide, and that one is the line the block is strung
+  along -- so the same measurement that decides a chain cannot be aimed at
+  decides which way a run of them goes;
+- **a cross is kept out by the width**, and that is not a detail. A flower
+  is drawn the same way and spans its cell corner to corner, so it is 11.3
+  units across against a chain's 2.12 -- already easy to hit, and a box
+  would make it impossible to click the ground behind it. The gap between
+  2.12 and 11.3 is why the threshold is not a tuning knob;
+- **the box is the geometry's own extent, not a transcribed collision
+  shape.** A chain comes out 2.12 across, which is its 3 texels turned 45
+  degrees, against vanilla's 3. Slightly narrow, and that is the right way
+  to be wrong: derived from what is drawn, it can never claim a shape the
+  block does not have. Per-shape interaction boxes remain the real version
+  of this, and would fix the outline too;
+- **a ray that starts inside a box is not a hit.** In flight the camera
+  passes through the build, and a box the camera is standing in would
+  otherwise be picked at zero range and beat everything on screen.
+
+The boxes ride on the chunk mesh they were built from, in `userData`, so
+they are evicted exactly when it is -- `chunkMeshes` is already keyed on
+layer *and* number for a stated reason, and a second map keyed the same way
+is a second chance to get that wrong. The void layer gets none, because
+nothing raycasts it.
+
+What it costs: a chain in front of a wall now takes the click that would
+have gone through it, in the fifth of a block it occupies. That is what the
+game does.
+
+**So the half of the block you clicked decides which end the next one goes
+on**, and that is a deliberate deviation, chosen by the user with the
+faithful answer in front of them. The argument is the one that already lets
+an iron door open here: faithful and useless is worse than useful. It is
+also not an invention out of nothing -- *which half of the block was
+clicked* is the question `placedInUpperHalf` asks of a slab, and vanilla's
+own placement context asks it of stairs and trapdoors.
+
+**Which half of *what* is the trap, and reading it vertically is the
+obvious way to fall into it.** A chain strung along `x` or `z` could then
+not be carried on at all -- click one and the next goes above or below it
+-- which is the deviation being paid for in the wrong place: the rule reads
+as a column and a chain is a *run*.
+
+It needs nothing new, because the stand-in box already knows: it is long on
+exactly one axis and narrow on the other two, and that axis is the run.
+`PlacementLook.run` carries it with how far along it the ray landed, so a
+hanging chain carries on down, one lying east-west carries on east or west,
+and the guard on the held block asks whether *that* value is legal rather
+than whether `y` is.
+
+`continuedPlacement` in `block_hover.ts` is the rule, plain for
+`selection_drag.ts`'s reason, and it is narrow in three ways that each
+matter:
+
+- **the block hit must have no end faces** (`PickedBlock.noEnds`, the tie
+  above). A fence, a slab, a stair, a full cube: untouched;
+- **the block held must carry an `axis`** -- so stone, or a torch, clicked
+  onto a flower goes exactly where it always went. That guard is load
+  bearing rather than tidy: a poppy is a cross precisely as a chain is, and
+  is *not* replaceable, so without it every plant in the game would have
+  become a thing you place above and below;
+- **that axis must be able to be `y`**, which is `nether_portal` excluding
+  itself. Its `axis` is `x|z`, so continuing a column with one would name a
+  cell above or below and write a state the game does not have -- the
+  orientation arm's own trap, one layer along, taking the same answer.
+
+It is **idempotent where the entry face already agreed**: aiming steeply
+from below gives `down` on its own, and the rule walks back along `against`
+and then forward along a face that is sometimes the very same one. Stepping
+twice there is the mistake the arithmetic invites, so it is checked.
+
+What it costs is stated rather than hidden: **you can no longer put a chain
+across the line of another one by clicking it** -- a click on a hanging
+chain always means up or down, and one on a chain lying east-west always
+means east or west. Start the other direction against a solid block's face,
+which is where a run has to start anyway.
+
+`against` moves with the cell, because everything downstream reads it -- the
+axis the block is born with, the slab merge, `use`, and the replaceable
+redirect, which steps back along it to find what was clicked.
+
+The epsilon is not a tuning knob and the rule is deliberately narrow: a tie
+means the existing answer was a coin toss, so only those change. Everything
+with a real winner keeps the answer it always had, which is why the lectern is
+named in the checks beside the cross — it is the near miss.
+
+A per-*shape* interaction box is the real version of this and is a project of
+its own: it would also fix the outline, which traces the cell rather than the
+block for the same reason. This reproduces the full-cell box only, which is
+the right approximation for the shapes that reach it — a cross fills its cell
+corner to corner in plan and runs the whole way up.
+
 **`block_id_list.txt` is generated, and the registry decides what is in it.**
 `node scripts/gen-block-list.mjs > block_id_list.txt`, idempotent, from
 `resources/block_states.json` — the game's own block registry — plus the
@@ -882,7 +1433,7 @@ what the inventory never offered. That is the same failure the hand-written
 `DEFAULT_STATE` had, one layer down, and it is the argument for generating a set
 rather than curating one.
 
-**Six vendored datasets, six generators, six skills.** The pattern is the
+**Seven vendored datasets, seven generators, seven skills.** The pattern is the
 same each time and it is the one to copy: the answers are looked up, recorded
 with where they came from, and the generator replaces only the rows between two
 markers. Running with nothing new must change no bytes — if it rewrites the file
@@ -896,6 +1447,29 @@ every time, the ordering or the formatting has drifted and *that* is the bug.
 | `block_id_list.txt` | `gen-block-list.mjs` | `mc-block-models` (for what the ids must draw as) |
 | `resources/litematica_versions.json` | `gen-litematica-versions.mjs` | `mc-litematic` |
 | `resources/command_syntax.json` | `gen-command-syntax.mjs` | `mc-commands` |
+| `resources/block_versions.json` | `gen-block-versions.mjs` | `mc-block-versions` |
+
+**Every one of them now names what reads it downstream, and six of the seven
+say «the MCP wire».** That section was missing and its absence had a cost: the
+skills described JSON → generator → table and stopped, so somebody could do
+everything `mc-versions` asked, twice, and leave `DEFAULT_SETTINGS.version`
+fifteen releases behind with nothing anywhere complaining.
+
+The datasets themselves reach a model **derived**, so a release or a block
+added to one arrives on the wire with no code change — `describe_block` is its
+three block tables through `propertiesOf`, `legalValuesFor`, `toPlacedEntry`
+and `versionSpan`, and the version enums are `MC_VERSION_NAMES`. What the
+skills add is the half no generator covers: whether the answer is still *true*.
+So each carries a verification step that reads a real answer rather than
+trusting that the generator ran.
+
+`mc-blockproperties` is where that matters most, and it sharpens the warning
+already below: its substance is prose, which fails no check anywhere, and that
+prose is now read by something that builds on it in a session nobody is
+watching. `mc-block-models` is the one exception — geometry never leaves this
+process — with the caveat that `capture_viewport` photographs whatever was
+drawn, so a wrong shape can still mislead a model that checks its work by
+looking.
 
 The skills' trust rules deliberately differ, and the difference is the point.
 `mc-versions` buys trust with **two independent sources that agree**, because a
@@ -926,6 +1500,43 @@ and a `fill` past `max_block_modifications` places nothing and reports nothing.
 Neither is a property of the file, so no test can ever see it, and those rows
 are corroborated. A Litematica `Version` is the `mc-versions` case outright:
 wrong, and Litematica opens the file and *converts* it.
+
+`mc-block-versions` is the split running through the *middle* of one file
+rather than between two. Its `blocks` and `properties` halves are derived from
+a diff and re-checked mechanically; its `renames` and `propertyValues` halves
+cannot be, and that is not a gap in the tooling — **a diff sees `chain`
+disappear at 1.21.9 and `iron_chain` appear and cannot tell that from a removal
+plus an unrelated addition.** Nothing anywhere can tell you that a 1.16 wall's
+`tall` should come back as `true` rather than `false` either. Those rows are
+corroborated on the wiki's History section and carry their evidence.
+
+**And that dataset is the one where a wrong answer *destroys* rather than
+omits.** The other six fail by being incomplete; this one, believed, replaces
+every affected block in somebody's build with empty space, reports a healthy
+count, and looks entirely deliberate. It came within one design decision of
+doing exactly that: `misode/mcmeta`'s summary — the source `block_states.json`
+already uses — **changed what it lists at 1.20.5**, holding only blocks with
+properties up to 1.20.4 and every block after. 686 entries, then 1060, with
+`stone` appearing at the boundary. A plain diff of it dates `stone`, `dirt`,
+`oak_planks` and some 370 others to 1.20.5, and acting on that turns any
+backport to 1.19 into a demolition. The same mechanism manufactures a false
+rename: `cauldron` vanishes at 1.17 because its `level` moved to
+`water_cauldron`, not because the block went anywhere.
+
+So block presence comes from **`PrismarineJS/minecraft-data`**, which lists
+every block at every version — `stone` present in all 37 it covers, and zero
+monotonicity gaps — and mcmeta only corroborates. `mc-versions`' rule, and its
+*«absence is not disagreement»* clause, arrived at from the data rather than
+from the principle. Property **values** still come from mcmeta alone, because
+minecraft-data types an integer property as a count with no range and its own
+count moves between releases: read naively it has `snow.layers` changing four
+times for a property the game has never touched.
+
+**The whole flat era holds five renames and seven value changes**, which is the
+number worth knowing before the next person fears this dataset. The renames are
+`sign`, `wall_sign`, `grass_path`, `grass` and `chain` — every one of them
+already named elsewhere in this file — and of the value changes only the walls'
+1.16 `true|false` → `none|low|tall` touches a real build.
 
 **Two generators cross-check their DataVersions against `mc_versions.json`**,
 which is the corroborated one, and refuse rather than write their own number.
@@ -1133,6 +1744,58 @@ carries what the window already holds. Four things about it are load-bearing:
   scene with nothing to update; refusing to be incremental there means the
   renderer never has to reason about that case.
 
+**And the shipping was fixed while the *building* went on doing the same work
+twice.** That earlier fix made the payload a delta and said, correctly, that
+none of the stutter was the meshing. It was not the meshing then and it is not
+now — it was two passes beside it, and they stayed:
+
+- **`concatChunks` rebuilt the whole fused mesh on every build.** Five typed
+  arrays plus a scalar loop over every index in the document, because the
+  indices are per chunk and have to be shifted. Its only consumer in the whole
+  of `src/main` was one line: `if (chunked.buffers.indices.length === 0)`. And
+  `pieces` only ever receives chunks that already *have* indices, so that
+  question is `pieces.length === 0` — the fusion was **provably** redundant;
+- **`boundsOf` walked every vertex of every chunk**, on every edit, over chunks
+  that had not moved, to fill in a caption.
+
+Measured on a dense 128×32×128 — a checkerboard, so every block is
+all-faces-visible and the geometry is the 75 MB of positions this file's
+17.5 MB was the sparse version of:
+
+| | |
+|---|---|
+| one block placed, before | **207 ms** |
+| ...of which `concatChunks` | 155 ms, allocating and copying ~264 MB |
+| ...of which `boundsOf` | 39 ms |
+| one block placed, after | **48 ms** |
+
+`concatChunks` is **exported and called by nothing in the app**, which is the
+arrangement worth keeping: `tests/chunks.ts` needs it, because the property
+that suite rests on is that an incrementally updated mesh is byte-identical to
+one built from scratch, and comparing them means fusing them. The fusing is
+what the check is *about*, so it belongs in the check.
+
+**Each chunk carries its own box**, which is the fourth thing to ride with a
+chunk after its voxels, its light and its sign text, and for the same
+arithmetic: a chunk carried forward by reference carries its box with it, so
+the union is O(chunks). The check on it is the one every incremental cache
+needs — the cheap answer equals the expensive one, over a sequence of edits —
+and it has a trap that cost a rewrite to see. The fixture has to be a **floor
+and nothing else**: `seeded()` holds a column running the document's full
+height, so its overall box never moves however the chunks are edited, and a
+union reading stale per-chunk boxes passes every comparison. The extremes have
+to be the thing being edited. Same reason the edit list writes into a chunk
+that **already has geometry**: an edit into an empty chunk creates it, and a
+chunk with no old box has no stale box to keep.
+
+**`paletteTally` is one walk where there were two.** `documentState` wants the
+materials list and the block count, and asked for them separately — two passes
+over every cell on every mutating handler, which a selection-face drag reaches
+many times a second. 12.1 ms became 5.6 ms on the same document. `blocks` is
+derived as `cells - counts[0]` rather than by filtering names, because that is
+`countBlocks`' answer *exactly*: index 0 is always air and is the only thing it
+excludes, so a `cave_air` interned at some other index counts as a block to it.
+
 **The viewport receives geometry, not a container format.** `docMesh` hands over
 per-chunk `Float32Array`/`Uint32Array` attributes plus the atlas as raw RGBA
 pixels; `Viewer.svelte` builds `BufferGeometry` and a `DataTexture` directly.
@@ -1189,6 +1852,65 @@ the stdio-only clients by forwarding to the running app; it is dependency-free
 plain Node because it is run by whatever `node` the *client* has, which cannot
 see this app's `node_modules`.
 
+**There is no `generate_schematic`, and its absence is the rule stated above
+working.** A tool by that name lived in `mcp/lifecycle.ts` and asked the model
+the *user* configured in this app to build the schematic — a second model, on a
+second budget, doing what the model driving the connection was already doing
+with `run_build_script`. It is the one thing this server exists not to be:
+calling an LLM is precisely what a harness can do for itself.
+
+It was never in `TOOL_SPECS`, so the chat inside the app never had it and is
+untouched by its removal — that path is `IPC.generate`, with its own key gate.
+What the tool did have was the app's provider key as a precondition for a
+connection that has nothing to do with it, so a missing key came back as the
+gateway's own `Invalid API key.` over a link the reader had just authenticated
+to with a bearer token. **Reported twice as an MCP authentication failure**, and
+diagnosed twice as something else, before the tool itself was doubted.
+
+**`list_blocks` is what it was genuinely carrying.** Generation splices the
+whole placeable set into its prompt; an MCP client could not obtain it at all —
+`describe_block` answers about ids you already have, `get_palette` lists what
+the schematic already uses, and nothing enumerated. So a model building with
+`run_build_script` guessed names and found out by refusal.
+
+**It is `checkBlockAllowed` read backwards, and that is the whole rule.** That
+function accepts a block if it is in `allowedBlocks` **and**, on a
+pre-Flattening document, in `legacy_blocks.json`; `placeableNames` asks both, in
+that order, from the same inputs. A list offering something `set_block` then
+refuses would be worse than no list — it sends a model to build with names that
+cannot land, confidently. `tests/mcp.ts` states it as a round trip: every name
+the tool returns for a **legacy** document is placed for real on that document,
+and a name it left out is refused. The legacy half is the only place the two can
+come apart, so a check on a flat document would pass with it deleted.
+
+Two lessons this project had already paid for are re-spent here. The filter
+matches the id **without the namespace** — `block_search.ts`'s bug, where every
+letter of `minecraft:` returned the whole registry — and it reports `total`
+beside `shown`, which is `ROW_LIMIT`'s rule: a limit bounds what comes back,
+never what was found, and a list truncated in silence is how a model concludes a
+block does not exist.
+
+**The 1.0.0 rename orphaned a profile, and the app now says so.** `app.getName()
+` names the userData directory, so `buildergpt` became `schematic-ai-studio` and
+an install with working API keys came back reading an empty one. Generation
+stopped; everything else kept working, because nothing else needs a key. What
+surfaced was the provider calling the key invalid — true, and pointing at a key
+that *was* set, in a folder the app had stopped reading.
+
+The decision not to migrate stands: `safeStorage` encrypts with a key held in
+the profile's own `Local State`, the two differ, and reading the old ciphertext
+would want `CryptUnprotectData` — a native dependency this project does not have
+and should not gain. What was wrong was the silence. `services/legacy_profile.ts`
+answers one question — *is there a profile next door with keys this one lacks* —
+and three places say it: the start screen at launch, `apiKeyRefusal` at the
+failure, and the keys pane where it is fixed.
+
+`null` once this profile has a key of its own, which is the part that matters: a
+warning that outlives its cause is one people learn to ignore. And a corrupt
+`settings.json` in a directory the app has stopped using is `null` rather than a
+throw — this runs at startup, and that is the least deserving reason to fail to
+launch there is.
+
 **Never a native dialog.** `discard_prompt.ts` is right for a person at the
 keyboard and wrong twice over here: a background agent must not be able to make
 a modal appear on somebody's screen, and must certainly not answer its own
@@ -1223,6 +1945,155 @@ in `READ_ONLY` — and fires with a sentence naming the mistake.
 writes the clipboard the user's own paste reads, so it is not read-only; the
 schematic did not move, so the viewport has nothing to redraw. One flag would
 make one of those a lie.
+
+**One transport per session, which is what the SDK's stateful mode means.**
+`server.ts` held a single `StreamableHTTPServerTransport` for the life of the
+listener, and that is a one-session server wearing the shape of a many-session
+one. The SDK is explicit about both halves: a second `initialize` on an
+already-initialised transport is refused outright — *«Invalid Request: Server
+already initialized»* — and any `Mcp-Session-Id` but the single one it holds
+comes back 404 `Session not found`.
+
+So a client that pressed **Reload** could not get back in without the server
+being switched off and on, and a second client could not connect **at all**.
+Both were reported as one bug. `transports` is a `Map` keyed by session now,
+with a `Server` per entry — which costs nothing, because `buildMcpServer` holds
+no state of its own and every answer comes through `host` and
+`currentSession()`.
+
+An entry goes in from `onsessioninitialized` and **never earlier**, so a
+malformed POST cannot leave a transport behind; it comes out from
+`onsessionclosed`, which is the DELETE, **and** from `transport.onclose`, which
+is the case that actually happens — a client that simply goes away. Without the
+second the client count only ever grows.
+
+The routing decision is `routeRequest` in `policy.ts` rather than a branch
+inside `handle`, for `selection_drag.ts`'s reason: `server.ts` imports
+`electron` and `node:http` and the suites cannot load it, and this is the part
+that was wrong. A session id this server never issued is **refused**, not
+honoured with a fresh session under the same id — that would look like success
+and behave like amnesia.
+
+**`server.close()` does not close connections, and that was the Regenerate
+button doing nothing.** It stops accepting new ones and waits for the open ones
+to end; an MCP client holds a keep-alive connection and often an SSE stream, so
+the callback never came and `stopMcpServer`'s promise never settled.
+`regenerateMcpToken` and the Enabled checkbox both await it.
+
+The shape of the report is worth keeping: **the new token had already been
+written to disk** by `ensureToken(true)` before the hang, so restarting the app
+showed it and the button looked merely inert. `closeAllConnections()` is the
+missing line, and `tests/mcp.ts` checks for it in the source because the
+harness cannot hold a socket open against a server it cannot start.
+
+**The token is read per request, not captured when the listener started.** It
+was closed over as `secret`, which meant a setting could only take effect by
+restarting and a regenerate whose restart failed would go on checking the old
+one.
+
+**The key gate is one copy, and it was written out twice.** `ipc/handlers.ts`
+asked "is there a key for this provider" in two places and phrased the answer
+twice; `services/llm_key.ts` is the single copy. The OpenCode arm is per
+*model*, because some of its models are free and the proportion moves, and the
+snapshot path is injected as a string exactly as `ToolContext.legacyBlocksPath`
+is — that module must not reach Electron.
+
+**Its fail-open is deliberate and has a cost worth knowing.**
+`openCodeModelRequiresKey` is `pricing === "paid"`, so a model absent from the
+catalogue — which `mimo-v2.5-free` is — passes the gate with **no key at
+all**, and an empty credential goes to the gateway. That is the right trade:
+a models.dev outage must not make the free models unusable. What it produces
+when it is wrong is the gateway's own `Invalid API key.`, which is a true
+sentence pointing at nothing the user can see. Narrowing it would refuse a
+free model every time the catalogue is stale, which is the commoner case.
+
+**`ProviderKeyStatus.hasKey` means "stored *and* readable", and meant "there
+are bytes on disk".** `getApiKey` answers `""` for absent, for no keyring, and
+for ciphertext that will not decrypt; `getKeyStatus` was reporting the third of
+those as a saved key. So a key encrypted under a keyring the profile no longer
+has showed as saved in the pane while every caller got an empty string, and the
+provider's refusal pointed nowhere. `unreadable` keeps the two apart, because
+they want different sentences: one is "paste a key" and the other is "paste it
+again".
+
+Neither `settings-store.ts` nor `server.ts` can be loaded by the suites —
+`safeStorage` and `electron` — so both rules are checked in the source, the way
+`closeAllConnections` is. That is the weaker kind of check and is worth saying:
+it proves the predicate is still consulted, not that it is right.
+
+**Authentication can be turned off, and the bind address can be changed, and
+the two together are refused.** Each half alone is defensible — on loopback the
+token is a convenience rather than the boundary, and off loopback the token *is*
+the access control — and together they are an anonymous write endpoint on
+somebody's files, reachable by anything that can route to the machine.
+`startupRefusal` says which of the two to change.
+
+Four things about it are load-bearing:
+
+- **`coerceMcp` reads `requireAuth` as `!== false`**, where `enabled` and
+  `allowDelete` are `=== true`. That is the same rule — read towards the safe
+  answer — applied to the one field whose safe answer is the other one. Written
+  the other way, every `settings.json` in existence (none of which carries the
+  key) would come back with authentication off on the next launch. It is
+  `editing.autoGrow`'s trap, and `tests/services.ts` states it.
+- **A CIDR is not an address.** `listen` binds one interface; `192.168.1.0/24`
+  is not something that can be bound, and what it *would* mean — which clients
+  may connect — is the token's question. `bindAddressRefusal` says so by name
+  rather than letting it reach `listen` and come back as `EADDRNOTAVAIL`. A
+  **hostname is refused too**, and not out of fussiness: `acceptsRequest`
+  compares the `Host` header against this string as written, so a value needing
+  resolution could never be compared at all.
+- **The Host and Origin checks stay, with authentication off and off loopback
+  alike.** They are the DNS-rebinding defence — a page on the open web pointing
+  a domain it controls at this machine — which is a question about who may
+  *reach* the server, not who may use it. Bound to a wildcard the rule becomes
+  "an address, never a name", because a name is the whole of the attack and an
+  IP literal has nothing to resolve.
+- **The dot gets a fifth state.** `unauthenticated`, painted `--warn`, and it
+  **outranks `active`** — the moment somebody connects is exactly when a warning
+  that anybody could would otherwise disappear. Not `--danger`: nothing has gone
+  wrong, and a red dot over a working server teaches people that red means
+  nothing.
+
+The warning beside the checkbox says the true thing rather than the expected
+one. On loopback the risk is not the network — it cannot be reached from there
+— it is that **any program on this machine** can read, write and save the
+user's schematics, and trash them where `allowDelete` is on.
+
+`writeDiscovery` writes `token: null` rather than returning early, or the stdio
+bridge could not find the app at all with authentication off; `mcp-bridge.mjs`
+accepts that and omits the header instead of sending `Bearer ` with nothing
+after it, which a server would compare and reject — reading as a wrong token
+rather than as no token being wanted. `connectCommand` drops `--header` for the
+same reason.
+
+**A settings change has to reach the listener, and for a long time only the
+toggle did.** `mcpSetEnabled` started and stopped; everything else in
+`McpSettings` was written to disk and ignored until the next launch. Turning
+authentication off and back on therefore left the socket serving anybody, and
+the token row -- keyed on what the *server* said -- gone with no way to bring
+it back. `servingChanged` names the three fields a listener is built from;
+`root` and `allowDelete` are deliberately not among them, because those are
+asked at the moment of each call and revoking deletion has to revoke it now.
+
+**The token row is shown from the setting, and the dot from the status.** That
+is not a contradiction of the rule above it, it is the rule: the pane is where
+the token is *configured*, so ticking the box has to produce the string
+immediately, whatever the listener has caught up to — while the dot is the one
+place that must never claim more than is true.
+
+**The client count is a line of its own.** It used to be the *label* of the
+`active` state, so the moment a fifth state outranked `active` the count
+silently left the pane. Two facts, two lines: what the server is doing, and how
+many clients are on it.
+
+**`apiKeyRefusal` answers "is there a key", which is not the same question as
+"does the key work".** A key that is present and wrong sails past it and is
+refused by the provider, and what comes back is the provider's own
+`Invalid API key.` with nothing said about whose key it is. That half is
+still open, and it is only reachable from the chat inside the window now —
+which is the one reader who can see the provider panel from where they are
+standing.
 
 **The checkbox is intent; `McpStatus` is reality.** They come apart when a port
 is already held by a second copy of the app, and a navbar dot derived from the
@@ -1373,6 +2244,31 @@ again, which is what makes a suite added tomorrow covered with no edit to any
 YAML — the script was already suited to it, with colours off a TTY, `npm ci`
 only when `node_modules` is absent, and no early abort.
 
+**Running that gate on both operating systems earned itself on the first run.**
+`tests/mcp.ts` spelled its fixtures `C:/builds/x.schem`, which is absolute on
+Windows and **relative everywhere else** — there is no drive letter on Linux —
+so `withinRoot`'s `path.resolve(root, candidate)` placed it *under* the root and
+the path doubled: `.../C:/builds/C:/builds/x.schem`. Windows was green and Linux
+was not, on the same commit.
+
+The rule was right and the fixture was wrong, which is the part worth keeping
+straight: resolving a relative candidate under the root and letting an absolute
+one replace it is exactly the semantics that function wants. The string simply
+was not a path on the machine running it, and `abs()` in that file now spells an
+absolute path the way the running platform spells one.
+
+Two of the three failures reported a doubled path and read as a normalisation
+bug. The third reported a file trashed where the run expected nothing at all —
+the "you may not delete the open document" guard comparing the resolved
+candidate against the open file, finding them different because one had doubled,
+and standing aside. A guard that quietly stops guarding is the failure this
+suite exists to catch, and here the suite had done it to itself.
+
+Only that suite was affected. `tests/services.ts` and `tests/document.ts` carry
+the same spelling, and their paths never reach `path.resolve` — `pathsMatch` is
+a string comparison — so they are opaque fixtures that behave identically
+everywhere.
+
 **`BUILD_NUMBER` is set on develop and deliberately not on master.**
 electron-builder reads it from the environment by itself and folds it into the
 Windows file version as `major.minor.patch.<n>`, substituting `0` for anything
@@ -1469,6 +2365,40 @@ which is `coerceSettings`' failure in another module. The two renderer halves
 are a browser fact this harness has no browser for, so `tests/ui.ts` checks the
 source the way the coplanar epsilons are checked: that the gate is there, and
 that it is still the first thing in the function to look at a modifier.
+
+**And that gate is why the window's text is not selectable.** Ctrl+A has always
+been the app's — `onWindowKey` calls `selectAll` and `preventDefault`s the
+browser's — but five early returns hand it back, and the first of them is the
+gate above: in flight Ctrl+A is sprint-plus-strafe-left, so the handler leaves
+before it can suppress anything. **Every strafe under sprint highlighted every
+word in the app.** The other four are the command palette, nothing open, busy,
+and a caret already in a field.
+
+The gate cannot go, so the answer is that there is nothing to highlight:
+`user-select: none` on `html, body, #app`, and `text` put back **by name** on
+the surfaces that exist to be read. Three things about it are worth keeping:
+
+- **it changes no keydown, which is the half the check is written about.** In
+  orbit, with a document open and the caret outside a field, Ctrl+A still
+  selects the whole schematic; in a field it still selects the field. A CSS
+  rule that quietly disabled a keyboard gesture would fail nothing anywhere
+  else, so `tests/ui.ts` reads the branch back out of `App.svelte`;
+- **it makes the canvas gesture *more* reliable, not less.**
+  `hasTextSelection()` hands Ctrl+A to the browser whenever a highlight already
+  exists, so a stray drag across the chat used to disarm the schematic
+  selection until you clicked something. A shell that does not highlight by
+  accident does not disarm it by accident either;
+- **the opt-ins are named, because \"which surfaces exist to be read\" is not a
+  question CSS can answer.** Form controls, `pre` and `code` — which covers the
+  NBT dump and `TraceView`'s arguments and results without a class repeated in
+  three components — and `.selectable`, which today is the chat log alone.
+
+What makes them win is that **a value set directly on an element beats one
+inherited from an ancestor**, and that is also why `AboutModal`'s own
+`user-select: text` keeps working where it is. That line stopped being
+decorative the moment the shell refused: deleting it would silently make the
+one row in the app that exists to be pasted into a bug report unselectable, so
+it is checked too.
 
 
 **Enablement is decided from main's own state**, not reported back by the
@@ -1573,12 +2503,25 @@ never moves. The same gesture also has to suppress the click-to-select path on
 and the 4px tolerance does not help, so it would collapse the selection the
 user was about to resize.
 
-**Which is why selecting takes Shift, and a plain drag belongs to the camera.**
-Every selection gesture has to take the button away from OrbitControls, so none
-of them can be the default: orbiting a build was close to impossible, because
-the press that started the orbit landed on it and collapsed the selection to the
-block underneath. Shift-click a block, Shift-drag the grid, Shift-drag a face.
-**Ctrl** took over "grow the selection from the anchor", the job Shift gave up.
+**Which is why selecting from *nothing* takes Shift, and a plain drag belongs
+to the camera.** Every gesture that starts on empty space or on the build has
+to take the button away from OrbitControls, so none of those can be the
+default: orbiting was close to impossible, because the press that started the
+orbit landed on the structure and collapsed the selection to the block
+underneath. Shift-drag the grid, Shift-drag across the blocks. **Ctrl** took
+over "grow the selection from the anchor", the job Shift gave up.
+
+**A press that starts on a *handle* is exempt, and that is the same rule rather
+than an exception to it.** A face plate and a gizmo arrow are drawn for one
+purpose, so a press on one can only mean that purpose -- it never enters the
+argument about what a plain press in the viewport means. It is the reasoning
+the compass's own `<button>` uses, one layer down.
+
+That exemption was unavailable until placing left orbit. The `!event.shiftKey`
+branch in `onPointerDown` held exactly one thing -- the build-grid placement --
+so a handle drag without Shift would have had to share the press with it.
+Removing the placement emptied the branch, and the gizmo is what moved into the
+space.
 
 Shift-dragging *across the structure* sweeps out a region, which is what anyone
 tries first: before it, a Shift-press on the blocks could only ever produce the
@@ -1589,13 +2532,23 @@ two towers — and a region that collapsed every time the ray missed would be
 unusable. A sweep that never moved still falls through to the single-block pick,
 so the click keeps its inspector and its Ctrl-extend.
 
-Two things survive without Shift, and both for the same reason: an orbit moves
-the pointer, so a gesture that only fires when it *did not* takes nothing from
-the camera. A stationary click on the build grid places a block — that is how an
-empty schematic gets its first one. A stationary click on a block asks what it
-is, which is the inspector.
+**Placing a block is the flight camera's, and used to be orbit's too.** A
+stationary click on the build grid placed one -- justified because an orbit
+moves the pointer, so a gesture that fires only when it did *not* takes nothing
+from the camera. The justification was sound and the feature was still wrong:
+the grid reaches hundreds of blocks past the schematic (`MAX_GRID_REACH`), and
+every framing click that happened not to move left a block somewhere in it.
+Reported as blocks appearing by accident, which is exactly what it was.
 
-That second one is a rule that was already broken once. Selecting was made a
+So placing is the crosshair's now. In flight, a right-click with nothing under
+the crosshair falls through to the build grid -- which is why the grid is drawn
+in both cameras, centred on the pointer in orbit and on the crosshair in
+flight. **That is the only way an empty schematic gets its first block by
+hand**, and the other way is a selection and a fill, which needs no placement at
+all.
+
+A stationary click on a block still asks what it is, which is the inspector.
+That one is a rule that was already broken once. Selecting was made a
 Shift gesture to keep the *drag* for the camera, and the click went along with
 it — silently taking the block inspector, because asking what a block is had
 never been anything but a click. So the rule lives in `clickIntent` in
@@ -1608,6 +2561,235 @@ clears the selection; a plain click past it does nothing. Clearing is right when
 the click meant something, and clicking past the build while framing a shot is
 the most ordinary accident there is.
 
+**The selection is transformed by a gizmo in the viewport, not by buttons in a
+panel.** Nine controls left `SelectionTools.svelte` -- cut, copy, paste, move,
+two turns and two mirrors -- and became handles on the thing they act on. The
+argument is the one the Move button itself made: it was a *mode*, armed from the
+panel and committed by a click in the viewport, because "a press on the selection
+is already the camera's". A press on a handle is not, so the mode became a drag.
+
+`renderer/lib/gizmo.ts` is the arithmetic, plain for `selection_drag.ts`'s reason,
+and it *imports* that module rather than sitting beside it: dragging one arrow is
+`dragFace`'s problem with the whole region moving instead of one face, so
+`dragPlaneNormal` and `intersectPlane` are reused. Two copies of that is how one
+of them comes to disagree about which way is up.
+
+Four things about it are load-bearing:
+
+- **The gizmo is sized from the distance to the camera, every frame.** In world
+  units it is unreachable on a selection two hundred blocks across and covers
+  everything on a selection of two. It is the one part that cannot live in the
+  pure module, because only the component has a camera.
+- **`RING_PLANE` orders each pair so one positive step sends `first` to
+  `second`**, which for the Y ring has to be **east to south** -- `transform.ts`'s
+  convention, `(x, z) -> (length - 1 - z, x)`. Written `z, x` instead it turns
+  the other way, lands on cells, breaks nothing, and is wrong; `tests/ui.ts`
+  states it as four compass points rather than one predicate, so a failure names
+  which one moved.
+- **`null` from a drag means "leave it alone" and must not be read as zero.** An
+  axis pointed at the camera has no usable drag plane; treated as zero, a drag
+  that grazed that angle would snap the region back to where it started.
+- **A drag decides but does not write.** The destination is drawn as a box, and
+  as the region's own geometry when `regionMesh` has arrived; one edit is sent on
+  release, so the whole gesture is one Ctrl+Z. The ghost is fetched at the press
+  rather than held for every selection, because meshing a region is real work and
+  a face drag changes the selection many times a second -- and the commit reads
+  the *selection* rather than the ghost, so a short drag on a big region is not
+  lost waiting for a picture.
+
+**The gizmo's toolbar is along the bottom, and opened on top of the
+notifications.** `.status` and the bar had byte-identical positioning —
+`top: 12px`, centred, `z-index: 4` — so every message the app raised landed on
+the controls somebody was reaching for. It clears the hotbar now, from
+`--hotbar-inset` and `--hotbar-height` in `app.css`: a pair, because the second
+is measured off `Hotbar.svelte`'s own rules and changing the slot moves it.
+That failure is two bars overlapping, which is visible, rather than silent.
+
+Glyphs rather than words, with the name, the sentence and the key on `title`
+and the name on `aria-label` — not optional for a button with no text in it.
+The three mirrors are axis letters in `--axis-x/y/z` rather than a glyph each,
+because X and Z are both horizontal and any mirror glyph would draw them
+identically; the colour is the language the gizmo already teaches in the
+viewport.
+
+**The ground patch yields to a handle, and did not.** Hovering an arrow with
+the floor behind it lit a cell at `y = 0` that the press had nothing to do
+with — two indicators, one of them about to do nothing. `pointerOnHandle` in
+`block_hover.ts` is the one question now, asked by the block outline and by the
+build grid; `overGizmo` is a field of its own beside `overHandle` because the
+two come from different raycasts and a failure should name which was forgotten.
+`updateHover` moved ahead of both consumers in the loop, so neither decides
+from the previous frame's answer.
+
+**Rotation is offered on one axis, and that is the finding rather than an
+omission.** A quarter turn about X or Z tumbles the build, and Minecraft's block
+states cannot follow: `facing` on a staircase, a door, a bed or a chest names one
+of four horizontal directions and has no spelling for up or down. The options
+were to write a state no version of the game has -- which saves, loads, and
+misbehaves -- or to leave a fraction of the build facing the wrong way. WorldEdit's
+own `//rotate` takes one angle, about the vertical, for the same reason. So the
+two rings that are not drawn are the two that would be a lie, and `tests/ui.ts`
+checks their absence so that completing the set is a deliberate act.
+
+**Mirroring is offered on all three, because a vertical reflection has a spelling
+for everything it touches.** It is not the horizontal rule with a letter changed:
+`MirrorAxis` gaining `"y"` needed a mapping of its own, because a flip turns over
+`half`, `type`, `face`, `attachment` and `vertical_direction` and touches none of
+the horizontal properties. `face` and `attachment` are the two that get
+forgotten -- leave them out and every lever and every bell comes back embedded in
+a block.
+
+One value has no reflection and is therefore left exactly as it was: an
+`ascending_north` rail upside down would be a rail going *down* to the north, and
+every rail that is not flat ascends. `tests/session.ts` states that as a check,
+because it looks like an omission and is the opposite -- inventing a state is the
+one thing that file may not do.
+
+**`TransformRequest.to` is what makes the pivot mean anything.** Turning about a
+corner is turning in place and then moving, and as two requests Ctrl+Z would take
+back half a gesture. With a destination it is one transaction -- and, as a side
+effect worth knowing, `NotSquareError` stops applying: a quarter turn of a 5x3
+footprint is simply a 3x5 box somewhere, and only the demand that it land back on
+its own coordinates ever made it impossible. In place, the refusal stands.
+
+**`autoGrow` reached `applyEdit` and nothing else, and the gizmo made that
+reachable every day.** A move that carried blocks past the edge lost them in
+silence: `pasteClipboard` clips by letting `tx.setBlock` return `false`, so
+`changed` came back short with nothing anywhere saying why -- which contradicts
+this file's own rule that an edit outside the box is refused by name, never
+clipped. `growthFor` in `session.ts` is the one copy now, and move, turn and scale
+all ask it. `docMove`, `docTransform` and `docScale` call `editOptionsFor`, which
+only `docApply` did.
+
+The same fix carries the void block: `cutSelection` and `moveRegion` each wrote
+`minecraft:air` inline, so an underwater cut left a dry hole in a pond.
+`RegionEditOptions.voidBlock` is `EditOptions.voidBlock`'s spelling for its
+reason -- a string the caller already holds, parsed once here.
+
+**A copy leaves a ghost behind, and pasting became a gesture rather than a
+coordinate.** Ctrl+C used to be invisible: the status line said how many
+blocks, and nothing on screen said what was held or where it would land — so
+pasting anywhere but back into the box you had just drawn meant drawing another
+one by hand, guessing, and looking at the result. The stamp is the move
+gesture's own ghost put to that job. The picture stands at the selection's
+corner, which is where a paste writes; the gizmo's arrows carry the box; Ctrl+V
+stamps; and the two repeat until the selection is dropped, by Escape or by the
+deselect button.
+
+**The picture is the clipboard's, and a cut is what makes that difference
+visible.** `clipboardMesh` is a second entry point onto the scratch-document
+meshing `regionMesh` already did, and the split is not tidiness: by the time
+the ghost is asked for, the region a *cut* came from is empty, so a picture
+meshed from the region would be nothing at all — on the one gesture where
+seeing what you are holding matters most. It has to outlive the region in the
+ordinary case too, because the whole point is that the box then moves away from
+the blocks.
+
+**The mode is armed by the copy and filled in by the picture, in that order.**
+`armStamp` writes `stamp` before it awaits, because the arrows mean "move the
+box" while a stamp is armed and "move the blocks" otherwise — so a mesh that
+failed to arrive would silently change what the next drag did. A late answer
+cannot overwrite a newer copy either: the fill is guarded on the **identity**
+of the object the arming created, which is `chunked_mesh.ts`'s rule for
+deciding that a chunk moved.
+
+**A stamped move writes nothing**, and `commitMove` decides that before it
+calls main. The selection step it records is an ordinary one, because no
+transaction was pushed — `adoptEditedSelection` works that out by comparing the
+depth either side rather than being told. That is what leaves the original
+where it was, to be stamped a second time.
+
+`ghostAt` is where the ghost stands when no drag is moving it, and until this
+there was no such place: the position was a variable initialised to the origin
+that nothing ever assigned. Invisible, because a move drag writes the position
+every frame and so always had a next one. A stamp does not.
+
+**What is aimed at the selection goes when the selection does, from one
+place.** The pivot and the stamp both name a particular box, and
+`clearSelection` is one of **eight** sites that drop a selection — the other
+seven are documents opening, closing and being restored, and every one of them
+had already forgotten the pivot. So it is an effect on `selection === null`
+rather than an eighth line: this file's own rule about discipline at N call
+sites, applied to the one place where it had already failed at seven.
+
+**And a paste grows, which is `moveRegion`'s rule one verb further on.**
+`pasteClipboard` clips by letting `tx.setBlock` return `false`, so a paste over
+the edge came back with a short count and nothing anywhere saying why. That was
+survivable while a paste landed at the corner of a box somebody had just drawn
+around the thing being pasted; the stamp is what made carrying the box
+somewhere else *first* the ordinary gesture. The clipping stays exactly where
+it is — it is what lets `moveRegion` compose `pasteClipboard` with no bounds
+arithmetic of its own, and what a refusal relies on never reaching — and
+`pasteSelection` decides in front of it.
+
+**And the box it grows to is what actually lands, not the clipboard's box.**
+A clipboard holds only the cells that carry something, and `keepUnder` takes
+more of them out again, so growing to the box would make room for cells that
+will never be written — a resize nobody asked for and would have to undo,
+which is `replace`'s stated reason for not growing at all. `includeAir` is the
+exception rather than an oversight: it clears the destination box first, so
+under it the box genuinely is what lands.
+
+**The gizmo's bar carries copy and paste, because the stamp made them a
+loop.** Two one-off commands became «copy, carry the box, paste, carry it
+again», which is worth having under the pointer rather than only on the
+keyboard. Cut is deliberately not there: it is destructive and happens once,
+so it is not part of that loop, and Ctrl+X still does it.
+
+**The third control is WorldEdit's `//paste -a`, for the half this app did not
+already do.** Air is never stored in a clipboard — `copyRegion` keeps only the
+cells that carry something — so a paste has never written air. The empty space
+block is a different matter: with `barrier` or `water` chosen, those cells are
+real palette entries, they travel in the copy, and a paste stamps them over
+whatever was standing at the destination. `PasteOptions.keepUnder` is the
+answer, and it is a **pattern** — `matchesBlockPattern`, for that function's
+own stated reason: the modal's preset is a bare `minecraft:barrier` and a
+barrier out of a file is `minecraft:barrier[waterlogged=false]`, so an exact
+comparison would skip neither spelling and the checkbox would do nothing on
+any real document.
+
+The boolean crosses the wire and the block does not. `PasteRequest.skipEmpty`
+is the wish; *which* block it means is the session's, resolved in
+`pasteSelection` — `EditOptions.voidBlock`'s arrangement reached from the
+other side.
+
+**It is shown disabled and pressed where empty space is air**, rather than
+hidden. Air is the default, so hiding it would mean most people never learn
+the control exists — and it is *true* there: a paste really does leave what is
+under it. Same reason the impossible versions are shown disabled rather than
+filtered out.
+
+**Scale is the least useful of the four modes, and it reports rather than
+refuses.** Whole factors only, because anything else is a build with a different
+number of blocks in every row. Multiplying is exact -- one block becomes n^3 of
+itself -- and dividing keeps the cell at the **low corner** of each group, which
+is a rule that can be predicted, unlike "the commonest block" or "the first
+non-air one".
+
+A division is counted before the pass and the number comes back in
+`EditSuccess.notes`. It used to be counted and **refused**, with the caller
+asked to try again carrying `confirmLoss` -- `resizeSession`’s shape, and the
+wrong shape borrowed. A resize is a number typed blind into a panel that has a
+second button; a scale is a cube dragged with the destination drawn under the
+pointer and one CTRL+Z away. So the refusal named a confirmation that existed
+nowhere in the app -- «Confirm to go ahead», with nothing to press -- and the
+gesture was simply cancelled. Reported as exactly that.
+
+`runDocument` shows any `notes` an edit sends, at `warn`, rather than each call
+site wiring its own: an edit only fills that field when something happened the
+count cannot report, and so far that means something was lost.
+
+A block entity comes along only on the group's representative cell. Copying it to
+every cell of an enlarged block would turn one chest into eight, each holding the
+original's items -- the kind of duplication somebody takes into a world and does
+not notice until it has been shared.
+
+**With automatic resizing off, the destination box is drawn in `--danger` while
+the drag is still happening**, and the release is refused by main. Said during the
+gesture rather than after it, which is the difference between a warning and a
+report; the refusal itself stays main's, because the renderer holds no schematic
+and a viewport that decided this would be a second opinion.
+
 **Ctrl+Z reaches the selection, and `undoDepth` is what makes that answerable.**
 The block edits live in main and the selection lives in the renderer;
 interleaving two stacks needs a shared ordering, and that field — main's undo
@@ -1615,6 +2797,45 @@ stack depth — is it. The rule is one sentence: **a selection is undone only wh
 no block edit has landed on top of it.** `selection_history.ts` holds it. A drag
 is one step rather than one per frame, which is why `Viewer.svelte` reports
 gesture boundaries at all: only it knows where the press was.
+
+**A gesture that moved the blocks *and* the box is one press, and was two.**
+The gizmo's commits write `selection` only after awaiting the edit, so by then
+`docState.undoDepth` has already advanced — and the catch-all recorder stamps
+whatever it finds. The step came out keyed to the depth it should have been
+*under*, `undoTarget` read it as the newest thing that happened, and Ctrl+Z put
+the box back while leaving the blocks moved.
+
+`SelectionStep.withEdit` is the pairing, keyed to the depth **before** the edit:
+at the new depth it no longer answers `undoTarget`, so the document is undone
+first and `takeEditUndo` hands the box back in the same press.
+`adoptEditedSelection` captures that depth before the await, and every gizmo
+commit goes through it.
+
+**The flag is load-bearing on `redoTarget` and deliberately absent from
+`undoTarget`**, which is the part that would be tidied into symmetry by
+somebody who had not checked. Undoing a pair leaves its step on the redo stack
+keyed at the depth the document has just come back to, so there the depths
+*do* meet and without the clause the press would move the box forward with the
+blocks left behind. On the undo side they never meet — except when the edit
+was undone by something that bypassed `undoAnything`, which the chat panel's
+per-message undo does, and there the arithmetic's answer is the right one: the
+blocks are already back, so the box should follow. The clause was written on
+both and removed from one when deleting it failed nothing.
+
+**`takeEditRedo` is asked before main is told, and its opposite number after.**
+A redo raises the depth exactly as a fresh edit does and the depth watcher
+cannot tell them apart, so it calls `recordDocumentEdit`, which empties the
+redo stack — the step would already be gone. Reassigning the timeline
+afterwards also puts the rest of that stack back, which is a fix rather than a
+side effect: nothing was branched away from.
+
+**There was a `restoringSelection` flag and it never did anything.** Set and
+cleared synchronously around three assignments, with a comment claiming the
+recorder ran synchronously off them; the recorder is a plain `$effect`, which
+flushes a microtask later with the flag already back to false. What actually
+suppresses a re-record is fast-forwarding `lastSelection`, so `sameSelection`
+finds nothing to record. It is gone, because it was the first thing the gizmo's
+commits reached for.
 
 **A wall-mounted block points *out* of the wall, and the sign of that is the
 whole bug.** Wall torches, wall signs, wall banners, mob heads and coral wall
@@ -1686,7 +2907,7 @@ scripts/gen-block-states.mjs    JSON → the table
 src/shared/block_states.ts      the table, plus the lookups
 ```
 
-`mc_versions.json`'s arrangement for its reason. 1105 blocks come out as 118
+`mc_versions.json`'s arrangement for its reason. 1197 blocks come out as 121
 distinct shapes — every fence in the game has the same five properties — which
 is both a third of the size and the only form a person can read.
 
@@ -1856,6 +3077,55 @@ staircase with a shape typed onto it.
 `_stem` is not a suffix in the pillar table and must not become one:
 `crimson_stem` is a pillar and `melon_stem` is a crop with an `age`.
 
+**The right button opens what it lands on, and Shift places.** That is the
+game's split, and it was missing entirely: the right button always placed, so
+the only way to open a door in a schematic was the inspector, twice, once per
+half.
+
+`EditRequest.use` is **one** verb rather than two, because only main can tell
+which one a click is — the renderer holds no schematic, so it does not know
+whether the cell under the crosshair is a door, and asking first would be a
+round trip per click and a race with any edit in flight. Its fields are
+`setBlock`'s exactly: the block that might open is one step back along
+`against`, which is the arithmetic `doubleSlabTarget` already does, generalised
+to six faces through `FACE_VECTOR`.
+
+The fall-through is a **rewrite** rather than a copy, so a right-click that
+turns out to be a placement is the same placement in every respect — the slab
+merge, the two-part rule, the flooding, the growth and the volume guard. A
+second path here is how one of those comes to be missing from the commonest
+gesture in the app.
+
+Both halves of a door in one transaction, or Ctrl+Z would take it back a half
+at a time. The far half comes from `TWO_PART`, which already knows a door is
+two blocks and which way the second lies — reading it rather than writing
+`_door` a second time is what makes clicking the **upper** half work, and that
+is the half a person reaches first when the door is at eye level.
+
+Sneaking is not a field on the request: Shift sends a plain `setBlock`, which
+keeps the verb's meaning a question about the block rather than about the
+keyboard. Shift is already the descend key in flight, so it collides with
+nothing. What opens is `open` minus `barrel`, whose `open` means a container is
+being looked into. An **iron** door opens here, which in game it does not
+without redstone — deliberate, because this is an editor and refusing would be
+faithful and useless.
+
+**A hotbar belongs to a schematic, not to the window.** It lived in
+`UiSettings`, written with `patchUi`: one bar for the whole app, so opening the
+next schematic handed you the last one's blocks — and a legacy `.schematic`
+inherited nine that its version does not have. It is keyed on the **file path**
+now, which is `conversation.ts`'s and `snapshots.ts`' shape down to the
+`storeFileName` hash.
+
+Three things are load-bearing. The outgoing bar is written **before** the
+subject moves, so a pending debounce cannot land one schematic's blocks in
+another's file. The effect reads only the **path**, so an edit, an undo, a
+resize and a restored version all leave it alone — which is
+`conversation.ts`'s distinction between opening and adopting, reached from the
+other side. And a document with **no path** keeps its bar in memory and writes
+no file: it starts from the factory nine rather than inheriting the last one
+used, because inheriting is the old behaviour under a new name.
+
 **The hotbar's active slot is what you are holding, in both camera modes.**
 There used to be two answers — an `activeBlock` for orbit, the hotbar for flight
 — chosen between by camera mode. That was tenable only while the hotbar was
@@ -1868,8 +3138,10 @@ wheel only because the game has no zoom to lose.
 empty cell in the document is air, and the writers and the agent both name it —
 but there is nothing to pick up and nothing to draw, so it was a permanently
 blank inventory tile that read as a failure to load. `inventoryBlocks` filters
-it and `coerceUi` refuses it in a slot, which heals a settings file written when
-it was the ninth default.
+it and `coerceHotbar` refuses it in a slot, which heals a file written when it
+was the ninth default. On the write as well as the read: validating only on
+read would let a bad value sit on disk, and only on write would trust whatever
+an older build left there.
 
 **Closing a modal over the viewport must release the pointer lock.** In flight
 the canvas holds it, so a panel opened on top of one appeared over a camera
@@ -1909,6 +3181,22 @@ Three specifics, each of which cost something to learn:
 allowlist is the one that was intended, not that it holds. The `mailto:`/`tel:`
 cases are load-bearing: DOMPurify's own default permits both, so without them
 `hardenLink` could be deleted and nothing would fail.
+
+**The block picker's list is one of those, and was not.** It was
+`position: absolute` against the field, inside a `ToolWindow` whose `.body` is
+`overflow-y: auto` and whose frame is `overflow: hidden` — so a list of blocks
+was cut off by a panel a few rows tall, *and* its own margin box drove that
+scroller's overflow. What it could reach, it could also resize. `fixed` removes
+both at once: nothing clips it, and nothing it can grow into.
+
+`placePopover` grew a `prefer` argument for it, defaulting to the old
+behaviour so the two existing callers are untouched. Above is right for a
+control at the foot of a panel; for a field you are **typing into** it is not,
+and the arithmetic made it worse than a fixed choice — `above >= margin` is
+true or false depending on where the panel happens to be, so the same field
+opened upwards or downwards according to where you had dragged its window.
+Below still falls back to above when it does not fit, and the clamp is still
+the only part that is a guarantee.
 
 **A popover is positioned against the window, not against its control.**
 Everything from `.controls` down is `overflow: hidden`, and the controls that
@@ -2010,6 +3298,95 @@ they are refreshed. Two independent sources that agree or the number does not
 ship — and minecraft.wiki plus its Fandom mirror is *one* source. A wrong
 DataVersion produces a file that opens fine and misbehaves in game, which is
 discovered a long way from here.
+
+**A version name and a version label are one version, and only one spelling
+worked.** `JE_26_2` is what every table is keyed on and `26.2` is what anybody
+asks for. `resolveVersionName` in `shared/mc_versions.ts` takes either and is
+the **first** thing every caller does; from there down only the canonical name
+circulates, so nothing else had to learn about labels.
+
+Two spellings is the limit, deliberately. `1.20` does not become `JE_1_20_4`,
+and a near-miss is not repaired — this is the function every caller checks
+before refusing by name, so a guess here puts the silence back one level down.
+
+**The silence is what this replaces.** `dataVersionOf` fails open: an
+unrecognised name comes back `null`, which is *also* what 1.8.8's genuine
+absence of a DataVersion looks like, and what no version at all looks like.
+`refusalFor` cannot catch it either, because `eraOf` answers `flat` for
+anything it does not know — the right permissive answer for a settings string
+written by a newer build, and the wrong one for a name a model just typed. So
+`create_document` accepted `"26.2"`, accepted `"banana"`, and produced a
+document with **no version tag** either way, reporting success.
+
+Two of the three callers already had the guard: `services/convert.ts` threw by
+name, and `setDocumentVersion` throws `UnknownVersionError`. The MCP tool was
+the one that did not — the shape this file records over and over, a rule
+reaching all but one of the places that ask the same question.
+
+**And `create_document`'s `version` is required**, as `NewDocumentRequest`'s
+has always been on IPC and for the reason written there: the container and the
+version are not independent, so they are chosen together at the start rather
+than discovered at save time. Optional, its absence *was* the bug rather than a
+default that needed choosing better — and it also produced the one refusal in
+the app with a hole in it, `refusalFor` interpolating an empty label into «a
+.litematic claiming &nbsp; would open in the mod as the wrong blocks».
+
+**Nothing on the MCP wire repeats a vendored fact, and that is the half that
+makes the next release free.** The `enum` on all five tools that name a version
+is `MC_VERSION_NAMES`; the sentence describing which container holds which
+versions is `versionRangesSentence()`, built from `versionsFor` and the two
+`*_MIN_LABEL` constants. A release added to `resources/mc_versions.json` reaches
+a model with no edit anywhere near `src/main/mcp/`.
+
+This is not tidiness, it is the same bug avoided twice. What went stale was a
+hand-typed `JE_1_20_4` in a tool description — the only spelling a model could
+see, in a schema with no `enum` at all — and writing out fifty names plus a
+sentence saying «39 versions» would have been that mistake four tools wide.
+`tests/mcp.ts` walks every schema and fails on any `enum` that is not the table
+and any description naming a version other than the newest.
+
+**Two things cannot be derived, and both are tripwired instead.**
+`DEFAULT_SETTINGS.version` is a *decision* — a default is a statement to a
+person, the same argument that keeps this app's own version bump manual — so it
+is written out and `tests/services.ts` pins it to the newest flat row. It had
+sat at `JE_1_20_4` through fifteen newer releases while generation stamped it
+and both dialogs fell back to it, and nothing anywhere was looking. The other
+is the prose above.
+
+`DEFAULT_VERSION` in `services/versions.ts` was a third copy of that number,
+exported, imported by nothing, and the one that looked most like the authority.
+It is gone.
+
+**`set_document_version` exists over MCP now**, and it is the other road to the
+wrong number. `setDocumentVersion` was IPC-only, so a client that guessed wrong
+— or opened a file carrying no tag — had no way back at all, and the only
+answer left was to build the document again.
+
+The tool is in `mcp/document_tools.ts` rather than `TOOL_SPECS`, by that file's
+own rule: `setDocumentVersion` opens its own transaction and `callTool` would
+wrap a second round it. `DocumentSpec.run` grew a third parameter for it — the
+`legacy_blocks.json` path, injected as a string exactly as `ToolContext` does
+it, because a backport below 1.13 needs that table and `services/resources.ts`
+reaches Electron, which this module must not.
+
+**`list_versions` is the file's snapshot history and says so now.** It is the
+name a model looking for Minecraft versions finds first, and it answers a
+different question entirely.
+
+**A `.mcfunction`'s 1.13 floor is enforced.** `MCFUNCTION_MIN_DATA_VERSION` was
+declared, documented, and read by the tests and nothing else: `convert.ts`
+skipped `refusalFor` for that format outright — reasonably, since a function
+carries no version tag for a container rule to be about — so a 1.12.2 schematic
+converted into commands naming flattened blocks that version has never had. A
+file that runs, places almost nothing, and reports no error.
+
+`mcfunctionCanCarry` in `shared/command_syntax.ts` is `litematicCanCarry`'s
+sibling and answers the **opposite** way about `null`: a litematic must stamp a
+`MinecraftDataVersion` and has nothing honest to put there, while a function
+carries none at all, so an absent number is not a claim it has to make. It asks
+the **era** as well as the number, and the era is the half that works — 1.8.8
+and 1.8.9 have `dataVersion: null`, so a number-only rule would let the two
+oldest releases through as though they had said nothing.
 
 **`showSaveDialog` exists now, and the format is chosen before it opens.**
 `.schem` is both Sponge v2 and v3 and Electron reports the chosen path but not
@@ -2170,6 +3547,80 @@ screenshot:
   towards +Z makes it deterministic *and* the one a map has, with north at the
   top.
 
+**The orbit turns around what you are looking at, and it used to turn around
+the middle of the document forever.** `controls.target` was written exactly
+twice in the app's life — the box centre when a file opens, and 24 blocks
+ahead when flight hands back — and nothing but a pan moved it in between.
+three's dolly changes the *radius* and never the target unless `zoomToCursor`
+says otherwise, and it defaults to false.
+
+So on a 512-block build every rotation swung on `max(dimension) * 1.6`, which
+is 819, and the pan speed scaled with the same number — about 0.9 blocks per
+pixel. Reaching a far corner was a fight, and that is the whole of *«the orbit
+fixes on the distance rather than on what is in front of you»*.
+
+Two changes, and the second is what the report was actually about:
+
+- **`zoomToCursor`**, so the wheel pulls the camera towards the pointer and
+  takes the pivot with it, plus a small `minDistance` — three leaves it at
+  zero, and a pivot that moves makes reaching it easy rather than theoretical,
+  where there is nothing left to rotate about;
+- **the pivot is reseated at the press that starts a rotation**, from the block
+  under the ray, else the build grid's cell, else not at all — which leaves the
+  target where it was and is therefore the old behaviour, kept for the case
+  this cannot improve. At the press and not continuously: the pivot has to hold
+  still for the whole drag or the camera chases what the rotation swings into
+  view. And it moves the pivot without moving the camera, which is the half
+  that is easy to write and get wrong -- see below.
+
+**Only the depth of what was picked is taken, never its position**, and the
+obvious spelling is the one that snaps the camera. OrbitControls re-aims at
+`controls.target` on every `update()`, so a target set to the cell that was
+actually under the pointer -- off to one side by however far the pointer was
+from the middle -- turns the view to face it, before the drag that asked for
+it has begun. Reported as exactly that, and it typechecks, and it rotates
+about the right place.
+
+`pivotDepth` in `framing.ts` is the answer: the target goes on the axis the
+camera is already looking down, at the depth of what was picked, so `lookAt`
+has nothing to do and nothing on screen moves at all. What changes is the
+*radius*, which is the whole of what was being asked for. It is what a 3D
+editor's \"auto depth\" does -- Blender sets the view's own offset along its
+axis rather than pointing the camera at the surface it found -- and it is
+why the answer to \"the camera snaps\" is not a transition: there is nothing
+left to animate.
+
+`tests/ui.ts` reads the assignment out of the source, because both spellings
+put the pivot on the thing under the pointer and nothing else in the file
+can tell them apart.
+
+**The compass was right about everything except which target it kept.**
+`flyToAxis` faithfully keeps `controls.target` and `arcBetween` sweeps about
+it — and that target *was* the centre of the build, so `UP` meant «fly over
+the middle of the structure» wherever you were standing. It reseats first now,
+and from the **centre of the canvas** rather than from the pointer, because
+the pointer is over the compass: that is its own element, not the scene. The
+bug survives every check written about `orbitFor` and `arcBetween`, which is
+why `tests/ui.ts` states it about the call site instead.
+
+**Orthographic needs the zoom compensating, and that is the part to not leave
+out.** `applyProjection` derives the frustum from the distance to the target,
+and the comment above `orthoFrustumHeight` leans on that distance holding
+still — true while only a dolly moved, because in orthographic OrbitControls
+writes `camera.zoom` and never moves the camera. Moving the *pivot* breaks
+exactly that: the camera has not moved and the distance has, so the build
+resizes on screen and reads as a zoom nobody asked for.
+
+The visible height is `2 · d · tan(fov / 2) / zoom`, so scaling `d` by `k`
+scales `zoom` by `k`. `zoomAfterPivot` is exact rather than a correction
+factor, and `applyProjection` has to run again immediately or the sides are
+left at the old distance while the zoom is at the new one.
+
+What deliberately did **not** change: `documentFraming` still frames the whole
+box on open and on `R`, which is right and is pinned; `LEFT` is still
+`THREE.MOUSE.PAN`, which several other rules are built on; and `onCompassClick`
+keeps the shape the source greps read.
+
 **A flight goes around the build rather than through it.** A straight line
 between two points on a sphere is a chord, so a lerped quarter turn passes a
 third of the way inside the structure and out again; `arcBetween` interpolates
@@ -2323,10 +3774,15 @@ behind a "but".
 around the whole build, handed to the raycaster, swallows every click meant for
 a block inside it — and the click still does *something*, so it reads as the
 inspector picking the wrong block rather than as the cage being in the way.
-`tests/ui.ts` requires every `intersectObject` call in the viewer to name
-`loaded` and nothing else, which is what keeps the next decorative object out of
-it by default. It is `BackSide` so the near faces are not in the way from
-inside, which is where anyone building will be.
+`tests/ui.ts` walks every `intersectObject` call in the viewer and requires that
+none of them names the cage or the void layer, and that the block pick still
+names `loaded` -- which is what keeps the next decorative object out of the
+picker by default. Stated that way rather than as "only `loaded`", because that
+was never true: the face plates have had a raycast of their own since they
+existed, and the gizmo's handles have one now. What must stay out is anything
+**decorative** -- a thing drawn to be looked at rather than pressed. It is
+`BackSide` so the near faces are not in the way from inside, which is where
+anyone building will be.
 
 **Empty space can be made of something other than air, and that is three
 mechanisms wearing one name.** `editing.voidBlock` is **written** when a block
@@ -2341,6 +3797,37 @@ every empty cell becomes water without a voxel being touched. Index 0 is always
 air, which is what makes it a one-entry edit; the voxels are shared with the
 document and only the palette array is rebuilt.
 
+**A bare name is a pattern here too, and one of three places knew it.** The
+rule this file already states for `replace` — *naming no state means the block
+in any state* — is the same question `fillVoid` asks when it decides what to
+draw as empty space, and `applyEdit`'s `emptiness` asks when it decides whether
+a break emptied a cell. Both compared `paletteEntryCacheKey` **exactly**.
+
+Every preset in the modal is a bare id; every barrier out of a file, or out of
+this app's own placement, is `minecraft:barrier[waterlogged=false]`, and water
+is `[level=0]`. So choosing barrier over a schematic already full of barrier
+left every one of them opaque and clickable — and the reported workaround went
+through **Replace**, which is `replaceAny`, which has known the rule all along.
+
+`matchesBlockPattern` in `pipeline/types.ts` is the one answer now, beside the
+cache key it is built from, and `replaceAny` calls it rather than keeping its
+own copy. Two things fall out:
+
+- **It looked intermittent, and the cause is an unrelated checkbox.**
+  `hideMarkers` runs only when markers are *hidden*, and it turns barrier,
+  structure_void and light into air — which `fillVoid` then sweeps up from the
+  air branch. With markers hidden the barrier case already worked.
+- `blocksInDocument` kept only bare names while `voidSources` keeps states, so
+  a stated previous void block was unmatchable and the Replace button died over
+  an edit that would have worked. It holds **both** spellings now, which is
+  `matchesBlockPattern`'s rule expressed as a set.
+
+The check that was supposed to cover this — *«a placed void block is void as
+well»* — passes for a reason that is not good enough: it compares a stateless
+entry against a stateless string, and would pass however narrow the comparison
+was. Every document the suites build for themselves is stateless, which is
+exactly why nothing saw it.
+
 **The bucket is chosen by palette entry, not by "was this cell air".** Two
 populations end up holding the block — the cells drawn over air and the cells
 a break actually wrote it into — and one rule covers both. The consequence is
@@ -2348,6 +3835,90 @@ worth knowing before it is reported: **with water as the void block,
 hand-placed water is unpickable too.** That is the request rather than a side
 effect; if water is what empty space is made of, a click passes through it the
 way it passes through air.
+
+**And the chunk cache diffs it, which is the fourth time that rule has earned
+itself.** The palette swap is invisible to every grid `chunked_mesh.ts`
+compares: the voxels do not move, no light changes, no sign is retyped, and
+index 0 quietly stops meaning air. So choosing water re-meshed **nothing**.
+
+The shape of the failure is the part worth recognising, because every layer
+reported success. `documentMesh`'s own key contains the void block, so the mesh
+*was* rebuilt -- over a chunk cache that found every chunk clean and carried
+them all forward by reference. `shipMesh` then tested object identity on the
+positions arrays, correctly found them identical, and sent a delta saying
+nothing had changed. The viewport was told the truth about a lie.
+
+On screen that is a setting that does nothing at all -- until some unrelated
+edit dirties one chunk, and the new void appears in that chunk alone. Reported
+exactly that way: *"the opacity only changes on one face if you add a block"*.
+
+`voidDigest` is the answer and it is **derived from the two arguments the
+mesher already receives** rather than taken as a third, so it cannot drift from
+what was drawn: every index `fillVoid` marked, *and what that index now holds*.
+Both halves are load-bearing. The indices alone miss a swap -- water and lava
+are both written over index 0, so `{0}` either way -- and the entries alone
+miss a cell a **break** filled with the void block for real, which is void by
+the same rule and has an index of its own.
+
+**Choosing and converting are two acts, so they are two controls.** The rewrite
+was a checkbox carried along with the choice, read at the moment the block
+changed. Ticking it *after* picking water therefore did nothing, and re-picking
+water to make it fire hit `setSessionVoidBlock`'s own short-circuit -- you had
+chosen what was already chosen. The one gesture anybody would try was the one
+with no answer, and it failed in silence at both ends.
+
+`replaceFrom` is what the split costs, and it has to be explicit. The choice
+lands at the pick -- that is what makes the viewport show it -- so by the time
+the button is pressed `session.voidBlock` is the **new** block and main working
+it out for itself would convert water into water. The panel is the only thing
+still holding the old value, so the panel names it.
+
+**And it is not enough on its own, which took a second report to find.** The
+setting and the cells can disagree, and from the setting the two states are
+indistinguishable: a schematic whose empty space is *set* to barrier with its
+cells still air -- reopened from its sidecar, or one Ctrl+Z after a conversion
+-- looks exactly like one where the conversion already happened. Both say
+barrier; only one has anything to do. Deciding from the setting disabled the
+button in **both**, so the one gesture that would have fixed it was the one
+with no answer. Reported as *«se l'aria di una schematic è già tutta barrier e
+si seleziona barrier come empty space block, questo non ha alcun effetto»*,
+with a workaround of picking a second block and coming back.
+
+Two changes, and the pair is the fix rather than either alone:
+
+- **air is always a source.** `voidSources` in `shared/settings.ts` puts it in
+  unconditionally, because that is what empty means in a schematic whatever the
+  setting says. `replaceFrom` is *added* to it rather than standing in for it —
+  a conversion leaves its own block behind, so swapping barrier for
+  structure_void has to find the barrier and air alone would not. The target is
+  never a source: converting a block into itself can only change nothing.
+- **whether there is anything to convert is observed, not inferred.** The panel
+  asks whether the document actually holds any of the sources. That is the only
+  thing that can separate the two states above, because one of them has air in
+  it and the other does not.
+
+The second of those has a half that is easy to leave out and makes the first
+one inert: **`DocumentState.palette` deliberately does not contain air.** It is
+the materials list and a schematic is mostly air, so asking it alone answers
+"no air here" about every document ever opened — and the button, correctly
+computing air as its source, would have gone on being dead for the identical
+reason under a different name.
+
+`blocksInDocument` recovers it rather than transporting it: `countBlocks`
+counts every voxel whose palette index is not zero and index 0 is always air,
+so the document holds air exactly when `blockCount` is short of the volume.
+Two numbers `DocumentState` already carries, and exact.
+
+`voidSources` is in `shared/` for `normaliseVoidBlock`'s reason and with a
+sharper edge: main converts with it and the panel decides the button from it,
+so two copies is how the button comes to be live over an edit that changes
+nothing, or dead over one that would work. Deleting the air term fails seven
+named checks across `tests/ui.ts` and `tests/session.ts`.
+
+One consequence follows and is deliberate: **a press converts even when the
+block picked is the one already chosen.** Choosing is not an edit and still
+pushes nothing; pressing is a request, and it is answered by looking rather
+than by consulting a flag.
 
 **One culling pass, two layers.** `BakedFace.voidFill` marks the layer and
 `chunked_mesh.ts` partitions before calling `buildMesh` twice. Meshing the two
@@ -2612,6 +4183,10 @@ knowing:
   approximations, and a close box beats a cube there. `tests/blocks.ts` states
   it both ways — the ones that are cubes must stay cubes, or a wall of them
   stops hiding its own interior.
+
+  An approximation is a *stage*, not a destination: redstone dust and the
+  skulls have since been transcribed properly, and what the box bought in the
+  meantime was the six neighbours it stopped deleting.
 - **A face with no area is not drawn**, decided from the box rather than from a
   hand-written `omit`. Vanilla writes a *plane* as an element whose `from` and
   `to` agree on one axis — a chain is two of them, and so is a cross — and the
@@ -2625,6 +4200,30 @@ knowing:
   full-block texture and wrong for blocks whose texture is a *sheet* of parts
   (lantern, chain, bell). Those carry an explicit `uv` window per face,
   transcribed from the vanilla model.
+
+  **A chain lying along `x` or `z` had none**, because those two variants are
+  written out as their own boxes rather than rotated, and the windows did not
+  come with them. All 696 opaque texels of `iron_chain.png` are in its first
+  six columns, so the band the derived UVs sampled -- `v 6.5..9.5` across all
+  sixteen -- is **16% opaque**: five sixths of every horizontal chain drew
+  nothing at all, and the rest wore a 3-pixel band of link stretched along the
+  run. Reported as an incomplete mesh *and* a badly sewn texture, which is one
+  fault seen from both sides.
+
+  Two measured facts put the windows back with no freedom left: the 16-texel
+  axis follows the length (which is what the `uvRotation`s are for -- the
+  turn transposes the quad's axes, the anvil's case), and the `v = 0` edge
+  sits where the turn sends the vertical chain's top. The turn is derivable
+  rather than guessed: the tilt moves from `y` to `x`, and conjugating a 45
+  degree turn about Y into one about X takes a rotation about **Z**,
+  `(x, y) -> (y, 16 - x)`, so `y = 16` goes to `x = 16`.
+
+  Both halves are checked, and the second is why: the sheet is **not**
+  symmetric under a half turn -- 936 of the 1536 texels in the two strips
+  differ from their opposite -- so the strip laid end for end is visible.
+  And a proportion check alone cannot see the original fault either, because
+  coordinate-derived UVs are 16 by 3 as well; they are 16 of the *wrong*
+  texels. `tests/blocks.ts` states all three.
 - **An animated texture is its frames stacked vertically in one PNG**
   (`lantern.png` is 3 frames tall). `firstAnimationFrame` crops to frame 0 on
   load — without it the atlas squashes the strip into a square tile and every
@@ -2632,15 +4231,26 @@ knowing:
   by reading the `.mcmeta`.
 - **Chests have no block model at all**, and are drawn from
   `textures/entity/…` with a `ModelPart` cube unwrap; `unwrapCube` in
-  `block_shapes.ts` reproduces that layout. Banners and shulker boxes stay on
-  a dyed-wool stand-in — their sheets need layer composition this code does not
-  do.
+  `block_shapes.ts` reproduces that layout. Shulker boxes stay on a dyed-wool
+  stand-in — their sheet is laid out for an animated lid — and a banner's
+  *patterns* stay uncomposed, though its cloth is no longer wool.
 - **`unwrapCube` needs the sheet's width, and it used to assume 64.** Its
   windows are stated in the *sheet's* texels while `UvWindow` is in sixteenths
   of the tile, so the two only agree once the size is known. Right for every
   sheet it had been used on and wrong the moment a 32-wide one arrived: a sign's
   board came out wearing a quarter of its own sheet blown up to fill the face,
   which reads as a plank and is why it nearly passed review.
+- **And it needs the sheet's *height*, which is not always the width.** One
+  scale for both axes is right exactly while the sheet is square, and the
+  three callers it had all are. A mob's is not: a skeleton, a wither skeleton
+  and a creeper are 64x32. Read at the width, a head's band lands at v 8..16
+  of a sheet only 32 tall, which is a rib.
+- **A head has no block model, and it had no unwrap either.** The box was
+  right -- `[4, 0, 4, 12, 8, 12]`, which is vanilla's -- and the texture was
+  right, `entityTextureAlias` having resolved the mob's own sheet for years.
+  What was missing between them was the `uv`, so every face took
+  coordinate-derived UVs and cropped an arbitrary quarter of a whole
+  skeleton. Reported as the heads being smeared, which is exactly what it is.
 - **Only a full opaque cube may cull — and "opaque" is a question about
   pixels.** `occludesFace` answered it from `isSeeThrough`, a list of names in
   `block_shapes.ts`, which is geometry and cannot open a PNG. So every block
@@ -2657,6 +4267,369 @@ knowing:
   from `occludesNeighbours` alone — fold the texture into that one and the two
   stop agreeing, so a copper grate becomes a cell the mesher reads light from
   and the flood never lit, and the wall behind it goes black.
+- **A texture that is a sheet of parts makes a correct box invisible.** The
+  header above says derived UVs are wrong for a lantern or a chain; candles are
+  what that costs when the empty part of the tile is where the box happens to
+  look. `candle.png`'s art lives at texels `x 0..1`, the box sits at `x 7..9`,
+  and every face was emitted, textured and drawn with nothing — reported as
+  candles having no model at all. Vanilla says so outright: a candle's sides are
+  `uv [0, 8, 2, 8 + height]` whatever the box is doing.
+
+  **`tests/blocks.ts` walks all 920 ids and fails on any whose every face
+  samples an entirely transparent region.** Nothing else can see it: the block
+  resolves a real texture, so the hashed-cube walk passes; the window is inside
+  the tile, so the off-tile walk passes; the geometry is vanilla's, so every
+  orientation check passes. What is wrong is only *where on the tile* a correct
+  box looked. It found `end_rod` on its first run, invisible for the identical
+  reason and never reported — which is the argument for the check over the fix.
+  `some` rather than `every`, because a chest's hidden faces and a plane's back
+  are legitimately blank.
+- **The candle's flame is this file's one deliberate invention, and it is
+  labelled.** No vanilla model has one: `candle_one_candle_lit.json` is the
+  same `template_candle` with `all: block/candle_lit`, and the two textures
+  differ by **eighty pixels** — the wax at the top going from cream to white.
+  In the game the flame is a *particle*, and this app draws none, so a lit
+  candle was faithful to every model and still looked unlit. Reported that way.
+
+  So it is two quads of `particle/flame`, the sprite the game's own particle
+  uses, above the transcribed wick rather than in place of it. The precedent is
+  redstone and the skulls — but there a cube was the *harmful* answer, and here
+  the block was merely incomplete, which is a weaker argument and is why it is
+  written down rather than assumed. **Its size is ours**: two units wide, three
+  tall, because no source states one.
+
+  Two things travel with it. `normalizeTextureKey` rewrites anything not under
+  `block/`, `item/` or `entity/` into `block/`, so `particle/flame` became
+  `block/particle/flame`, resolved nothing, and fell back to the block's own
+  texture — **a flame made of candle wax, silently**. And a lit candle emitted
+  no light at all, being in none of `lighting.ts`' three tables, so the flame
+  would have been a dark smudge in a sealed room; it is the game's `3 per
+  candle` now, which is the second block after `minecraft:light` whose level
+  lives in its state and the only one where that state is a *count*.
+- **`lit` chose the light and never the texture, and eleven blocks were drawn
+  in the wrong state.** `lighting.ts` has kept two default tables for that
+  property since it was written -- a bare campfire is burning, a bare furnace
+  is not -- while `model_baker.ts` read it in exactly one place, the `_front_on`
+  arm of the `facing` branch. So a **redstone torch switched off emitted zero
+  and was drawn burning**: the two halves of one block contradicting each other
+  on screen, with `block/redstone_torch_off.png` sitting in the pack reachable
+  from no code path in the repo.
+
+  The walk is what turned one report into a finite list. Of the **52** ids that
+  carry `lit`, **thirteen** baked identically at both values: the two torches,
+  `redstone_lamp` -- whose `_on` was unreachable in the mirror direction -- the
+  eight copper bulbs, and `redstone_ore` with `deepslate_redstone_ore`. The
+  last two are **right**: vanilla ships one texture for each and `lit` there
+  moves the light and nothing else. Eleven wrong, two correct, and nothing but
+  a walk separates them.
+
+  It is a **table** because vanilla's naming runs in three directions at once
+  and no derivation covers them: a torch's bare name is the *lit* one and
+  `_off` is dark, a lamp's bare name is *dark* and `_on` is lit, and a bulb is
+  `<name>[_lit][_powered]` -- four textures for two booleans. It is in
+  `candidatesForName` and **not** in a shape function, which would see the
+  property just as well: here the swap is of the whole block, and two of the
+  three families are `kind: "cube"` with no `ShapeBox` to hang a `texture` on.
+  The campfire went the other way because it needed control per *face*, tied to
+  geometry. That is the whole of the difference between the two.
+
+  **Which value a bare block takes is asked of the registry**, not written into
+  the table, because it is not one answer for all of them: a bare
+  `redstone_torch` is lit and a bare `redstone_lamp` is not. That matters
+  because a schematic may legally carry a partial state and the block-icon walk
+  bakes with none at all, so the default is the commonest case rather than an
+  edge one -- and `tests/blocks.ts` therefore bakes the two bare, which is the
+  only shape of check that can see it.
+
+  The `lit` table sits **above** the `facing` branch and the order changes
+  nothing today, which is written down rather than left to be rediscovered. A
+  wall torch reaches that branch carrying a `facing`, and for the face it
+  points at the branch answers the bare name -- the lit texture. The collision
+  is real and unreachable: a wall torch is a `boxes` shape, so every face takes
+  the primary key and the per-face map is never consulted. Verified by moving
+  the table below and watching nothing fail. It stays above for the day a block
+  in it is a cube with a `facing`.
+
+  The pre-Flattening era is covered by the same fix and needed none of its own:
+  `legacy_blocks.json` maps `75:5` to `redstone_torch[lit=false]` and `76:5` to
+  `[lit=true]`, so a 1.12 document arrives at the baker already holding the
+  right state. Only the drawing was wrong, in both eras, for the same reason.
+- **A property may choose the texture, and a candidate list cannot.**
+  `SPECIAL_FACE_RULES` is keyed on the block, so the campfire's row put
+  `campfire_log_lit` first *because the default state is lit* — and a cold
+  campfire then wore burning logs. A shape function sees the state, so `lit`
+  belongs there: it swaps the texture and moves not one coordinate, which is
+  what vanilla does through `campfire_off.json`. Same for a candle. What is left
+  in the face rule is the particle texture and the fallback the boxes resolve
+  against.
+- **The blockstate decides the authoring direction, and three of five disagreed.**
+  The campfire is authored facing **south**, the hopper north, and a bell's two
+  *wall* models east while its floor and ceiling ones face north. Guessing one
+  convention for a block family leaves it a quarter or a half turn out, and a
+  campfire turned 180° is still a campfire. Read the blockstate, every time.
+- **A bell has no block model at all.** `bell_floor.json` and its three siblings
+  hold only the supports — a dark-oak bar, and two stone posts on the floor. The
+  bell is a block entity, like a chest, and `unwrapCube` already reads that
+  layout. Its two cubes were **measured off** `entity/bell/bell_body.png`: a
+  6×7×6 unwrap at (0, 0) and an 8×2×8 at (0, 13), which is that layout and
+  nothing else could produce it. Whether the body turns with `facing` is
+  unobservable — its four side windows are byte-identical, because a bell is a
+  body of revolution — so it turns with the supports and that is one `transform`
+  rather than two.
+- **`hopper_side.png` is not a file vanilla has ever had.** The generic
+  candidate list asks for it, so every hopper wore its own lid on all six faces
+  — `hopper_top` being the only name that resolved — and `hopper_inside` was
+  unreachable from a face rule at all, because it belongs to the bowl's floor
+  and the funnel's underside rather than to a side of the block. The hopper is
+  also the one of the five whose UVs were right and whose *geometry* was the
+  whole fault: the rim as a solid lump, with no bowl, funnel or spout.
+- **A rail's `shape` was decoded, derived and rotated -- and drawn by
+  nobody.** It comes out of `legacy_blocks.json` and out of a `.schem`, it is
+  derived from the neighbours by `block_connections.ts`, and it turns with
+  the schematic in `domain/transform.ts`; the only place it was missing was
+  the one that decides what a rail looks like, so every track in the game
+  drew the same flat plate whichever way it ran. `powered` was the same story
+  one property over: `rail_corner`, `powered_rail_on`, `detector_rail_on` and
+  `activator_rail_on` are all in the shipped pack and were reachable from
+  nothing.
+
+  Both are named in the **shape function** rather than in
+  `SPECIAL_FACE_RULES`, for the campfire's reason: a candidate list cannot
+  see a property, and both halves of this depend on one.
+- **A rail is a plane, and was a box.** Vanilla writes the element with
+  `from` and `to` equal on y, so `boxFaces` drops the four faces with no
+  area: six quads become two. What it gives up is the `cullFace` the old
+  box's underside earned by lying on the cell boundary -- which vanilla does
+  not claim either, its rail models carrying no `cullface` at all.
+- **An ascending rail's UVs have to be stated, and that is a consequence of
+  having no `rescale`.** Vanilla writes the raised plane as the full 0..16
+  and lets `rescale: true` grow it back out to the block's diagonal after the
+  45-degree turn; written out as coordinates instead -- the chain's idiom --
+  the box runs from -3.3 to 19.3 along its axis, and coordinate-derived UVs
+  would then run a fifth of the way outside the tile. The atlas clamps rather
+  than refusing, so that is a ramp wearing one smeared row of its own
+  texture. `up` is the identity and says nothing the derivation would not;
+  `down` is vanilla's own vertical mirror of it, which is a real choice.
+
+  The finished ramp reaches a pixel **above** its own cell, exactly as
+  vanilla's does. That is the first geometry in this file to leave the block
+  it belongs to.
+- **A colour that varies with the *state* needs a texture key of its own.**
+  The tint in `ensureTextureCached` is keyed on the texture path and its
+  colour is a constant of the baker, which is exactly right for grass and
+  water -- every leaf in a document takes the same biome -- and cannot
+  express a banner's cloth in sixteen colours or redstone dust at sixteen
+  powers. Neither is a second `BIOME_TINTED` row.
+
+  The way round it already existed, for the glyphs: mint a synthetic key and
+  write the multiplied pixels into the cache under it. `resolveBoxTexture`
+  spells it `<path>#rrggbb`, so a shape function can ask for one and nothing
+  else has to know -- the atlas packs whatever is in `textures`.
+
+  An **animated** source is handed back untinted rather than half-done:
+  `animationCache` is keyed on the texture too, so a tinted copy would need
+  its frames tinted as well, and today nothing asks. `tests/blocks.ts` checks
+  the suffix is a colour `parseHexColor` accepts, because a malformed one is
+  refused nowhere -- it falls back to the biome green, so a typo in a dye
+  would come out the colour of grass with nothing saying why.
+- **A banner is a block entity with three parts, and it was a slab of dyed
+  wool.** `entity/banner/banner_base.png` measurably carries all three: the
+  flag's unwrap runs u 0..42 by v 0..41, the pole's u 44..52 by v 0..44 and
+  the bar's u 0..44 by v 42..46, which is `unwrapCube` evaluated for a
+  20x40x1 at (0,0), a 2x42x2 at (44,0) and a 20x2x2 at (0,42). Nothing else
+  produces that layout, which is the bell's argument.
+
+  A banner *standing* has no `facing` at all, so `facingSteps` fell back to
+  east and all sixteen rotations came out flat against the west wall. It
+  turns by sixteenths now, through a `BoxRotation`, for the head's reason.
+
+  Vanilla renders the model at **two thirds**, which is what makes a banner
+  two blocks tall out of a 42-unit pole, and its two translations happen
+  *before* that scale -- so they are whole blocks and the scale does not
+  touch them. Getting that wrong moves the cloth by a fifth of a block and
+  looks like nothing in particular.
+- **The cloth hangs out of its own cell, and that is the block rather than a
+  liberty.** A standing banner reaches three quarters of a block *above* its
+  cell; a wall banner's cloth ends thirteen units *below* the floor of its
+  own. That is what makes one read as two blocks tall while its hitbox is
+  one.
+
+  It has a consequence worth knowing before it is reported: `pickBlockAt`
+  derives the cell from where the ray hit, so **a click on the lower half of
+  a wall banner's cloth selects the empty cell underneath it**. Minecraft
+  behaves the same way -- there is no hitbox down there either -- but the
+  outline this app draws round that cell is its own, and it is the same class
+  as the azalea's `down` face above.
+- **The pole's south face is omitted, and the bar's costs nothing.** Vanilla
+  puts the flag's back and the pole's front on the same plane, and two
+  coincident faces z-fight -- here that would be a flickering stripe up the
+  back of every banner in the build. What omitting it costs is the couple of
+  units below the cloth's hem, seen from due south. The bar's south face is
+  *entirely* behind the cloth, so that one is free.
+- **The patterns are still not composed, and a plain banner is not a
+  stand-in for one.** They are a stack of layers in the block entity's NBT
+  and that is a different job; what changed is that the base colour is no
+  longer a lump of wool. Shulker boxes keep the wool, because their sheet is
+  still laid out for an animated lid.
+- **Redstone dust was three faults in one block, and each hid the others.**
+  Vanilla ships the texture **greyscale** -- the shipped pack's palette is
+  three greys and transparency, none darker than 217 -- and multiplies it by
+  `RedStoneWireBlock.getColorForPower`, so an untinted wire is a white line
+  rather than a dim red one: `4c0000` unpowered to `ff3300` at fifteen, with
+  the green and blue terms clamped away below power 9 and 11, so most of the
+  range is a pure red getting brighter. The shape was one full plate, so it
+  looked identical connected to anything. And the connections were derived
+  from `side.name.includes("redstone")`, which is wrong in both directions at
+  once -- it took `redstone_ore`, `deepslate_redstone_ore` and
+  `redstone_lamp`, and missed every source not spelled with the word: a
+  repeater, a comparator, a lever, a button, a pressure plate, an observer, a
+  tripwire hook, a daylight detector, a target, a trapped chest, a lectern, a
+  detector rail, a sculk sensor and a lightning rod.
+
+  `power` is **read from the file and never computed**. A schematic records
+  what the wire was carrying when it was cut, and a legacy `.schematic`
+  carries all sixteen levels in its data nibble; nothing here simulates
+  redstone.
+- **`"up"` was never produced by any code path in this repo**, so no wire
+  ever climbed a step and the geometry that draws one had nothing to draw it
+  from. `getConnectingSide` is transcribed now, in its own order: up the side
+  of a solid neighbour when there is dust on top of it *and* nothing on top
+  of this wire to stop it; then the neighbour itself; then `none` if the
+  neighbour is solid; then down onto whatever is under it.
+
+  That reads two cells that are not faces of the wire -- above and below each
+  horizontal neighbour -- so `Neighbours` gained eight keys and `connect.ts`
+  fills them. They are in the **same array** as the six rather than beside
+  it, and that is the load-bearing part: phase one uses that array to decide
+  which cells an edit made stale, and the set of cells a wire *reads* is
+  exactly the set that must be revisited when one of them moves. Two lists is
+  how one comes to be missing an offset, and the symptom is a wire that stops
+  climbing until something else near it is edited. `tests/session.ts` builds
+  a real step for that reason -- the block-level checks call `connectedState`
+  with a map built by hand and cannot see either half.
+
+  It costs about **6%**: a 120x20x120 fence fill goes from ~1.07 s to ~1.13 s.
+- **Dust is refused in mid-air and on a pond, and that is the only placement
+  this app refuses on physical grounds.** Minecraft refuses a great many -- a
+  torch on sand, a flower on stone -- and reproducing that would be faithful
+  and useless here, the same argument that lets an iron door open. What earns
+  a rule is a block whose *appearance* lies without one: dust floating in the
+  air or lying on water looks like a working circuit and is a state the game
+  cannot hold.
+
+  **Silently, and only from the hand.** Silently because that is already what
+  this arm does when a door's far half is blocked; only from the hand because
+  `applyEdit`'s `setBlock` arm is the hand -- a fill, a paste, a transform and
+  every agent tool go through `runTransaction` bodies that never reach it,
+  which is the same reach the slab merge and the two-part rule have. A fill of
+  dust across mixed ground should lay what it can rather than refuse the lot.
+
+  The support test is **`coversFace`, not `occludesNeighbours`**, and the pair
+  of slabs is why: a *top* slab reaches its cell's ceiling, so the cell above
+  it has a floor and vanilla's `isFaceSturdy(UP)` says yes, while a *bottom*
+  slab's surface is half way down its own cell. Asking whether the block is a
+  full opaque cube would refuse the top slab too, and a false refusal in an
+  editor is worse than a false allowance. `src/shared/block_support.ts` is the
+  rule, pure, with solidity passed in -- `NeighbourBlock.solid`'s split.
+
+  One consequence is inherited rather than introduced, and is worth knowing:
+  **a file keeps the connections it arrived with**, because loading is not a
+  transaction. A pre-Flattening `.schematic` spells every wire
+  `[east=none,north=none,south=none,west=none]` -- the format cannot carry
+  more -- so a 1.12 circuit opens as a row of dots until something near it is
+  edited. Legacy fences have had exactly that property since they were
+  drawn, for exactly the same reason.
+- **A cauldron was a solid block of iron, so its `level` was not merely
+  unread -- it was unreadable.** The shape was a 16x16x16 box wearing the
+  pot's own textures, with no bowl, no floor and no inside, so a liquid drawn
+  in there would have been sealed inside it. Both halves had to be
+  transcribed together, from `template_cauldron_full` and its two shorter
+  siblings: four walls, the bowl's floor, eight boxes of feet, and one
+  upward-facing surface for the contents. `cauldron_inner` ships in the pack
+  and nothing could name it.
+
+  Every `omit` in it is a face vanilla's own model does not state, and each
+  is a face another box of the same cauldron stands against -- two coincident
+  faces z-fight, which is what a seam down the middle of a leg looks like.
+
+  It also stopped hiding what it stands on. A full box covers all six faces,
+  so `coversFace` said yes and a cauldron deleted the top of the block under
+  it -- through the gap between its own feet, which is where the game shows
+  you the floor.
+- **The two eras spell the water differently, and that is the finding rather
+  than a bug in the table.** 1.17 split the block: a modern `cauldron` has no
+  properties at all and the water moved to `water_cauldron[level=1..3]`.
+  Before the Flattening there was one `cauldron` with `level=0..3`, and
+  `legacy_blocks.json` maps `118:2` to `minecraft:cauldron[level=2]` exactly.
+  So a 1.12 schematic arrives holding a state the modern registry says that
+  block cannot have, and a cauldron of water arrives called `cauldron`.
+  Reading `level` off **both** spellings is what makes one function serve
+  both eras, and it costs nothing: a modern `cauldron` never carries one.
+
+  The three heights are vanilla's and are not thirds of anything -- 9, 12,
+  15. Lava and powder snow have no level in any version: full, or a different
+  block. Only water is tinted, which is vanilla too; the template writes
+  `tintindex: 0` on all three and only `water_cauldron` registers a colour.
+
+  A `water_cauldron` with nothing stated is drawn **one third full**, which
+  is the state the game places. That is not a nicety: the walk over every
+  offered id bakes with an empty property bag, so an empty pot there would
+  make the commonest cauldron in the app look like the bug this fixes.
+- **`signal_fire` has no geometry, and that is the finding rather than an
+  omission.** It changes the height of the smoke column, which is a particle and
+  part of no model. Giving it a shape would be inventing, which is the one thing
+  this file is not allowed to do.
+- **An amethyst bud was a cube, and the cube sealed the geode.** All four --
+  the three buds and the cluster -- fell through every table to `CUBE`, so a
+  pointed crystal was drawn as a solid block wearing its own sprite on six
+  sides. That is the half that was reported. The half that was not:
+  `occludesNeighbours` answered **true**, and `lighting.ts` floods from that
+  predicate, so a bud **sealed its own cell** and a geode with buds lining its
+  walls put itself in the dark. `connect.ts` read the same predicate and let a
+  fence connect to one as if it were stone; `session.ts` read `coversFace` and
+  reported it as sturdy ground.
+
+  That it did not *also* delete its neighbours' faces was luck rather than
+  design: the mesher gates culling on `isTextureOpaque`, which asks the decoded
+  alpha, and a bud's sprite has plenty of it. A wrong geometric answer saved by
+  a later texture guard is exactly the arrangement worth writing down, because
+  it is the kind that stops saving you.
+
+  Vanilla is `parent: block/cross` for all four, and the four models are
+  **identical** -- the size difference is entirely in the art. Counted off the
+  bundled pack on a 64x64 tile: 354 opaque texels for the small bud, 690 for
+  the medium, 1114 for the large, 2104 for the cluster. Not one coordinate
+  between them, which is why one shape function serves all four.
+
+  The blockstate turns the whole model by `facing` in **six** directions, and
+  `rotateShapeBox` does only the `y`. So the `x` is applied by hand, once, as
+  `(x, y, z) -> (x, z, 16 - y)` about the centre; three parts are written and
+  three derived. Which way that sends the model's top is not a guess -- `south`
+  is `north` plus `y: 180`, so `x: 90` alone has to point north.
+
+  **No `uv` window is stated and that is deliberate**, which is the opposite of
+  the usual advice in this file: every plane spans 0..16 on both of its own
+  axes, so the derived UVs already *are* vanilla's `[0, 0, 16, 16]`. What each
+  facing needs is a per-face `uvRotation`, because the sprite tapers to a point
+  at the top of its tile and that point has to come out along `facing`. Strip
+  them and five of the six facings fail -- which is how they were checked, in
+  pixels, off `large_amethyst_bud.png` having nothing at all above row 26 of
+  64.
+
+  The **sign** of the 45-degree roll is immaterial for a cross and says so
+  beside itself, because it looks exactly like the thing to get backwards:
+  `{0, 90}` rolled by +45 is `{45, 135}` and by -45 is `{-45, 45}`, the same
+  pair. All it decides is which plane takes which diagonal, and they wear the
+  same texture through the same window. So "the planes came out swapped" is
+  not evidence of anything.
+
+  **And `facing` is derived at the click now, in the same commit as the
+  geometry.** `WALL_MOUNTED` is that rule with four directions and refuses `up`
+  and `down` on purpose -- there is no ladder on a ceiling. A bud has both:
+  they line a geode's floor, walls and roof. It belongs with the model rather
+  than after it, because while all six facings drew the same cube deriving the
+  property bought precisely nothing, and the moment the model turns, not
+  deriving it is half the block coming out wrong.
 - **A flowerbed is one quarter-plate per segment, and they sit above the
   floor.** Pink petals, wildflowers and leaf litter were a full 16×16 plate at
   `y = 0` whatever the count: one petal carpeted the cell, and a plate that
@@ -2668,13 +4641,17 @@ knowing:
   way the ray came.** Vanilla's `template_azalea` states its lid as a
   zero-thickness element at `y = 16` carrying **both** an `up` and a `down`
   face, so half of the block's top surface points into the cell above. The block
-  material is `DoubleSide` — it has to be, for crosses — so the raycaster can
+  material **was** `DoubleSide` — for crosses, it was thought, and it is
+  `FrontSide` now — so the raycaster could
   return either, and on the `down` one `pickBlockAt`'s step along `-normal`
   landed one cell up: the outline drew around air, breaking it did nothing, and
   placing went a cell too high. Reported as "placing an azalea leaves an air
   block above it that cannot be removed". `facingNormal` in `block_hover.ts`
   turns the normal to face the ray first; a front hit is returned unchanged, so
-  it cannot alter an answer that was already right.
+  it cannot alter an answer that was already right. It stays after the material
+  went single-sided, because the two layers that are still double-sided are
+  raycast by nothing *today*, which is a fact about the call sites rather than
+  about the rule.
 - **Which way round a texture goes is vanilla's rule, not this app's, and it
   was the mirror of it on all six faces.** `boxFaceGeometry` now reproduces
   `BlockElement.uvsByFace` — `u = 16 - x` on north, `x` on south, `z` on west,
@@ -2750,10 +4727,12 @@ knowing:
   the per-face `rotation`s `template_glazed_terracotta` states and this app has
   no entry for). And a shape whose *geometry* is rotation-invariant tends to have
   been written without passing the steps to `transform` at all — closed
-  trapdoors, wall hanging signs, campfires, the stonecutter, the lectern, the
-  decorated pot, the hopper, the bell. Each of those needs its own check against
-  its vanilla blockstate for the authored direction, which `trapdoor`'s own
-  comment shows is easy to get a quarter-turn wrong.
+  trapdoors, wall hanging signs, campfires, the stonecutter, the decorated pot,
+  the hopper, the bell. Each of those needs its own check against its vanilla
+  blockstate for the authored direction, which `trapdoor`'s own comment shows is
+  easy to get a quarter-turn wrong. **The lectern was on that list and has come
+  off it**, which is what one of them costs: its blockstate read, its three
+  elements transcribed, and four bakes that are no longer identical.
 - **A texture that lands outside its tile is clamped, not refused.** The atlas
   smears the edge pixels across the face, which reads as a badly drawn texture
   rather than as a window that missed — so `tests/blocks.ts` walks every offered
@@ -2787,6 +4766,49 @@ knowing:
   `rotateWindowUvs` is a cyclic shift of four pairs and touches no coordinate.
   Its signature is what `tests/blocks.ts` checks: rotated, two vertices at the
   same height no longer share a `v`; unrotated they always do.
+
+  **The number is copied verbatim, and that is the whole rule.**
+  `template_anvil.json` writes `west: 90` and `east: 270` on all four of its
+  elements and `ANVIL_PARTS` writes the same two numbers, which settles it for
+  every transcription after it.
+
+  The *direction* was written down wrong here and in the field's own comment,
+  and it cost nothing until a second block needed a `90`. Both said the
+  picture turns **clockwise**; it does not. Measured off the baked anvil rather
+  than argued: on its base box the window's `v` runs from `z = 2` to `z = 14`,
+  and seen from outside a west face `+z` is to the viewer's right — so the
+  picture's downward direction points right, its top points left, and a
+  positive value turns it **anticlockwise**. The sentence was wrong while every
+  number was right, which is exactly why nothing anywhere failed.
+- **A lectern was two of vanilla's three elements, and the third one is the
+  block.** `lectern.json` has a base, a post and the sloping desk you put a
+  book on, tilted 22.5° back about x; the app had the base and the post, so it
+  drew a plinth with a stick on it.
+
+  The texture was worse than the shape, and the cause is one letter. The
+  generic candidate list asks for `<name>_side`, singular; vanilla's file is
+  `lectern_sides`, plural; `_front` is the next candidate and *that* one
+  exists — so **ten of the twelve faces came out wearing `lectern_front`**, the
+  book graphic wrapped round the plinth and up the post, while `lectern_base`
+  and `lectern_sides` were reachable from nothing. It is `hopper_side.png`
+  again: a name vanilla has never had, asked for by a list that cannot know.
+  Naming the textures per box is what reaches them; adding `_sides` to the
+  generic list is a separate one-line change across all 1197 ids and has a
+  blast radius of its own.
+
+  And `facing` did nothing at all — the entry was `() => boxes(...)`, with no
+  parameter to read — so all four directions baked **byte for byte**
+  identically. It is one of the family `CLAUDE.md` already lists under "a shape
+  whose geometry is rotation-invariant tends to have been written without
+  passing the steps to `transform`", and it is the first of them to be done.
+  The blockstate gives `facing=north` no `y`, so it is north-authored.
+
+  Two faces are omitted rather than drawn, and neither leaves a hole. The
+  post's underside is coincident with the base's top; its top square
+  (`x 4..12, z 4..12`) lies inside the tilted desk, which at `y = 15` covers
+  everything from `z = 3.99` inward — worked out rather than assumed, because
+  "the desk is above the post" is not true: it cuts through it, and its back
+  corner reaches `y = 18.45`, above the block. That overhang is vanilla's.
 - **The chest's two strips are fifteen rows in a block fourteen tall, and the
   fifteenth is the seam.** The body's last row and the lid's first are
   byte-identical — `46 48 48 46 46 36 36 36 48 46 46 48 48 59` across the whole
@@ -2805,6 +4827,61 @@ knowing:
   centred on the pair; the sheets say so themselves, `normal_left` leaving its
   lock's west window blank and `normal_right` its east, which is the same face
   `inner` already names for the chest.
+- **`unwrapCube` has two answers about which way is up, and both are
+  measured.** A chest, a bell and a sign want the four side strips read
+  bottom-up and the first flat patch as the *underside*; a mob's head wants
+  the exact opposite on all six faces. That is not a preference, it is what
+  the two sheets say, and vanilla's block-entity renderers each pose their
+  `ModelPart` before drawing it rather than sharing one convention.
+
+  How each was measured, so the next person can redo it rather than trust it.
+  On `entity/chest/normal.png` the lock's notch sits two rows into the lid's
+  front strip and two rows short of the end of the body's, and those two rows
+  are byte-identical -- so they are the joint, and the strips run bottom-up.
+  On `entity/player/wide/steve.png` the front strip has hair in its first two
+  rows, eyes in its fifth and a mouth in its seventh -- so that one runs
+  top-down. Neither reading is arguable and they disagree, so `upright` says
+  which, defaulting to the chest's.
+
+  Turning the cube over is **one** operation and not two: the two flat
+  patches swap *and* the four strips reverse, because it is the same cube
+  seen from the other end of the Y axis. Doing half of it puts a head's face
+  on upside down while its scalp is still on top, which looks like a
+  different bug.
+- **The head cube's in-plane orientation on its two flat faces is not
+  determinable from any sheet the pack ships**, and is left where the
+  arithmetic puts it. The top of a head is a flat colour on every mob in the
+  game -- the seam test that settles it for a chest returns 5 out of 255 on
+  Steve and disagrees with itself between Steve, a zombie and a piglin. It is
+  not visible either, which is the same fact from the other side.
+- **A wall head was a quarter turn out, on every one of the fourteen.**
+  Vanilla states the shape as its `facing=north` case -- against the *south*
+  wall -- so it is north-authored, and it was being turned by `facingSteps +
+  2`, which is what an *east*-authored box needs and what `againstWall`
+  correctly does for a ladder. Nothing could see it: a skull is very nearly
+  symmetric in plan, and every check there was asked `orientPlacement` for
+  the property rather than the baker for the box. The unwrap is what made it
+  visible, because a face is not symmetric in plan at all.
+- **A head on the floor turns by sixteenths, not by quarters.** A standing
+  sign rounds `rotation` to the nearest quarter and says so, because its
+  board is square in plan and carries the same picture on both faces. A head
+  has a face, and eight of the sixteen values would be 22.5 degrees out. So
+  it is a `BoxRotation` -- which spins the positions and the normal and
+  leaves the windows alone, and that is exactly right, because the picture
+  has to turn with the geometry it is painted on.
+
+  The `180 -` in front of it is the offset between two conventions and is the
+  part that is easy to write down backwards: the cube is authored with the
+  face on its **north** side, which is what the wall variant needs at zero
+  steps, while vanilla's `RotationSegment` puts **south** at `rotation=0` --
+  the same convention `rotationSegment` already implements. A head turned
+  exactly half round still reads as a head, so nothing on screen would say.
+- **The dragon is deliberately not in the table.** Its head is not an 8x8x8
+  cube on a 64-wide sheet -- `entity/enderdragon/dragon.png` is 256 logical
+  texels wide and the head there has a jaw and horns as separate parts -- so
+  there is no window to write that would not be invented. It keeps the crop
+  it has always had, which is wrong in a way somebody can report rather than
+  wrong in a way that looks deliberate.
 - **The sign sheets are 32 wide and their parts are unwrapped on them**, which
   the comment there used to deny — the layout looked underivable because
   `unwrapCube` was reading it at the wrong scale. The hanging sign's board
@@ -2850,6 +4927,133 @@ knowing:
   before it, every one of them wore `<name>_side` on all four sides, fire
   included, because the generic candidate list offers `_front` only after
   `_side`. `_front_on` comes first when the block is lit.
+
+**A bare pre-Flattening name is a member of its own family, and one place
+asked otherwise.** `shapeFor` learned this once — `EXACT_SHAPES` carries `sign`
+and `wall_sign` because neither ends in the suffix that names its family — and
+the lesson reached the lookup and not the function the lookup calls. `signBoard`
+asked `endsWith("_wall_sign")`, so a legacy `wall_sign` fell through to the
+**standing** board: at `z 7..9`, the middle of the cell, turned by a `rotation`
+a wall sign has never carried — `NaN`, guarded to zero, so north. Reported as
+both of those at once, which is what one missing underscore looks like from
+outside. `inFamily` is the rule now, and the three sign arms all ask it.
+
+**And a standing sign is turned by `rotation`, which nothing derived.** The word
+did not appear in `block_orientation.ts` at all, so every sign ever placed by
+hand landed on `rotation=0` — facing south — whatever the camera was doing. It
+is vanilla's own `floor((yaw + 180) * 16 / 360 + 0.5) & 15`, and the `+ 180` is
+the half no screenshot can check: a sign facing exactly the wrong way still
+reads as a sign. `tests/blocks.ts` states it against the four cardinal answers.
+
+**A sign was one of four families carrying that property, and the other three
+got nothing.** The rule was a suffix list — `_sign` and `_hanging_sign` — and
+the registry names **47** blocks with a `rotation`: twelve standing signs,
+twelve hanging ones, sixteen banners and seven heads. Twenty-two of them, every
+head and every standing banner, fell past that arm to the end of the function
+and took the registry default. The camera was never consulted, so a head always
+faced south and a banner always north, and it looked deliberate.
+
+It is one rule for all four, which is what the wiki says as well: a sign «face[s]
+toward the player who placed it», a head is oriented «similar to signs», and a
+head on a **wall** pointedly does not, «but forward» — that last being the
+contrast that settles what the floor ones do. The vendored
+`block_properties.json` carries the same sentence from the other side: `0 is
+south` and the value increases clockwise, which is the convention
+`block_shapes.ts` was already *drawing*. Both halves were separately right while
+every head came out facing south.
+
+**The membership is asked of the registry, not of a suffix list**, which is
+`isOpenable`'s move and buys three things that each look like an omission. The
+wall families exclude themselves, because they carry a `facing` and no
+`rotation` — so the exclusion of `_wall_hanging_sign` **by name** is gone, and
+so is the arm's dependence on sitting below `WALL_MOUNTED`. `piston_head`
+excludes itself, and it is the reason a hand-written `_head` suffix would have
+been wrong: it ends in `_head` and has no `rotation`, so the obvious edit would
+have written a property onto a block that has none. And the pre-Flattening
+`sign` does **not** exclude itself in the other direction — it is deliberately
+outside the flat-era registry — so it stays as the one member of a set, where
+`ORIENTED_BLOCK_NAMES` publishes it to the check that reads every named id back
+out of `block_id_list.txt`.
+
+`signRotation` is `rotationSegment` now, after vanilla's own
+`RotationSegment.convertToSegment`. Naming it for signs was accurate for as
+long as signs were the only callers, which is the whole of the bug.
+
+Two checks carry the part the four cardinal answers cannot. **A sixteenth is
+not a quarter**: every one of `0, 4, 8, 12` is also what a quarter-turn rule
+would produce, so a look 22.5° east of north has to come back `1`. And the four
+blocks that must get **no** rotation are stated by name, because that is the
+half asking the registry buys and deleting the question leaves nothing failing.
+
+One consequence is the format's rather than the code's, and is worth knowing
+before it is reported: a 1.12.2 document can hold **four** of a head's sixteen
+rotations. `legacy_blocks.json` maps `144:0/1/8/9` to `rotation=0/4/8/12` and
+the rest lived in the tile entity, so twelve of them come back `degraded` from
+the MCEdit writer. Signs and the white banner carry all sixteen — `63:0..15`
+and `176:0..15`.
+
+**Every block the registry gives an `axis` takes it from the face clicked, and
+eleven did not.** The rule was nineteen hand-written names plus `_log`,
+`_wood` and `_hyphae`, which reached **59** of the **70** blocks carrying the
+property. Asking the registry is `isOpenable`'s move and the `rotation` arm's,
+and what it recovered is the shape of the same mistake twice:
+
+- **nine chains.** `chain` was in the list; `iron_chain` — the same block after
+  the **1.21.9** rename — was not, which is the failure the block-states
+  section already warns about in as many words: *any future rename needs both
+  halves*. The texture alias was added and the orientation was left behind. The
+  eight copper chains were never in it at all;
+- **`creaking_heart`**, 1.21.4, that nobody went back to add.
+
+**`nether_portal` is the eleventh, and it is the one that must stay out.** Its
+`axis` is `x|z` with no `y`, so a click on a floor under a plain `hasProperty`
+rule would write a state the game does not have — precisely the failure that
+function exists to prevent, one question short. So the branch asks whether the
+**derived value is legal**, which covers both halves at once and improves the
+portal rather than merely excusing it: against a wall it now takes the axis it
+was placed on, where the old rule gave it the registry default.
+
+`melon_stem` needed a hand-written exclusion under the old rule and needs none
+now — a crop has an `age` and no `axis`, so the registry never offers it. The
+comment explaining that trap is gone with the trap.
+
+The walk over all 70 is what makes this a list rather than a report, and the
+two halves are stated separately because deleting either leaves the other
+passing: *every holder takes the face's axis*, and *none is given a value the
+game does not have*.
+
+**A hopper points into the block it was clicked onto**, which is the whole of
+what makes one feed a chest. It was in none of `orientPlacement`'s tables, so
+every hopper landed on the registry default `down` with its spout hanging in
+mid-air beside whatever it was meant to feed. `facing` is the clicked face
+reversed, with the one exception the game states outright: there is no
+upward-facing hopper, so a click on a floor gives `down`.
+
+**A trapdoor is the wall-mounted rule with a second property, and answered
+neither half of it.** `orientPlacement` returned `half` alone, so every
+trapdoor ever placed by hand landed on `facing=north` -- right a quarter of
+the time and looking deliberate the rest of it.
+
+The reason written beside it was that a trapdoor's `facing` is decided by the
+edge it hinges on, which this does not model, and that a confidently wrong
+hinge is worse than the default. That is the *door*'s property under the
+trapdoor's name -- a trapdoor has no `hinge` at all, which the suite two
+sections down already said -- and vanilla's rule is the two things
+`PlacementLook` was already carrying: the clicked face on a side click, the
+opposite of the look direction otherwise. Both were written out four arms
+further down, in `WALL_MOUNTED`, and that is not a coincidence: `facing` names
+the side the trapdoor swings out over, which is the side you were standing on.
+
+`half` was already right on both branches and is untouched.
+`placedInUpperHalf` is vanilla's rule for it exactly -- the floor for a click
+on a top face, the ceiling for one underneath, and which half of the face was
+hit otherwise -- so the risk in this change was never the new property but the
+old one, and `tests/blocks.ts` states the side-face case at both heights.
+
+The contrast with a staircase is stated as an **equality against `west`**
+rather than as "not what the staircase says". The inequality was written
+first and it passes with `facing` absent, which is precisely the state the
+check exists to refuse.
 
 **A sign says what is written on it, and that is the one thing in the pipeline
 that is a function of a *position*.** Two signs of the same block state say
@@ -2958,6 +5162,180 @@ not a fog, so a pond hides the sand under its far side), drops **`alphaTest`**
 (a blended pass that discarded at 0.5 would throw away the pixels it exists to
 draw), and gets **the same `shadeWithBakedLight` injection**, or water would be
 the one surface in the build that ignored the sun and the torches.
+
+**The build is invisible from inside it, and the block material was**
+**`DoubleSide` for a reason that was never true of the material.** The comment
+said what everyone would say: a cross-quad is a single plane and has to be seen
+from both directions. That is a fact about *geometry*, and the answer to it is
+geometry -- vanilla's `cross.json` states each of its two elements with a
+`north` face **and** a `south` face, which is four quads, where `crossFaces`
+emitted two. Every other paper-thin element in the game is a box with `from`
+and `to` equal on one axis, and `boxFaces` has always given one of those the
+two real faces out of the six.
+
+So the opaque material is `FrontSide` and the geometry says what it always
+should have. What it buys is fill rate rather than triangles: the far face of
+every wall in a build was shaded and then thrown away by the depth test, and
+single-sided it is rejected at the raster stage instead. It reaches the picker
+for free -- `Mesh.raycast` honours `material.side`, so a ray can no longer come
+back holding the *back* of a face, which is the whole of what `facingNormal`
+exists to repair.
+
+**Two of the three materials stay double-sided, and neither is timidity.**
+Water is a surface seen from underneath -- a pond you swim in has a ceiling,
+and vanilla draws it -- and the void block is the medium the work happens
+*inside*, so its inside is the ordinary view. `tests/ui.ts` states all three,
+because "the one that changed" and "the two that did not" are the same
+decision and a later reader would otherwise read the pair as an oversight.
+
+**What makes it safe is one check: a face's winding agrees with the normal it
+declares.** `buildMesh` winds `[0, 2, 1, 0, 3, 2]` and the `normal` attribute
+is a *separate* statement about the same quad; nothing anywhere made the two
+agree, and double-sided nothing ever had to -- the quad is drawn either way,
+and three flips the normal per side in the shader, so even the lighting came
+out right. Single-sided, a face that disagrees is simply **not drawn**, and no
+other check in `tests/blocks.ts` can see the difference: the geometry is in the
+right place, the texture resolves, the uvs are inside the tile.
+
+It was false in exactly two places, and the walk over all 1197 ids found the
+first: **85 of them**, which is every `cross` shape, because `crossFaces`
+declared the opposite of what it wound. The second the walk cannot reach --
+`bakeBlockstate` never produces it -- and it is the one that would have been
+reported: **a sign's text was wound backwards**, so the words would have gone
+missing from in front of every sign in the world and come back mirrored from
+behind it. `sign_faces.ts` built its corners from the bottom up, which reads
+more naturally and is the wrong way round.
+
+**Culling ran one way only, and a staircase is what that cost.** A slab could
+take the face off the block beneath it -- `coversFace` has answered that since
+it existed -- and never lost anything of its own: a `boxes` shape leaves the
+six-direction path entirely, because `isFullCube` is false, and its faces are
+`extraFaces`, emitted unconditionally. So a staircase pushed against a wall
+drew its whole back, and the wall drew the face behind it, and neither was
+ever visible.
+
+**`BakedFace.cullFace` is vanilla's `cullface`, derived rather than
+transcribed:** a box's face carries one when its own plane is exactly the cell
+boundary it points at. Vanilla writes that out per face in its JSON, and it
+writes it on exactly the faces this arithmetic names. `culledFaces` then drops
+such a face when the neighbour on that side covers its whole face opaquely --
+the same question the six faces of a full cube have always been asked.
+
+**A face with no `cullFace` is a surface inside the block, and that is what
+keeps the 2D textures out of this.** A step's riser, a fence's rails, the
+quads of a cross, a candle's flame: no neighbour can cover any of them, and
+none of them lies on a side of the cell. Fire is a cross, so it has no axial
+face at all; a candle's and a campfire's flames are boxes in mid-air. Walled
+in on all six sides all three come out identical, which `tests/blocks.ts`
+states as counts. A plane laid *against* a wall -- a ladder, a vine -- loses
+the one face that looks into the wall and keeps the one that does not, which
+is the rule working rather than an exception to it.
+
+**And `coversFace` takes the boxes of a shape together, where one box used to
+have to cover the square alone.** That is vanilla's `faceShapeOccludes`, and
+the staircase is the case: its back is covered by two boxes, the lower slab
+from 0 to 8 and the step from 8 to 16, and by neither alone. Coordinate
+compression rather than a 16x16 grid of booleans, because a few transcribed
+models carry fractional coordinates and a grid would round them into the wrong
+answer.
+
+**The two answers are precomputed per palette entry, and that is what makes
+the union affordable.** `occludesFace` was called live in the innermost loop --
+per face, per cell -- and every call walked `shapeFor`: a regex over the name
+and three tables, for an answer that cannot differ between two cells holding
+the same entry. It is the cost `connect.ts` records having paid once already.
+Six booleans per entry, twice.
+
+Measured on a deliberately dense 24x24x24 of alternating stairs, slabs and
+stone -- the worst case rather than a typical one: **106,176 faces in 261 ms
+becomes 70,848 in 203 ms.** Across the 1197 offered ids, 606 more of them now
+drop something when walled in; a staircase goes from 12 faces to 3, a slab
+from 6 to 1, a trapdoor and a carpet and a rail from 6 to 1.
+
+One guard in it is **defensive and cannot fail today**, which is worth saying
+rather than leaving to be discovered: a tilted box gets no `cullFace`, and
+deleting that test fails nothing anywhere. Over all 1197 ids no tilted box has
+a *surviving* face on a cell boundary -- a chain's planes run the full height
+of the cell, but the two faces that would claim it are the degenerate ones
+`boxFaces` already drops. The guard is what will be right the day somebody
+transcribes a leaning box flush to a wall.
+
+**Four graphics settings, and every one of them is the viewer's.** Nothing
+here reaches the mesher, so none of them rebuilds a mesh -- which is the whole
+reason they could be added at all without touching the chunk cache. Two are
+not numbers or booleans, so both are read *totally*, `projection`'s rule for
+`projection`'s reason: `coerceSettings` spreads `preview` over the defaults
+without validating it, and that is safe only while a junk value is
+indistinguishable from an absent one.
+
+**Anti-aliasing is multisampling on a render target, not the context's own
+flag.** `antialias` is fixed for the life of a WebGL context, so a setting
+built on it could only ever take effect at the next launch -- a live control
+that does nothing, which is the Stop button's fault in another pane. The
+context is created with it **off** and the three passes draw into a
+`WebGLRenderTarget` with `samples`, which three resolves on its own when the
+target is unbound; a fullscreen quad then copies it to the canvas. At `0`
+there is no target and the scene goes straight to the canvas exactly as
+before.
+
+Two details decide whether it is the same picture. The target is sized in
+**drawing-buffer** pixels, because `maxDpr` and `renderScale` are already
+folded into the renderer's pixel ratio and a target at CSS size would quietly
+undo both. And the copy's material leaves `toneMapped` at its default, which
+is *on*: three applies tone mapping only when it is drawing to the canvas, so
+with a target bound the scene pass emits linear colour and the copy is where
+the curve belongs. Either way it happens exactly once, which is the property
+that has to hold -- turning anti-aliasing on must not change how the picture
+is graded. **The compass is drawn before the copy**, so it is inside the
+multisampled picture rather than the one unaliased thing on screen.
+
+The default is **4**, not 0. The context used to be created with `antialias:
+true` and no way to say otherwise, so off has to be a choice somebody makes
+rather than what an upgrade does to them.
+
+**Global illumination is the sky dome as an environment map, and it works
+because `shadeWithBakedLight` already dims the albedo.** The injection
+multiplies `diffuseColor` by the baked sky-light channel *before* three
+computes the indirect contribution, so a sealed room takes none of it: the
+flood fill still decides what the sky can reach and this decides what colour
+it is when it gets there. That is not an arrangement, it falls out of the
+order the shader already had.
+
+It **needs the sky**, because the environment *is* the sky -- with the dome
+off there is nothing to gather light from, and the checkbox is shown disabled
+saying so rather than vanishing, the same rule as the impossible versions and
+the empty-space toggle. `usingEnvironment()` asks both questions in one place,
+so turning the sky off takes the environment down with it instead of leaving
+the last one built lighting the build from a sky nobody is drawing.
+
+The PMREM is rebuilt on a **one-second floor**, in the frame rather than in an
+effect: `fromScene` binds render targets of its own, which is not something to
+do in the middle of drawing into one. And the hemisphere light gives way to
+`GI_AMBIENT` while it is on, because a hemisphere light is a cheap stand-in
+for exactly the sky bounce the environment then supplies for real -- at full
+strength the sky would be counted twice.
+
+**The frame counter is written twice a second, not per frame.** A `$state`
+assigned at 60Hz would run Svelte's effects at 60Hz to move a number nobody
+can read that fast. It carries the triangles and the draw calls beside the
+rate, which is free and is what makes it a diagnosis rather than a number --
+and `renderer.info.autoReset` goes **off**, because `info` resets itself at
+the start of every render and a frame here is three or four of them: left
+alone it would report the compass.
+
+**A shader mode is a preset, and `vanilla` is the identity.** There are no
+shader packs and there must not appear to be: the renderer opens no connection
+of any kind and there is no safe way to run GLSL somebody sent you. What is
+offered is tone mapping, exposure and how much of the scene's light is
+directional -- `flat` has no sun at all, which is the mode for looking at the
+blocks rather than at the building.
+
+`renderer/src/lib/shader_modes.ts` is the table, a plain module for
+`selection_drag.ts`'s reason, and its two light values are **multipliers**.
+That is what makes it compose: `applySky` already writes both lights from the
+hour, so a preset that set intensities outright would be a second opinion
+about what time it is and whichever ran last would win. `tests/ui.ts` requires
+each light to be written in exactly **one** place for that reason.
 
 **A fluid stands as tall as its `level`, and used to fill its cell.** Vanilla's
 rule is `(8 - level) / 9` for 0..7 and a full cell for 8 and above, which is

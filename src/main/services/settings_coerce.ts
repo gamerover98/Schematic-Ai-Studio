@@ -28,6 +28,7 @@ import {
   DEFAULT_EDITING_SETTINGS,
   VOID_OPACITY,
   type EditingSettings,
+  type Hotbar,
   type Language,
   type McpSettings,
   type Provider,
@@ -35,6 +36,7 @@ import {
   type Theme,
   type UiSettings,
   PANEL_SIZE,
+  bindAddressRefusal,
 } from "../../shared/settings.js";
 
 function isProvider(value: unknown): value is Provider {
@@ -87,25 +89,41 @@ export function coerceUi(raw: unknown): UiSettings {
       DEFAULT_UI_SETTINGS.inspectorWindowH,
       PANEL_SIZE.minHeight,
     ),
-    hotbar: hotbar(source.hotbar),
-    // Wrapped rather than clamped, so a stored index from a build with a
-    // different slot count lands somewhere reachable instead of always on 0.
-    hotbarSlot: ((Math.trunc(Number(source.hotbarSlot)) || 0) % HOTBAR_SLOTS + HOTBAR_SLOTS) % HOTBAR_SLOTS,
-    // `sidebarTab` was here and is gone with the tabs. Not naming a field is
-    // how this function drops one, which is exactly what should happen to a
-    // value left behind in a settings file written by an older build.
+    /*
+     * `hotbar` and `hotbarSlot` were here and are gone: a hotbar belongs to a
+     * document now, keyed on its path, not to the window. `sidebarTab` went
+     * the same way when the tabs did. Not naming a field is how this
+     * function drops one, which is exactly what should happen to a value a
+     * newer build no longer has a meaning for.
+     */
   };
 }
 
 /**
- * Exactly `HOTBAR_SLOTS` block ids, whatever was on disk.
+ * Exactly `HOTBAR_SLOTS` block ids and a slot to hold, whatever was on disk.
  *
  * Padded and truncated rather than rejected: a hotbar is a convenience, and
  * losing all nine because one entry was edited badly is a worse trade than
  * quietly restoring the default in that slot. The length itself is not
  * negotiable — the template indexes by slot, and the keys 1-9 have to land.
+ *
+ * Exported because it is read in two places now: `settings-store.ts` used to
+ * be the only one, and the per-document store reads files nobody has
+ * validated either. One coercion, or the two come to disagree about what a
+ * hotbar is.
  */
-function hotbar(raw: unknown): string[] {
+export function coerceHotbar(raw: unknown): Hotbar {
+  const source =
+    raw !== null && typeof raw === "object" ? (raw as { slots?: unknown; slot?: unknown }) : {};
+  return {
+    slots: hotbarSlots(source.slots),
+    // Wrapped rather than clamped, so a stored index from a build with a
+    // different slot count lands somewhere reachable instead of always on 0.
+    slot: (((Math.trunc(Number(source.slot)) || 0) % HOTBAR_SLOTS) + HOTBAR_SLOTS) % HOTBAR_SLOTS,
+  };
+}
+
+function hotbarSlots(raw: unknown): string[] {
   const source = Array.isArray(raw) ? raw : [];
   return Array.from({ length: HOTBAR_SLOTS }, (_unused, index) => {
     const value = source[index];
@@ -162,22 +180,25 @@ export function coerceEditing(raw: unknown): EditingSettings {
     // to mean the old behaviour, not the safe-looking one.
     autoGrow: source.autoGrow !== false,
     /*
-     * Air is stored as the empty string, and an id that *says* air is
-     * healed into it rather than kept.
+     * `voidBlock` is deliberately absent, and its normaliser moved rather
+     * than went away.
      *
-     * Two spellings of the same state is how they come to disagree: one of
-     * them would make `fillVoid` intern air over air and hand the mesher a
-     * palette full of void indices that draw nothing, which is the
-     * expensive way of doing exactly what the default already does.
+     * What empty space is made of is a fact about one schematic -- it is
+     * written into that file when a block is broken -- so it lives on the
+     * open session and is remembered per path in `ProjectNotes`. As a
+     * global it followed you between documents quietly changing what a
+     * break wrote.
+     *
+     * The air-heals-to-empty-string rule is still needed wherever the
+     * value now enters, or `fillVoid` interns air over air; it is
+     * `normaliseVoidBlock` in `shared/settings.ts`.
+     *
+     * A settings file written by an older build still carries the key. It
+     * is simply not read, which is this function's whole contract: only
+     * what is named survives.
      */
-    voidBlock: voidBlock(source.voidBlock),
     voidOpacity: opacity(source.voidOpacity),
   };
-}
-
-function voidBlock(raw: unknown): string {
-  const value = typeof raw === "string" ? raw.trim() : "";
-  return value === "" || isAir(value) ? "" : value;
 }
 
 function opacity(raw: unknown): number {
@@ -197,6 +218,24 @@ export function coerceMcp(raw: unknown): McpSettings {
         : DEFAULT_MCP_SETTINGS.port,
     root: typeof source.root === "string" ? source.root : DEFAULT_MCP_SETTINGS.root,
     allowDelete: source.allowDelete === true,
+    /*
+     * `!== false`, where the two lines above are `=== true`. Not an
+     * inconsistency: it is the same rule -- read towards the safe answer --
+     * applied to the one field whose safe answer is the other one. `enabled`
+     * and `allowDelete` are off by default, so anything that is not exactly
+     * `true` means off; authentication is **on** by default, so anything that
+     * is not exactly `false` means on.
+     *
+     * Written the other way round, every `settings.json` in existence -- none
+     * of which carries this key -- would come back with authentication
+     * disabled, silently, on the next launch.
+     */
+    requireAuth: source.requireAuth !== false,
+    bindAddress:
+      typeof source.bindAddress === "string" &&
+      bindAddressRefusal(source.bindAddress) === null
+        ? source.bindAddress.trim()
+        : DEFAULT_MCP_SETTINGS.bindAddress,
   };
 }
 

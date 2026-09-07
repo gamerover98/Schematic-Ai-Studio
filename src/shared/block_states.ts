@@ -1406,6 +1406,38 @@ const BLOCK_SHAPE: Readonly<Record<string, number>> = {
   "zombie_wall_head": 60,
 };
 
+const REPLACEABLE: ReadonlySet<string> = new Set([
+  "air",
+  "bubble_column",
+  "bush",
+  "cave_air",
+  "crimson_roots",
+  "dead_bush",
+  "fern",
+  "fire",
+  "glow_lichen",
+  "hanging_roots",
+  "large_fern",
+  "lava",
+  "leaf_litter",
+  "light",
+  "nether_sprouts",
+  "resin_clump",
+  "seagrass",
+  "short_dry_grass",
+  "short_grass",
+  "snow",
+  "soul_fire",
+  "structure_void",
+  "tall_dry_grass",
+  "tall_grass",
+  "tall_seagrass",
+  "vine",
+  "void_air",
+  "warped_roots",
+  "water",
+]);
+
 // --- end generated ---------------------------------------------------------
 
 /**
@@ -1474,6 +1506,69 @@ export function propertiesOf(id: string): readonly string[] {
 export function hasProperty(id: string, property: string): boolean {
   const shape = shapeOf(id);
   return shape !== null && shape.values[property] !== undefined;
+}
+
+/**
+ * Whether right-clicking this block should **open** it rather than place
+ * what you are holding.
+ *
+ * The game's own rule, and `open` is the whole of it: doors, trapdoors and
+ * fence gates carry it and nothing else a player can reach does. Asking the
+ * registry rather than listing the families is what makes it cover every
+ * wood, the copper ones, and whatever the next update adds -- the same
+ * argument `DEFAULT_STATE` records for being generated rather than curated.
+ *
+ * `barrel` is the one exclusion and it is a real one: its `open` reflects a
+ * container being looked into, not an door on a hinge, and toggling it in a
+ * schematic would write a state that means nothing and draws nothing.
+ *
+ * An **iron** door opens here, which in game it does not without redstone.
+ * That is deliberate: this is an editor, and refusing would be faithful and
+ * useless.
+ */
+export function isOpenable(id: string): boolean {
+  return bareName(id) !== "barrel" && hasProperty(id, "open");
+}
+
+/**
+ * The pre-Flattening spellings that are replaceable and that the registry
+ * cannot name.
+ *
+ * `minecraft:grass` is the whole list, and it is the same case as `sign` in
+ * `block_orientation.ts`: one of the four ids this app deliberately offers
+ * that the modern registry has never had. `legacy_blocks.json` maps `31:1` to
+ * it, so a 1.12.2 document really does arrive holding short grass under that
+ * name -- and every *other* replaceable block in that era arrives under its
+ * modern one, measured: `31:2` is `fern`, `31:0` is `dead_bush`, `78:0` is
+ * `snow`, `175:2` is `tall_grass`, `217:0` is `structure_void`, and water and
+ * lava carry all 32 of their states each.
+ *
+ * Hand-written, above the generator's line and outside its markers, because
+ * no dataset can supply a name the dataset's own registry does not have.
+ */
+const REPLACEABLE_LEGACY: ReadonlySet<string> = new Set(["grass"]);
+
+/**
+ * Whether a placement writes **over** this block rather than beside it.
+ *
+ * Vanilla's `#minecraft:replaceable`, which the wiki states from the other
+ * side: *«blocks placed on, against, or in the same location as the
+ * replaceable block replace it rather than being placed on or against it»*.
+ * Both halves of that sentence are one predicate, and this is it.
+ *
+ * Not `isSeeThrough` and not `FLUIDS`, neither of which can serve: the first
+ * holds glass, leaves, ice, slime and honey, every one of them a solid block
+ * a placement must not destroy, and it is a *rendering* answer besides; the
+ * second is five names.
+ *
+ * Deliberately **not** dated by version. The tag arrived in 23w14a and this
+ * app writes schematics from 1.8 onward, but a placement is a gesture of the
+ * editor rather than a fact about the file: the schematic records the block,
+ * not how it got there.
+ */
+export function isReplaceable(id: string): boolean {
+  const name = bareName(id);
+  return REPLACEABLE.has(name) || REPLACEABLE_LEGACY.has(name);
 }
 
 /** Whether the table knows this block at all. */

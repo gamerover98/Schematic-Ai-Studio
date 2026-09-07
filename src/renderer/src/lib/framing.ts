@@ -128,3 +128,59 @@ export function orthoBounds(
   const wide = half * (aspect > 0 ? aspect : 1);
   return { left: -wide, right: wide, top: half, bottom: -half };
 }
+
+/**
+ * How far ahead of the camera a point is, measured along the way it faces.
+ *
+ * This is what puts a moved pivot **on the view axis**, and that is the whole
+ * of why moving it does not disturb the picture. OrbitControls re-aims the
+ * camera at `controls.target` on every `update()`, so a target set to the
+ * point that was actually picked -- which is off to the side, wherever the
+ * pointer was -- turns the camera to face it. That is a snap: the view swings
+ * before the drag that asked for it has begun.
+ *
+ * Taking only the depth keeps the target exactly where the camera is already
+ * looking, so `lookAt` has nothing to do and nothing on screen moves at all.
+ * What changes is the *radius*, which is the thing the report was about: the
+ * orbit stops swinging on the distance the whole document was framed at and
+ * starts swinging on the distance to what is in front of you.
+ *
+ * It is what a 3D editor's "auto depth" does -- Blender sets the view's
+ * offset along its own axis at the depth under the cursor rather than
+ * pointing the camera at the surface it found.
+ *
+ * `forward` is assumed unit length; it comes from `getWorldDirection`.
+ */
+export function pivotDepth(
+  camera: readonly [number, number, number],
+  forward: readonly [number, number, number],
+  at: readonly [number, number, number],
+): number {
+  return (
+    (at[0] - camera[0]) * forward[0] +
+    (at[1] - camera[1]) * forward[1] +
+    (at[2] - camera[2]) * forward[2]
+  );
+}
+/**
+ * The orthographic zoom that keeps the picture still when the pivot moves.
+ *
+ * `orthoFrustumHeight` derives the frustum from the distance to
+ * `controls.target`, and the comment above it leans on that distance holding
+ * still: in orthographic, OrbitControls dollies by writing `camera.zoom` and
+ * never moves the camera, so recomputing from the distance cannot undo a
+ * zoom. Moving the **pivot** breaks exactly that assumption -- the camera has
+ * not moved and the distance has, so the frustum shrinks or grows and the
+ * viewer reads it as a jump in zoom they did not ask for.
+ *
+ * The visible height is `2 * d * tan(fov / 2) / zoom`, so if `d` is multiplied
+ * by `k` then `zoom` must be too. Exact, not a correction factor.
+ *
+ * Guarded away from zero at both ends for `orthoFrustumHeight`'s reason: the
+ * target can be reached exactly, and a zoom of zero or infinity is a
+ * degenerate projection matrix that renders nothing and reports nothing.
+ */
+export function zoomAfterPivot(zoom: number, before: number, after: number): number {
+  if (!(before > 1e-6) || !(after > 1e-6)) return zoom;
+  return zoom * (after / before);
+}

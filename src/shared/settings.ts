@@ -83,8 +83,62 @@ export const DEFAULT_WATER_COLOR = "#3f76e4";
  */
 export type Projection = "perspective" | "orthographic";
 
+/**
+ * How the viewport looks, as a handful of presets.
+ *
+ * Not shader *packs*: the renderer opens no connection of any kind and there
+ * is no safe way to run GLSL somebody sent you, so what is offered is what
+ * this app can be sure of. Each one is a bundle of renderer and light state --
+ * tone mapping, exposure, and how much of the scene's light is directional.
+ *
+ * `"vanilla"` is the identity, and has to be: a preset called neutral that
+ * moved anything would silently change the look for everyone who never opened
+ * this setting. The read is *total*, `Projection`'s rule for `Projection`'s
+ * reason -- `coerceSettings` spreads `preview` without validating it.
+ */
+export const SHADER_MODES = ["vanilla", "cinematic", "flat"] as const;
+
+export type ShaderMode = (typeof SHADER_MODES)[number];
+
+/**
+ * The multisampling levels offered, in samples per pixel. `0` is off.
+ *
+ * A number rather than a boolean because the cost is real and the right answer
+ * differs per machine. It is not the context's `antialias` flag -- that cannot
+ * be changed once the context exists, so the scene is drawn into a
+ * multisampled render target and copied to the canvas, which can be turned on
+ * and off while the app runs.
+ */
+export const AA_LEVELS = [0, 2, 4, 8] as const;
+
 export interface PreviewSettings {
   projection: Projection;
+  /**
+   * Multisampling, in samples per pixel; `0` is off. See `AA_LEVELS`.
+   *
+   * The default is 4 rather than 0 because the context used to be created
+   * with `antialias: true` and no way to say otherwise: off has to be a
+   * choice somebody makes, not what an upgrade quietly does to them.
+   */
+  antialias: number;
+  /**
+   * Whether the sky lights the build.
+   *
+   * The sky dome becomes an environment map, so a surface takes the colour of
+   * the sky in the direction it faces -- blue from above, orange at sunset.
+   * It multiplies into the baked sky light rather than replacing it, so a
+   * sealed room stays dark: the flood fill still decides what the sky can
+   * reach, and this decides what colour it is when it gets there.
+   *
+   * It needs `sky`, because the environment *is* the sky. With the sky off
+   * there is nothing to gather light from and the control says so rather than
+   * disappearing.
+   */
+  globalIllumination: boolean;
+  /** Frames per second, frame time, triangles and draw calls, in a corner. */
+  showFps: boolean;
+  /** Which look the viewport is drawn with. See `SHADER_MODES`. */
+  shaderMode: ShaderMode;
   sunAzimuthDeg: number;
   sunElevationDeg: number;
   maxDpr: number;
@@ -214,6 +268,10 @@ export interface PreviewSettings {
 /** component.py:319-328 slider/checkbox defaults, verbatim. */
 export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   projection: "perspective",
+  antialias: 4,
+  globalIllumination: false,
+  showFps: false,
+  shaderMode: "vanilla",
   sunAzimuthDeg: 60,
   sunElevationDeg: 35,
   maxDpr: 1.6,
@@ -329,16 +387,29 @@ export interface UiSettings {
   inspectorWindowY: number;
   inspectorWindowW: number;
   inspectorWindowH: number;
-  /**
-   * The nine blocks on the creative hotbar, and which one is held.
-   *
-   * Persisted because a hotbar you have to refill every launch is not a hotbar.
-   * Always exactly `HOTBAR_SLOTS` long after `coerceUi` — a short array would
-   * leave the template indexing past the end, and a long one would draw slots
-   * no key can reach.
-   */
-  hotbar: string[];
-  hotbarSlot: number;
+}
+
+/*
+ * The hotbar is **not** here any more, and that is the point of the change.
+ *
+ * It was one bar for the whole app, in `UiSettings`, written with `patchUi`.
+ * That is right for a window's chrome and wrong for what you are holding: a
+ * schematic is a thing you build with a set of blocks, and opening the next
+ * one handed you the last one's. A legacy `.schematic` was the case that made
+ * it plainly wrong -- it inherited nine blocks that version does not have.
+ *
+ * So a hotbar belongs to a **document**, keyed on its file path, the way its
+ * conversation and its version history already are. A document with no path
+ * has nowhere to keep one and starts from the factory nine, which live
+ * below; it is never written to disk, because there is no name to write it
+ * under.
+ */
+
+/** The nine blocks on the creative hotbar, and which one is held. */
+export interface Hotbar {
+  /** Exactly `HOTBAR_SLOTS` long; `coerceHotbar` guarantees it. */
+  readonly slots: readonly string[];
+  readonly slot: number;
 }
 
 /*
@@ -421,8 +492,6 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   inspectorWindowY: 500,
   inspectorWindowW: 300,
   inspectorWindowH: 320,
-  hotbar: [...DEFAULT_HOTBAR],
-  hotbarSlot: 0,
 };
 
 /**
@@ -461,6 +530,37 @@ export interface McpSettings {
    * Even on, the file goes to the OS trash rather than being unlinked.
    */
   allowDelete: boolean;
+  /**
+   * Whether a bearer token is required.
+   *
+   * On, and the one field here whose safe answer is `true` -- which is why
+   * `coerceMcp` reads it as `!== false` while reading every other flag as
+   * `=== true`. Every settings file written before this existed has no such
+   * key, and reading its absence as `false` would turn authentication off for
+   * everyone who has ever run the app. `editing.autoGrow`'s rule, for exactly
+   * that reason.
+   *
+   * Off is defensible on loopback -- there the token is a convenience rather
+   * than the boundary -- and is refused outright once the server is bound
+   * anywhere else, because the two together are anonymous write access to
+   * somebody's files over the network.
+   */
+  requireAuth: boolean;
+  /**
+   * The address to listen on. **An address, not a range.**
+   *
+   * `server.listen` binds one interface: `127.0.0.1`, `0.0.0.0` for every
+   * IPv4 one, `::`, or a specific card's address. A CIDR is not something
+   * that can be bound at all -- it would describe which *clients* are
+   * allowed, which is a different mechanism and one the token already covers
+   * -- so it is refused by name rather than handed to `listen` to come back
+   * as an `EADDRNOTAVAIL` explaining nothing.
+   *
+   * Loopback is the default and is what the rest of this server assumes.
+   * Leaving it puts the editing surface on the network, which is why it takes
+   * typing an address rather than ticking a box.
+   */
+  bindAddress: string;
 }
 
 export const DEFAULT_MCP_SETTINGS: McpSettings = {
@@ -468,7 +568,73 @@ export const DEFAULT_MCP_SETTINGS: McpSettings = {
   port: 4571,
   root: "",
   allowDelete: false,
+  requireAuth: true,
+  bindAddress: "127.0.0.1",
 };
+
+/**
+ * The addresses that make a missing token defensible.
+ *
+ * Only these reach this machine and nothing else, which is the whole of the
+ * argument for allowing an unauthenticated server at all.
+ */
+export function isLoopbackAddress(address: string): boolean {
+  const trimmed = address.trim().toLowerCase();
+  return (
+    trimmed === "127.0.0.1" ||
+    trimmed === "localhost" ||
+    trimmed === "::1" ||
+    trimmed === "[::1]"
+  );
+}
+
+/** Every IPv4 or IPv6 address that means "all interfaces". */
+export function isWildcardAddress(address: string): boolean {
+  const trimmed = address.trim();
+  return trimmed === "0.0.0.0" || trimmed === "::" || trimmed === "[::]";
+}
+
+/**
+ * Why an address cannot be listened on, or `null`.
+ *
+ * In `shared/` because three places ask it and only one of them is main:
+ * `coerceMcp` falls back on a bad value, the server refuses to start on one,
+ * and the settings field says so while it is being typed. Same reason
+ * `openCodeModelRequiresKey` lives here.
+ *
+ * A **hostname is refused** as well as a range, and that is not fussiness:
+ * `acceptsRequest` compares the request's `Host` header against this string,
+ * so a value that has to be resolved first could never be compared at all.
+ */
+export function bindAddressRefusal(address: string): string | null {
+  const trimmed = address.trim();
+  if (trimmed === "") return "Give an address to listen on, such as 127.0.0.1.";
+  if (trimmed.includes("/")) {
+    return (
+      `${trimmed} is an address range. A server binds one address — 127.0.0.1 for ` +
+      `this machine only, or 0.0.0.0 for every network interface — not a range. ` +
+      `Which clients may connect is what the token decides.`
+    );
+  }
+  if (isLoopbackAddress(trimmed) || isWildcardAddress(trimmed)) return null;
+  const bare = trimmed.startsWith("[") && trimmed.endsWith("]")
+    ? trimmed.slice(1, -1)
+    : trimmed;
+  const ipv4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+  if (ipv4.test(bare)) {
+    const parts = bare.split(".").map(Number);
+    if (parts.every((part) => part >= 0 && part <= 255)) return null;
+    return `${trimmed} is not a valid IPv4 address.`;
+  }
+  // Deliberately loose: anything with a colon and only hex is taken as IPv6,
+  // because writing a correct IPv6 grammar here would be a second, worse copy
+  // of one and `listen` is the real arbiter. What this must catch is a *name*.
+  if (/^[0-9a-fA-F:]+$/.test(bare) && bare.includes(":")) return null;
+  return (
+    `${trimmed} is not an IP address. Use a numeric address — a name would have ` +
+    `to be resolved, and this one is compared against the Host header as written.`
+  );
+}
 
 /** What the port may be. `0` is legal and means "any free one". */
 export const MCP_PORT = { min: 0, max: 65535 } as const;
@@ -498,21 +664,26 @@ export interface EditingSettings {
    * would throw away the room they made to build in.
    */
   autoGrow: boolean;
-  /**
-   * What empty space is made of. `""` means air, which is the default and
-   * is what a schematic has always been full of.
+  /*
+   * `voidBlock` used to be here and deliberately is not any more.
    *
-   * Set it to water and an underwater build stops being a build in a
-   * vacuum: breaking a block leaves water behind, which is what the game
-   * would do and what the file has to say for the paste to come out right.
-   * Lava, barrier and structure void are the other obvious ones.
+   * What empty space is made of is a fact about *one schematic*, not a
+   * preference about editing: it is written into that file when a block is
+   * broken, and an underwater jetty and a cathedral have different answers.
+   * As a global it followed you from document to document silently changing
+   * what a break wrote, which is the wrong direction for a setting that
+   * ends up in somebody's file.
    *
-   * It does three things at once and they are separate mechanisms: it is
-   * **written** when a block is broken, it is **drawn** over every empty
-   * cell, and it is **ignored by the pointer** so a click reaches whatever
-   * is behind it.
+   * It lives on the open session and is remembered per path in
+   * `ProjectNotes`, beside the version and the container -- the sidecar that
+   * already answers "what is this schematic for". See
+   * `services/conversation_store.ts`.
+   *
+   * `voidOpacity` stayed, and the split is the rule rather than an
+   * inconsistency: opacity is about *looking* at empty space and never
+   * reaches the file, so it is a preference and belongs to the person, not
+   * to the schematic.
    */
-  voidBlock: string;
   /**
    * How solid the void block looks, 0 to 1.
    *
@@ -528,13 +699,106 @@ export interface EditingSettings {
 
 export const DEFAULT_EDITING_SETTINGS: EditingSettings = {
   autoGrow: true,
-  voidBlock: "",
   voidOpacity: 0.4,
 };
 
 /** What the void block's opacity may be. Never 0; see `voidOpacity`. */
 export const VOID_OPACITY = { min: 0.05, max: 1 } as const;
 
+/**
+ * What empty space is made of, normalised. `""` is air.
+ *
+ * Every spelling of air heals to `""`, and that is load-bearing rather than
+ * tidiness: `fillVoid` rewrites the *air palette entry* into the chosen block,
+ * so a void block that is itself air would intern air over air and hand the
+ * mesher a palette in which every index is void and none of them draws
+ * anything -- the expensive way of doing exactly what the default already does
+ * for free.
+ *
+ * Here rather than in `settings_coerce.ts`, where it began, because it is no
+ * longer a setting: main normalises it on the way onto the session and the
+ * renderer needs the same answer to decide what a break will write.
+ */
+export function normaliseVoidBlock(raw: unknown): string {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (value === "") return "";
+  const bare = value.split("[")[0].replace(/^minecraft:/, "");
+  return bare === "air" ? "" : value;
+}
+
+/**
+ * The blocks a change of empty space converts **from**, as ids.
+ *
+ * One function because there are two callers and they must not disagree:
+ * `setSessionVoidBlock` does the converting, and the panel decides from the
+ * same answer whether there is anything to convert. Two copies of this rule is
+ * how the button comes to be live over an edit that changes nothing, or dead
+ * over one that would work.
+ *
+ * **Air is always a source**, and that is the whole of a bug worth keeping
+ * written down. Taking the previous choice alone cannot separate two states
+ * that look identical from the setting: a schematic whose empty space is *set*
+ * to barrier with its cells still air -- reopened from its sidecar, or one
+ * Ctrl+Z after a conversion -- against one where the conversion already
+ * happened. Both say barrier, and only one has anything to do. Reading the
+ * setting refused both, so the one gesture that would have fixed it was the
+ * one with no answer.
+ *
+ * The previous choice is **added** to air rather than standing in for it,
+ * because a conversion leaves its own block behind: swapping barrier for
+ * structure_void has to find the barrier, and air alone would not.
+ *
+ * The target is never a source. Converting a block into itself can only
+ * change nothing, and offering it would put an empty step on the undo stack.
+ */
+export function voidSources(previous: string, next: string): string[] {
+  const id = (value: string): string => (value === "" ? "minecraft:air" : value);
+  const target = id(normaliseVoidBlock(next));
+  return [...new Set(["minecraft:air", id(normaliseVoidBlock(previous))])].filter(
+    (source) => source !== target,
+  );
+}
+/**
+ * Every block a document contains, **air included**, under both spellings.
+ *
+ * `DocumentState.palette` deliberately leaves air out -- it is the materials
+ * list, and a schematic is mostly air -- so a caller asking "does this document
+ * hold any air" from it alone always gets no, whatever the document. That is
+ * the second half of the empty-space button's bug: the sources were right and
+ * the set they were looked up in could never contain the commonest one.
+ *
+ * Air is recovered rather than transported: `countBlocks` counts every voxel
+ * whose palette index is not zero, and index 0 is always air, so the document
+ * holds air exactly when `blockCount` is short of the volume. Exact, and out of
+ * two numbers `DocumentState` already carries.
+ *
+ * ## Both spellings, because `voidSources` speaks the other one
+ *
+ * A palette entry is a full state string -- `minecraft:water[level=0]` -- while
+ * a source may be either: the modal's presets are bare and a block somebody
+ * typed may not be. Keeping only the bare name made a stated source
+ * unmatchable, so the Replace button went dead over an edit that would have
+ * worked; keeping only the full key made a bare source unmatchable, which is
+ * every preset.
+ *
+ * Holding both is exactly `matchesBlockPattern`'s rule expressed as a set: a
+ * bare source finds the block whatever state it is in, and a stated one finds
+ * only that state. The two answers cannot drift apart, because a caller with a
+ * source in hand does one `has`.
+ */
+export function blocksInDocument(
+  palette: readonly { block: string }[],
+  size: readonly [number, number, number],
+  blockCount: number,
+): Set<string> {
+  const held = new Set<string>();
+  for (const entry of palette) {
+    held.add(entry.block);
+    held.add(entry.block.split("[")[0]);
+  }
+  if (blockCount < size[0] * size[1] * size[2]) held.add("minecraft:air");
+  return held;
+}
 /**
  * What a schematic may be resized to by hand, per axis.
  *
@@ -568,7 +832,20 @@ export const DEFAULT_SETTINGS: Settings = {
   provider: "OpenCode",
   model: PROVIDER_DEFAULT_MODEL.OpenCode,
   baseUrl: "",
-  version: "JE_1_20_4",
+  /*
+   * The newest release this build knows, and a **decision** rather than a
+   * derivation -- which is why it is written out and pinned by a test rather
+   * than read from `MC_VERSIONS[0]`. A default is a statement to a person,
+   * the same argument that keeps this app's own version bump manual, and one
+   * that moved on every table refresh would be a surprise nobody chose.
+   *
+   * It sat at `JE_1_20_4` through fifteen newer releases, which is the whole
+   * of what went wrong: generation stamped it, the New and Save As dialogs
+   * fell back to it, and nothing anywhere said it had gone stale. The test
+   * in `tests/services.ts` is what makes the next one a failing check rather
+   * than a report from outside the app.
+   */
+  version: "JE_26_2",
   exportType: "schem",
   outputDir: "",
   preview: { ...DEFAULT_PREVIEW_SETTINGS },
@@ -583,7 +860,26 @@ export const DEFAULT_SETTINGS: Settings = {
  */
 export interface ProviderKeyStatus {
   provider: Provider;
+  /**
+   * A key is stored **and this machine can read it**.
+   *
+   * It used to be the presence of ciphertext alone, which is a different
+   * question and answers wrongly in the one case that matters: a key
+   * encrypted under a keyring this profile no longer has decrypts to nothing,
+   * so `getApiKey` hands every caller `""` while the pane says the key is
+   * saved. The provider then answers `Invalid API key.` and there is nothing
+   * anywhere to suggest the app is the one that lost it.
+   */
   hasKey: boolean;
+  /**
+   * Ciphertext is there and will not decrypt.
+   *
+   * Distinct from `hasKey: false`, because the two want different sentences:
+   * one is "paste a key" and this one is "the key you pasted cannot be read
+   * on this machine any more, paste it again". Collapsing them loses the
+   * reason, which is the only part that is not obvious.
+   */
+  unreadable?: boolean;
 }
 
 /**
@@ -594,4 +890,22 @@ export interface ProviderKeyStatus {
 export interface KeyStorageStatus {
   encryptionAvailable: boolean;
   keys: ProviderKeyStatus[];
+  /**
+   * A pre-1.0.0 profile next door with keys in it, when this one has none.
+   *
+   * The rename moved the userData directory and nothing migrates, which is a
+   * defensible decision that was taken silently -- so an install with working
+   * keys came back with none, generation stopped, and what the user saw was
+   * the provider saying the key was invalid. It was not invalid; it was in
+   * the other folder.
+   *
+   * `null` once this profile has a key of its own, so the notice cannot
+   * outlive the thing it is about.
+   */
+  legacyProfile?: {
+    path: string;
+    /** Which providers have one there. Never the keys. */
+    providers: string[];
+    conversations: number;
+  } | null;
 }

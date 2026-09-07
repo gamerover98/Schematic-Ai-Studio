@@ -34,8 +34,10 @@ import {
   markSaved,
   normalizeRegion,
   paletteHistogram,
+  paletteTally,
   regionVolume,
   setBlock,
+  type Region,
   type SchematicDocument,
 } from "../domain/document.js";
 import {
@@ -48,6 +50,7 @@ import {
   nextUndoId,
   nextUndoLabel,
   redo,
+  readHeader,
   runTransaction,
   undo,
   type History,
@@ -62,16 +65,33 @@ import {
 } from "../domain/clipboard.js";
 import { flattenNbt, setNbtValue } from "../domain/nbt_edit.js";
 import {
+  applyRegionScale,
   applyRegionTransform,
   describeTransform,
   NotSquareError,
+  scaledExtent,
+  scaleWouldDrop,
   type RegionTransform,
+  type ScaleSpec,
 } from "../domain/transform.js";
 
 export { NotSquareError, type RegionTransform };
 import { loadStructure } from "../pipeline/loader.js";
 import type { PaletteEntry } from "../pipeline/types.js";
-import { hasProperty } from "../../shared/block_states.js";
+import { matchesBlockPattern, paletteEntryCacheKey } from "../pipeline/types.js";
+import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { hasProperty, isOpenable, isReplaceable } from "../../shared/block_states.js";
+import { FACE_VECTOR } from "../../shared/block_orientation.js";
+import { standsOn, type SupportBelow } from "../../shared/block_support.js";
+import { coversFace } from "../pipeline/block_shapes.js";
+import { normaliseVoidBlock, voidSources } from "../../shared/settings.js";
+import { mcVersion, refusalFor } from "../../shared/mc_versions.js";
+import {
+  blockExistsIn,
+  propertyExistsIn,
+  propertyValueIn,
+  renameFor,
+} from "../../shared/block_versions.js";
 import { DOCUMENT_SIZE } from "../../shared/settings.js";
 import { buildDocumentPreview, type DocumentPreviewOptions } from "./preview.js";
 import type { ChunkMeshCache } from "../pipeline/chunked_mesh.js";
@@ -82,6 +102,7 @@ import {
   growthToInclude,
   orderRegion,
   shiftRegion,
+  type Extent,
 } from "../domain/grow.js";
 import { peelEmptyFaces } from "../domain/shrink.js";
 
@@ -115,6 +136,24 @@ export interface DocumentSession {
    * rather than a wrong picture.
    */
   sent?: { token: string; chunks: Map<string, Float32Array> } | null;
+  /**
+   * What empty space is made of in *this* document. `""` is air.
+   *
+   * On the session rather than in `Settings`, and that is the whole change:
+   * a break writes this block into the file, so it is a fact about one
+   * schematic. As a global it followed you between documents quietly
+   * changing what a break wrote.
+   *
+   * Seeded from `ProjectNotes` when the document has a path and written
+   * back there on save. A document with **no path has no sidecar**, so the
+   * value lives here for the session and is persisted at the first save --
+   * the same rule conversations and version history already follow.
+   *
+   * Not on `SchematicDocument`: it is not part of the schematic, it does
+   * not belong on the undo stack, and putting it there would make it a
+   * thing `history.ts` had to capture and restore.
+   */
+  voidBlock: string;
   /**
    * What the reader had to say about the file it came from.
    *
@@ -187,6 +226,10 @@ export async function openDocument(
     doc: documentFromLoaded(loaded, imported ? null : filePath),
     history: createHistory(),
     mesh: null,
+    // Air until the caller says otherwise. `openDocument` cannot read the
+    // sidecar itself: `conversation.ts` needs Electron for `userData`, and
+    // this module is reachable from the suites. The handler seeds it.
+    voidBlock: "",
     notes: loaded.notes,
   };
   return current;
@@ -202,6 +245,7 @@ export function newDocument(
     doc: createDocument({ ...size, format, dataVersion }),
     history: createHistory(),
     mesh: null,
+    voidBlock: "",
   };
   return current;
 }
@@ -216,7 +260,27 @@ export function newDocument(
  * open unsaved recovered work and call it clean.
  */
 export function adoptDocument(doc: SchematicDocument, history?: History): DocumentSession {
-  current = { doc, history: history ?? createHistory(), mesh: null };
+  /*
+   * The void block carries over, and that is decided here rather than at
+   * the call sites on purpose.
+   *
+   * Every caller of this function is restoring *another state of the same
+   * file* -- a version, a checkpoint, a crash snapshot. What empty space is
+   * made of has not changed, so resetting it to air would quietly undo the
+   * choice on every Ctrl+Z-shaped gesture that is not actually an undo, and
+   * the next break would start writing air into an underwater build.
+   *
+   * Opening a *different* file goes through `openDocument`, which builds a
+   * session from nothing and never comes through here. That asymmetry is
+   * what makes inheriting safe: there is no path into this function that
+   * means "a different schematic".
+   */
+  current = {
+    doc,
+    history: history ?? createHistory(),
+    mesh: null,
+    voidBlock: current?.voidBlock ?? "",
+  };
   return current;
 }
 
@@ -236,8 +300,8 @@ export function adoptDocument(doc: SchematicDocument, history?: History): Docume
  * The cost is already paid. `paletteHistogram` walks every voxel and runs on
  * every state push either way; dropping the `.slice` adds payload, not work.
  */
-function paletteCounts(doc: SchematicDocument): PaletteCount[] {
-  return [...paletteHistogram(doc).entries()]
+function paletteCounts(histogram: ReadonlyMap<string, number>): PaletteCount[] {
+  return [...histogram.entries()]
     .filter(([block]) => !block.startsWith("minecraft:air"))
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .map(([block, count]) => ({ block, count }));
@@ -245,6 +309,9 @@ function paletteCounts(doc: SchematicDocument): PaletteCount[] {
 
 export function documentState(session: DocumentSession): DocumentState {
   const { doc, history } = session;
+  // One walk for both numbers. This runs on every mutating handler, and a
+  // selection-face drag reaches it many times a second.
+  const tally = paletteTally(doc);
   return {
     filePath: doc.filePath,
     fileName: doc.filePath === null ? null : path.basename(doc.filePath),
@@ -253,8 +320,8 @@ export function documentState(session: DocumentSession): DocumentState {
     size: [doc.width, doc.height, doc.length],
     offset: doc.offset === null ? null : ([...doc.offset] as [number, number, number]),
     worldOrigin: doc.worldOrigin === null ? null : ([...doc.worldOrigin] as [number, number, number]),
-    blockCount: countBlocks(doc),
-    palette: paletteCounts(doc),
+    blockCount: tally.blocks,
+    palette: paletteCounts(tally.histogram),
     dirty: isDirty(history),
     canUndo: canUndo(history),
     undoDepth: history.undoStack.length,
@@ -262,6 +329,7 @@ export function documentState(session: DocumentSession): DocumentState {
     undoLabel: nextUndoLabel(history),
     undoTransactionId: nextUndoId(history),
     redoLabel: nextRedoLabel(history),
+    voidBlock: session.voidBlock,
     revision: doc.revision,
   };
 }
@@ -272,6 +340,84 @@ export function documentState(session: DocumentSession): DocumentState {
 
 function toEntry(block: { namespacedName: string; properties?: Record<string, string> }): PaletteEntry {
   return { namespacedName: block.namespacedName, properties: block.properties ?? {} };
+}
+
+/**
+ * A block that cannot exist in the version this schematic is for.
+ *
+ * Refused where it is typed rather than at save time, which is the whole
+ * point: `buildMcEdit` already refuses these, by throwing
+ * `UnrepresentableBlocksError` over the *whole palette* once the user asks to
+ * save. That is a correct objection arriving hours late, naming blocks placed
+ * long enough ago to have been built around.
+ *
+ * The message names the way out as well as the problem, because there is one
+ * and it is not obvious: the schematic's version can be changed. Without that
+ * sentence this is a dead end that reads as the app refusing to let you build.
+ */
+/**
+ * A version change that would destroy blocks, refused until it is confirmed.
+ *
+ * `resizeSession`'s shape and for its reason: the count is the thing the user
+ * needs, it can only be known by looking, so the first attempt is the one that
+ * reports it. Main must not raise a dialog -- the request may not have come
+ * from anybody at a keyboard.
+ *
+ * **It counts only what is actually lost.** A block that was *renamed* is not in
+ * here: `chain` becoming `iron_chain` costs nothing, and asking somebody to
+ * confirm it would teach them to confirm the sentence that means the opposite.
+ *
+ * `FailureKind` carries `needs-confirmation` already, which is what lets the
+ * panel offer to go ahead **without matching on this wording**. A renderer that
+ * read the sentence would turn a reworded refusal into a silent dead end.
+ */
+export class VersionWouldLoseBlocksError extends Error {
+  constructor(
+    readonly blocks: readonly string[],
+    readonly count: number,
+    readonly versionLabel: string,
+    readonly replacement: string,
+  ) {
+    const shown = blocks.slice(0, 6).join(", ");
+    const rest = blocks.length - 6;
+    const more = rest > 0 ? ", and " + String(rest) + " more" : "";
+    super(
+      `${count.toLocaleString()} block(s) of ${blocks.length} type(s) do not exist in ` +
+        `Minecraft ${versionLabel} and would be replaced with ${replacement}: ` +
+        `${shown}${more}. This can be undone.`,
+    );
+    this.name = "VersionWouldLoseBlocksError";
+  }
+}
+
+/** A version string this build has never heard of. */
+export class UnknownVersionError extends Error {
+  constructor(version: string) {
+    super(`${version} is not a Minecraft version this build knows.`);
+    this.name = "UnknownVersionError";
+  }
+}
+
+/** A version the open container cannot carry; the message is `refusalFor`'s. */
+export class VersionRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "VersionRefusedError";
+  }
+}
+
+export class BlockNotInVersionError extends Error {
+  constructor(
+    readonly block: string,
+    readonly versionLabel: string,
+  ) {
+    super(
+      `${block} does not exist in Minecraft ${versionLabel}, which is what this ` +
+        `schematic is for. Pick a block from that version, or change the ` +
+        `schematic's Minecraft version.`,
+    );
+    this.name = "BlockNotInVersionError";
+  }
 }
 
 export class EditTooLargeError extends Error {
@@ -356,6 +502,24 @@ export class DocumentTooLargeError extends Error {
  * because an oak slab does not merge into a stone one; complementary half,
  * because two bottom slabs are not a full block and never become one.
  */
+/**
+ * What is under the cell being placed into, in the shape `standsOn` reads.
+ *
+ * `null` at y=0, which is the floor of the document and is *not* a floor:
+ * there is nothing below it and the rule's answer is the same as for air.
+ * `covers` is `coversFace`'s, which is `isFaceSturdy`'s question -- so a
+ * bottom slab, a stair's flat half and a full block all carry a wire, and
+ * `occludesNeighbours` would have refused the first two.
+ */
+function floorUnder(
+  doc: SchematicDocument,
+  request: { readonly x: number; readonly y: number; readonly z: number },
+): SupportBelow | null {
+  if (request.y <= 0) return null;
+  const below = getBlock(doc, request.x, request.y - 1, request.z);
+  return { name: below.namespacedName, covers: coversFace(below, "up") };
+}
+
 function doubleSlabTarget(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number; against?: string },
@@ -413,6 +577,104 @@ function floodedPlacement(
     existing.namespacedName === "minecraft:water" || existing.properties.waterlogged === "true";
   if (!flooded) return entry;
   return { ...entry, properties: { ...entry.properties, waterlogged: "true" } };
+}
+
+interface OpenTarget {
+  readonly cells: readonly { x: number; y: number; z: number; entry: PaletteEntry }[];
+  /** `true` when the door is being opened; only the undo label reads it. */
+  readonly opening: boolean;
+  readonly name: string;
+}
+
+/**
+ * What a right-click should **open**, or `null` when it should place instead.
+ *
+ * The gesture is the game's: right-click a door and it swings, and you have to
+ * sneak to put a block on it. Here it did the second thing always, so the one
+ * way to open a door was the inspector.
+ *
+ * The clicked cell is one step back along `against` from the cell a placement
+ * would use -- the same arithmetic `doubleSlabTarget` does for its two faces,
+ * generalised to six through `FACE_VECTOR`, which `block_orientation.ts` owns
+ * and `connect.ts` already reads rather than keeping six numbers of its own.
+ * With no `against` there is no clicked block: a click on the build grid is a
+ * placement and nothing else.
+ *
+ * **Both halves of a door, or neither.** A door open at the bottom and shut at
+ * the top is a shape the game cannot hold, and it is what one `setBlock` would
+ * leave -- so the far half is found through `TWO_PART`, the table that already
+ * knows a door is two blocks and which way the second one lies. Reading it
+ * rather than writing `_door` a second time is what makes clicking the *upper*
+ * half work, which is the half a person reaches first when the door is at eye
+ * level.
+ *
+ * The far half is only taken when it is the same block. A door with something
+ * else above it is already broken, and opening half of it would not mend it.
+ */
+/**
+ * The cell that was clicked, one step back along `against`.
+ *
+ * `request.x/y/z` is where the block would *go*, which is the cell across the
+ * face; the renderer computes it and main only ever steps back. Written out
+ * here rather than reusing `openTarget`, which asks a different question and
+ * answers `null` for everything that is not a door.
+ */
+function clickedCell(request: {
+  x: number;
+  y: number;
+  z: number;
+  against?: string;
+}): { x: number; y: number; z: number } | null {
+  const against = request.against;
+  if (against === undefined) return null;
+  const step = FACE_VECTOR[against as keyof typeof FACE_VECTOR];
+  if (step === undefined) return null;
+  return { x: request.x - step.x, y: request.y - step.y, z: request.z - step.z };
+}
+
+function openTarget(
+  doc: SchematicDocument,
+  request: { x: number; y: number; z: number; against?: string },
+): OpenTarget | null {
+  const against = request.against;
+  if (against === undefined) return null;
+  const step = FACE_VECTOR[against as keyof typeof FACE_VECTOR];
+  if (step === undefined) return null;
+  const at = { x: request.x - step.x, y: request.y - step.y, z: request.z - step.z };
+
+  const existing = getBlock(doc, at.x, at.y, at.z);
+  /*
+   * The registry decides, which excludes air for free and covers every wood
+   * without a list. A block carrying `open` that the registry has never heard
+   * of is left alone -- an omission that costs nothing, where a wrong guess
+   * would write a state onto something that has no such property.
+   */
+  if (!isOpenable(existing.namespacedName)) return null;
+  const opening = existing.properties.open !== "true";
+  const next = opening ? "true" : "false";
+  const swung = (entry: PaletteEntry): PaletteEntry => ({
+    ...entry,
+    properties: { ...entry.properties, open: next },
+  });
+
+  const cells = [{ ...at, entry: swung(existing) }];
+  const family = TWO_PART.find((candidate) =>
+    existing.namespacedName.endsWith(candidate.suffix),
+  );
+  const held = family === undefined ? undefined : existing.properties[family.property];
+  if (family !== undefined && family.step !== null && (held === family.near || held === family.far)) {
+    const away = held === family.near ? 1 : -1;
+    const other = {
+      x: at.x + family.step[0] * away,
+      y: at.y + family.step[1] * away,
+      z: at.z + family.step[2] * away,
+    };
+    const there = getBlock(doc, other.x, other.y, other.z);
+    if (there.namespacedName === existing.namespacedName) {
+      cells.push({ ...other, entry: swung(there) });
+    }
+  }
+  return { cells, opening, name: existing.namespacedName };
 }
 
 /**
@@ -537,7 +799,7 @@ function takeBoxBack(
   doc: SchematicDocument,
   tx: TransactionScope,
   cell: { x: number; y: number; z: number },
-  isEmpty: (namespacedName: string) => boolean,
+  isEmpty: (entry: PaletteEntry) => boolean,
 ): void {
   const faces = {
     x: cell.x === doc.width - 1,
@@ -553,7 +815,7 @@ function takeBoxBack(
    * would read as "not empty", which is the safe direction but the wrong
    * answer. `connect.ts` records the same trap one layer down.
    */
-  const empty = doc.palette.map((entry) => isEmpty(entry.namespacedName));
+  const empty = doc.palette.map((entry) => isEmpty(entry));
   const next = peelEmptyFaces(doc, (index) => empty[index] === true, faces);
   if (next !== null) tx.resize(next);
 }
@@ -580,6 +842,21 @@ export interface EditOptions {
    * never arises. Which is exactly why it is written down.
    */
   voidBlock?: string;
+  /**
+   * If given, the only block names that may be written.
+   *
+   * The legacy name table, for a document in the legacy era. `undefined` means
+   * no restriction, which is every flat document -- this app has no per-block
+   * introduction data for the flat era, so there is nothing honest to check
+   * against there and pretending otherwise would hide blocks that do exist.
+   *
+   * Passed in rather than read here for the module's standing reason: the
+   * table is loaded from `resources/` by a path only main knows, and this file
+   * has to stay reachable from the suites.
+   */
+  placeableNames?: ReadonlySet<string> | null;
+  /** How to name the version in a refusal. Only read when one is raised. */
+  versionLabel?: string;
 }
 
 export function applyEdit(
@@ -589,8 +866,52 @@ export function applyEdit(
 ): number {
   const { doc, history } = session;
   const mayGrow = options.autoGrow !== false;
-  const emptiness = (block: string): boolean =>
-    block === "minecraft:air" || (options.voidBlock !== undefined && options.voidBlock !== "" && block === options.voidBlock);
+  /*
+   * What counts as empty space, matched the way `fillVoid` matches it.
+   *
+   * This compared a bare `namespacedName` against the *raw setting string*,
+   * which are two different vocabularies: the picker can hand back
+   * `minecraft:water[level=0]` and a cell holding it has the name
+   * `minecraft:water`, so they never matched and a break into that void
+   * silently went back to growing the box. `preview.ts` was already
+   * comparing `paletteEntryCacheKey`, so the two halves of one feature
+   * disagreed about which cells were empty -- one drawing them, the other
+   * not counting them.
+   *
+   * Whole entries rather than names, because the key needs the properties.
+   */
+  const voidPattern =
+    options.voidBlock === undefined || options.voidBlock === ""
+      ? null
+      : parsePaletteEntry(options.voidBlock);
+  /*
+   * ...and a **pattern**, not an exact state. `fillVoid` draws the void by the
+   * same rule, and the two have to agree cell for cell or a break into a cell
+   * that is drawn as empty space would not count as emptying it -- so the box
+   * would not peel back. They disagreed: both compared full state strings, and
+   * a barrier from a file carries `[waterlogged=false]` while the setting says
+   * `minecraft:barrier`.
+   */
+  const emptiness = (entry: PaletteEntry): boolean =>
+    entry.namespacedName === "minecraft:air" ||
+    (voidPattern !== null && matchesBlockPattern(entry, voidPattern));
+
+  /*
+   * Every block *written* by this edit has to exist in the schematic's
+   * version. Names only -- see `legacyBlockNames` for why that is the line and
+   * not a shortcut.
+   *
+   * Air is always allowed and is not in the table under that spelling in every
+   * direction; more to the point, air is what a break writes, and a document
+   * you cannot empty a cell in is not an editor.
+   */
+  const placeable = (entry: PaletteEntry): PaletteEntry => {
+    const allowed = options.placeableNames;
+    if (allowed === undefined || allowed === null) return entry;
+    if (entry.namespacedName === "minecraft:air") return entry;
+    if (allowed.has(entry.namespacedName)) return entry;
+    throw new BlockNotInVersionError(entry.namespacedName, options.versionLabel ?? "this version");
+  };
 
   /*
    * Placing one block grows the document, exactly as filling does.
@@ -606,8 +927,116 @@ export function applyEdit(
    * because the grid has no negative index; that is `grow.ts`'s arithmetic and
    * the same answer a fill dragged under the floor already gives.
    */
+  /*
+   * Open what was clicked, or fall through and place what is held.
+   *
+   * The fall-through is a rewrite rather than a copy, so a right-click that
+   * turns out to be a placement is the *same* placement in every respect --
+   * the slab merge, the two-part rule, the flooding, the growth and the
+   * volume guard. A second path here is how one of those comes to be missing
+   * from the commonest gesture in the app.
+   *
+   * Both halves land in one transaction, or Ctrl+Z would take a door back a
+   * half at a time -- which is the rule the placement below already keeps,
+   * arrived at from the other direction. None of these blocks carries a block
+   * entity, so `setBlock` dropping one is not a hazard here the way it is in
+   * `connect.ts`.
+   */
+  if (request.kind === "use") {
+    const target = openTarget(doc, request);
+    if (target === null) {
+      return applyEdit(session, { ...request, kind: "setBlock" }, options);
+    }
+    return runTransaction(
+      doc,
+      history,
+      `${target.opening ? "Open" : "Close"} ${target.name}`,
+      (tx) =>
+        target.cells.reduce(
+          (changed, cell) => changed + (tx.setBlock(cell.x, cell.y, cell.z, cell.entry) ? 1 : 0),
+          0,
+        ),
+    );
+  }
+
   if (request.kind === "setBlock") {
-    const entry = floodedPlacement(doc, request, toEntry(request.block));
+    /*
+     * A placement writes over a **replaceable** block and never over anything
+     * else, and this arm never asked.
+     *
+     * Vanilla's rule, from the wiki's own sentence: *blocks placed on, against,
+     * or in the same location as the replaceable block replace it rather than
+     * being placed on or against it*. Two halves, and both are here.
+     *
+     * Nothing in this repo had the concept -- `replaceable`, `canBeReplaced`
+     * and every other spelling appeared zero times -- and the existing
+     * predicates cannot stand in for it. `isSeeThrough` holds glass, leaves,
+     * ice, slime and honey, all of them solid blocks a placement must not
+     * destroy, and it is a rendering answer besides; `FLUIDS` is five names.
+     *
+     * The reported case is a fence: its post is inset to 6..10 of the cell, so
+     * a click on the exposed side gives `place = the cell next door`, and that
+     * cell's iron block was simply written over. Every non-cube with inset
+     * faces does it -- walls, stairs, torches, chains, lanterns, panes, pots.
+     */
+    /*
+     * **The redirect.** Clicking *on* tall grass or a snow layer puts the block
+     * in the grass's own cell, not above it. `against` is deliberately left
+     * alone -- vanilla's `BlockPlaceContext` keeps `getClickedFace()` and moves
+     * only `getClickedPos()`, and the orientation rules want the face that was
+     * clicked rather than the cell that was chosen.
+     */
+    /*
+     * **Only for a placement**, and that is not a refinement of the rule --
+     * it is what makes the coordinates mean what this arithmetic assumes.
+     *
+     * A placement's `x/y/z` is the cell *across* the face, so one step back
+     * along `against` is the block that was clicked. A **break** names the
+     * block itself and carries the same `against`, so the step back lands on
+     * the empty cell the ray came in through -- which is replaceable, always.
+     * The redirect then moved the break into that empty cell, wrote the void
+     * over the void, and reported `changed: 0` while the block the user was
+     * looking at stayed exactly where it was. Every break in the app, from
+     * the moment the redirect landed.
+     */
+    const held = toEntry(request.block);
+    const clicked = emptiness(held) ? null : clickedCell(request);
+    const target =
+      clicked !== null && isReplaceable(getBlock(doc, clicked.x, clicked.y, clicked.z).namespacedName)
+        ? { ...request, x: clicked.x, y: clicked.y, z: clicked.z }
+        : request;
+    const entry = placeable(floodedPlacement(doc, target, held));
+
+    /*
+     * **The refusal**, and three boundaries on it.
+     *
+     * *Silently, and only from the hand*: this arm is the click, and a fill, a
+     * paste, a transform and every agent tool go through `runTransaction`
+     * bodies that never reach it -- the same reach the slab merge, the
+     * two-part rule and the redstone guard already have. The block in the way
+     * is on screen, which says as much as a message would, and this path is
+     * also `use`'s, where there is nobody to word it for.
+     *
+     * *Breaking is not placing*: a break is `setBlock` with the void, and it
+     * empties a cell rather than building in one. `emptiness` is the predicate
+     * this arm already owns.
+     *
+     * *Empty space is replaceable whatever block it is made of*: with barrier
+     * chosen as the void block a cell that reads as empty holds a barrier,
+     * which is not in the tag -- deciding from the tag alone would make it
+     * impossible to build inside your own empty space.
+     *
+     * Before the growth below, for the redstone guard's stated reason: a
+     * refused placement must not have resized the document on its way out.
+     */
+    const standing = getBlock(doc, target.x, target.y, target.z);
+    if (
+      !emptiness(entry) &&
+      !emptiness(standing) &&
+      !isReplaceable(standing.namespacedName)
+    ) {
+      return 0;
+    }
 
     /*
      * Two slabs meeting in one cell are one double slab.
@@ -628,7 +1057,26 @@ export function applyEdit(
      * than guessed: merging on a side click that meant "place beside it" would
      * destroy the slab already there.
      */
-    const merged = doubleSlabTarget(doc, request, entry);
+    /*
+     * Redstone dust is refused in mid-air and on a pond.
+     *
+     * Silently, and only here. Silently because that is already what this
+     * arm does when a door's far half is blocked, and because a message would
+     * have to be worded for a person while this path is also `use`'s. Only
+     * here because `applyEdit`'s `setBlock` arm is the *hand* -- a fill, a
+     * paste, a transform and every agent tool go through `runTransaction`
+     * bodies that never reach it, which is the same reach the slab merge and
+     * the two-part rule have and is deliberate: a fill of redstone across
+     * mixed ground should lay what it can rather than refuse the lot.
+     *
+     * Before the growth below it, or a refused placement would still have
+     * resized the document.
+     */
+    if (!standsOn(entry.namespacedName, floorUnder(doc, target))) {
+      return 0;
+    }
+
+    const merged = doubleSlabTarget(doc, target, entry);
     if (merged !== null) {
       return runTransaction(doc, history, `Place ${entry.namespacedName}`, (tx) =>
         tx.setBlock(merged.x, merged.y, merged.z, merged.entry) ? 1 : 0,
@@ -645,18 +1093,18 @@ export function applyEdit(
      * the document, or a door hung at the ceiling, makes room for itself
      * exactly as a single block does.
      */
-    const pair = twoPartPlacement(doc, request, entry);
+    const pair = twoPartPlacement(doc, target, entry);
     // The far cell has something in it. The game does not place it either, and
     // the block in the way is on screen.
     if (pair === "blocked") return 0;
 
     const cell = {
-      minX: Math.min(request.x, pair?.other.x ?? request.x),
-      minY: Math.min(request.y, pair?.other.y ?? request.y),
-      minZ: Math.min(request.z, pair?.other.z ?? request.z),
-      maxX: Math.max(request.x, pair?.other.x ?? request.x),
-      maxY: Math.max(request.y, pair?.other.y ?? request.y),
-      maxZ: Math.max(request.z, pair?.other.z ?? request.z),
+      minX: Math.min(target.x, pair?.other.x ?? target.x),
+      minY: Math.min(target.y, pair?.other.y ?? target.y),
+      minZ: Math.min(target.z, pair?.other.z ?? target.z),
+      maxX: Math.max(target.x, pair?.other.x ?? target.x),
+      maxY: Math.max(target.y, pair?.other.y ?? target.y),
+      maxZ: Math.max(target.z, pair?.other.z ?? target.z),
     };
     /*
      * Breaking is `setBlock` with air, and growing to make room for air would
@@ -666,7 +1114,7 @@ export function applyEdit(
      * the day something does, the failure would be a document that quietly got
      * larger.
      */
-    const wanted = emptiness(entry.namespacedName) ? null : growthToInclude(doc, cell);
+    const wanted = emptiness(entry) ? null : growthToInclude(doc, cell);
     // Refused rather than clipped: see `OutsideDocumentError`. A break is
     // exempt because it never wanted to grow in the first place, so with
     // auto-grow off it goes on doing exactly what it did before.
@@ -701,7 +1149,7 @@ export function applyEdit(
         if (growth !== null) tx.resize(growth.size, growth.shift);
         if (pair !== null) {
           const [sx, sy, sz] = growth?.shift ?? [0, 0, 0];
-          const here = tx.setBlock(request.x + sx, request.y + sy, request.z + sz, pair.here) ? 1 : 0;
+          const here = tx.setBlock(target.x + sx, target.y + sy, target.z + sz, pair.here) ? 1 : 0;
           const there = tx.setBlock(
             pair.other.x + sx,
             pair.other.y + sy,
@@ -713,7 +1161,7 @@ export function applyEdit(
           return here + there;
         }
         const wrote = tx.setBlock(at.minX, at.minY, at.minZ, entry) ? 1 : 0;
-        broke = wrote > 0 && emptiness(entry.namespacedName);
+        broke = wrote > 0 && emptiness(entry);
         return wrote;
       },
       {
@@ -744,7 +1192,7 @@ export function applyEdit(
    * through `changed: 0`.
    */
   if (request.kind === "setState") {
-    const entry = toEntry(request.block);
+    const entry = placeable(toEntry(request.block));
     return runTransaction(
       doc,
       history,
@@ -780,7 +1228,7 @@ export function applyEdit(
   }
 
   if (request.kind === "fill") {
-    const entry = toEntry(request.block);
+    const entry = placeable(toEntry(request.block));
     return runTransaction(doc, history, `Fill with ${entry.namespacedName}`, (tx) => {
       // One transaction, so growing and filling are one undo step -- and the
       // resize goes in first, because a block delta recorded before it would be
@@ -791,14 +1239,337 @@ export function applyEdit(
     });
   }
 
+  // `from` is a pattern over what is already there, so it is deliberately not
+  // guarded: refusing it would make "take out the block some other tool wrote"
+  // impossible, which is exactly when somebody needs it.
   const from = toEntry(request.from);
-  const to = toEntry(request.to);
+  const to = placeable(toEntry(request.to));
   return runTransaction(
     doc,
     history,
     `Replace ${from.namespacedName} with ${to.namespacedName}`,
     (tx) => tx.replace(region, from, to),
   );
+}
+
+/**
+ * Changes what empty space is made of in this document, and optionally
+ * rewrites the cells that already hold the old answer.
+ *
+ * Two things happen here and they are deliberately not the same thing:
+ *
+ * - **The choice itself is a preference, not a mutation.** It changes what
+ *   empty space is *drawn* as and what a future break will *write*; it moves
+ *   no block, so it is not on the undo stack. Ctrl+Z after changing it takes
+ *   back whatever you did before it, which is the honest answer.
+ * - **The rewrite is an edit**, and it is one transaction, so a swap of a
+ *   quarter of a million cells is one Ctrl+Z.
+ *
+ * They are asked for separately, and that is the second thing this got wrong.
+ * The rewrite used to ride along with the choice, read from a checkbox at the
+ * moment the block changed -- so ticking the box *after* picking water did
+ * nothing at all, and re-picking water to make it fire hit a short-circuit that
+ * said you had chosen what was already chosen. The one gesture anybody would
+ * try was the one with no answer.
+ *
+ * So `replaceFrom` is explicit rather than read from the session. By the time
+ * somebody presses the button the choice has already landed -- that is what
+ * makes the viewport show it -- so `session.voidBlock` is the *new* value and
+ * would convert a block into itself. The caller names the old one because the
+ * caller is the only one still holding it.
+ *
+ * It is not enough on its own, and `sources` below says why: the setting and
+ * the cells can disagree, and two documents that look identical from the
+ * setting can differ entirely in what they contain.
+ *
+ * `from` is built with `toEntry` and not with any defaults-filling helper,
+ * because it is a *pattern*: `tx.replace` interns it and matches on the
+ * palette index, so writing default properties onto it would turn "take out
+ * the water" into "take out the water that happens to be at level 0" -- which
+ * finds a fraction of it and reports a healthy count for those. Same reason
+ * `replace_blocks` parses its `from` and places its `to`.
+ *
+ * The volume goes through `MAX_EDIT_VOLUME` like any other edit. It is not a
+ * formality here: air is most of an ordinary schematic, so this is the one
+ * edit that genuinely does touch every cell, and one delta per changed voxel
+ * is exactly the unbounded allocation that cap exists to stop.
+ */
+export function setSessionVoidBlock(
+  session: DocumentSession,
+  block: string,
+  options: { replaceExisting?: boolean; replaceFrom?: string } = {},
+): number {
+  const next = normaliseVoidBlock(block);
+  /*
+   * What the empty cells could be holding, and **air is always one of them**.
+   *
+   * That is the whole of a bug worth keeping written down. `replaceFrom` alone
+   * cannot separate two states that look identical from the setting: a
+   * document whose empty space is *set* to barrier with its cells still air --
+   * reopened from the sidecar, or one Ctrl+Z after a conversion -- against one
+   * where the conversion already happened. Both say barrier, and only one has
+   * anything to do. Reading the setting refused both, so the one gesture that
+   * would have fixed it was the one with no answer.
+   *
+   * Air is what empty means in a schematic whatever the setting says, so it
+   * goes in unconditionally; `replaceFrom` is *added* to it rather than
+   * standing in for it, because a previous choice leaves its own block behind
+   * and swapping barrier for structure_void has to find the barrier.
+   */
+  const sources = voidSources(options.replaceFrom ?? session.voidBlock, next);
+  /*
+   * Converting a block into itself can only ever change nothing, so it is not
+   * an edit and does not reach the transaction -- which is what keeps a second
+   * press of the button, or a re-pick of the block already chosen, from
+   * putting an empty step on the undo stack.
+   *
+   * The corner this removes is worth naming, because it read as a bug and was
+   * one: undoing a rewrite puts the blocks back and leaves the *choice*
+   * standing -- they are deliberately different things -- and while the two
+   * were fused, re-picking the block could not re-apply it. With the rewrite
+   * on a press of its own, pressing again is exactly the gesture for that.
+   */
+  let changed = 0;
+  if (options.replaceExisting === true && sources.length > 0) {
+    const { doc, history } = session;
+    const region = {
+      minX: 0,
+      minY: 0,
+      minZ: 0,
+      maxX: doc.width - 1,
+      maxY: doc.height - 1,
+      maxZ: doc.length - 1,
+    };
+    const volume = regionVolume(region);
+    if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+
+    // `""` means air on both sides, which is what makes going back to air the
+    // same operation rather than a special case.
+    const wanted = sources.map((id) => parsePaletteEntry(id));
+    const to = parsePaletteEntry(next === "" ? "minecraft:air" : next);
+    changed = runTransaction(
+      doc,
+      history,
+      `Replace ${wanted.map((entry) => entry.namespacedName).join(" and ")} with ${to.namespacedName}`,
+      // One pass whatever the number of sources, which is what `replaceAny`
+      // is for: this edit already touches most of the document.
+      (tx) => tx.replaceAny(region, wanted, to),
+    );
+  }
+
+  session.voidBlock = next;
+  return changed;
+}
+
+/** What a version change did, for the sentence the panel shows afterwards. */
+export interface VersionChangeResult {
+  /** Cells written, of any of the three kinds below. */
+  changed: number;
+  renamed: number;
+  rewritten: number;
+  dropped: number;
+  /** A sentence, or `""` when nothing moved. */
+  notes: string;
+}
+
+/**
+ * Changes which Minecraft version this schematic is for, as one undoable step.
+ *
+ * There was no way to do this at all. A version could be chosen when a document
+ * was created and stamped when it was saved, and nothing in between -- so
+ * saying "this is a 1.12 schematic" about a file that arrived without a tag
+ * meant a Save As, and so did changing 1.21 to 1.16.
+ *
+ * **The container is not changed here, and a version it cannot carry is
+ * refused.** `doc.format` is what a plain Save writes back, so flipping it
+ * under an open file would leave the next Ctrl+S writing MCEdit bytes into
+ * something still called `.schem`. Save As and Convert both exist and both
+ * change the pair together; this verb changes one thing.
+ *
+ * ## Three things happen, in this order, and the order is the whole design
+ *
+ * 1. **Rename.** `chain` becomes `iron_chain` going past 1.21.9 and back again
+ *    coming under it. Nothing is lost, nothing is counted, nothing is asked.
+ * 2. **Rewrite the states** the target cannot say -- a wall's `north=tall`
+ *    becomes `north=true` before 1.16, because that release is where a wall
+ *    connection stopped being a boolean.
+ * 3. **Drop what is left**, and only that.
+ *
+ * Doing 3 before 1 is not a worse version of this: it is the demolition this
+ * function exists to prevent. A registry diff sees `chain` disappear at 1.21.9
+ * and `iron_chain` appear and cannot tell that from two unrelated events, so a
+ * backport that checked existence first would find `iron_chain` absent from
+ * 1.16 and replace every one of them with empty space -- while the correct
+ * answer, `chain`, is a name that version has had since it shipped.
+ *
+ * ## What replaces a dropped block
+ *
+ * The document's **empty space** (`session.voidBlock`), not air. A break already
+ * writes it, and an underwater build that came back full of air bubbles would
+ * have lost exactly what that setting exists to preserve. It falls back to air
+ * when the empty space block is itself too new for the target -- which is a real
+ * case, `structure_void` being 1.10.
+ *
+ * A backport is refused first and counted, and only goes through with
+ * `dropUnrepresentable`: a warning shown after the blocks are gone is not a
+ * warning.
+ *
+ * One transaction, so Ctrl+Z takes back the version, the names, the states
+ * *and* the blocks together. That costs nothing to arrange: `HeaderState` has
+ * captured and restored `dataVersion` since it existed.
+ */
+export function setDocumentVersion(
+  session: DocumentSession,
+  version: string,
+  options: { dropUnrepresentable?: boolean; placeableNames?: ReadonlySet<string> | null } = {},
+): VersionChangeResult {
+  const { doc, history } = session;
+  const info = mcVersion(version);
+  if (info === undefined) throw new UnknownVersionError(version);
+  const refusal = refusalFor(doc.format, version);
+  if (refusal !== null) throw new VersionRefusedError(refusal);
+
+  /*
+   * `block_versions.json` is the **flat era only** -- its generator refuses a
+   * pre-Flattening label outright -- so a legacy target is not a question it
+   * may be asked. Below 1.13 the authority is `legacy_blocks.json`, which the
+   * caller passes as `placeableNames` and which the MCEdit writer already uses
+   * to decide the same thing. Two tables answering one question is how they
+   * come to disagree.
+   */
+  const target = info.era === "flat" ? info.dataVersion : null;
+  const allowed = options.placeableNames ?? null;
+  /*
+   * Names only, which is the line `buildMcEdit` already draws: a missing name
+   * is fatal, an uncarryable state is written as the base block and reported
+   * as degraded. The legacy table answers when there is one -- it is exact
+   * where this dataset stops -- and `blockExistsIn` answers otherwise.
+   */
+  const exists = (name: string): boolean => {
+    if (allowed !== null) return allowed.has(name);
+    return target === null ? true : blockExistsIn(name, target);
+  };
+
+  /*
+   * The empty space this document is made of, or air when the target is too old
+   * to have it. Resolved once: it is the same answer for every dropped block.
+   */
+  const AIR: PaletteEntry = { namespacedName: "minecraft:air", properties: {} };
+  const chosen =
+    session.voidBlock === "" ? AIR : parsePaletteEntry(session.voidBlock);
+  const fill = exists(chosen.namespacedName) ? chosen : AIR;
+
+  type Kind = "rename" | "rewrite" | "drop";
+  const plan = new Map<string, { to: PaletteEntry; kind: Kind }>();
+  const doomed: string[] = [];
+
+  for (const entry of doc.palette) {
+    if (entry.namespacedName === AIR.namespacedName) continue;
+
+    // 1. the name.
+    const renamed = target === null ? null : renameFor(entry.namespacedName, target);
+    const name = renamed === null ? entry.namespacedName : `minecraft:${renamed}`;
+
+    // 3, asked early because it decides whether 2 is worth doing at all.
+    if (!exists(name)) {
+      plan.set(paletteEntryCacheKey(entry), { to: fill, kind: "drop" });
+      doomed.push(entry.namespacedName);
+      continue;
+    }
+
+    // 2. the states, against the name the target will actually use.
+    // Copied only when something actually moves: most entries need nothing,
+    // and a copy per palette row on every version change is pure waste.
+    let states: Record<string, string> | null = null;
+    if (target !== null) {
+      for (const [property, value] of Object.entries(entry.properties)) {
+        if (!propertyExistsIn(name, property, target)) {
+          states ??= { ...entry.properties };
+          delete states[property];
+          continue;
+        }
+        const next = propertyValueIn(name, property, value, target);
+        if (next === null) continue;
+        states ??= { ...entry.properties };
+        states[property] = next;
+      }
+    }
+
+    if (renamed === null && states === null) continue;
+    plan.set(paletteEntryCacheKey(entry), {
+      to: { namespacedName: name, properties: states ?? entry.properties },
+      kind: renamed === null ? "rewrite" : "rename",
+    });
+  }
+
+  /*
+   * Counted in cells, not in palette entries: "3 types" is not the number
+   * somebody deciding whether to go ahead is weighing. The histogram is keyed
+   * the same way the plan is, so this is a lookup rather than a second walk.
+   */
+  const counts = paletteHistogram(doc);
+  let renamedCells = 0;
+  let rewrittenCells = 0;
+  let droppedCells = 0;
+  for (const [key, cells] of counts) {
+    const step = plan.get(key);
+    if (step === undefined) continue;
+    if (step.kind === "drop") droppedCells += cells;
+    else if (step.kind === "rename") renamedCells += cells;
+    else rewrittenCells += cells;
+  }
+
+  if (droppedCells > 0 && options.dropUnrepresentable !== true) {
+    const names = [...new Set(doomed)].sort();
+    throw new VersionWouldLoseBlocksError(
+      names,
+      droppedCells,
+      info.label,
+      fill.namespacedName === AIR.namespacedName ? "air" : fill.namespacedName,
+    );
+  }
+
+  const region = {
+    minX: 0,
+    minY: 0,
+    minZ: 0,
+    maxX: doc.width - 1,
+    maxY: doc.height - 1,
+    maxZ: doc.length - 1,
+  };
+
+  const changed = runTransaction(
+    doc,
+    history,
+    `Set the Minecraft version to ${info.label}`,
+    (tx) => {
+      // Blocks first, then the header: a run that threw half way must never
+      // leave a document claiming a version its palette contradicts.
+      const wrote =
+        plan.size === 0
+          ? 0
+          : tx.remap(region, (entry) => plan.get(paletteEntryCacheKey(entry))?.to ?? null);
+      tx.setHeader({ ...readHeader(doc), dataVersion: info.dataVersion });
+      return wrote;
+    },
+  );
+
+  const parts: string[] = [];
+  if (renamedCells > 0) parts.push(`${renamedCells.toLocaleString()} renamed`);
+  if (rewrittenCells > 0) parts.push(`${rewrittenCells.toLocaleString()} restated`);
+  if (droppedCells > 0) {
+    parts.push(
+      `${droppedCells.toLocaleString()} replaced with ` +
+        (fill.namespacedName === AIR.namespacedName ? "air" : fill.namespacedName),
+    );
+  }
+  return {
+    changed,
+    renamed: renamedCells,
+    rewritten: rewrittenCells,
+    dropped: droppedCells,
+    notes: parts.length === 0 ? "" : `${parts.join(", ")}.`,
+  };
 }
 
 /**
@@ -939,6 +1710,15 @@ export function inspect(session: DocumentSession, x: number, y: number, z: numbe
  */
 let clipboard: Clipboard | null = null;
 
+/**
+ * Empty space, when nothing else has been chosen.
+ *
+ * A constant rather than an object literal at each call site: `cutSelection`
+ * and `moveRegion` each wrote their own, which is how they came to ignore the
+ * document's void block while `applyEdit`'s break path honoured it -- an
+ * underwater build cut and pasted came back with air pockets in it.
+ */
+const AIR_ENTRY: PaletteEntry = { namespacedName: "minecraft:air", properties: {} };
 export function currentClipboard(): Clipboard | null {
   return clipboard;
 }
@@ -949,13 +1729,23 @@ export function copySelection(session: DocumentSession, request: RegionSpec): Cl
   return clipboard;
 }
 
-/** Copies, then clears — one undoable step for the clearing half. */
-export function cutSelection(session: DocumentSession, request: RegionSpec): Clipboard {
+/**
+ * Copies, then clears — one undoable step for the clearing half.
+ *
+ * What is left behind is the document's empty space rather than the word air,
+ * for `applyEdit`'s reason: with water chosen as the void, a cut that wrote air
+ * would punch a dry hole in a pond.
+ */
+export function cutSelection(
+  session: DocumentSession,
+  request: RegionSpec,
+  options: RegionEditOptions = {},
+): Clipboard {
   const { doc, history } = session;
   const region = normalizeRegion(doc, request);
   clipboard = copyRegion(doc, region);
   runTransaction(doc, history, "Cut the selection", (tx) =>
-    tx.fill(region, { namespacedName: "minecraft:air", properties: {} }),
+    tx.fill(region, emptyEntry(options.voidBlock)),
   );
   return clipboard;
 }
@@ -967,20 +1757,99 @@ export class EmptyClipboardError extends Error {
   }
 }
 
-/** Pastes the clipboard with its corner at `at`, as one undoable step. */
+/**
+ * Pastes the clipboard with its corner at `at`, as one undoable step.
+ *
+ * It grows to hold what lands, or refuses by name -- `moveRegion`'s rule,
+ * which had not reached here. `pasteClipboard` clips by letting `tx.setBlock`
+ * return false, so a paste over the edge came back with a short count and
+ * nothing anywhere saying why, which is the silence this file records over and
+ * over. It was survivable while a paste landed at the corner of a box somebody
+ * had just drawn around the thing they were pasting; the stamp is what made
+ * carrying the box somewhere else first the ordinary gesture.
+ */
 export function pasteSelection(
   session: DocumentSession,
   at: { x: number; y: number; z: number },
-  options: PasteOptions = {},
+  options: RegionEditOptions & { includeAir?: boolean; skipEmpty?: boolean } = {},
 ): number {
   if (clipboard === null) {
     throw new EmptyClipboardError();
   }
   const held = clipboard;
   const { doc, history } = session;
-  return runTransaction(doc, history, "Paste", (tx) =>
-    pasteClipboard(doc, tx, held, at, options),
-  );
+  /*
+   * The boolean is the renderer's -- "leave the empty space where it falls" --
+   * and *which* block that is is the session's, resolved here. The renderer
+   * says the intent and main supplies the fact, which is `EditOptions.voidBlock`
+   * arriving at the same arrangement from the other side.
+   */
+  const keepUnder = options.skipEmpty === true ? emptyEntry(options.voidBlock) : null;
+  const landing = pasteLanding(held, at, options.includeAir === true, keepUnder);
+  const growth = landing === null ? null : growthFor(doc, landing, options.autoGrow !== false);
+  return runTransaction(doc, history, "Paste", (tx) => {
+    // The resize first and alone in its command, for `moveRegion`'s reason: a
+    // block delta recorded before it would index the old shape.
+    if (growth !== null) tx.resize(growth.size, growth.shift);
+    const shift = growth?.shift ?? ([0, 0, 0] as const);
+    return pasteClipboard(
+      doc,
+      tx,
+      held,
+      { x: at.x + shift[0], y: at.y + shift[1], z: at.z + shift[2] },
+      { includeAir: options.includeAir, keepUnder },
+    );
+  });
+}
+
+/**
+ * The box a paste actually occupies, or `null` when it writes nothing.
+ *
+ * Not the clipboard's own box, and the difference is what the document is
+ * asked to grow to. A clipboard holds only the cells that carry something --
+ * air is never stored -- and `keepUnder` takes more of them out again, so
+ * growing to the box would make room for cells that will never be written:
+ * a resize nobody asked for and would have to undo, which is `replace`'s
+ * stated reason for not growing at all.
+ *
+ * `includeAir` is the exception rather than an oversight. It clears the whole
+ * destination box before writing, so under it the box genuinely is what lands.
+ */
+function pasteLanding(
+  held: Clipboard,
+  at: { x: number; y: number; z: number },
+  includeAir: boolean,
+  keepUnder: PaletteEntry | null,
+): Region | null {
+  if (includeAir) {
+    return {
+      minX: at.x,
+      minY: at.y,
+      minZ: at.z,
+      maxX: at.x + held.width - 1,
+      maxY: at.y + held.height - 1,
+      maxZ: at.z + held.length - 1,
+    };
+  }
+  let box: Region | null = null;
+  for (const cell of held.cells) {
+    if (keepUnder !== null && matchesBlockPattern(cell.entry, keepUnder)) continue;
+    const x = at.x + cell.dx;
+    const y = at.y + cell.dy;
+    const z = at.z + cell.dz;
+    box =
+      box === null
+        ? { minX: x, minY: y, minZ: z, maxX: x, maxY: y, maxZ: z }
+        : {
+            minX: Math.min(box.minX, x),
+            minY: Math.min(box.minY, y),
+            minZ: Math.min(box.minZ, z),
+            maxX: Math.max(box.maxX, x),
+            maxY: Math.max(box.maxY, y),
+            maxZ: Math.max(box.maxZ, z),
+          };
+  }
+  return box;
 }
 
 /**
@@ -999,17 +1868,121 @@ export function pasteSelection(
  * destination keeps whatever was already standing inside the moved box, so
  * dragging a hollow room three blocks along would smear its walls.
  */
+/**
+ * What every region edit may be told, beyond the region itself.
+ *
+ * The three questions are the same for a move, a turn and a scale, and before
+ * this they were answered in three different places or not at all: `autoGrow`
+ * reached only `applyEdit`, so a move that carried blocks past the edge lost
+ * them silently -- `pasteClipboard` clips by letting `tx.setBlock` return
+ * false, and `changed` came back short with nothing to say why.
+ */
+export interface RegionEditOptions {
+  /** Whether the schematic grows to hold the result. Refuses by name when off. */
+  autoGrow?: boolean;
+  /**
+   * What the region leaves behind: the document's own empty space.
+   *
+   * A string, the way `EditOptions.voidBlock` is, and parsed here for the same
+   * reason -- so a caller passes what the session holds rather than converting
+   * it. Before this, `cutSelection` and `moveRegion` each wrote
+   * `minecraft:air` inline, so an underwater build cut and pasted came back
+   * with air pockets where the water had been.
+   */
+  voidBlock?: string;
+}
+
+/** The block a region leaves behind, from whatever the session was told. */
+function emptyEntry(voidBlock: string | undefined): PaletteEntry {
+  if (voidBlock === undefined || voidBlock === "") return AIR_ENTRY;
+  return parsePaletteEntry(voidBlock);
+}
+
+/**
+ * The growth a destination box needs, refusing rather than clipping.
+ *
+ * One place, because the alternative is this rule written out at three call
+ * sites and wrong at whichever is added next -- which is exactly how move,
+ * paste and transform came to ignore the setting while `applyEdit` honoured it.
+ */
+function growthFor(
+  doc: SchematicDocument,
+  box: Region,
+  mayGrow: boolean,
+): { size: Extent; shift: readonly [number, number, number] } | null {
+  const growth = growthToInclude(doc, orderRegion(box));
+  if (growth === null) return null;
+  if (!mayGrow) throw new OutsideDocumentError();
+  if (extentVolume(growth.size) > MAX_DOCUMENT_VOLUME) {
+    throw new DocumentTooLargeError(extentVolume(growth.size));
+  }
+  return growth;
+}
+
+/** The box a region occupies once a transform has been applied to it. */
+function transformedBox(
+  region: Region,
+  transform: RegionTransform,
+  to: { x: number; y: number; z: number } | null,
+): Region {
+  const width = region.maxX - region.minX + 1;
+  const height = region.maxY - region.minY + 1;
+  const length = region.maxZ - region.minZ + 1;
+  const quarter = transform.kind === "rotate" && (transform.steps === 1 || transform.steps === 3);
+  const size = quarter
+    ? { width: length, height, length: width }
+    : { width, height, length };
+  const corner = to ?? { x: region.minX, y: region.minY, z: region.minZ };
+  return {
+    minX: corner.x,
+    minY: corner.y,
+    minZ: corner.z,
+    maxX: corner.x + size.width - 1,
+    maxY: corner.y + size.height - 1,
+    maxZ: corner.z + size.length - 1,
+  };
+}
+
 export function moveRegion(
   session: DocumentSession,
   request: RegionSpec,
   to: { x: number; y: number; z: number },
+  options: RegionEditOptions = {},
 ): number {
   const { doc, history } = session;
   const region = normalizeRegion(doc, request);
+  const volume = regionVolume(region);
+  if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+
+  const landing: Region = {
+    minX: to.x,
+    minY: to.y,
+    minZ: to.z,
+    maxX: to.x + (region.maxX - region.minX),
+    maxY: to.y + (region.maxY - region.minY),
+    maxZ: to.z + (region.maxZ - region.minZ),
+  };
+  const growth = growthFor(doc, landing, options.autoGrow !== false);
   const held = copyRegion(doc, region);
+  const empty = emptyEntry(options.voidBlock);
+
   return runTransaction(doc, history, "Move the selection", (tx) => {
-    let changed = tx.fill(region, { namespacedName: "minecraft:air", properties: {} });
-    changed += pasteClipboard(doc, tx, held, to, { includeAir: true });
+    /*
+     * The resize comes first, and alone in its command: a voxel index means
+     * nothing except against the dimensions in force when it was recorded, so a
+     * block delta written before it would index the old shape.
+     */
+    if (growth !== null) tx.resize(growth.size, growth.shift);
+    const shift = growth?.shift ?? ([0, 0, 0] as const);
+    const source = growth === null ? region : shiftRegion(region, growth.shift);
+    let changed = tx.fill(source, empty);
+    changed += pasteClipboard(
+      doc,
+      tx,
+      held,
+      { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] },
+      { includeAir: true },
+    );
     return changed;
   });
 }
@@ -1033,12 +2006,48 @@ export async function regionMesh(
   options: DocumentPreviewOptions,
 ): Promise<{ chunks: ChunkGeometry[]; atlasVersion: number }> {
   const region = normalizeRegion(session.doc, request);
-  const held = copyRegion(session.doc, region);
+  return meshDetached(copyRegion(session.doc, region), session.doc.format, options);
+}
+
+/**
+ * The clipboard's own contents as geometry, for the ghost a copy leaves behind.
+ *
+ * The clipboard and not the region it was taken from, and a **cut** is what
+ * makes the difference visible: by the time the ghost is asked for that region
+ * is empty, so a picture meshed from it would be nothing at all -- on the one
+ * gesture where seeing what you are holding matters most. It has to outlive the
+ * region in the ordinary case too, because the whole point of the ghost is that
+ * the box then moves away from where the blocks were copied.
+ *
+ * An empty clipboard is not a failure. It is the state before the first copy,
+ * and it answers the way an all-air region does: nothing to draw.
+ */
+export async function clipboardMesh(
+  session: DocumentSession,
+  options: DocumentPreviewOptions,
+): Promise<{ chunks: ChunkGeometry[]; atlasVersion: number }> {
+  if (clipboard === null) return { chunks: [], atlasVersion: -1 };
+  return meshDetached(clipboard, session.doc.format, options);
+}
+
+/**
+ * A detached snapshot meshed on its own, in coordinates from its own corner.
+ *
+ * A one-off document of exactly the snapshot's size, run through the same
+ * pipeline as everything else -- so a preview cannot disagree with what the
+ * edit produces, for the same reason a block icon cannot disagree with the
+ * viewport.
+ */
+async function meshDetached(
+  held: Clipboard,
+  format: SchematicDocument["format"],
+  options: DocumentPreviewOptions,
+): Promise<{ chunks: ChunkGeometry[]; atlasVersion: number }> {
   const scratch = createDocument({
     width: held.width,
     height: held.height,
     length: held.length,
-    format: session.doc.format,
+    format,
   });
   for (const cell of held.cells) {
     setBlock(scratch, cell.dx, cell.dy, cell.dz, cell.entry);
@@ -1060,15 +2069,140 @@ export async function regionMesh(
  * The mechanics live in `domain/transform.ts` so the agent can drive the same
  * code inside its own transaction; this is only the UI's wrapper around them.
  */
+/**
+ * Turns or reflects a region, optionally landing it somewhere else.
+ *
+ * The destination is what makes the gizmo's pivot work: turning about a corner
+ * is turning in place and then moving, and doing that as two transactions would
+ * let Ctrl+Z take back half of one gesture. It is also what removes
+ * `NotSquareError` for callers that supply one -- an oblong quarter-turn is
+ * simply a box of the other shape, and only the demand that it land back on its
+ * own footprint ever made it impossible.
+ */
 export function transformRegion(
   session: DocumentSession,
   request: RegionSpec,
   transform: RegionTransform,
+  options: RegionEditOptions & { to?: { x: number; y: number; z: number } | null } = {},
 ): number {
   const { doc, history } = session;
-  return runTransaction(doc, history, describeTransform(transform), (tx) =>
-    applyRegionTransform(doc, tx, request, transform),
-  );
+  const region = normalizeRegion(doc, request);
+  const volume = regionVolume(region);
+  if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+
+  const to = options.to ?? null;
+  const landing = transformedBox(region, transform, to);
+  const growth = growthFor(doc, landing, options.autoGrow !== false);
+
+  return runTransaction(doc, history, describeTransform(transform), (tx) => {
+    if (growth !== null) tx.resize(growth.size, growth.shift);
+    const shift = growth?.shift ?? ([0, 0, 0] as const);
+    const source = growth === null ? region : shiftRegion(region, growth.shift);
+    const corner =
+      to === null
+        ? null
+        : { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] };
+    return applyRegionTransform(doc, tx, source, transform, {
+      to: corner,
+      empty: emptyEntry(options.voidBlock),
+    });
+  });
+}
+
+/**
+ * What a scale did, when the count of written cells does not say it.
+ *
+ * `VersionChangeResult`'s shape, for its reason: multiplying writes n^3 cells
+ * per block and loses nothing, dividing writes far fewer and *discards* the
+ * rest, and one number would report the two identically.
+ *
+ * This used to be a refusal -- counted first and thrown as
+ * `ScaleWouldLoseBlocksError` unless the caller passed `confirmLoss`, which is
+ * `resizeSession`'s shape. It was the wrong shape borrowed: a resize is a
+ * number typed blind into a panel that has a second button, while a scale is a
+ * cube dragged with the destination drawn under the pointer and one Ctrl+Z
+ * away. So the refusal named a confirmation that did not exist anywhere in the
+ * app -- «Confirm to go ahead», with nothing to press -- and the gesture was
+ * simply cancelled. Reported as exactly that.
+ */
+export interface ScaleResult {
+  /** Cells written. */
+  changed: number;
+  /** Non-air cells a division threw away. Always 0 for a multiplication. */
+  dropped: number;
+  /** A sentence, or `""` when nothing was lost. */
+  notes: string;
+}
+
+/**
+ * Resamples a region by a whole factor.
+ *
+ * The least useful of the gizmo's four modes and the one most able to destroy
+ * something, which is why it is the only one that ever asks first.
+ */
+export function scaleRegion(
+  session: DocumentSession,
+  request: RegionSpec,
+  spec: ScaleSpec,
+  options: RegionEditOptions & {
+    to?: { x: number; y: number; z: number } | null;
+  } = {},
+): ScaleResult {
+  const { doc, history } = session;
+  const region = normalizeRegion(doc, request);
+  const size = {
+    width: region.maxX - region.minX + 1,
+    height: region.maxY - region.minY + 1,
+    length: region.maxZ - region.minZ + 1,
+  };
+  const out = scaledExtent(size, spec);
+  /*
+   * The *destination* is what has to fit, not the source: multiplying by three
+   * turns a hundred blocks a side into twenty-seven million cells, which is
+   * past what one edit may touch and well past what the process survives.
+   */
+  const volume = out.width * out.height * out.length;
+  if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+
+  /*
+   * Counted before the write, and reported rather than refused. Before the
+   * pass because after it the source cells have already been overwritten and
+   * there is nothing left to count.
+   */
+  const dropped = scaleWouldDrop(doc, region, spec);
+
+  const to = options.to ?? { x: region.minX, y: region.minY, z: region.minZ };
+  const landing: Region = {
+    minX: to.x,
+    minY: to.y,
+    minZ: to.z,
+    maxX: to.x + out.width - 1,
+    maxY: to.y + out.height - 1,
+    maxZ: to.z + out.length - 1,
+  };
+  const growth = growthFor(doc, landing, options.autoGrow !== false);
+  const label = spec.kind === "multiply" ? `Scale up ${spec.factor}x` : `Scale down ${spec.factor}x`;
+
+  const changed = runTransaction(doc, history, label, (tx) => {
+    if (growth !== null) tx.resize(growth.size, growth.shift);
+    const shift = growth?.shift ?? ([0, 0, 0] as const);
+    const source = growth === null ? region : shiftRegion(region, growth.shift);
+    return applyRegionScale(doc, tx, source, spec, {
+      to: { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] },
+      empty: emptyEntry(options.voidBlock),
+    });
+  });
+
+  return {
+    changed,
+    dropped,
+    notes:
+      dropped === 0
+        ? ""
+        : `Discarded ${dropped.toLocaleString()} block${dropped === 1 ? "" : "s"}: only the ` +
+          `cell at the low corner of each ${spec.factor}x${spec.factor}x${spec.factor} group ` +
+          `survives. CTRL+Z puts them back.`,
+  };
 }
 
 export class NoBlockEntityError extends Error {

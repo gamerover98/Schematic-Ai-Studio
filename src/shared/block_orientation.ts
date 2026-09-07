@@ -31,7 +31,7 @@
  * and not about the click. It belongs to whoever holds the voxels.
  */
 
-import { defaultStateFor } from "./block_states.js";
+import { defaultStateFor, hasProperty, legalValuesFor } from "./block_states.js";
 
 /** A face of a cell, named as Minecraft names its directions. */
 export type Face = "up" | "down" | "north" | "south" | "east" | "west";
@@ -61,6 +61,26 @@ export interface PlacementLook {
    * top-half slab from a bottom-half one.
    */
   readonly cursorY: number;
+  /**
+   * The line the block that was hit runs along, and how far up it the click
+   * landed -- `null` for everything that is not one.
+   *
+   * A chain has no face on its own axis at all: `boxFaces` drops the two
+   * with no area, so there is literally no end of a chain to aim at. It is
+   * picked through a stand-in box instead (`thinBoxes`), and that box knows
+   * which way the chain is strung -- it is long on exactly one axis and
+   * narrow on the other two.
+   *
+   * That is what makes continuing a run possible in **any** direction
+   * rather than only downwards: `at` says which half of the block was
+   * clicked, and `axis` says which two faces those halves are.
+   *
+   * `orientPlacement` does not read it, and that is not an oversight: this
+   * says nothing about which way a block points, only about what was under
+   * the pointer. `continuedPlacement` in the renderer's `block_hover.ts`
+   * is the one reader.
+   */
+  readonly run: { readonly axis: "x" | "y" | "z"; readonly at: number } | null;
 }
 
 /**
@@ -106,37 +126,6 @@ const OPPOSITE: Record<Face, Face> = {
 };
 
 /**
- * Pillars: `axis` comes from the face, never from the look direction.
- *
- * `_stem` is deliberately not a suffix here. `crimson_stem` is a pillar and
- * `melon_stem` is a crop with an `age`, and writing `axis` onto the crop would
- * produce a block state that does not exist.
- */
-const AXIS_SUFFIXES = ["_log", "_wood", "_hyphae"] as const;
-
-const AXIS_NAMES: ReadonlySet<string> = new Set([
-  "crimson_stem",
-  "stripped_crimson_stem",
-  "warped_stem",
-  "stripped_warped_stem",
-  "bone_block",
-  "hay_block",
-  "purpur_pillar",
-  "quartz_pillar",
-  "basalt",
-  "polished_basalt",
-  "deepslate",
-  "infested_deepslate",
-  "muddy_mangrove_roots",
-  "ochre_froglight",
-  "verdant_froglight",
-  "pearlescent_froglight",
-  "chain",
-  "bamboo_block",
-  "stripped_bamboo_block",
-]);
-
-/**
  * Blocks whose front turns to face the player — the reason a freshly placed
  * dispenser shoots at you rather than away.
  *
@@ -168,6 +157,79 @@ const FRONT_TO_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set([
   "dropper",
   "barrel",
 ]);
+
+/**
+ * Blocks that point **into** the block they were clicked onto.
+ *
+ * A hopper is the whole family, and it is the one everybody notices: you put
+ * one against the side of a chest so that it feeds the chest, and the spout
+ * has to end up pointing at it. `facing` is the clicked face reversed, with
+ * one exception the game states outright -- there is no upward-facing hopper,
+ * so a click on a floor gives `down` rather than `up`.
+ *
+ * Absent from every table until now, so every hopper ever placed here landed
+ * on the registry default `down` and its spout hung in mid-air beside whatever
+ * it was meant to feed.
+ */
+const POINTS_INTO_CLICKED: ReadonlySet<string> = new Set(["hopper"]);
+
+/**
+ * The one block carrying a sixteenth-turn `rotation` that the registry cannot
+ * be asked about.
+ *
+ * **Everything else asks the registry.** `hasProperty(name, "rotation")` is
+ * `isOpenable`'s move one file over, for `isOpenable`'s reason: the blocks
+ * that carry the property are twelve standing signs, twelve hanging ones,
+ * sixteen banners and seven heads, and a list of families is a list to keep
+ * up to date. It was one -- `["_sign", "_hanging_sign"]` -- so **every head
+ * and every standing banner** fell through to the end of this function and
+ * took the registry default, and no camera was ever consulted for either.
+ *
+ * Three things fall out of asking the registry instead, and all three look
+ * like omissions:
+ *
+ * - **the wall families exclude themselves.** `oak_wall_sign`,
+ *   `white_wall_banner`, `skeleton_wall_skull` and `oak_wall_hanging_sign`
+ *   carry a `facing` and no `rotation`, so the rule no longer depends on
+ *   being written below `WALL_MOUNTED`, and the wall hanging sign no longer
+ *   needs excluding by name. Both of those were real and both are gone.
+ * - **`piston_head` excludes itself.** It ends in `_head` and carries no
+ *   `rotation`, so a hand-written `_head` suffix -- the obvious way to write
+ *   this -- would have put a property on a block that has none. That is the
+ *   failure this file exists to avoid, arriving in the fix for another one.
+ * - **the pre-Flattening `sign` does not**, and is why this set survives with
+ *   one member. It is deliberately outside the modern registry, which holds
+ *   the flat era only, while `legacy_blocks.json` enumerates its sixteen
+ *   values as `63:0`..`63:15`. `ORIENTED_BLOCK_NAMES` publishes it to the
+ *   check that reads every named id back out of `block_id_list.txt`.
+ */
+const SPUN_LEGACY: ReadonlySet<string> = new Set(["sign"]);
+
+/**
+ * Vanilla's own sixteenth of a turn, from the direction the camera was facing.
+ *
+ * `RotationSegment.convertToSegment(yaw + 180)`, which is
+ * `floor(degrees * 16 / 360 + 0.5) & 15`. The `+ 180` is what turns the block
+ * round to face the person who placed it, and it is the half that cannot be
+ * checked by looking at a screenshot: a sign facing exactly the wrong way still
+ * reads as a sign, and the mistake only shows when somebody walks round it.
+ * minecraft.wiki states it outright for the two families where it is
+ * observable from outside -- a standing sign "face[s] toward the player who
+ * placed it", and a head on a **wall** pointedly does not, "but forward".
+ *
+ * Named for vanilla's class rather than for signs, because signs turned out to
+ * be one of four families that reach it and the only one that ever did.
+ *
+ * Minecraft's yaw is zero at south and increases towards west, which is
+ * `atan2(-x, z)` in this app's axes.
+ */
+export function rotationSegment(direction: {
+  readonly x: number;
+  readonly z: number;
+}): number {
+  const yaw = (Math.atan2(-direction.x, direction.z) * 180) / Math.PI;
+  return Math.floor(((yaw + 180) * 16) / 360 + 0.5) & 15;
+}
 
 /** Blocks that point where you are looking, because that is where they act. */
 const AWAY_FROM_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set(["piston", "sticky_piston"]);
@@ -215,6 +277,27 @@ const WALL_MOUNTED_SUFFIXES = [
   "_wall_head",
   "_wall_skull",
 ] as const;
+
+/**
+ * Blocks that grow out of the face they were clicked onto, in **six**
+ * directions rather than four.
+ *
+ * `WALL_MOUNTED` above is this rule with four, and it refuses `up` and `down`
+ * deliberately -- there is no ladder on a ceiling and no wall torch on a
+ * floor. An amethyst bud has both: they line a geode's floor, its walls and
+ * its roof, and `facing` is simply which way the crystal points.
+ *
+ * This arrived with the geometry rather than before it, and that is the
+ * argument for it. While all six facings drew the same cube, deriving `facing`
+ * bought exactly nothing; the moment the model turns, not deriving it is half
+ * the block coming out wrong.
+ */
+const GROWS_FROM_CLICKED: ReadonlySet<string> = new Set([
+  "small_amethyst_bud",
+  "medium_amethyst_bud",
+  "large_amethyst_bud",
+  "amethyst_cluster",
+]);
 
 /**
  * Blocks carrying `face` (floor/wall/ceiling) alongside a horizontal `facing`.
@@ -293,10 +376,40 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
   const name = baseBlockName(id);
   const upper = placedInUpperHalf(look);
 
-  if (AXIS_NAMES.has(name) || AXIS_SUFFIXES.some((suffix) => name.endsWith(suffix))) {
-    // No face means no answer here: a pillar's axis is a property of the
-    // surface it was placed on, and the look direction cannot stand in for it.
-    return look.against === null ? {} : { axis: FACE_AXIS[look.against] };
+  /*
+   * Pillars: `axis` comes from the face, never from the look direction.
+   *
+   * **The membership is asked of the registry**, which is `isOpenable`'s move
+   * and the one the `rotation` arm below already makes. It was nineteen names
+   * plus `_log`/`_wood`/`_hyphae`, and that reached **59** of the **70** blocks
+   * carrying the property. The eleven it missed:
+   *
+   * - **nine chains.** `chain` was in the list and `iron_chain` was not, which
+   *   is the 1.21.9 rename this file's own neighbour warns about -- *any future
+   *   rename needs both halves* -- with the texture alias added and the
+   *   orientation left behind. The eight copper chains were never in it at all,
+   *   so a chain strung sideways against a wall hung vertically instead;
+   * - **`creaking_heart`**, a 1.21.4 block nobody went back to add;
+   * - **`nether_portal`**, which is the one that must stay out, and the reason
+   *   `hasProperty` alone is not the rule. Its `axis` is `x|z` with no `y`, so
+   *   a click on a floor would write a state the game does not have -- the
+   *   exact failure `hasProperty` exists to prevent, one question short.
+   *
+   * Asking whether the derived value is *legal* covers both halves at once,
+   * and it improves the portal rather than merely excusing it: against a wall
+   * it now takes the axis it was placed on instead of the registry default.
+   *
+   * `melon_stem` needed a hand-written exclusion under the old rule and needs
+   * none now: a crop has an `age` and no `axis`, so the registry never offers
+   * it.
+   *
+   * No face means no answer: a pillar's axis is a property of the surface it
+   * was placed on, and the look direction cannot stand in for it.
+   */
+  if (look.against !== null && hasProperty(name, "axis")) {
+    const axis = FACE_AXIS[look.against];
+    if (legalValuesFor(name, "axis")?.includes(axis) === true) return { axis };
+    return {};
   }
 
   if (name.endsWith("_stairs")) {
@@ -308,10 +421,30 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
   }
 
   if (name.endsWith("_trapdoor")) {
-    // `half` only. A trapdoor's `facing` is decided by the edge it hinges on,
-    // which this does not model, and a confidently wrong hinge is worse than
-    // the default one.
-    return { half: upper ? "top" : "bottom" };
+    /*
+     * The same two branches as the wall-mounted family below, and that is not
+     * a coincidence: a trapdoor's `facing` names the side it swings out over,
+     * so vanilla takes it from the clicked face where there is one and from
+     * the opposite of the look direction where there is not.
+     *
+     * This used to answer `half` alone, on the reasoning that a trapdoor's
+     * `facing` is decided by the edge it hinges on and that a confidently
+     * wrong hinge is worse than the default. The premise is the wrong
+     * property: `hinge` is a *door*'s, and a trapdoor has none. What decides
+     * `facing` is exactly the two things `PlacementLook` already carries, and
+     * both were already written out four arms further down. So every trapdoor
+     * ever placed by hand landed on `facing=north` -- the one value that is
+     * right a quarter of the time and looks deliberate every time.
+     *
+     * `half` is untouched. `placedInUpperHalf` is already vanilla's rule for
+     * it, on both branches: the floor for a click on a top face, the ceiling
+     * for one underneath, and which half of the face was hit otherwise.
+     */
+    const half = upper ? "top" : "bottom";
+    if (look.against !== null && look.against !== "up" && look.against !== "down") {
+      return { facing: look.against, half };
+    }
+    return { facing: OPPOSITE[horizontalFacing(look.direction)], half };
   }
 
   // A door is walked through in the direction you were looking when you hung
@@ -341,6 +474,34 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
       return { facing: look.against };
     }
     return { facing: OPPOSITE[horizontalFacing(look.direction)] };
+  }
+
+  if (GROWS_FROM_CLICKED.has(name)) {
+    /*
+     * The clicked face, exactly as `WALL_MOUNTED` has it, and the fallback is
+     * that rule's own extended to six: with no face to go on -- the build grid,
+     * or a cell in mid-air -- the surface is taken to be the one being looked
+     * at, which puts the crystal pointing back at the camera.
+     */
+    if (look.against !== null) return { facing: look.against };
+    return { facing: OPPOSITE[nearestFace(look.direction)] };
+  }
+
+  /*
+   * Still below the wall-mounted arm, and no longer *because* of it: the
+   * registry keeps every wall variant out of here on its own. It stays here
+   * because the three names in that table are the ones with an answer up
+   * there, and because moving it would make the order matter again the day a
+   * wall-mounted block turns up carrying a `rotation`.
+   */
+  if (SPUN_LEGACY.has(name) || hasProperty(name, "rotation")) {
+    return { rotation: String(rotationSegment(look.direction)) };
+  }
+
+  if (POINTS_INTO_CLICKED.has(name)) {
+    if (look.against === null) return {};
+    const into = OPPOSITE[look.against];
+    return { facing: into === "up" ? "down" : into };
   }
 
   if (FACE_AND_FACING.has(name) || FACE_AND_FACING_SUFFIXES.some((s) => name.endsWith(s))) {
@@ -420,10 +581,12 @@ export function placementState(id: string, look: PlacementLook): Record<string, 
  * app would ever notice.
  */
 export const ORIENTED_BLOCK_NAMES: readonly string[] = [
-  ...AXIS_NAMES,
   ...FRONT_TO_PLAYER,
   ...FRONT_TO_PLAYER_ANY_AXIS,
   ...AWAY_FROM_PLAYER_ANY_AXIS,
   ...WALL_MOUNTED,
   ...FACE_AND_FACING,
+  ...POINTS_INTO_CLICKED,
+  ...GROWS_FROM_CLICKED,
+  ...SPUN_LEGACY,
 ];

@@ -7,6 +7,7 @@
  */
 
 import type { SchematicFormat } from "./schematic.js";
+import type { Hotbar } from "./settings.js";
 import { SCHEMATIC_FORMAT_LABEL, SCHEMATIC_FORMATS } from "./schematic.js";
 import type {
   ExportType,
@@ -51,6 +52,34 @@ export const IPC = {
 
   /** Every block the app can place — the same set the agent is judged against. */
   blocksList: "bgpt:blocks:list",
+  /**
+   * The pre-Flattening block table, `"id:meta"` to a modern spelling.
+   *
+   * Sent whole and once, because the renderer needs it read both ways: to
+   * stop offering blocks a legacy schematic cannot hold, to label the ones it
+   * can with the `ID:DATA` the file will really store, and to accept one typed
+   * into the block field. About 1,700 short strings.
+   *
+   * It is main's to read -- `resources/` is resolved there and the renderer
+   * touches no filesystem -- but the *rule* for inverting it is in
+   * `shared/legacy_ids.ts`, so both sides agree on which `id:meta` a name maps
+   * to when several produce it.
+   */
+  blocksLegacy: "bgpt:blocks:legacy",
+
+  /**
+   * The hotbar this schematic was last built with.
+   *
+   * Keyed on the file path, like a conversation and a version history, and
+   * for the same reason: what you are *holding* belongs to the thing you are
+   * building, not to the window. One bar for the whole app meant opening a
+   * legacy `.schematic` handed you nine blocks that version does not have.
+   *
+   * Two channels rather than one that does both, which is this file's rule:
+   * one channel per verb, no dispatcher.
+   */
+  hotbarRead: "bgpt:hotbar:read",
+  hotbarWrite: "bgpt:hotbar:write",
   /**
    * Geometry for a handful of blocks, so the inventory can draw them.
    *
@@ -119,6 +148,32 @@ export const IPC = {
    */
   docResize: "bgpt:doc:resize",
   /**
+   * Choose what empty space is made of in the open schematic.
+   *
+   * A document verb rather than a settings write, and that is the fix as
+   * much as it is the plumbing. It used to go through `setSettings`, which
+   * writes the store and stops -- so the choice landed on disk and the
+   * viewport went on showing the previous one until the schematic was
+   * closed and reopened. Answering with a `DocumentState` puts it on the
+   * same path as every other document change, where refreshing the mesh is
+   * what the caller already does.
+   */
+  docSetVoidBlock: "bgpt:doc:void:set",
+  /**
+   * Change which Minecraft version the open schematic is for.
+   *
+   * Its own verb rather than a shape of `SaveRequest`, because until now that
+   * was the only way to do it: a version could be chosen at New and stamped at
+   * Save, and nothing in between. Saying "this is a 1.12 schematic" about a
+   * file that arrived with no tag meant a Save As, and so did going from 1.21
+   * to 1.16.
+   *
+   * It changes the version and **not** the container. `format` is what a plain
+   * Save writes back, so changing it under an open file would leave the next
+   * Ctrl+S writing MCEdit bytes into something still called `.schem`.
+   */
+  docSetVersion: "bgpt:doc:version:set",
+  /**
    * One file into another, without opening either.
    *
    * A verb of its own rather than a mode of `docSaveAs`, because it does not
@@ -146,8 +201,12 @@ export const IPC = {
   docPaste: "bgpt:doc:paste",
   /** Pick a region up and put it down elsewhere, as one step. */
   docMove: "bgpt:doc:move",
+  /** Resample the selection by a whole factor. */
+  docScale: "bgpt:doc:scale",
   /** A region's contents as standalone geometry, for the move preview. */
   docRegionMesh: "bgpt:doc:region:mesh",
+  /** The clipboard's contents as standalone geometry, for the paste ghost. */
+  docClipboardMesh: "bgpt:doc:clipboard:mesh",
   /**
    * renderer → main: where the 3D canvas sits in the window.
    *
@@ -171,6 +230,21 @@ export const IPC = {
    * and has no way to ask, so the renderer says so when it changes.
    */
   pointerLock: "bgpt:viewport:pointerLock",
+  /**
+   * The renderer telling main it has just thrown something it did not catch.
+   *
+   * An **event, not a request**, and that is the whole design. It is sent from
+   * a window that may be seconds from being unable to run anything at all, and
+   * a promise to await is exactly the thing that would never come back.
+   *
+   * It exists because the failure it reports is otherwise **silent and total**.
+   * A reactive loop that Svelte or the browser aborts takes every effect in the
+   * window with it: the viewport goes on drawing, because its
+   * `requestAnimationFrame` chain owes Svelte nothing, and main goes on
+   * answering, so the menu still opens. The app is navigable and completely
+   * dead, with a clean console, and it has been reported that way twice.
+   */
+  rendererFailed: "bgpt:renderer:failed",
   /** The sun and moon images out of the resource pack. */
   skyTextures: "bgpt:sky:textures",
   /** The wooden axe, drawn on the cell WorldEdit would paste from. */
@@ -888,6 +962,15 @@ export interface DocumentState {
    * anywhere said which.
    */
   dataVersion: number | null;
+  /**
+   * What empty space is made of in this document. `""` is air.
+   *
+   * On the state because the renderer decides what a *break* writes, and it
+   * used to read that out of the global settings object it holds. Now that
+   * the answer belongs to the document, being told is the only way the
+   * renderer can have it right the instant a different schematic opens.
+   */
+  voidBlock: string;
   /** Monotonic; the renderer uses it to tell whether its mesh is stale. */
   revision: number;
 }
@@ -937,6 +1020,32 @@ export type EditRequest =
    * already there.
    */
   | { kind: "setState"; x: number; y: number; z: number; block: BlockSpec }
+  /**
+   * The right-click gesture: **open what was clicked, or place what is held.**
+   *
+   * One verb rather than two because only main can tell which one it is. The
+   * renderer holds no schematic, so it does not know whether the cell under
+   * the crosshair is a door -- and asking first would be a round trip per
+   * click and a race with any edit in flight.
+   *
+   * The fields are `setBlock`'s exactly, and `x/y/z` is the **empty** cell a
+   * placement would use. The clicked block is one step back along `against`,
+   * which is the same arithmetic the double-slab merge already does -- so
+   * this carries nothing a placement does not already carry, and a click on
+   * the build grid, where there is no `against`, is simply a placement.
+   *
+   * Sneaking is **not** a field here. Holding Shift sends a plain `setBlock`,
+   * exactly as it always did, which keeps this verb's meaning a question
+   * about the block rather than about the keyboard.
+   */
+  | {
+      kind: "use";
+      x: number;
+      y: number;
+      z: number;
+      block: BlockSpec;
+      against?: "up" | "down" | "north" | "south" | "east" | "west";
+    }
   | { kind: "fill"; region: RegionSpec; block: BlockSpec }
   | { kind: "replace"; region: RegionSpec; from: BlockSpec; to: BlockSpec };
 
@@ -947,6 +1056,69 @@ export type EditRequest =
  * because a delta would be ambiguous about which side it grew from. Growth
  * lands at the far side, so every coordinate already on screen stays valid.
  */
+/**
+ * What empty space should be made of, and whether to rewrite what already is.
+ */
+/**
+ * A new Minecraft version for the open schematic.
+ */
+/**
+ * What the renderer managed to say on its way down.
+ *
+ * Strings only, and deliberately: this crosses the boundary from a window that
+ * is already failing, so anything that had to be serialised from a live object
+ * is one more thing that can throw inside the error handler.
+ */
+export interface RendererFailure {
+  message: string;
+  /** A stack when there was one; `""` rather than absent, for the same reason. */
+  stack: string;
+  /** `"error"` for a thrown exception, `"rejection"` for an unhandled promise. */
+  kind: "error" | "rejection";
+  /** `file:line:column`, when the event carried one. */
+  at: string;
+}
+
+export interface VersionRequest {
+  /** A name from `MC_VERSIONS`, e.g. `JE_1_12_2`. */
+  version: string;
+  /**
+   * Go ahead even though blocks will be replaced with air.
+   *
+   * Backporting cannot carry what the older version never had. Main refuses
+   * the first attempt and reports the count; this is the second. The refusal
+   * arrives as `needs-confirmation`, so the panel never has to read the
+   * sentence to know it may offer this.
+   */
+  dropUnrepresentable?: boolean;
+}
+
+
+export interface VoidBlockRequest {
+  /** The block id, with states if it has any. `""` means air. */
+  block: string;
+  /**
+   * Also replace every cell holding the *previous* answer.
+   *
+   * Off by default, and it has to be: the choice on its own moves no block,
+   * while this rewrites the document. One transaction, so it is one Ctrl+Z --
+   * but it is still an edit somebody has to ask for.
+   */
+  replaceExisting?: boolean;
+  /**
+   * What the empty cells hold *now*, when it is not what the session says.
+   *
+   * The choice lands the moment it is picked -- that is what makes the
+   * viewport show it -- so by the time the rewrite is asked for, the session's
+   * own value is the **new** block and would convert it into itself. The
+   * panel is the only thing still holding the old one, so it names it.
+   *
+   * Absent, the session's value is used, which is what a caller doing both at
+   * once means.
+   */
+  replaceFrom?: string;
+}
+
 export interface ResizeRequest {
   width: number;
   height: number;
@@ -1048,12 +1220,37 @@ export interface BlockInspection {
 }
 
 /**
- * Turning or reflecting a region. A quarter turn needs a square footprint and
- * is refused otherwise rather than cropped.
+ * Turning or reflecting a region.
+ *
+ * `to` is where the result's minimum corner lands, and it is what makes the
+ * gizmo's pivot mean something: turning about a corner is turning in place and
+ * then moving, and as two requests Ctrl+Z would take back half a gesture.
+ * Without it the region turns on its own footprint, which a quarter turn can
+ * only do when that footprint is square.
+ *
+ * The mirror axis includes `y`, which is the flip. It is not the other two with
+ * a letter changed -- a vertical reflection turns over `half`, `type`, `face`
+ * and `attachment` and touches none of the horizontal properties.
  */
 export interface TransformRequest {
   region: RegionSpec;
-  transform: { kind: "rotate"; steps: 0 | 1 | 2 | 3 } | { kind: "mirror"; axis: "x" | "z" };
+  transform:
+    | { kind: "rotate"; steps: 0 | 1 | 2 | 3 }
+    | { kind: "mirror"; axis: "x" | "y" | "z" };
+  to?: { x: number; y: number; z: number } | null;
+}
+
+/**
+ * Resampling a region by a whole factor.
+ *
+ * Whole factors only, because anything else is a build with a different number
+ * of blocks in every row. Multiplying is exact; dividing keeps the cell at the
+ * low corner of each group and says in `notes` how many it threw away.
+ */
+export interface ScaleRequest {
+  region: RegionSpec;
+  spec: { kind: "multiply"; factor: number } | { kind: "divide"; factor: number };
+  to?: { x: number; y: number; z: number } | null;
 }
 
 /**
@@ -1075,6 +1272,16 @@ export interface PasteRequest {
   z: number;
   /** Write the copied air too, erasing what it lands on. Off by default. */
   includeAir?: boolean;
+  /**
+   * Leave the document's empty space where it falls, rather than writing it.
+   *
+   * WorldEdit's `//paste -a`, for the half of it this app did not already do:
+   * air is never stored in the clipboard and so never pasted, but with
+   * `barrier` or `water` chosen as empty space those cells are real blocks in
+   * the copy and a paste stamps them over what was standing there. The block
+   * itself is the session's, so only the wish crosses.
+   */
+  skipEmpty?: boolean;
 }
 
 export interface SetNbtRequest {
@@ -1085,10 +1292,47 @@ export interface SetNbtRequest {
   value: string;
 }
 
+/**
+ * An edit that cannot make room below the origin moves nothing, and says so.
+ *
+ * Named rather than written out as a literal at each site, because the point
+ * of `EditSuccess.shift` being required is that every producer answers the
+ * question -- and \"this one cannot\" is an answer worth reading.
+ */
+export const NO_SHIFT: readonly [number, number, number] = [0, 0, 0];
+
 export interface EditSuccess {
   /** Voxels actually changed; 0 means the edit matched nothing. */
   changed: number;
   state: DocumentState;
+  /**
+   * How far the document's own content moved to make room for this edit.
+   *
+   * The grid has no negative index, so growing *below* the origin is done by
+   * moving everything already there up and out of the way. Main has always
+   * done that correctly and has never told anybody: the renderer holds a
+   * selection, a pivot and a stamp, every one of which names a cell, and all
+   * three stayed in the old frame while the blocks moved out from under them.
+   *
+   * Always `>= 0` on every axis, and non-zero only on the axes that went below
+   * zero -- so an edit dragged out past the *high* faces has always worked and
+   * always will, which is why this went unnoticed for so long.
+   *
+   * Required rather than optional, and that is deliberate: a field that can be
+   * left out is a field somebody leaves out, and leaving it out is exactly the
+   * bug. `NO_SHIFT` is what an edit that cannot grow says.
+   */
+  shift: readonly [number, number, number];
+  /**
+   * A sentence about what the edit did, when the count alone does not say it.
+   *
+   * `DocumentSession.notes`' rule and its only other user: most edits do one
+   * kind of thing, so `changed` is the whole answer. A version change does
+   * three -- renames what was renamed, restates what the target cannot say,
+   * and replaces what it does not have -- and only the third is a loss. One
+   * number for all three would report a demolition and a rename identically.
+   */
+  notes?: string;
 }
 
 /** The schematic's own NBT, as the panel shows it. */
@@ -1551,6 +1795,17 @@ export interface McpStatus {
    * them.
    */
   bridge: string | null;
+  /**
+   * Whether the running server is asking for a token.
+   *
+   * Reality, not the checkbox -- `McpSettings.requireAuth` is the intent, and
+   * this is what the listener is actually doing. They come apart while a
+   * change is in flight, and the direction that matters is the one where the
+   * pane says "required" over a server serving anybody.
+   */
+  requiresAuth: boolean;
+  /** The address it is bound to, so the pane can say what that means. */
+  bindAddress: string;
 }
 
 /** One line of the activity log: what was called, and when. */
@@ -1595,6 +1850,19 @@ export interface BgptApi {
   copyToClipboard(text: string): Promise<void>;
   getDefaultOutputDir(): Promise<string>;
   listBlocks(): Promise<string[]>;
+  /** The pre-Flattening block table; `{}` when it cannot be read. */
+  listLegacyBlocks(): Promise<Record<string, string>>;
+
+  /**
+   * The hotbar stored for a schematic, or the factory nine.
+   *
+   * Never rejects and never answers `null`: a document nobody has built in
+   * yet is the ordinary case rather than a failure, and a caller told the
+   * difference would have nothing different to do about it.
+   */
+  readHotbar(filePath: string): Promise<Hotbar>;
+  /** Remember it. A document with no path has nowhere to keep one. */
+  writeHotbar(filePath: string, hotbar: Hotbar): Promise<void>;
   /** Geometry for the blocks the inventory is about to draw. */
   getBlockIcons(req: BlockIconsRequest): Promise<BlockIconsResponse>;
   /** Settles the atlas for the whole block list. Resolves with its version. */
@@ -1628,10 +1896,26 @@ export interface BgptApi {
   getDocumentMesh(request: DocumentMeshRequest): Promise<DocumentMeshResponse>;
   moveRegion(request: MoveRegionRequest): Promise<EditResponse>;
   regionMesh(region: RegionSpec): Promise<RegionMeshResponse>;
+  /**
+   * The clipboard's contents as geometry, for the ghost a copy leaves behind.
+   *
+   * Deliberately not `regionMesh` of the selection: a cut has already emptied
+   * that region by the time the ghost is asked for, and even a copy's box moves
+   * away from the blocks -- which is the whole gesture this draws.
+   */
+  clipboardMesh(): Promise<RegionMeshResponse>;
   getSkyTextures(): Promise<SkyTextures>;
   applyEdit(request: EditRequest): Promise<EditResponse>;
   /** Set the schematic's size. Refuses a lossy shrink without `confirmLoss`. */
   resizeDocument(request: ResizeRequest): Promise<EditResponse>;
+  /** Choose what empty space is made of in the open schematic. */
+  setVoidBlock(request: VoidBlockRequest): Promise<EditResponse>;
+  /** Change which Minecraft version the open schematic is for. */
+  setDocumentVersion(request: VersionRequest): Promise<EditResponse>;
+  /**
+   * Tell main the renderer threw. Fire and forget; see `IPC.rendererFailed`.
+   */
+  reportFailure(report: RendererFailure): void;
   /** One file into another. Never overwrites; touches no open document. */
   convertFile(request: ConvertRequest): Promise<ConvertResponse>;
   undo(): Promise<EditResponse>;
@@ -1655,6 +1939,7 @@ export interface BgptApi {
   getAnchorTexture(): Promise<PackTexture | null>;
   /** Turn or reflect the selection. Undoable as one step. */
   transformRegion(request: TransformRequest): Promise<EditResponse>;
+  scaleRegion(request: ScaleRequest): Promise<EditResponse>;
   /**
    * Copy the selection out, or cut it. The clipboard lives in main and
    * deliberately outlives the open document, so it can carry between two.

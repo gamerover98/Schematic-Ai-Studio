@@ -65,6 +65,10 @@ const READ_ONLY = new Set([
   "get_schematic_info",
   "get_palette",
   "get_region",
+  // Answers what this schematic may hold. It needs the document -- the
+  // pre-Flattening set is a few hundred names rather than nine hundred -- and
+  // changes nothing about it.
+  "list_blocks",
   // Not about the open document at all -- it answers a question about
   // Minecraft. It still belongs here rather than in a table of its own,
   // because "does this write" is the only question this set asks.
@@ -192,6 +196,8 @@ function refusingScope(name: string): ToolContext["tx"] {
     setBlockEntity: no,
     fill: no,
     replace: no,
+    remap: no,
+    replaceAny: no,
     resize: no,
     setHeader: no,
     get changed(): number {
@@ -231,6 +237,18 @@ export interface CallOptions {
   client: string;
   selection: Region | null;
   allowedBlocks: ReadonlySet<string>;
+  /**
+   * Where `legacy_blocks.json` is.
+   *
+   * This was simply not passed, and two things went quietly wrong for it.
+   * `convert_schematic` is in `TOOL_SPECS` precisely so the chat and MCP get
+   * one definition -- and over MCP it reported MCEdit unavailable, which is a
+   * tool that works in the chat and not here, the failure that arrangement
+   * exists to prevent. And the version guard reads the same table, so without
+   * it a model driving a 1.12 schematic over MCP could place blocks the chat
+   * would refuse.
+   */
+  legacyBlocksPath?: string | null;
   /**
    * The file-level verbs and everything they need to reach.
    *
@@ -320,7 +338,7 @@ export async function callTool(
       );
     }
     const run = async (): Promise<CallOutcome> => {
-      const result = await owned.run(session, args ?? {});
+      const result = await owned.run(session, args ?? {}, options.legacyBlocksPath ?? null);
       if (owned.changesDocument) options.onChanged(session);
       return { result, summary: name };
     };
@@ -343,6 +361,7 @@ export async function callTool(
     tx: refusingScope(name),
     selection: options.selection,
     allowedBlocks: options.allowedBlocks,
+    legacyBlocksPath: options.legacyBlocksPath ?? null,
     onStep: (step) => {
       summary = step.summary;
     },

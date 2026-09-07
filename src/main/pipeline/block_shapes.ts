@@ -16,7 +16,7 @@
 // This is a deliberate approximation, not a model loader. Blocks with no entry
 // stay full cubes, which is the same answer as before for anything not listed.
 
-import { paletteEntryIsAir, type PaletteEntry } from "./types.js";
+import { paletteEntryIsAir, type CellFace, type PaletteEntry } from "./types.js";
 
 /** A box in Minecraft's 1/16 units: `[x0, y0, z0, x1, y1, z1]`, each 0..16. */
 export type Box = readonly [number, number, number, number, number, number];
@@ -76,12 +76,23 @@ export interface ShapeBox {
    */
   readonly uv?: Readonly<Record<string, UvWindow>>;
   /**
-   * A vanilla face's `rotation`: the texture turned clockwise within the face,
-   * in whole quarter-turns. It is a property of the *window*, not of the box —
-   * the anvil states its foot's west face as `[0, 2, 4, 14]` rotated 90°, a
-   * window that is 4 wide and 12 tall wrapped onto a face that is 12 wide and
-   * 4 tall — so a window without its rotation addresses the right pixels and
-   * lays them across the face sideways.
+   * A vanilla face's `rotation`, in whole quarter-turns. It is a property of
+   * the *window*, not of the box — the anvil states its foot's west face as
+   * `[0, 2, 4, 14]` rotated 90°, a window 4 wide and 12 tall wrapped onto a
+   * face 12 wide and 4 tall — so a window without its rotation addresses the
+   * right pixels and lays them across the face sideways.
+   *
+   * **Vanilla's number is copied verbatim**, which is the only rule a
+   * transcription needs and is the one worth stating: `template_anvil.json`
+   * writes `west: 90` and `east: 270` on every one of its four elements, and
+   * `ANVIL_PARTS` writes the same two numbers.
+   *
+   * This used to say the turn was *clockwise* and it is not. Measured off the
+   * baked anvil rather than argued: on its base box the window's `v` axis runs
+   * from `z = 2` to `z = 14`, and seen from outside a west face `+z` is to the
+   * viewer's right — so the picture's downward direction points right, its top
+   * points left, and a positive value turns it **anticlockwise**. The sentence
+   * was wrong and the numbers were right, which is why nothing ever failed.
    */
   readonly uvRotation?: Readonly<Record<string, number>>;
   /**
@@ -473,13 +484,46 @@ function unwrapCube(
    * which reads as a plank and is why it nearly passed.
    */
   sheet = 64,
+  /**
+   * The sheet's own height, in its own texels. Defaults to its width,
+   * which is what every square sheet wants and what this used to assume.
+   *
+   * A window is normalised over the *whole* image on each axis independently
+   * -- the atlas stretches every tile to a square (`tileSizeFor` takes the
+   * larger side) -- so one scale for both is right only while the sheet is
+   * square. Chests, bells and signs all are. A mob's is not: a skeleton, a
+   * wither skeleton and a creeper are 64x32, and read at the width their
+   * head lands on the bottom half of the sheet, which is a leg.
+   */
+  sheetHeight = sheet,
+  /**
+   * Whether the sheet's V runs **with** the world's Y -- the top of the
+   * picture being the top of the box.
+   *
+   * It is `false` here because that is what the chest, the bell and the sign
+   * measurably want, and `true` for a mob's head, and both of those are
+   * measurements rather than opinions. Vanilla's block-entity renderers each
+   * pose their `ModelPart` before drawing it and they do not all pose it the
+   * same way up; what reaches `ShapeBox.uv` has to be the *world's* answer,
+   * so the difference has to be sayable here.
+   *
+   * How each was measured, so the next person can redo it rather than trust
+   * it. On `entity/chest/normal.png` the lock's notch sits two rows into the
+   * lid's front strip and two rows short of the end of the body's, and those
+   * two rows are byte-identical -- so they are the joint, and the strips run
+   * bottom-up. On `entity/player/wide/steve.png` the front strip has hair in
+   * its first two rows, eyes in its fifth and a mouth in its seventh -- so
+   * that strip runs top-down. Neither reading is arguable and they disagree.
+   */
+  upright = false,
 ): Record<string, UvWindow> {
   const scale = 16 / sheet;
+  const scaleV = 16 / sheetHeight;
   const w = (x: number, y: number, width: number, height: number): UvWindow => [
     x * scale,
-    y * scale,
+    y * scaleV,
     (x + width) * scale,
-    (y + height) * scale,
+    (y + height) * scaleV,
   ];
   /*
    * The four side strips run **bottom-up**, and the lock says so.
@@ -502,17 +546,24 @@ function unwrapCube(
    */
   const side = (x: number, y: number, width: number, height: number): UvWindow => [
     x * scale,
-    (y + height) * scale,
+    (y + height) * scaleV,
     (x + width) * scale,
-    y * scale,
+    y * scaleV,
   ];
+  /*
+   * Turning the cube over swaps the two flat patches and un-reverses the four
+   * strips, which is one operation rather than two: it is the same cube seen
+   * from the other end of the Y axis.
+   */
+  const strip = upright ? w : side;
+  const [top, bottom] = upright ? [u + dz, u + dz + dx] : [u + dz + dx, u + dz];
   return {
-    down: w(u + dz, v, dx, dz),
-    up: w(u + dz + dx, v, dx, dz),
-    west: side(u, v + dz, dz, dy),
-    north: side(u + dz, v + dz, dx, dy),
-    east: side(u + dz + dx, v + dz, dz, dy),
-    south: side(u + 2 * dz + dx, v + dz, dx, dy),
+    up: w(top, v, dx, dz),
+    down: w(bottom, v, dx, dz),
+    west: strip(u, v + dz, dz, dy),
+    north: strip(u + dz, v + dz, dx, dy),
+    east: strip(u + dz + dx, v + dz, dz, dy),
+    south: strip(u + 2 * dz + dx, v + dz, dx, dy),
   };
 }
 
@@ -751,6 +802,609 @@ const SNOW_LAYER = (entry: PaletteEntry): BlockShape => {
   return height >= 16 ? CUBE : boxes([0, 0, 0, 16, height, 16]);
 };
 
+// --- heads and skulls -------------------------------------------------------
+//
+// A head has no block model: `blockstates/skeleton_skull.json` names
+// `block/skull`, which holds a particle texture and nothing else. It is a
+// block entity drawn from the *mob's own sheet* -- which is what vanilla does
+// and what `entityTextureAlias` already resolves -- so the geometry is one
+// `ModelPart` cube and `unwrapCube` is its arithmetic.
+
+/** The cube every head is, in the model's own units. Vanilla's `SkullBlock`. */
+const HEAD_BOX: Box = [4, 0, 4, 12, 8, 12];
+
+/** The same cube on a wall, as vanilla's `facing=north` states it. */
+const WALL_HEAD_BOX: Box = [4, 4, 8, 12, 12, 16];
+
+/**
+ * How tall each head's sheet is, in its own texels.
+ *
+ * Not one number, because the mobs do not agree: a skeleton, a wither
+ * skeleton and a creeper are 64x32 and a zombie, a piglin and a player are
+ * 64x64. `unwrapCube` needs both sides or the three short sheets read their
+ * head windows at twice the height they occupy.
+ *
+ * **The dragon is deliberately absent.** Its head is not an 8x8x8 cube on a
+ * 64-wide sheet -- `entity/enderdragon/dragon.png` is 256 logical texels wide
+ * and the head there has a jaw and horns as separate parts -- so there is no
+ * window to write that would not be invented. It keeps the coordinate-derived
+ * UVs it has always had, which are wrong in a way somebody can see and report
+ * rather than wrong in a way that looks deliberate.
+ */
+const HEAD_SHEET_HEIGHT: Readonly<Record<string, number>> = {
+  skeleton: 32,
+  wither_skeleton: 32,
+  creeper: 32,
+  zombie: 64,
+  piglin: 64,
+  player: 64,
+};
+
+/** `creeper_wall_head` -> `creeper`, which is the key of the table above. */
+function headKind(entry: PaletteEntry): string {
+  return baseName(entry).replace(/_(?:wall_)?(?:skull|head)$/, "");
+}
+
+/**
+ * The head cube's windows on the mob's sheet, or `undefined` for a head whose
+ * sheet this does not claim to know.
+ */
+function headUv(entry: PaletteEntry): Readonly<Record<string, UvWindow>> | undefined {
+  const sheetHeight = HEAD_SHEET_HEIGHT[headKind(entry)];
+  return sheetHeight === undefined
+    ? undefined
+    : unwrapCube(0, 0, 8, 8, 8, 64, sheetHeight, true);
+}
+
+/**
+ * A head on the floor, turned by `rotation` -- sixteen positions, not four.
+ *
+ * A quarter-turn would be the cheaper answer and it is the wrong one here: a
+ * standing sign rounds to the nearest quarter because its board is square in
+ * plan and carries the same picture on both faces, while a head has a *face*,
+ * and half the sixteen values would put it 22.5 degrees out.
+ *
+ * So it is a `BoxRotation`, which spins the positions and the normal and
+ * leaves the windows alone -- and that is exactly right, because the picture
+ * has to turn with the geometry it is painted on.
+ *
+ * `180 -` is the offset between the two conventions in play, and it is the
+ * part that is easy to write down backwards. The cube is authored with the
+ * mob's face on its **north** side, which is what the wall variant needs at
+ * zero steps; vanilla's `RotationSegment` puts **south** at `rotation=0`,
+ * which is the same convention `rotationSegment` already implements. A head
+ * turned exactly half round still reads as a head, so nothing on screen would
+ * say it was wrong.
+ */
+function skull(entry: PaletteEntry): BlockShape {
+  const sixteenths = Number(entry.properties.rotation);
+  const turn = 180 - 22.5 * (Number.isFinite(sixteenths) ? sixteenths : 0);
+  return boxes({
+    box: HEAD_BOX,
+    uv: headUv(entry),
+    rotation: { origin: [8, 8, 8], axis: "y", angle: turn },
+  });
+}
+
+/**
+ * A head on a wall, hung on the face opposite the one it looks out of.
+ *
+ * `northFacingSteps`, not `facingSteps + 2`, and the difference is a quarter
+ * turn on every wall head in the game. The box above is vanilla's
+ * `facing=north` shape -- against the **south** wall -- so it is north-authored
+ * like a trapdoor, while `+ 2` is what an *east*-authored box needs and is
+ * what `againstWall` correctly does for a ladder. Nothing could see it: a
+ * skull is very nearly symmetric in plan, and every check there was asked
+ * `orientPlacement` for the property rather than the baker for the box.
+ */
+function wallSkull(entry: PaletteEntry): BlockShape {
+  return transform(
+    [{ box: WALL_HEAD_BOX, uv: headUv(entry) }],
+    northFacingSteps(entry),
+    false,
+  );
+}
+
+// --- rails ------------------------------------------------------------------
+//
+// Transcribed from `blockstates/rail.json` and the three models it names,
+// `rail_flat`, `rail_curved` and `template_rail_raised_ne` (1.21.4). The
+// `shape` property was decoded on the way in, derived from the neighbours by
+// `block_connections.ts`, rotated with the schematic by `domain/transform.ts`
+// -- and read by nobody here, so every rail in the game was the same flat
+// plate whichever way the track ran.
+
+/**
+ * A rail is a **plane**, at y=1, not a box one unit thick.
+ *
+ * That is what vanilla writes and it is also cheaper: `boxFaces` drops a face
+ * with no area, so six quads become two. What it gives up is the `cullFace`
+ * the old box's underside earned by sitting on the cell boundary -- which
+ * vanilla does not claim either, its rail models carrying no `cullface` at
+ * all.
+ */
+const RAIL_BOX: Box = [0, 1, 0, 16, 1, 16];
+
+/**
+ * Half the block's diagonal, which is how far a 45-degree ramp has to reach
+ * before it is turned.
+ *
+ * Vanilla states the raised plane as the full 0..16 with `rescale: true`,
+ * which grows it back out to the diagonal after the turn. There is no rescale
+ * here, so the plane is written at its rescaled width instead -- the chain's
+ * idiom, for the chain's reason.
+ */
+const RAIL_SLOPE = 8 * Math.SQRT2;
+const RAIL_RAMP: Box = [0, 9, 8 - RAIL_SLOPE, 16, 9, 8 + RAIL_SLOPE];
+
+/**
+ * Both faces stated, which the ramp cannot do without.
+ *
+ * Its box reaches from -3.3 to 19.3 along z, so coordinate-derived UVs would
+ * run well outside the tile and the atlas would smear the edge pixels across
+ * the whole ramp. `tests/blocks.ts` walks every id for exactly that.
+ *
+ * `up` is the identity and says nothing the derivation would not; `down` is
+ * vanilla's own vertical mirror of it, which is a real choice rather than a
+ * restatement -- the derived underside would come out the other way up.
+ */
+const RAIL_UV: Readonly<Record<string, UvWindow>> = {
+  up: [0, 0, 16, 16],
+  down: [0, 16, 16, 0],
+};
+
+/**
+ * What each `shape` draws, straight from `blockstates/rail.json`.
+ *
+ * `steps` is that file's `y` in quarter turns -- one step is 90 degrees, east
+ * to south, which is `rotateBoxY`'s own direction. `rise` is the ramp's angle
+ * about x, positive lifting the north edge.
+ */
+const RAIL_SHAPES: Readonly<
+  Record<string, { readonly corner?: true; readonly rise?: number; readonly steps: number }>
+> = {
+  north_south: { steps: 0 },
+  east_west: { steps: 1 },
+  south_east: { corner: true, steps: 0 },
+  south_west: { corner: true, steps: 1 },
+  north_west: { corner: true, steps: 2 },
+  north_east: { corner: true, steps: 3 },
+  ascending_north: { rise: 45, steps: 0 },
+  ascending_east: { rise: 45, steps: 1 },
+  ascending_south: { rise: -45, steps: 0 },
+  ascending_west: { rise: -45, steps: 1 },
+};
+
+/**
+ * A rail, the way its `shape` and its `powered` say.
+ *
+ * The texture is named **here** rather than in `SPECIAL_FACE_RULES` for the
+ * campfire's reason: a candidate list cannot see a property, and both halves
+ * of this depend on one. `rail_corner`, `powered_rail_on`, `detector_rail_on`
+ * and `activator_rail_on` are all in the shipped pack and were all reachable
+ * from nothing.
+ *
+ * Only the bare `rail` curves, which is the game's rule and already
+ * `railShape`'s in `block_connections.ts`. A file naming a corner on a
+ * powered rail gets the straight plate rather than a texture that does not
+ * exist.
+ */
+function rail(entry: PaletteEntry): BlockShape {
+  const name = baseName(entry);
+  const spec = RAIL_SHAPES[entry.properties.shape ?? ""] ?? RAIL_SHAPES.north_south;
+  const corner = spec.corner === true && name === "rail";
+  const texture = corner ? "rail_corner" : entry.properties.powered === "true" ? `${name}_on` : name;
+  return transform(
+    [
+      {
+        box: spec.rise === undefined ? RAIL_BOX : RAIL_RAMP,
+        texture,
+        uv: RAIL_UV,
+        rotation:
+          spec.rise === undefined
+            ? undefined
+            : { origin: [8, 9, 8], axis: "x", angle: spec.rise },
+      },
+    ],
+    spec.steps,
+    false,
+  );
+}
+
+// --- cauldrons ---------------------------------------------------------------
+//
+// Transcribed from `template_cauldron_full` and its two shorter siblings
+// (1.21.4). It was a solid 16x16x16 box wearing the pot's own textures, so
+// there was no inside for anything to be in -- which is why the `level` was
+// not merely unread, it was unreadable: a liquid drawn in there would have
+// been sealed inside a block of iron.
+
+const CAULDRON_WALL: Readonly<Record<string, string>> = {
+  up: "cauldron_top",
+  down: "cauldron_inner",
+};
+const CAULDRON_FLOOR: Readonly<Record<string, string>> = {
+  up: "cauldron_inner",
+  down: "cauldron_inner",
+};
+const CAULDRON_FOOT: Readonly<Record<string, string>> = { down: "cauldron_bottom" };
+
+/**
+ * The pot: four walls, the floor they stand on, and eight boxes of feet.
+ *
+ * Every `omit` here is a face vanilla's own model does not state, and each is
+ * a face another box of the same cauldron is standing against -- two
+ * coincident faces z-fight, which is what a seam down the middle of a leg
+ * looks like.
+ */
+const CAULDRON_POT: readonly ShapeBox[] = [
+  // The four walls, from 3 up. `cauldron_inner` on their undersides is the
+  // texture the pack has always shipped and nothing could name.
+  { box: [0, 3, 0, 2, 16, 16], texture: "cauldron_side", textures: CAULDRON_WALL },
+  { box: [14, 3, 0, 16, 16, 16], texture: "cauldron_side", textures: CAULDRON_WALL },
+  {
+    box: [2, 3, 0, 14, 16, 2],
+    texture: "cauldron_side",
+    textures: CAULDRON_WALL,
+    omit: ["east", "west"],
+  },
+  {
+    box: [2, 3, 14, 14, 16, 16],
+    texture: "cauldron_side",
+    textures: CAULDRON_WALL,
+    omit: ["east", "west"],
+  },
+  // The floor of the bowl, seen from above and from below.
+  {
+    box: [2, 3, 2, 14, 4, 14],
+    texture: "cauldron_inner",
+    textures: CAULDRON_FLOOR,
+    omit: ["north", "east", "south", "west"],
+  },
+  // Four feet, two boxes each, with nothing on top of any of them.
+  { box: [0, 0, 0, 4, 3, 2], texture: "cauldron_side", textures: CAULDRON_FOOT, omit: ["up"] },
+  {
+    box: [0, 0, 2, 2, 3, 4],
+    texture: "cauldron_side",
+    textures: CAULDRON_FOOT,
+    omit: ["up", "north"],
+  },
+  { box: [12, 0, 0, 16, 3, 2], texture: "cauldron_side", textures: CAULDRON_FOOT, omit: ["up"] },
+  {
+    box: [14, 0, 2, 16, 3, 4],
+    texture: "cauldron_side",
+    textures: CAULDRON_FOOT,
+    omit: ["up", "north"],
+  },
+  { box: [0, 0, 14, 4, 3, 16], texture: "cauldron_side", textures: CAULDRON_FOOT, omit: ["up"] },
+  {
+    box: [0, 0, 12, 2, 3, 14],
+    texture: "cauldron_side",
+    textures: CAULDRON_FOOT,
+    omit: ["up", "south"],
+  },
+  { box: [12, 0, 14, 16, 3, 16], texture: "cauldron_side", textures: CAULDRON_FOOT, omit: ["up"] },
+  {
+    box: [14, 0, 12, 16, 3, 14],
+    texture: "cauldron_side",
+    textures: CAULDRON_FOOT,
+    omit: ["up", "south"],
+  },
+];
+
+/** The three heights vanilla's `_level1`, `_level2` and `_full` put the top at. */
+const CAULDRON_LEVEL: readonly number[] = [0, 9, 12, 15];
+
+/**
+ * The surface of whatever is in the pot, or `null` for an empty one.
+ *
+ * **The two eras spell this differently and the difference is real**, which
+ * is worth saying because it looks like a bug in the table. 1.17 split the
+ * block: a modern `cauldron` has no properties at all and a modern
+ * `water_cauldron` carries `level=1..3`. Before the Flattening there was one
+ * `cauldron` with `level=0..3`, and `legacy_blocks.json` maps `118:2` to
+ * `minecraft:cauldron[level=2]` exactly -- so a 1.12 schematic arrives
+ * holding a state the modern registry says that block cannot have, and a
+ * cauldron of water arrives called `cauldron`. Reading `level` off both
+ * spellings is what makes one function serve both eras.
+ *
+ * A face and nothing else, as vanilla states it: the underside is against
+ * the bowl's floor and would z-fight with it.
+ */
+function cauldronContent(entry: PaletteEntry): ShapeBox | null {
+  const name = baseName(entry);
+  const surface = (height: number, texture: string): ShapeBox => ({
+    box: [2, height, 2, 14, height, 14],
+    texture,
+    omit: ["down"],
+  });
+  // Lava and powder snow have no level in any version: they are full or they
+  // are a different block.
+  if (name === "lava_cauldron") return surface(15, "lava_still");
+  if (name === "powder_snow_cauldron") return surface(15, "powder_snow");
+  const stated = Number(entry.properties.level);
+  // A `water_cauldron` with nothing said is the state the game places, which
+  // is one third full; a bare modern `cauldron` really is empty.
+  const level = Number.isFinite(stated) ? Math.trunc(stated) : name === "water_cauldron" ? 1 : 0;
+  if (level < 1) return null;
+  return surface(CAULDRON_LEVEL[Math.min(3, level)], "water_still");
+}
+
+function cauldron(entry: PaletteEntry): BlockShape {
+  const content = cauldronContent(entry);
+  return boxes(...CAULDRON_POT, ...(content === null ? [] : [content]));
+}
+
+// --- banners ------------------------------------------------------------------
+//
+// A banner has no block model: `blockstates/white_wall_banner.json` names
+// `block/banner`, which holds a particle texture and nothing else. It is a
+// block entity with three parts, and `entity/banner/banner_base.png`
+// measurably carries all three -- the flag's unwrap runs u 0..42 by v 0..41,
+// the pole's u 44..52 by v 0..44 and the bar's u 0..44 by v 42..46, which is
+// `unwrapCube` evaluated for a 20x40x1 at (0,0), a 2x42x2 at (44,0) and a
+// 20x2x2 at (0,42). Nothing else produces that layout, which is the bell's
+// argument.
+//
+// It was a 2-thick slab of dyed wool filling the whole cell -- and a banner
+// *standing* has no `facing`, so `facingSteps` fell back to east and every
+// one of the sixteen rotations came out flat against the west wall.
+
+/**
+ * Vanilla renders the model at **two thirds**, which is what makes a banner
+ * two blocks tall out of a 42-unit pole. Every coordinate below is a model
+ * unit already multiplied by it, so they are thirds rather than integers.
+ */
+const BANNER_SCALE = 2 / 3;
+const bannerUnits = (n: number): number => n * BANNER_SCALE;
+
+/** The three parts' windows on the sheet, in the sheet's own texels. */
+const BANNER_CLOTH_UV = unwrapCube(0, 0, 20, 40, 1);
+const BANNER_POLE_UV = unwrapCube(44, 0, 2, 42, 2);
+const BANNER_BAR_UV = unwrapCube(0, 42, 20, 2, 2);
+
+/**
+ * Vanilla's `DyeColor.textureDiffuseColor`, which is what the base layer is
+ * multiplied by.
+ *
+ * Corroborated against the pack rather than trusted: every one of the sixteen
+ * is within 35 of the mean of its own `<colour>_wool` texture, and every one
+ * of those means is the same hue a shade darker -- which is what a wool
+ * texture is. A transposed pair would show up as two colours swapping places,
+ * not as a uniform offset.
+ */
+const DYE_COLOURS: Readonly<Record<string, string>> = {
+  white: "f9fffe",
+  orange: "f9801d",
+  magenta: "c74ebd",
+  light_blue: "3ab3da",
+  yellow: "fed83d",
+  lime: "80c71f",
+  pink: "f38baa",
+  gray: "474f52",
+  light_gray: "9d9d97",
+  cyan: "169c9c",
+  purple: "8932b8",
+  blue: "3c44aa",
+  brown: "835432",
+  green: "5e7c16",
+  red: "b02e26",
+  black: "1d1d21",
+};
+
+/**
+ * The cloth's texture: the base layer, tinted by the block's own dye.
+ *
+ * `#rrggbb` is `resolveBoxTexture`'s spelling for "this texture multiplied by
+ * this colour", which is how a colour that varies with the **state** is
+ * expressed at all -- the baker's own tint is keyed on the texture path and
+ * is one constant per document.
+ *
+ * A colour the table does not know falls back to the untinted base, which is
+ * white: the same answer as before the tint existed, rather than a guess.
+ */
+function bannerCloth(entry: PaletteEntry): string {
+  const dye = DYE_COLOURS[baseName(entry).replace(/_(?:wall_)?banner$/, "")];
+  return dye === undefined ? "entity/banner/base" : `entity/banner/base#${dye}`;
+}
+
+const BANNER_CLOTH_HEIGHT = bannerUnits(40);
+
+/**
+ * A banner on the ground: a pole from the floor, a crossbar across its top,
+ * and the cloth hanging from the bar.
+ *
+ * **It is taller than its own cell**, by three quarters of a block, and that
+ * is the block rather than this file: vanilla's pole is 42 units at two
+ * thirds, which is 28, and the bar sits on top of that. The first geometry
+ * here to leave its cell upwards.
+ *
+ * Sixteen positions through `rotation`, as a `BoxRotation` and for the head's
+ * reason: a banner has a front. `-22.5` and no offset, because the cloth is
+ * authored on the **south** side of the pole and vanilla's `RotationSegment`
+ * puts south at `rotation=0` -- the same convention `rotationSegment` writes.
+ */
+function standingBanner(entry: PaletteEntry): BlockShape {
+  const sixteenths = Number(entry.properties.rotation);
+  const angle = -22.5 * (Number.isFinite(sixteenths) ? sixteenths : 0);
+  const poleTop = bannerUnits(42);
+  const barTop = poleTop + bannerUnits(2);
+  const spin: BoxRotation = { origin: [8, 8, 8], axis: "y", angle };
+  const half = bannerUnits(1);
+  const wide = bannerUnits(10);
+  return boxes(
+    /*
+     * The pole's south face is coplanar with the cloth's north face, in
+     * vanilla as here -- the flag runs to z = -1 in model space and the pole
+     * starts there. Two coincident faces z-fight, and this pair would do it
+     * up the whole back of every banner in the build. What omitting it costs
+     * is the strip below the cloth's hem, a couple of units at the foot of
+     * the pole seen from due south; that is the cheaper of the two.
+     */
+    {
+      box: [8 - half, 0, 8 - half, 8 + half, poleTop, 8 + half],
+      uv: BANNER_POLE_UV,
+      rotation: spin,
+      omit: ["south"],
+    },
+    // The bar's south face is *entirely* behind the cloth, so this one costs
+    // nothing at all.
+    {
+      box: [8 - wide, poleTop, 8 - half, 8 + wide, barTop, 8 + half],
+      uv: BANNER_BAR_UV,
+      rotation: spin,
+      omit: ["south"],
+    },
+    {
+      box: [8 - wide, barTop - BANNER_CLOTH_HEIGHT, 8 + half, 8 + wide, barTop, 8 + half + bannerUnits(1)],
+      texture: bannerCloth(entry),
+      uv: BANNER_CLOTH_UV,
+      rotation: spin,
+    },
+  );
+}
+
+/**
+ * A banner on a wall: no pole, and the cloth **hangs into the cell below**.
+ *
+ * That is the block, not a liberty taken here. Vanilla drops the whole model
+ * by 0.479 of a block before drawing it, so the cloth ends 13 units under the
+ * floor of its own cell -- which is why a wall banner reads as two blocks
+ * tall while its hitbox is one, and it is what somebody asking for a wall
+ * banner is asking for.
+ *
+ * It has a consequence worth knowing before it is reported: `pickBlockAt`
+ * derives the cell from the point the ray hit, so **a click on the lower half
+ * of the cloth selects the empty cell underneath it**. Minecraft does the
+ * same -- there is no hitbox down there either -- but the outline drawn round
+ * that cell is this app's own.
+ *
+ * `southFacingSteps`, because the box below is vanilla's `facing=south` case:
+ * the cloth against the *north* wall, on the face opposite the one it looks
+ * out of.
+ */
+function wallBanner(entry: PaletteEntry): BlockShape {
+  const half = bannerUnits(1);
+  const wide = bannerUnits(10);
+  // The model's origin after vanilla's two translations, in model units.
+  // Vanilla's two translations happen *before* the scale, so they are whole
+  // blocks rather than model units and `BANNER_SCALE` does not touch them.
+  const originY = -(1 / 6 + 0.3125) * 16;
+  const originZ = 16 * (0.5 - 0.4375);
+  const barTop = originY + bannerUnits(32);
+  return transform(
+    [
+      {
+        box: [8 - wide, barTop - bannerUnits(2), originZ - half, 8 + wide, barTop, originZ + half],
+        uv: BANNER_BAR_UV,
+        omit: ["south"],
+      },
+      {
+        box: [
+          8 - wide,
+          barTop - BANNER_CLOTH_HEIGHT,
+          originZ + half,
+          8 + wide,
+          barTop,
+          originZ + half + bannerUnits(1),
+        ],
+        texture: bannerCloth(entry),
+        uv: BANNER_CLOTH_UV,
+      },
+    ],
+    southFacingSteps(entry),
+    false,
+  );
+}
+
+// --- redstone dust ------------------------------------------------------------
+//
+// Transcribed from `blockstates/redstone_wire.json`, which is a multipart, and
+// the four models it names (1.21.4). It was one flat plate wearing an
+// untinted greyscale texture -- so a line of redstone was a row of white
+// squares, whatever it was connected to and whatever it was carrying.
+
+/** Every part of it is a plane a quarter of a unit off the floor. */
+const DUST_DOT: Box = [0, 0.25, 0, 16, 0.25, 16];
+const DUST_ARM_NEAR: Box = [0, 0.25, 0, 16, 0.25, 8];
+const DUST_ARM_FAR: Box = [0, 0.25, 8, 16, 0.25, 16];
+/** The quad that climbs the side of the block next door. */
+const DUST_RISER: Box = [0, 0, 0.25, 16, 16, 0.25];
+
+/**
+ * `RedStoneWireBlock.getColorForPower`, transcribed.
+ *
+ * Vanilla ships the dust **greyscale** -- the shipped pack's palette is three
+ * greys and transparency, none darker than 217 -- and multiplies it by this,
+ * which is why an untinted wire is a white line rather than a dim red one.
+ * Unpowered is `4c0000` and full is `ff3300`: the green and blue terms are
+ * clamped away below power 9 and 11, so most of the range is a pure red
+ * getting brighter.
+ *
+ * `power` is read from the file and never computed. A schematic records what
+ * the wire was carrying when it was cut; nothing here simulates redstone, and
+ * a legacy `.schematic` carries all sixteen levels in its data nibble.
+ */
+function redstoneColour(power: unknown): string {
+  const stated = Number(power);
+  const level = Number.isFinite(stated) ? Math.min(15, Math.max(0, Math.trunc(stated))) : 0;
+  const f = level / 15;
+  const clamp = (n: number): number => Math.min(1, Math.max(0, n));
+  const channels = [
+    clamp(f * 0.6 + (f > 0 ? 0.4 : 0.3)),
+    clamp(f * f * 0.7 - 0.5),
+    clamp(f * f * 0.6 - 0.7),
+  ];
+  return channels.map((c) => Math.round(c * 255).toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * A wire, the way its four connections and its `power` say.
+ *
+ * The multipart's dot condition is four `OR`ed pairs -- north/east,
+ * east/south, south/west, west/north -- which is every way of having two
+ * connections at right angles, plus the case of having none at all. A
+ * *straight* run has no dot, which is what makes a long line read as a line
+ * rather than as a row of beads.
+ *
+ * `line0` runs north-south and `line1` east-west; vanilla writes the east and
+ * west arms as the same two half-plates turned a quarter, which is what
+ * `turnFlatFaces` does to the picture on a flat face.
+ */
+function redstoneWire(entry: PaletteEntry): BlockShape {
+  const tint = redstoneColour(entry.properties.power);
+  const dot = `redstone_dust_dot#${tint}`;
+  const along = `redstone_dust_line0#${tint}`;
+  const across = `redstone_dust_line1#${tint}`;
+  const linked = (face: string): string => entry.properties[face] ?? "none";
+  const on = (face: string): boolean => linked(face) !== "none";
+  const parts: ShapeBox[] = [];
+
+  const flat = on("north") || on("south") || on("east") || on("west");
+  const corner = (on("north") || on("south")) && (on("east") || on("west"));
+  if (!flat || corner) {
+    parts.push({ box: DUST_DOT, texture: dot });
+  }
+  if (on("north")) parts.push({ box: DUST_ARM_NEAR, texture: along });
+  if (on("south")) parts.push({ box: DUST_ARM_FAR, texture: along });
+  if (on("west")) parts.push(rotateShapeBox({ box: DUST_ARM_NEAR, texture: across }, 3));
+  if (on("east")) parts.push(rotateShapeBox({ box: DUST_ARM_FAR, texture: across }, 3));
+
+  /*
+   * And the quads that climb the block next door, which is the whole of what
+   * `up` means: dust running up a step keeps its line unbroken. Nothing in
+   * this app produced that value before -- `connectedState` wrote only `side`
+   * and `none` -- so this geometry had nothing to draw it from.
+   */
+  const RISE: Readonly<Record<string, number>> = { north: 0, east: 1, south: 2, west: 3 };
+  for (const [face, steps] of Object.entries(RISE)) {
+    if (linked(face) === "up") {
+      parts.push(rotateShapeBox({ box: DUST_RISER, texture: along }, steps));
+    }
+  }
+  return boxes(...parts);
+}
+
 /** Suffix-matched families, checked after the exact-name table. */
 const SUFFIX_SHAPES: ReadonlyArray<readonly [string, (entry: PaletteEntry) => BlockShape]> = [
   ["_slab", slab],
@@ -774,7 +1428,8 @@ const SUFFIX_SHAPES: ReadonlyArray<readonly [string, (entry: PaletteEntry) => Bl
    * same shape and only differ in which sheet they wear.
    */
   ["_chest", chest],
-  ["_banner", (e) => againstWall(e, 2)],
+  ["_wall_banner", wallBanner],
+  ["_banner", standingBanner],
   // Order matters: a wall hanging sign ends in `_hanging_sign` too, and a wall
   // sign ends in `_sign`.
   ["_wall_hanging_sign", hangingSign],
@@ -782,8 +1437,8 @@ const SUFFIX_SHAPES: ReadonlyArray<readonly [string, (entry: PaletteEntry) => Bl
   ["_wall_sign", wallSign],
   ["_sign", standingSign],
   ["_torch", torchShape],
-  ["_rail", () => boxes([0, 0, 0, 16, 1, 16])],
-  ["_candle", () => boxes([7, 0, 7, 9, 6, 9])],
+  ["_rail", rail],
+  ["_candle", candleShape],
   ["_sapling", () => ({ kind: "cross" })],
   /*
    * `_chain` covers the rename and everything that came with it: `chain` became
@@ -823,20 +1478,540 @@ const SUFFIX_SHAPES: ReadonlyArray<readonly [string, (entry: PaletteEntry) => Bl
   ["_coral", () => ({ kind: "cross" })],
   // A head or a skull sits in the middle of its cell; a wall one hangs on the
   // face opposite the one it looks out of.
-  ["_wall_head", (e) => transform([[4, 4, 8, 12, 12, 16]], facingSteps(e) + 2, false)],
-  ["_wall_skull", (e) => transform([[4, 4, 8, 12, 12, 16]], facingSteps(e) + 2, false)],
-  ["_head", () => boxes([4, 0, 4, 12, 8, 12])],
-  ["_skull", () => boxes([4, 0, 4, 12, 8, 12])],
+  ["_wall_head", wallSkull],
+  ["_wall_skull", wallSkull],
+  ["_head", skull],
+  ["_skull", skull],
   // A cake with a candle on it: the cake, and the candle standing on top.
-  ["_candle_cake", () => boxes([1, 0, 1, 15, 8, 15], [7, 8, 7, 9, 14, 9])],
-  // A cauldron with something in it is the same iron pot.
-  ["_cauldron", () => boxes([0, 0, 0, 16, 16, 16])],
+  ["_candle_cake", candleCake],
+  // A cauldron with something in it is the same iron pot, with the something
+  // drawn in it.
+  ["_cauldron", cauldron],
   // The copper golem, stood still. A statue is not a cube and drawing it as one
   // walled off whatever it was standing next to.
   ["_golem_statue", (e) => transform([[4, 0, 4, 12, 14, 12]], facingSteps(e), false)],
   ["_tulip", () => ({ kind: "cross" })],
   ["_mushroom", () => ({ kind: "cross" })],
 ];
+
+/**
+ * One candle in a group: where its 2x2 footprint starts, and how tall it is.
+ *
+ * Vanilla writes four separate models -- `template_candle` through
+ * `template_four_candles` -- and the heights differ *within* a group (3, 5 and
+ * 6 units), which is what stops four candles reading as a grid of identical
+ * posts. They are transcribed rather than spaced by arithmetic.
+ */
+type CandleStick = readonly [x: number, z: number, height: number];
+
+/** The four vanilla arrangements, indexed by `candles` - 1. */
+const CANDLE_GROUPS: readonly (readonly CandleStick[])[] = [
+  [[7, 7, 6]],
+  [
+    [5, 7, 5],
+    [9, 6, 6],
+  ],
+  [
+    [7, 9, 3],
+    [5, 7, 5],
+    [8, 6, 6],
+  ],
+  [
+    [6, 8, 3],
+    [9, 8, 5],
+    [5, 5, 5],
+    [8, 5, 6],
+  ],
+];
+
+/**
+ * Candles, and the reason they were **invisible** rather than merely wrong.
+ *
+ * The shape was one box with no windows, so its UVs came from its own
+ * coordinates: `x 7..9` of the tile. Decoded from the bundled pack,
+ * `candle.png`'s opaque art lives at `x 0..1`, `y 5..15` -- so every face was
+ * drawn, textured with nothing, and the block did not appear at all. This is
+ * the sheet-of-parts case the header already names for the lantern and the
+ * chain, arriving as a block that could not be seen.
+ *
+ * The vanilla windows say the same thing outright: a candle's sides are
+ * `[0, 8, 2, 8 + height]` whatever the box is doing.
+ *
+ * The little cross on top is the wick, or the flame when it is lit. Two quads
+ * of no thickness at +/-45 degrees -- so their four side faces have no area
+ * and are not drawn, which is the rule this file already keeps for a chain.
+ * Its position is derived from the stick because in all eight of vanilla's
+ * candles it is exactly the stick's centre; that regularity is stated here
+ * rather than transcribed eight times.
+ *
+ * `lit` swaps the **texture**, not the geometry, and that really is all
+ * vanilla does: `candle_one_candle_lit.json` is this same template with
+ * `all: block/candle_lit`, and the two textures differ by eighty pixels --
+ * the wax at the top going from cream to white. Decoded from the bundled
+ * pack, not assumed. `resolveBoxTexture` falls back to the block's own
+ * texture for a pack shipping no `_lit`, so a candle is never worse off
+ * than it was.
+ *
+ * ## The flame is an approximation, and is the only one in this file
+ *
+ * **No vanilla model has a candle flame.** In the game it is a particle,
+ * spawned by the block, and this app draws no particles -- so a lit candle
+ * was faithful to every model and still looked unlit, which is how it was
+ * reported.
+ *
+ * So this crosses the line the header draws, deliberately and once: two
+ * quads of `particle/flame`, the sprite the game's own particle uses. The
+ * precedent is redstone and the skulls, where a cube was the *harmful*
+ * answer; here nothing was harmful and the block was merely incomplete,
+ * which is a weaker argument and worth saying out loud.
+ *
+ * **Its size is ours**, because no source states one: two units wide, which
+ * is the candle's own width, and three tall, sitting directly on the wick.
+ * The tallest candle in any group stands at 6, so the flame reaches 10 and
+ * stays inside the cell in all four arrangements.
+ *
+ * It is lit from the inside by `lighting.ts`, which gives a lit candle the
+ * game's own `3 per candle`. Without that the flame would be drawn at
+ * whatever the room's light is, which in a sealed room is a dark smudge --
+ * the same reason a campfire's fire is visible.
+ */
+/** The sprite the game's own candle particle is drawn from. */
+const FLAME_TEXTURE = "particle/flame";
+
+/** The whole tile: a particle sprite fills its own texture. */
+const FLAME_UV: Readonly<Record<string, UvWindow>> = {
+  north: [0, 0, 16, 16],
+  south: [0, 0, 16, 16],
+};
+
+function candleShape(entry: PaletteEntry): BlockShape {
+  const wanted = Math.trunc(Number(entry.properties.candles));
+  const count = Number.isFinite(wanted) ? Math.min(4, Math.max(1, wanted)) : 1;
+  const lit = entry.properties.lit === "true";
+  const texture = lit ? `${baseName(entry)}_lit` : undefined;
+  const parts: ShapeBox[] = [];
+  for (const [x, z, height] of CANDLE_GROUPS[count - 1]) {
+    const side: UvWindow = [0, 8, 2, 8 + height];
+    parts.push({
+      box: [x, 0, z, x + 2, height, z + 2],
+      texture,
+      uv: {
+        north: side,
+        south: side,
+        east: side,
+        west: side,
+        up: [0, 6, 2, 8],
+        down: [0, 14, 2, 16],
+      },
+    });
+    const cx = x + 1;
+    const cz = z + 1;
+    for (const angle of [45, -45]) {
+      parts.push({
+        box: [cx - 0.5, height, cz, cx + 0.5, height + 1, cz],
+        rotation: { origin: [cx, height, cz], axis: "y", angle },
+        texture,
+        uv: { north: [0, 5, 1, 6], south: [0, 5, 1, 6] },
+      });
+      // The approximated flame, above the transcribed wick rather than in
+      // place of it: the wick is vanilla's and stays exactly where it is.
+      if (!lit) continue;
+      parts.push({
+        box: [cx - 1, height + 1, cz, cx + 1, height + 4, cz],
+        rotation: { origin: [cx, height + 1, cz], axis: "y", angle },
+        texture: FLAME_TEXTURE,
+        uv: FLAME_UV,
+      });
+    }
+  }
+  return boxes(...parts);
+}
+
+/**
+ * A cake with a candle standing in it.
+ *
+ * Two boxes wearing two textures, which is the beacon's arrangement and needs
+ * to be: `model_baker.ts` aliases the whole block to `cake`, so without a box
+ * naming its own the candle was a slice of cake standing on a cake. Reported
+ * as the candle simply not being there, which from a distance is what a
+ * cake-coloured stub on a cake looks like.
+ *
+ * The candle is vanilla's own `[7, 8, 7]..[9, 14, 9]` with the same windows a
+ * lone candle uses, and the flame sits on top of it by the same rule.
+ */
+function candleCake(entry: PaletteEntry): BlockShape {
+  const name = baseName(entry);
+  const dyed = name.endsWith("_candle_cake") ? name.slice(0, -"_cake".length) : "candle";
+  const texture = entry.properties.lit === "true" ? `${dyed}_lit` : dyed;
+  const parts: ShapeBox[] = [
+    { box: [1, 0, 1, 15, 8, 15] },
+    {
+      box: [7, 8, 7, 9, 14, 9],
+      texture,
+      uv: {
+        north: [0, 8, 2, 14],
+        south: [0, 8, 2, 14],
+        east: [0, 8, 2, 14],
+        west: [0, 8, 2, 14],
+        up: [0, 6, 2, 8],
+        down: [0, 14, 2, 16],
+      },
+    },
+  ];
+  for (const angle of [45, -45]) {
+    parts.push({
+      box: [7.5, 14, 8, 8.5, 15, 8],
+      rotation: { origin: [8, 14, 8], axis: "y", angle },
+      texture,
+      uv: { north: [0, 5, 1, 6], south: [0, 5, 1, 6] },
+    });
+  }
+  return boxes(...parts);
+}
+
+// --- the bell, the hopper and the campfire ----------------------------------
+//
+// Three blocks that were single crude boxes wearing the wrong pixels. All
+// three are transcribed from vanilla at 1.21.4, and in all three the
+// **blockstate** decided something the model could not: the campfire is
+// authored facing *south*, the hopper facing north, and a bell's two wall
+// models are authored facing east while its floor and ceiling ones face north.
+// Assuming one convention for all of them would have left half of them a
+// quarter or a half turn out, which still looks like a bell.
+
+/** `entity/bell/bell_body.png`, which is 32 texels square rather than 64. */
+const BELL_SHEET = "entity/bell/bell_body";
+const BELL_SHEET_WIDTH = 32;
+
+/**
+ * The bell itself, which has **no block model at all**.
+ *
+ * `bell_floor.json` and its three siblings contain only the supports -- a
+ * dark-oak bar and, on the floor, two stone posts. The bell is drawn by a block
+ * entity renderer from `entity/bell/bell_body.png`, exactly as a chest is, so
+ * `unwrapCube` is already the function that reads it.
+ *
+ * The two cubes and their offsets were **measured off the sheet** rather than
+ * recalled: its opaque regions are a 6x7x6 unwrap at (0, 0) and an 8x2x8 one at
+ * (0, 13), which is that layout and nothing else could produce it. What was
+ * there before was `boxes([4, 4, 4, 12, 12, 12])` wearing `bell_side` -- a cube
+ * in the middle of the cell showing a piece of the *support's* texture.
+ */
+const BELL_BODY = unwrapCube(0, 0, 6, 7, 6, BELL_SHEET_WIDTH);
+const BELL_CROWN = unwrapCube(0, 13, 8, 2, 8, BELL_SHEET_WIDTH);
+
+/**
+ * The supports, by `attachment`, and the quarter-turns each is authored for.
+ *
+ * `bell.json`'s variants are the source: floor and ceiling put `y: 0` on
+ * `facing=north`, and both wall models put it on `facing=east`. Two conventions
+ * in one block, which is exactly the sort of thing that is invisible in a
+ * screenshot -- a bell turned a quarter still hangs.
+ */
+function bellSupports(entry: PaletteEntry): { parts: ShapeBox[]; steps: number } {
+  const bar = "dark_oak_planks";
+  switch (entry.properties.attachment) {
+    case "ceiling":
+      return {
+        parts: [{ box: [7, 13, 7, 9, 16, 9], texture: bar }],
+        steps: northFacingSteps(entry),
+      };
+    case "single_wall":
+      return {
+        parts: [{ box: [3, 13, 7, 16, 15, 9], texture: bar }],
+        steps: facingSteps(entry),
+      };
+    case "double_wall":
+      return {
+        parts: [{ box: [0, 13, 7, 16, 15, 9], texture: bar }],
+        steps: facingSteps(entry),
+      };
+    default:
+      // `floor`, and the answer for an entry that names no attachment at all.
+      return {
+        parts: [
+          { box: [2, 13, 7, 14, 15, 9], texture: bar },
+          { box: [0, 0, 6, 2, 16, 10], texture: "stone" },
+          { box: [14, 0, 6, 16, 16, 10], texture: "stone" },
+        ],
+        steps: northFacingSteps(entry),
+      };
+  }
+}
+
+/**
+ * The bell hangs from y 4 to y 13 whatever holds it up: the crown's top meets
+ * the underside of every one of the four bars, which all sit at y 13.
+ *
+ * The body turns with the supports, and whether it should is **unobservable**:
+ * its four side windows are byte-identical on the sheet, as are the crown's,
+ * because a bell is a body of revolution. Turning everything together is one
+ * `transform` instead of two.
+ */
+function bell(entry: PaletteEntry): BlockShape {
+  const { parts, steps } = bellSupports(entry);
+  return transform(
+    [
+      { box: [5, 4, 5, 11, 11, 11], texture: BELL_SHEET, uv: BELL_BODY },
+      { box: [4, 11, 4, 12, 13, 12], texture: BELL_SHEET, uv: BELL_CROWN },
+      ...parts,
+    ],
+    steps,
+    false,
+  );
+}
+
+/**
+ * A hopper: a bowl with walls, a funnel and a spout.
+ *
+ * Its UVs really are derived from the box -- `hopper.json` states not one
+ * window -- so this is the one of the five where the *geometry* was the whole
+ * fault. It was `boxes([0, 10, 0, 16, 16, 16])`: the rim as a solid lump, with
+ * no bowl inside it, no funnel and no spout.
+ *
+ * The three textures are the other half. `hopper_top` goes on the rim, and the
+ * bowl's floor and the funnel's underside wear `hopper_inside`, which nothing
+ * would ever have reached: the generic candidate list asks for `hopper_side`,
+ * and **the pack has no such file** -- vanilla calls it `hopper_outside`.
+ *
+ * `omit` follows vanilla's own omissions rather than being decided here. Each
+ * one is a face that meets another box of the same hopper exactly: the walls'
+ * undersides on the bowl floor, the funnel's top on that same plane, the
+ * spout's top on the funnel's bottom. Drawn, they are coplanar pairs, and a
+ * coplanar pair is the dotted seam this file already records fixing on a chest.
+ */
+const HOPPER_FACES: Readonly<Record<string, string>> = {
+  up: "hopper_top",
+  down: "hopper_inside",
+  north: "hopper_outside",
+  south: "hopper_outside",
+  east: "hopper_outside",
+  west: "hopper_outside",
+};
+
+const HOPPER_BOWL: readonly ShapeBox[] = [
+  // The bowl's floor: `hopper_inside` above as well as below, which is what
+  // you see looking down into it.
+  {
+    box: [0, 10, 0, 16, 11, 16],
+    textures: { ...HOPPER_FACES, up: "hopper_inside" },
+  },
+  { box: [0, 11, 0, 2, 16, 16], textures: HOPPER_FACES, omit: ["down"] },
+  { box: [14, 11, 0, 16, 16, 16], textures: HOPPER_FACES, omit: ["down"] },
+  { box: [2, 11, 0, 14, 16, 2], textures: HOPPER_FACES, omit: ["down"] },
+  { box: [2, 11, 14, 14, 16, 16], textures: HOPPER_FACES, omit: ["down"] },
+  { box: [4, 4, 4, 12, 10, 12], textures: HOPPER_FACES, omit: ["up"] },
+];
+
+function hopper(entry: PaletteEntry): BlockShape {
+  const facing = entry.properties.facing;
+  if (facing === undefined || facing === "down" || facing === "up") {
+    return boxes(...HOPPER_BOWL, {
+      box: [6, 0, 6, 10, 4, 10],
+      textures: HOPPER_FACES,
+      omit: ["up"],
+    });
+  }
+  /*
+   * `hopper_side.json`, authored **north** -- `hopper.json`'s blockstate puts
+   * `y: 0` on `facing=north`. The spout comes out of the side at mid height
+   * instead of dropping from the bottom, which is the shape that reads as
+   * feeding the chest beside it.
+   */
+  return transform(
+    [...HOPPER_BOWL, { box: [6, 4, 0, 10, 8, 4], textures: HOPPER_FACES, omit: ["south"] }],
+    northFacingSteps(entry),
+    false,
+  );
+}
+
+/**
+ * A campfire: four logs, a base plate, and two crossed sheets of flame.
+ *
+ * Every face of it carries a transcribed window -- `campfire_log.png` is a
+ * sheet holding a log's end, its length and the ash, so derived UVs put the
+ * wrong quarter of it on every surface. It was one slab, `[0, 0, 0, 16, 7, 16]`,
+ * which is not even the right silhouette.
+ *
+ * **Authored facing south.** `campfire.json`'s blockstate puts `y: 0` on
+ * `facing=south` and 180 on north, so the obvious guess is exactly half a turn
+ * wrong -- and a campfire turned 180 degrees is still a campfire, which is how
+ * that survives review.
+ *
+ * `signal_fire` is deliberately absent. It changes the height of the smoke
+ * column, which is a particle effect and part of no model at all; giving it
+ * geometry would be inventing rather than transcribing.
+ */
+const CAMPFIRE_LOGS: readonly ShapeBox[] = [
+  {
+    box: [1, 0, 0, 5, 4, 16],
+    textures: { east: "lit_log" },
+    uv: {
+      north: [0, 4, 4, 8],
+      east: [0, 1, 16, 5],
+      south: [0, 4, 4, 8],
+      west: [16, 0, 0, 4],
+      up: [0, 0, 16, 4],
+      down: [0, 0, 16, 4],
+    },
+  },
+  {
+    box: [11, 0, 0, 15, 4, 16],
+    textures: { west: "lit_log" },
+    uv: {
+      north: [0, 4, 4, 8],
+      east: [0, 0, 16, 4],
+      south: [0, 4, 4, 8],
+      west: [16, 1, 0, 5],
+      up: [0, 0, 16, 4],
+      down: [0, 0, 16, 4],
+    },
+  },
+  {
+    box: [0, 3, 11, 16, 7, 15],
+    textures: { north: "lit_log", south: "lit_log", down: "lit_log" },
+    uv: {
+      north: [16, 0, 0, 4],
+      east: [0, 4, 4, 8],
+      south: [0, 0, 16, 4],
+      west: [0, 4, 4, 8],
+      up: [0, 0, 16, 4],
+      down: [0, 4, 16, 8],
+    },
+  },
+  {
+    box: [0, 3, 1, 16, 7, 5],
+    textures: { north: "lit_log", south: "lit_log", down: "lit_log" },
+    uv: {
+      north: [0, 0, 16, 4],
+      east: [0, 4, 4, 8],
+      south: [16, 0, 0, 4],
+      west: [0, 4, 4, 8],
+      up: [0, 0, 16, 4],
+      down: [0, 4, 16, 8],
+    },
+  },
+  // The ash the logs sit on. One unit tall, so its four sides are a sliver.
+  {
+    box: [5, 0, 0, 11, 1, 16],
+    textures: { up: "lit_log" },
+    uv: {
+      north: [0, 15, 6, 16],
+      south: [10, 15, 16, 16],
+      up: [0, 8, 16, 14],
+      down: [0, 8, 16, 14],
+    },
+  },
+];
+
+/** The flame sheets, which are the same square of `#fire` twice, crossed. */
+const CAMPFIRE_FIRE: Readonly<Record<string, UvWindow>> = {
+  north: [0, 0, 16, 16],
+  south: [0, 0, 16, 16],
+  east: [0, 0, 16, 16],
+  west: [0, 0, 16, 16],
+};
+
+function campfire(entry: PaletteEntry): BlockShape {
+  const soul = baseName(entry).startsWith("soul_");
+  const lit = entry.properties.lit !== "false";
+  /*
+   * Unlit, every `lit_log` face falls back to the plain log -- which is what
+   * `campfire_off.json` does, by rebinding the texture rather than by changing
+   * a single coordinate. The pack ships no `soul_campfire_log` and needs none:
+   * a cold soul campfire is cold wood.
+   */
+  const litLog = lit ? (soul ? "soul_campfire_log_lit" : "campfire_log_lit") : "campfire_log";
+  const parts: ShapeBox[] = CAMPFIRE_LOGS.map((part) => ({
+    ...part,
+    texture: "campfire_log",
+    textures: Object.fromEntries(Object.keys(part.textures ?? {}).map((face) => [face, litLog])),
+  }));
+  if (lit) {
+    const fire = soul ? "soul_campfire_fire" : "campfire_fire";
+    parts.push(
+      {
+        box: [0.8, 1, 8, 15.2, 17, 8],
+        rotation: { origin: [8, 8, 8], axis: "y", angle: 45 },
+        texture: fire,
+        uv: CAMPFIRE_FIRE,
+      },
+      {
+        box: [8, 1, 0.8, 8, 17, 15.2],
+        rotation: { origin: [8, 8, 8], axis: "y", angle: 45 },
+        texture: fire,
+        uv: CAMPFIRE_FIRE,
+      },
+    );
+  }
+  return transform(parts, southFacingSteps(entry), false);
+}
+
+/**
+ * An end rod: a short base plate and a long rod, both reading a sheet.
+ *
+ * Found by the check that was written for the candles rather than by a report,
+ * and it is the same fault exactly: `boxes([6, 0, 6, 10, 16, 10])` with derived
+ * UVs, over an `end_rod.png` whose art occupies texels `x 0..6, y 0..7`. Every
+ * face sampled the empty three quarters of the tile, so an end rod was **also**
+ * drawn and invisible -- and nobody had said so, which is the argument for the
+ * check over the fix.
+ *
+ * Both boxes and all twelve windows are `end_rod.json` verbatim.
+ */
+const END_ROD: readonly ShapeBox[] = [
+  {
+    box: [6, 0, 6, 10, 1, 10],
+    uv: {
+      down: [6, 6, 2, 2],
+      up: [2, 2, 6, 6],
+      north: [2, 6, 6, 7],
+      south: [2, 6, 6, 7],
+      west: [2, 6, 6, 7],
+      east: [2, 6, 6, 7],
+    },
+  },
+  {
+    box: [7, 1, 7, 9, 16, 9],
+    uv: {
+      up: [2, 0, 4, 2],
+      north: [0, 0, 2, 15],
+      south: [0, 0, 2, 15],
+      west: [0, 0, 2, 15],
+      east: [0, 0, 2, 15],
+    },
+    omit: ["down"],
+  },
+];
+
+/**
+ * Where the rod points, as **one** rotation each.
+ *
+ * `end_rod.json`'s blockstate spells east and west as an x turn *and* a y turn,
+ * and a `ShapeBox` carries one rotation rather than a pair -- so those two are
+ * restated as a single turn about z, which lands the rod on the same axis. The
+ * difference between the two spellings is a roll about the rod's own length,
+ * and that is **unobservable here**: all four of the rod's side faces wear the
+ * identical window `[0, 0, 2, 15]`, as do the base's. The same argument the
+ * bell's body rests on, for the same reason.
+ *
+ * Vanilla's `x` turns the opposite way from `tiltFace`'s, which is why north is
+ * -90 and not +90. Getting that backwards points every rod at the block behind
+ * the one it grew from.
+ */
+const END_ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
+  up: undefined,
+  down: { origin: [8, 8, 8], axis: "x", angle: 180 },
+  north: { origin: [8, 8, 8], axis: "x", angle: -90 },
+  south: { origin: [8, 8, 8], axis: "x", angle: 90 },
+  east: { origin: [8, 8, 8], axis: "z", angle: -90 },
+  west: { origin: [8, 8, 8], axis: "z", angle: 90 },
+};
+
+function endRod(entry: PaletteEntry): BlockShape {
+  const turn = END_ROD_TURN[entry.properties.facing ?? "up"];
+  return boxes(...(turn === undefined ? END_ROD : END_ROD.map((part) => ({ ...part, rotation: turn }))));
+}
 
 /**
  * `template_fence_gate.json`: two posts and the bars between them, authored
@@ -952,14 +2127,39 @@ function lantern(entry: PaletteEntry): BlockShape {
  * mirroring a face, and `windowUvsFrom` does no ordering check, so they carry
  * across unchanged.
  *
- * ## What a horizontal chain does not get
+ * ## A horizontal chain is that model turned, picture and all
  *
- * `axis` is honoured for the geometry, which is the part that reads as broken:
- * a chain strung sideways lies along its axis instead of standing up. Its
- * *texture* still runs across the plane rather than along it, because the
- * blockstate rotates the whole model 90 degrees about X and a UV window cannot
- * transpose a quad's axes. Chains hang; this is the rare case, and a wrong
- * silhouette was the visible half.
+ * The `x` and `z` variants are written out as their own boxes rather than
+ * rotated -- and were written with **no `uv` at all**, so instead of the
+ * 3-wide strip of links they took coordinate-derived UVs running the whole
+ * width of the tile. Measured on the shipped pack: all 696 opaque texels of
+ * `iron_chain.png` live in its first six columns, so the band a sideways
+ * chain sampled -- `v 6.5..9.5` across all sixteen -- came out **16%
+ * opaque**. Five sixths of it drew nothing, and the sixth that did drew a
+ * 3-pixel band of link stretched along the whole run. Reported as an
+ * incomplete mesh *and* a badly sewn texture, which is one fault seen from
+ * both sides.
+ *
+ * The windows below are the vertical chain's, laid along the run, and two
+ * measured facts fix them with no freedom left:
+ *
+ * - the window's **16-texel axis follows the length** and its 3-texel axis
+ *   goes across, which is what the `uvRotation`s are for: the quad's own
+ *   axes are transposed by the turn, and a window without the rotation
+ *   names the right texels and lays them sideways -- the anvil's case;
+ * - the window's **`v = 0` edge sits where the turn sends the vertical
+ *   chain's top**. The turn is not a guess: the tilt goes from `y` to `x`,
+ *   and conjugating a 45 degree turn about Y into one about X takes a
+ *   rotation about **Z**, `(x, y) -> (y, 16 - x)`, which sends `y = 16` to
+ *   `x = 16`. For `axis=z` the tilt moves to Z, so the rotation is about X,
+ *   `(y, z) -> (16 - z, y)`, and `y = 16` goes to `z = 16`.
+ *
+ * The second is a real choice rather than a free one: the sheet is **not**
+ * symmetric under a half turn -- 936 of the 1536 texels in the two strips
+ * differ from their opposite -- so laying the strip end for end is visible,
+ * and a check on the proportion alone would not see it. Which is also why
+ * that check exists beside this one: coordinate-derived UVs are 16 by 3 as
+ * well. They are simply 16 of the wrong texels.
  */
 const CHAIN_TILT: BoxRotation = { origin: [8, 8, 8], axis: "y", angle: 45 };
 
@@ -967,14 +2167,34 @@ function chain(entry: PaletteEntry): BlockShape {
   const axis = entry.properties.axis ?? "y";
   if (axis === "x") {
     return boxes(
-      { box: [0, 6.5, 8, 16, 9.5, 8], rotation: { ...CHAIN_TILT, axis: "x" } },
-      { box: [0, 8, 6.5, 16, 8, 9.5], rotation: { ...CHAIN_TILT, axis: "x" } },
+      {
+        box: [0, 6.5, 8, 16, 9.5, 8],
+        rotation: { ...CHAIN_TILT, axis: "x" },
+        uv: { north: [3, 0, 0, 16], south: [0, 0, 3, 16] },
+        uvRotation: { north: 90, south: 270 },
+      },
+      {
+        box: [0, 8, 6.5, 16, 8, 9.5],
+        rotation: { ...CHAIN_TILT, axis: "x" },
+        uv: { down: [3, 0, 6, 16], up: [6, 0, 3, 16] },
+        uvRotation: { down: 270, up: 270 },
+      },
     );
   }
   if (axis === "z") {
     return boxes(
-      { box: [6.5, 8, 0, 9.5, 8, 16], rotation: { ...CHAIN_TILT, axis: "z" } },
-      { box: [8, 6.5, 0, 8, 9.5, 16], rotation: { ...CHAIN_TILT, axis: "z" } },
+      {
+        box: [6.5, 8, 0, 9.5, 8, 16],
+        rotation: { ...CHAIN_TILT, axis: "z" },
+        uv: { down: [0, 0, 3, 16], up: [3, 0, 0, 16] },
+        uvRotation: { down: 0, up: 180 },
+      },
+      {
+        box: [8, 6.5, 0, 8, 9.5, 16],
+        rotation: { ...CHAIN_TILT, axis: "z" },
+        uv: { west: [6, 0, 3, 16], east: [3, 0, 6, 16] },
+        uvRotation: { west: 270, east: 90 },
+      },
     );
   }
   return boxes(
@@ -1092,6 +2312,170 @@ function pottedPlant(): BlockShape {
     { box: [0, 4, 8, 16, 16, 8], rotation: spin, uv: POT_PLANT_UV },
     { box: [8, 4, 0, 8, 16, 16], rotation: spin, uv: POT_PLANT_UV },
   );
+}
+
+/**
+ * An amethyst bud or cluster: `block/cross`, turned by `facing`.
+ *
+ * All four -- the three buds and the cluster -- are the identical model with a
+ * different texture, so the whole size difference lives in the art. Counted
+ * off the bundled pack, on a 64x64 tile: 354 opaque texels for the small bud,
+ * 690 for the medium, 1114 for the large and 2104 for the cluster. There is
+ * not one coordinate between them.
+ *
+ * They were **cubes**, which is two faults and not one. The silhouette was
+ * wrong -- a pointed crystal drawn as a solid block wearing its own sprite on
+ * all six sides -- and `occludesNeighbours` answered `true`, so a bud **sealed
+ * its cell**: `lighting.ts` floods from that predicate, and a geode with buds
+ * lining its walls put itself in the dark. That it did not also delete its
+ * neighbours' faces was luck rather than design -- `isTextureOpaque` refuses
+ * on the decoded alpha, for a reason with nothing to do with this block.
+ *
+ * ## Three parts written, three derived
+ *
+ * The blockstate applies `x: 180` for `down`, `x: 90` for `north`, and `x: 90`
+ * plus a `y` for the other three horizontals. `rotateShapeBox` carries a box's
+ * own rotation correctly through a `y` but knows nothing about `x`, so the
+ * `x: 90` is applied here, once, as `(x, y, z) -> (x, z, 16 - y)` about the
+ * centre. Which way that sends the model's top is not a guess: `south` is
+ * `north` plus `y: 180`, so `x: 90` alone has to point north.
+ *
+ * **No `uv` window is stated below**, and that is deliberate rather than an
+ * omission. Every plane spans 0..16 on both of its own axes, so the UVs
+ * derived from the coordinates already *are* vanilla's `[0, 0, 16, 16]`;
+ * writing them out would be a no-op to keep correct through four rotations.
+ * What each facing needs is a per-face `uvRotation`, because the sprite's tip
+ * is at the top of its tile and has to come out pointing along `facing`.
+ *
+ * The **sign** of the 45-degree roll is immaterial for a cross, which is worth
+ * saying because it looks exactly like the thing to get backwards: the pair
+ * {0, 90} rolled by +45 is {45, 135} and rolled by -45 is {-45, 45}, the same
+ * pair. All it decides is which of the two planes takes which diagonal, and
+ * they wear the same texture through the same window. The corollary is worth
+ * having too -- "the planes came out swapped" is not evidence the sign is
+ * wrong, because nothing on screen can tell.
+ *
+ * Written at their **already-rescaled** width, `pottedPlant`'s idiom: vanilla
+ * states 0.8..15.2 with `rescale: true`, there is no rescale here, and 0..16
+ * turned 45 degrees reaches 8 +/- 8/sqrt(2), which is what `kind: "cross"`
+ * builds and what the rescale arrives at.
+ */
+const BUD_SPIN: BoxRotation = { origin: [8, 8, 8], axis: "y", angle: 45 };
+const BUD_ROLL: BoxRotation = { origin: [8, 8, 8], axis: "z", angle: -45 };
+
+const BUD_UP: readonly ShapeBox[] = [
+  { box: [0, 0, 8, 16, 16, 8], rotation: BUD_SPIN },
+  { box: [8, 0, 0, 8, 16, 16], rotation: BUD_SPIN },
+];
+
+/** `x: 180`, which for a cross is the same two planes with the picture over. */
+const BUD_DOWN: readonly ShapeBox[] = [
+  { box: [0, 0, 8, 16, 16, 8], rotation: BUD_SPIN, uvRotation: { north: 180, south: 180 } },
+  { box: [8, 0, 0, 8, 16, 16], rotation: BUD_SPIN, uvRotation: { east: 180, west: 180 } },
+];
+
+/** `x: 90`. The first plane comes out horizontal; the second stays where it was. */
+const BUD_NORTH: readonly ShapeBox[] = [
+  { box: [0, 8, 0, 16, 8, 16], rotation: BUD_ROLL, uvRotation: { down: 180 } },
+  { box: [8, 0, 0, 8, 16, 16], rotation: BUD_ROLL, uvRotation: { west: 90, east: 270 } },
+];
+
+function amethystBud(entry: PaletteEntry): BlockShape {
+  /*
+   * `up`, not `facingSteps`' `east`. The registry gives all four `facing: up`,
+   * and the walk over every offered id bakes with an empty property bag -- so
+   * the wrong default here would put the commonest case on the wrong branch
+   * and every whole-registry check would be judging the wrong picture.
+   */
+  const facing = entry.properties.facing ?? "up";
+  if (facing === "up") return boxes(...BUD_UP);
+  if (facing === "down") return boxes(...BUD_DOWN);
+  return transform(BUD_NORTH, northFacingSteps(entry), false);
+}
+
+/**
+ * A lectern, from `lectern.json`: a base, a post, and the sloping desk.
+ *
+ * It was two boxes of the three, and the missing one is the whole block --
+ * the desk you put a book on, tilted 22.5° back. What was left read as a
+ * plinth with a post standing on it.
+ *
+ * The **texture** was worse than the shape and for a reason worth keeping:
+ * the generic candidate list asks for `<name>_side`, singular, and vanilla's
+ * file is `lectern_sides`, plural. `_front` is the next candidate and that one
+ * exists, so **ten of the twelve faces came out wearing `lectern_front`** --
+ * the book graphic wrapped round the plinth and up the post -- while
+ * `lectern_base` and `lectern_sides` were reachable from nothing. It is the
+ * `hopper_side.png` case again: a name vanilla has never had, asked for by a
+ * list that cannot know.
+ *
+ * Naming the textures per box is what fixes that, and it is also why the
+ * plural is not added to the generic list here: that would be a one-line
+ * change across all 1197 ids with a blast radius of its own.
+ *
+ * And `facing` did nothing at all -- the entry was `() => boxes(...)`, with no
+ * parameter to read -- so all four directions baked byte for byte identically.
+ * The blockstate gives `facing=north` no `y`, so it is **north-authored**.
+ *
+ * Two faces are omitted rather than drawn. The post has no `up` or `down` in
+ * vanilla, and neither is a hole: its underside is coincident with the base's
+ * top, and its top square (`x 4..12, z 4..12`) lies inside the tilted desk,
+ * which at `y = 15` covers everything from `z = 3.99` inward. Drawing them
+ * would be the chest-lid z-fight in a smaller place.
+ */
+const LECTERN_PARTS: readonly ShapeBox[] = [
+  {
+    box: [0, 0, 0, 16, 2, 16],
+    texture: "lectern_base",
+    // `#bottom` is `oak_planks`, which is a texture and not an indirection:
+    // this file has no `#name` references, and `resolveBoxTexture` would read
+    // a leading `#` as a hex tint and fall back in silence.
+    textures: { down: "oak_planks" },
+    uv: {
+      north: [0, 14, 16, 16],
+      east: [0, 6, 16, 8],
+      south: [0, 6, 16, 8],
+      west: [0, 6, 16, 8],
+      up: [0, 0, 16, 16],
+      down: [0, 0, 16, 16],
+    },
+    uvRotation: { up: 180 },
+  },
+  {
+    box: [4, 2, 4, 12, 15, 12],
+    texture: "lectern_sides",
+    textures: { north: "lectern_front", south: "lectern_front" },
+    uv: {
+      north: [0, 0, 8, 13],
+      east: [2, 16, 15, 8],
+      south: [8, 3, 16, 16],
+      west: [2, 8, 15, 16],
+    },
+    uvRotation: { east: 90, west: 90 },
+    omit: ["up", "down"],
+  },
+  {
+    // The fractional ends are vanilla's, to the ten-thousandth, and are kept:
+    // `6.5` is `6.5` here and so is `0.0125`. They stop the desk's sides being
+    // exactly coplanar with the cell boundary.
+    box: [0.0125, 12, 3, 15.9875, 16, 16],
+    rotation: { origin: [8, 8, 8], axis: "x", angle: -22.5 },
+    texture: "lectern_sides",
+    textures: { up: "lectern_top", down: "oak_planks" },
+    uv: {
+      north: [0, 0, 16, 4],
+      east: [0, 4, 13, 8],
+      south: [0, 4, 16, 8],
+      west: [0, 4, 13, 8],
+      up: [0, 1, 16, 14],
+      down: [0, 0, 16, 13],
+    },
+    uvRotation: { up: 180 },
+  },
+];
+
+function lectern(entry: PaletteEntry): BlockShape {
+  return transform(LECTERN_PARTS, northFacingSteps(entry), false);
 }
 
 /**
@@ -1555,22 +2939,42 @@ const HANGING_CHAIN: Readonly<Record<string, UvWindow>> = {
  * sign either way — and both stop being invisible the moment there is *text* on
  * it, which is why they are fixed here rather than filed.
  */
+/**
+ * Whether a block name is in a family, counting the bare name as a member.
+ *
+ * `wall_sign` and `sign` are the two pre-Flattening spellings this app still
+ * offers, and neither ends in the suffix that names its own family: a name that
+ * *is* `wall_sign` does not end in `_wall_sign`. `shapeFor` learned that once --
+ * `EXACT_SHAPES` carries both bare names for exactly this reason -- and the
+ * lesson reached the lookup and not the function the lookup calls.
+ *
+ * So a legacy `wall_sign` was handed to `wallSign`, correctly, and then asked
+ * `signBoard` a question it answered as though the block were a standing sign:
+ * the board at `z 7..9`, in the **middle of the cell** rather than flat on the
+ * wall, turned by a `rotation` a wall sign has never carried -- `NaN`, guarded
+ * to zero, so north. Reported as both of those at once, which is what one
+ * missing underscore looks like from the outside.
+ */
+function inFamily(name: string, family: string): boolean {
+  return name === family || name.endsWith(`_${family}`);
+}
+
 function signBoard(entry: PaletteEntry): { box: Box; steps: number } {
   const name = entry.namespacedName.slice(entry.namespacedName.indexOf(":") + 1);
   // `rotation` is 0..15 around the compass; the boards are square in plan, so
   // the sixteenth-turns land on the nearest quarter.
   const sixteenths = Number(entry.properties.rotation);
   const spun = Number.isFinite(sixteenths) ? Math.round(sixteenths / 4) : null;
-  if (name.endsWith("_wall_sign")) {
+  if (inFamily(name, "wall_sign")) {
     return { box: [0, 4, 14, 16, 12, 16], steps: northFacingSteps(entry) };
   }
-  if (name.endsWith("_wall_hanging_sign")) {
+  if (inFamily(name, "wall_hanging_sign")) {
     // The one bolted to a wall carries `facing` and no `rotation` at all, and
     // the model is authored looking south. Reading `rotation` off it gave
     // `NaN`, which the guard turned into zero: twelve blocks all facing south.
     return { box: [1, 0, 7, 15, 10, 9], steps: southFacingSteps(entry) };
   }
-  if (name.endsWith("_hanging_sign")) {
+  if (inFamily(name, "hanging_sign")) {
     // ...and the one that hangs from a ceiling carries `rotation` and no
     // `facing`. Falling through to a facing-derived answer here would default
     // it to east and turn every one of them a quarter.
@@ -1767,7 +3171,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
 
   // Flat against the face they sit on. As cubes they hid the block underneath,
   // which for a rail means the track is invisible and the ground is too.
-  rail: () => boxes([0, 0, 0, 16, 1, 16]),
+  rail,
   lever: (e) => againstWall(e, 3),
   tripwire_hook: (e) => againstWall(e, 3),
   glow_lichen: (e) => againstWall(e, 1),
@@ -1780,7 +3184,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   kelp: () => ({ kind: "cross" }),
   kelp_plant: () => ({ kind: "cross" }),
   sea_pickle: () => boxes([6, 0, 6, 10, 6, 10]),
-  candle: () => boxes([7, 0, 7, 9, 6, 9]),
+  candle: candleShape,
 
   // Workstations that are not full blocks. `composter` is left a cube on
   // purpose: its outer shell really is 16x16x16, only its inside is hollow.
@@ -1793,7 +3197,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   azalea,
   flowering_azalea: azalea,
   vine,
-  lectern: () => boxes([0, 0, 0, 16, 2, 16], [4, 2, 4, 12, 15, 12]),
+  lectern,
   chest,
   trapped_chest: chest,
   ender_chest: chest,
@@ -1814,13 +3218,13 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
       { box: [2, 2, 2, 14, 14, 14], texture: "beacon" },
     ),
   flower_pot: () => boxes(...FLOWER_POT),
-  campfire: () => boxes([0, 0, 0, 16, 7, 16]),
-  soul_campfire: () => boxes([0, 0, 0, 16, 7, 16]),
-  cauldron: () => boxes([0, 0, 0, 16, 16, 16]),
-  hopper: () => boxes([0, 10, 0, 16, 16, 16]),
-  end_rod: () => boxes([6, 0, 6, 10, 16, 10]),
+  campfire,
+  soul_campfire: campfire,
+  cauldron,
+  hopper,
+  end_rod: endRod,
   chain,
-  bell: () => boxes([4, 4, 4, 12, 12, 12]),
+  bell,
   conduit: () => boxes([5, 5, 5, 11, 11, 11]),
   lily_pad: () => boxes([0, 0, 0, 16, 1, 16]),
 
@@ -1846,7 +3250,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
    * was deleting a face from all six of its neighbours. A crop stem across a
    * field took the field with it.
    */
-  candle_cake: () => boxes([1, 0, 1, 15, 8, 15], [7, 8, 7, 9, 14, 9]),
+  candle_cake: candleCake,
   dragon_egg: () => boxes([1, 0, 1, 15, 16, 15]),
   turtle_egg: () => boxes([5, 0, 5, 11, 7, 11]),
   chorus_flower: () => boxes([2, 2, 2, 14, 14, 14]),
@@ -1867,9 +3271,11 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
    * confidently wrong shape looks deliberate -- assumes a cube is the harmless
    * answer. For these it is the harmful one, so a close box beats it.
    */
-  redstone_wire: () => boxes([0, 0, 0, 16, 1, 16]),
-  skeleton_skull: () => boxes([4, 0, 4, 12, 8, 12]),
-  skeleton_wall_skull: (e) => transform([[4, 4, 8, 12, 12, 16]], facingSteps(e) + 2, false),
+  redstone_wire: redstoneWire,
+  // `skeleton_skull` and `skeleton_wall_skull` used to be repeated here, with
+  // the same two expressions the `_skull` and `_wall_skull` suffixes already
+  // reach. Two copies of one shape is how one of them comes to be corrected
+  // and the other not -- and this pair very nearly was.
   decorated_pot: () => boxes([1, 0, 1, 15, 16, 15]),
   sniffer_egg: () => boxes([1, 0, 1, 15, 16, 15]),
   // Tapered in vanilla, and a taper is a stack of boxes this does not build.
@@ -1894,6 +3300,11 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   end_gateway: () => boxes([0, 11, 0, 16, 12, 16]),
   // The same plate and rod as `moving_piston`, which is what a piston head is.
   piston_head: pistonHead,
+
+  small_amethyst_bud: amethystBud,
+  medium_amethyst_bud: amethystBud,
+  large_amethyst_bud: amethystBud,
+  amethyst_cluster: amethystBud,
 };
 
 /** Blocks drawn as two crossed quads rather than boxes. */
@@ -2000,8 +3411,13 @@ export function shapeFor(entry: PaletteEntry): BlockShape {
   return CUBE;
 }
 
-/** The six sides of a cell, as the mesher names them. */
-export type CellFace = "north" | "south" | "east" | "west" | "up" | "down";
+/**
+ * The six sides of a cell, as the mesher names them.
+ *
+ * Defined in `types.ts`, because `BakedFace` carries one, and re-exported here
+ * because this is where everything that asks about a face already looks.
+ */
+export type { CellFace };
 
 const FACE_AXIS: Readonly<Record<CellFace, 0 | 1 | 2>> = {
   west: 0,
@@ -2035,6 +3451,13 @@ const FACE_AT_MIN: Readonly<Record<CellFace, boolean>> = {
  * without covering it, and the arithmetic that would tell the two apart is
  * worth less than the one block it would win -- nothing in this file tilts a
  * box that also reaches a boundary.
+ *
+ * **The boxes are taken together, and one box used to have to do it alone.**
+ * That is vanilla's `faceShapeOccludes`, and the difference is a staircase:
+ * its back is covered by two boxes, the lower slab from 0 to 8 and the step
+ * from 8 to 16, and by neither alone. So a wall behind a staircase kept a face
+ * nobody could see, and -- read from the other side, which is the same
+ * sentence -- a staircase's own back was never a candidate for being dropped.
  */
 export function coversFace(entry: PaletteEntry, face: CellFace): boolean {
   const shape = shapeFor(entry);
@@ -2043,15 +3466,62 @@ export function coversFace(entry: PaletteEntry, face: CellFace): boolean {
 
   const axis = FACE_AXIS[face];
   const atMin = FACE_AT_MIN[face];
-  const others: Array<0 | 1 | 2> = [0, 1, 2].filter((a) => a !== axis) as Array<0 | 1 | 2>;
+  const [u, v] = [0, 1, 2].filter((a) => a !== axis) as [0 | 1 | 2, 0 | 1 | 2];
 
-  return shape.boxes.some(({ box, rotation }) => {
-    if (rotation !== undefined) return false;
+  const rects: Array<[number, number, number, number]> = [];
+  for (const { box, rotation } of shape.boxes) {
+    if (rotation !== undefined) continue;
     // The box has to touch the boundary this face sits on...
-    if (atMin ? box[axis] > 0 : box[axis + 3] < 16) return false;
-    // ...and span the whole square on the other two axes.
-    return others.every((a) => box[a] <= 0 && box[a + 3] >= 16);
-  });
+    if (atMin ? box[axis] > 0 : box[axis + 3] < 16) continue;
+    // ...and what it covers of the square is clipped to the square: a potted
+    // plant's crossed planes run to y = 22, six units above the block.
+    rects.push([
+      Math.max(0, box[u]),
+      Math.max(0, box[v]),
+      Math.min(16, box[u + 3]),
+      Math.min(16, box[v + 3]),
+    ]);
+  }
+  return coversSquare(rects);
+}
+
+/**
+ * Whether a set of rectangles covers the whole 16x16 square between them.
+ *
+ * Coordinate compression rather than a grid: the cuts the rectangles make on
+ * each axis divide the square into cells that are either wholly covered or
+ * wholly not, so testing one point per cell is exact -- including for the
+ * fractional coordinates a few transcribed models carry, which a 16x16 grid of
+ * booleans would round into the wrong answer.
+ *
+ * A dozen boxes is the most any shape here has, so this is a few hundred
+ * comparisons at worst, and `culledFaces` asks it once per palette entry.
+ */
+function coversSquare(
+  rects: ReadonlyArray<readonly [number, number, number, number]>,
+): boolean {
+  if (rects.length === 0) return false;
+  const cuts = (lo: 0 | 1): number[] => {
+    const set = new Set<number>([0, 16]);
+    for (const rect of rects) {
+      for (const n of [rect[lo], rect[lo + 2]]) {
+        if (n > 0 && n < 16) set.add(n);
+      }
+    }
+    return [...set].sort((a, b) => a - b);
+  };
+  const us = cuts(0);
+  const vs = cuts(1);
+  for (let i = 0; i + 1 < us.length; i += 1) {
+    for (let j = 0; j + 1 < vs.length; j += 1) {
+      const u = (us[i] + us[i + 1]) / 2;
+      const v = (vs[j] + vs[j + 1]) / 2;
+      if (!rects.some((r) => r[0] <= u && u <= r[2] && r[1] <= v && v <= r[3])) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 /**

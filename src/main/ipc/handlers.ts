@@ -13,6 +13,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron"
 
 import {
   IPC,
+  NO_SHIFT,
   type AgentRequestPayload,
   type AgentResponse,
   type Artifact,
@@ -21,6 +22,9 @@ import {
   type DocumentStateResponse,
   type EditRequest,
   type ResizeRequest,
+  type VersionRequest,
+  type RendererFailure,
+  type VoidBlockRequest,
   type EditResponse,
   type ConvertRequest,
   type ConvertResponse,
@@ -52,6 +56,7 @@ import {
   type TraceItem,
   type RecentDocument,
   type RecoveryPeekResponse,
+  type ScaleRequest,
   type SaveRequest,
   type SaveResponse,
   type ClipboardResponse,
@@ -68,10 +73,21 @@ import {
   type StartupProgressEvent,
   type TransformRequest,
 } from "../../shared/ipc.js";
+import { contentShiftSince } from "../domain/history.js";
 import { SCHEMATIC_FORMAT_LABEL, schematicExtension } from "../../shared/schematic.js";
-import { dataVersionOf, refusalFor } from "../../shared/mc_versions.js";
 import {
+  dataVersionOf,
+  documentEra,
+  eraOf,
+  documentVersionName,
+  mcVersion,
+  refusalFor,
+  resolveVersionName,
+} from "../../shared/mc_versions.js";
+import {
+  normaliseVoidBlock,
   providerRequiresApiKey,
+  type Hotbar,
   type KeyStorageStatus,
   type PreviewSettings,
   type Provider,
@@ -81,6 +97,13 @@ import {
   type DocumentSession,
   adoptDocument,
   applyEdit,
+  BlockNotInVersionError,
+  UnknownVersionError,
+  VersionRefusedError,
+  VersionWouldLoseBlocksError,
+  type EditOptions,
+  setDocumentVersion,
+  setSessionVoidBlock,
   OutsideDocumentError,
   ResizeWouldLoseBlocksError,
   resizeSession,
@@ -91,6 +114,7 @@ import {
   documentMesh,
   documentState,
   moveRegion,
+  clipboardMesh,
   regionMesh,
   editBlockEntityValue,
   EditTooLargeError,
@@ -106,6 +130,7 @@ import {
   requireSession,
   saveSession,
   NotSquareError,
+  scaleRegion,
   transformRegion,
   undoEdit,
 } from "../services/session.js";
@@ -118,7 +143,8 @@ import {
   setWorldEditAnchor,
   setWorldOrigin,
 } from "../services/schematic_nbt.js";
-import { UnrepresentableBlocksError } from "../services/writers.js";
+import { legacyBlockNames, UnrepresentableBlocksError } from "../services/writers.js";
+import { loadLegacyBlockTable } from "../pipeline/loader_formats.js";
 import { AgentCancelledError, runAgent } from "../agent/agent.js";
 import {
   adoptSubject,
@@ -154,6 +180,8 @@ import { loadAnchorTexture, loadSkyTextures } from "../services/sky_textures.js"
 import { SchematicFormatError } from "../pipeline/loader.js";
 import { classifyGenerateError, generate } from "../services/generate.js";
 import { fetchOpenCodeModels } from "../services/opencode.js";
+import { apiKeyRefusal } from "../services/llm_key.js";
+import { orphanedProfile } from "../services/legacy_profile.js";
 import {
   buildPreview,
   EmptyPreviewError,
@@ -168,9 +196,11 @@ import {
   mcpBridgeFile,
   mcpDiscoveryFile,
   snapshotsDir,
+  hotbarsDir,
   defaultResourcePackPath,
   generatedDir,
   legacyBlocksPath,
+  legacyUserDataDir,
   openCodeSnapshotPath,
   resourcesDir,
 } from "../services/resources.js";
@@ -187,12 +217,29 @@ import {
 } from "../services/settings-store.js";
 import { discardPrompt } from "../services/discard_prompt.js";
 import {
+  failurePrompt,
+  failureReport,
+  issueUrl,
+} from "../services/failure_prompt.js";
+/*
+ * The manifest, for its `homepage`. Imported rather than read at runtime: it is
+ * inlined at build time, so there is nothing to find on disk and nothing to
+ * fail when the app is packed into an asar -- and it stays the one place in
+ * this app that knows where its issues live.
+ */
+import manifest from "../../../package.json" with { type: "json" };
+import {
   deleteSnapshot,
   listSnapshots,
   readSnapshot,
   takeSnapshot,
   useSnapshotDirectory,
 } from "../services/snapshots.js";
+import {
+  readHotbar,
+  useHotbarDirectory,
+  writeHotbar,
+} from "../services/hotbars.js";
 import { refreshShell, rememberInOsRecents, setKeysToCamera } from "../menu.js";
 import { shellState, useWindow } from "../services/broadcast.js";
 import {
@@ -203,6 +250,7 @@ import {
   stopMcpServer,
   useHost,
 } from "../mcp/server.js";
+import { servingChanged } from "../mcp/policy.js";
 import { VERSION_NAMES } from "../services/versions.js";
 import { convertFile, extensionForKind } from "../services/convert.js";
 
@@ -319,6 +367,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   useConversationDirectory(conversationsDir());
   useCheckpointDirectory(checkpointsDir());
   useSnapshotDirectory(snapshotsDir());
+  useHotbarDirectory(hotbarsDir());
 
   /*
    * The MCP server's three dependencies, injected for the same reason.
@@ -404,8 +453,28 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
 
   ipcMain.handle(IPC.settingsGet, async (): Promise<Settings> => await getSettings());
 
+  /*
+   * Saving settings also **applies** the ones a running listener is made of.
+   *
+   * `mcpSetEnabled` starts and stops, and for a long time that was the only
+   * thing that reached the server -- so the port, the bind address and
+   * whether a token is required were written to disk and then ignored until
+   * the next launch. Turning authentication off and back on left the pane
+   * saying one thing while the socket did another, and the token disappeared
+   * from the pane with no way to bring it back.
+   *
+   * Only the three fields the listener is *built* from. `root` and
+   * `allowDelete` are asked at the moment of each call -- deliberately, so
+   * that revoking deletion revokes it now -- and restarting for those would
+   * drop every session for nothing.
+   */
   ipcMain.handle(IPC.settingsSet, async (_event, next: Settings): Promise<Settings> => {
-    return await setSettings(next);
+    const before = await getSettings();
+    const saved = await setSettings(next);
+    if (servingChanged(before.mcp, saved.mcp) && saved.mcp.enabled) {
+      await startMcpServer(saved.mcp);
+    }
+    return saved;
   });
 
   ipcMain.handle(IPC.keysStatus, async (): Promise<KeyStorageStatus> => await getKeyStatus());
@@ -460,6 +529,100 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       return answer.response === 0;
     },
   );
+
+  /*
+   * The renderer telling us it threw. See `IPC.rendererFailed`.
+   *
+   * `ipcMain.on`, not `handle`: the window sending this may be moments from
+   * being unable to run anything, so there is nothing to reply to.
+   */
+  let failureShowing = false;
+  let failuresSince = 0;
+  ipcMain.on(IPC.rendererFailed, (_event, report: RendererFailure): void => {
+    /*
+     * Logged first and unconditionally. The dialog is for the person; this is
+     * the half that survives into a terminal, and it is the only record that
+     * exists of a failure the console never showed.
+     */
+    console.error(
+      `[renderer ${report.kind}] ${report.message}` +
+        (report.at === "" ? "" : ` (${report.at})`) +
+        (report.stack === "" ? "" : `
+${report.stack}`),
+    );
+
+    // One dialog. A window failing in a loop would otherwise raise one per
+    // iteration, which is worse than the freeze it is describing.
+    if (failureShowing) {
+      failuresSince += 1;
+      return;
+    }
+    failureShowing = true;
+
+    /*
+     * Everything a bug report wants, gathered here rather than asked for: the
+     * renderer is the half that has stopped answering, and main has all of it
+     * for free.
+     */
+    const text = failureReport({
+      appName: app.getName(),
+      appVersion: app.getVersion(),
+      platform: `${process.platform} ${process.arch}`,
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+      kind: report.kind,
+      message: report.message,
+      at: report.at,
+      stack: report.stack,
+    });
+
+    /*
+     * Shown again after a copy, rather than once.
+     *
+     * Copying is not an answer to "what do you want to do about the window" --
+     * a dialog that closed on it would leave the app exactly as dead, with the
+     * report in hand and no way back to Reload. So the two decisions are asked
+     * separately, and only Reload or Leave it end the conversation.
+     */
+    const ask = (): void => {
+      const prompt = failurePrompt(report.message, failuresSince);
+      const window = getWindow();
+      const options: Electron.MessageBoxOptions = {
+        type: "error",
+        buttons: [...prompt.buttons],
+        defaultId: prompt.confirmIndex,
+        cancelId: prompt.cancelIndex,
+        message: prompt.message,
+        detail: prompt.detail,
+      };
+      const asked = window
+        ? dialog.showMessageBox(window, options)
+        : dialog.showMessageBox(options);
+      void asked.then((answer) => {
+        if (answer.response === prompt.reportIndex) {
+          clipboard.writeText(text);
+          /*
+           * The repository the manifest already names. A second place in this
+           * app that knew where its issues live is the place that goes stale.
+           * `openExternal` is how this app hands a URL to the browser already,
+           * and it publishes nothing -- the Submit is the user's.
+           */
+          void shell.openExternal(issueUrl(manifest.homepage, text));
+          ask();
+          return;
+        }
+        failureShowing = false;
+        failuresSince = 0;
+        if (answer.response !== prompt.confirmIndex) return;
+        // `reload`, not `reloadIgnoringCache`: the code is fine, the window's
+        // state is not, and re-fetching the bundle would only be slower.
+        getWindow()?.webContents.reload();
+      });
+    };
+    ask();
+  });
+
 
   ipcMain.handle(IPC.pickFile, async (_event, req: PickFileRequest): Promise<PickFileResponse> => {
     const window = getWindow();
@@ -569,6 +732,40 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(
     IPC.blocksList,
     async (): Promise<string[]> => [...(await loadAllowedBlocks(resourcesDir()))].sort(),
+  );
+
+  /*
+   * Read here rather than bundled into the renderer: it is a `resources/`
+   * file, and the renderer touches no filesystem. An unreadable table is not
+   * an error -- it means the legacy features degrade to what the app did
+   * before them, which is better than refusing to show an inventory.
+   */
+  ipcMain.handle(IPC.blocksLegacy, async (): Promise<Record<string, string>> => {
+    try {
+      return await loadLegacyBlockTable(legacyBlocksPath());
+    } catch {
+      return {};
+    }
+  });
+
+  /*
+   * The hotbar this schematic was last built with.
+   *
+   * Keyed on the path, like the conversation and the version history: what
+   * you are holding belongs to what you are building. A document with no path
+   * never reaches here -- the renderer has nothing to key on and keeps the
+   * factory nine in memory -- so neither handler has an empty-string case to
+   * get wrong.
+   */
+  ipcMain.handle(IPC.hotbarRead, async (_event, filePath: string): Promise<Hotbar> => {
+    return await readHotbar(filePath);
+  });
+
+  ipcMain.handle(
+    IPC.hotbarWrite,
+    async (_event, filePath: string, hotbar: Hotbar): Promise<void> => {
+      await writeHotbar(filePath, hotbar);
+    },
   );
 
   ipcMain.handle(
@@ -718,30 +915,27 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     const apiKey = await getApiKey(settings.provider);
 
     // component.py:383-384 exempted OpenCode from the key gate wholesale,
-    // because "OpenCode has free models". Most of them are not: 9 of the 61
-    // models it serves are free and the rest bill per token. The gate is now
-    // per model, and the reference image is gated the same way -- a text-only
+    // because "OpenCode has free models". Most of them are not, and the
+    // proportion moves, so the gate is per model. It lives in
+    // `services/llm_key.ts` now: it was written out here, again for the agent
+    // turn below, and **nowhere** on the MCP path -- where its absence came
+    // back as `LLM API Error: Invalid API key` and was read as an MCP
+    // authentication failure, because that is what it looks like.
+    const noKey = await apiKeyRefusal({
+      provider: settings.provider,
+      model: settings.model,
+      apiKey,
+      snapshotPath: openCodeSnapshotPath(),
+      legacyProfilePath: (await orphanedProfile(app.getPath("userData"), legacyUserDataDir()))?.path ?? null,
+    });
+    if (noKey !== null) return settle({ ok: false, kind: "no-api-key", message: noKey });
+
+    // The reference image is gated the same way and separately -- a text-only
     // model answers an image with an opaque 400.
     let acceptsImages: boolean | undefined;
     if (settings.provider === "OpenCode") {
       const catalogue = await fetchOpenCodeModels({ snapshotPath: openCodeSnapshotPath() });
-      const model = catalogue?.find((entry) => entry.id === settings.model);
-      if (apiKey.trim() === "" && openCodeModelRequiresKey(model)) {
-        return settle({
-          ok: false,
-          kind: "no-api-key",
-          message:
-            `${model?.name ?? settings.model} is a paid OpenCode model. Add an API key, ` +
-            `or pick one of the free models in the LLM provider panel.`,
-        });
-      }
-      acceptsImages = model?.imageInput !== "no";
-    } else if (apiKey.trim() === "" && providerRequiresApiKey(settings.provider)) {
-      return settle({
-        ok: false,
-        kind: "no-api-key",
-        message: `Add an API key for ${settings.provider} in Settings.`,
-      });
+      acceptsImages = catalogue?.find((entry) => entry.id === settings.model)?.imageInput !== "no";
     }
 
     /*
@@ -806,6 +1000,35 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   // every mutating call rather than on a separate round trip, because there is
   // no case where the renderer wants one without the other.
 
+  /**
+   * What an edit is allowed to do to the open document.
+   *
+   * Assembled here rather than read inside `session.ts`, which stays clear of
+   * the settings store and of `resources/` so the suites can reach it. Three
+   * separate answers arrive by this one route, which is what stops a caller
+   * getting two of them and forgetting the third.
+   *
+   * The block restriction exists only for the legacy era, and that asymmetry is
+   * honest rather than lazy: `legacy_blocks.json` says exactly which blocks a
+   * pre-Flattening file can name, and this app has no equivalent data for the
+   * flat era. Guessing there would hide blocks that do exist, which is the one
+   * failure a user cannot work around.
+   */
+  const editOptionsFor = async (session: DocumentSession): Promise<EditOptions> => {
+    const settings = await getSettings();
+    const { format, dataVersion } = session.doc;
+    const legacy = documentEra(format, dataVersion) === "legacy";
+    const name = documentVersionName(format, dataVersion);
+    return {
+      autoGrow: settings.editing.autoGrow,
+      voidBlock: session.voidBlock,
+      placeableNames: legacy
+        ? legacyBlockNames(await loadLegacyBlockTable(legacyBlocksPath()))
+        : null,
+      versionLabel: (name === null ? null : mcVersion(name)?.label) ?? "this version",
+    };
+  };
+
   const failure = (err: unknown): Failure => {
     if (err instanceof NoDocumentError) {
       return { ok: false, kind: "invalid-input", message: err.message };
@@ -819,6 +1042,19 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       return { ok: false, kind: "needs-confirmation", message: err.message };
     }
     if (err instanceof OutsideDocumentError) {
+      return { ok: false, kind: "invalid-input", message: err.message };
+    }
+    if (err instanceof BlockNotInVersionError) {
+      // Its message already names the block, the version and the way out.
+      // Wrapping it would bury the only sentence that helps.
+      return { ok: false, kind: "invalid-input", message: err.message };
+    }
+    if (err instanceof VersionWouldLoseBlocksError) {
+      // Its own kind, so the panel can offer to go ahead without reading the
+      // sentence. The message already names the count and the blocks.
+      return { ok: false, kind: "needs-confirmation", message: err.message };
+    }
+    if (err instanceof VersionRefusedError || err instanceof UnknownVersionError) {
       return { ok: false, kind: "invalid-input", message: err.message };
     }
     if (err instanceof UnrepresentableBlocksError) {
@@ -869,10 +1105,19 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
        */
       await adoptSubject(filePath);
       forgetCheckpointMemo();
+      /*
+       * What empty space is made of comes back with the file.
+       *
+       * Read here rather than in `openDocument`, which is Electron-free so
+       * the suites can reach it -- the sidecar lives under `userData`. Same
+       * split as the conversation, and the same reason.
+       */
+      const notes = await projectNotes(filePath);
+      session.voidBlock = normaliseVoidBlock(notes?.voidBlock);
       return {
         ok: true,
         state: shellState(session),
-        project: await projectNotes(filePath),
+        project: notes,
         ...(session.notes === undefined || session.notes.length === 0
           ? {}
           : { notes: [...session.notes] }),
@@ -894,10 +1139,26 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     IPC.docNew,
     async (_event, req: NewDocumentRequest): Promise<DocumentStateResponse> => {
       try {
+        /*
+         * Resolved before it is used, like every other caller. The dropdown
+         * only ever sends a real name, so this is unreachable from the
+         * window -- which is the argument for it rather than against: a rule
+         * kept true by one caller's good behaviour is wrong at the next one,
+         * and `dataVersionOf` fails open, so an unrecognised name here would
+         * silently produce a document with no version tag.
+         */
+        const version = resolveVersionName(req.version);
+        if (version === null) {
+          return {
+            ok: false,
+            kind: "invalid-input",
+            message: `${req.version} is not a Minecraft version this build knows.`,
+          };
+        }
         // Mirrored by the dialog and enforced here. A renderer that filtered
         // correctly today is not the same thing as a rule, and this is the only
         // side that writes files.
-        const refusal = refusalFor(req.format, req.version);
+        const refusal = refusalFor(req.format, version);
         if (refusal !== null) {
           return { ok: false, kind: "invalid-input", message: refusal };
         }
@@ -905,7 +1166,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
           newDocument(
             { width: req.width, height: req.height, length: req.length },
             req.format,
-            dataVersionOf(req.version),
+            dataVersionOf(version),
           ),
         );
         await adoptSubject(null);
@@ -939,10 +1200,6 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       try {
         const { settings } = request;
         const session = requireSession();
-        // The void block lives in `editing` rather than `preview`, because it
-        // is written into the file as well as drawn -- so it comes from the
-        // store rather than from the payload the renderer sent.
-        const stored = await getSettings();
         const mesh = await documentMesh(
           session,
           {
@@ -950,7 +1207,11 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
             fallbackResourcePackPath: await defaultResourcePackPath(),
             biomeColor: settings.biomeColor,
             showMarkers: settings.showMarkers,
-            voidBlock: stored.editing.voidBlock,
+            // The document's own, not a setting: what empty space is made of
+            // is written into this file, so it belongs to it. It reaches the
+            // mesh key in `documentMesh`, which is what makes changing it
+            // redraw instead of returning the cached picture.
+            voidBlock: session.voidBlock,
             waterColor: settings.waterColor,
             blockLight: settings.blockLight,
             occlusion: settings.ambientOcclusion,
@@ -976,19 +1237,99 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.docApply, async (_event, request: EditRequest): Promise<EditResponse> => {
     try {
       const session = requireSession();
-      // Whether an edit outside the box may move the box is a setting, and
-      // main is where it has to be honoured -- `session.ts` may not read the
-      // store, which imports Electron and is out of the suites' reach.
-      const settings = await getSettings();
-      const changed = applyEdit(session, request, {
-        autoGrow: settings.editing.autoGrow,
-        voidBlock: settings.editing.voidBlock,
-      });
-      return { ok: true, changed, state: shellState(session) };
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
+      const changed = applyEdit(session, request, await editOptionsFor(session));
+      return {
+        ok: true,
+        changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
   });
+
+  ipcMain.handle(
+    IPC.docSetVoidBlock,
+    async (_event, request: VoidBlockRequest): Promise<EditResponse> => {
+      try {
+        const session = requireSession();
+        const changed = setSessionVoidBlock(session, request.block, {
+          replaceExisting: request.replaceExisting === true,
+          replaceFrom: request.replaceFrom,
+        });
+        /*
+         * Written through immediately, not left until the next save.
+         *
+         * A document with no path has no sidecar and keeps the value on the
+         * session until it gets one -- the rule conversations and version
+         * history already follow. Persisting here as well as in `docSave` is
+         * what makes the choice survive a crash, which is the one case where
+         * "it would have been saved eventually" is worth nothing.
+         */
+        if (session.doc.filePath !== null) {
+          await rememberProject(session.doc.filePath, { voidBlock: session.voidBlock });
+        }
+        return { ok: true, changed, shift: NO_SHIFT, state: shellState(session) };
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.docSetVersion,
+    async (_event, request: VersionRequest): Promise<EditResponse> => {
+      try {
+        const session = requireSession();
+        /*
+         * The *target* version's block set, not the document's. That is the
+         * whole question being asked: what would this schematic lose if it
+         * became 1.12? Passing the current one would check it against itself
+         * and always find nothing.
+         */
+        const version = resolveVersionName(request.version);
+        if (version === null) {
+          return {
+            ok: false,
+            kind: "invalid-input",
+            message: `${request.version} is not a Minecraft version this build knows.`,
+          };
+        }
+        const legacy = eraOf(version) === "legacy";
+        const result = setDocumentVersion(session, version, {
+          dropUnrepresentable: request.dropUnrepresentable === true,
+          placeableNames: legacy
+            ? legacyBlockNames(await loadLegacyBlockTable(legacyBlocksPath()))
+            : null,
+        });
+        // The sidecar has to agree, or reopening the file preselects the
+        // version it used to be.
+        if (session.doc.filePath !== null) {
+          await rememberProject(session.doc.filePath, { version });
+        }
+        return {
+          ok: true,
+          changed: result.changed,
+          // A version change renames, restates and drops; it never resizes.
+          shift: NO_SHIFT,
+          state: shellState(session),
+          notes: result.notes,
+        };
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
 
   ipcMain.handle(
     IPC.docResize,
@@ -998,7 +1339,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         const changed = resizeSession(session, request, {
           confirmLoss: request.confirmLoss === true,
         });
-        return { ok: true, changed, state: shellState(session) };
+        return { ok: true, changed, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
@@ -1051,7 +1392,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         request.path,
         request.value,
       );
-      return { ok: true, changed, state: shellState(session) };
+      return { ok: true, changed, shift: NO_SHIFT, state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
@@ -1079,7 +1420,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
           request.revision,
           "Edit the schematic's NBT",
         );
-        return { ok: true, changed, state: shellState(session) };
+        return { ok: true, changed, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
@@ -1102,7 +1443,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       try {
         const session = requireSession();
         setWorldEditAnchor(session.doc, session.history, anchor, "Set the WorldEdit anchor");
-        return { ok: true, changed: 0, state: shellState(session) };
+        return { ok: true, changed: 0, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
@@ -1115,18 +1456,71 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       try {
         const session = requireSession();
         setWorldOrigin(session.doc, session.history, origin, "Set the WorldEdit origin");
-        return { ok: true, changed: 0, state: shellState(session) };
+        return { ok: true, changed: 0, shift: NO_SHIFT, state: shellState(session) };
       } catch (err) {
         return failure(err);
       }
     },
   );
 
+  ipcMain.handle(IPC.docScale, async (_event, request: ScaleRequest): Promise<EditResponse> => {
+    try {
+      const session = requireSession();
+      const options = await editOptionsFor(session);
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
+      const result = scaleRegion(session, request.region, request.spec, {
+        ...options,
+        to: request.to ?? null,
+      });
+      /*
+       * The sentence rides along rather than refusing the gesture. A division
+       * throws blocks away and the count of written cells cannot say so, but a
+       * scale is a handle dragged with the destination drawn under the pointer
+       * and one CTRL+Z away -- so what it needs is to be told, not stopped.
+       */
+      return {
+        ok: true,
+        changed: result.changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+        ...(result.notes === "" ? {} : { notes: result.notes }),
+      };
+    } catch (err) {
+      return failure(err);
+    }
+  });
+
   ipcMain.handle(IPC.docMove, async (_event, request: MoveRegionRequest): Promise<EditResponse> => {
     try {
       const session = requireSession();
-      const changed = moveRegion(session, request.region, request.to);
-      return { ok: true, changed, state: shellState(session) };
+      /*
+       * The same options `docApply` gets, and it is the point of this change:
+       * a move that carried blocks past the edge used to lose them in silence,
+       * because `pasteClipboard` clips by letting `tx.setBlock` return false.
+       */
+      const options = await editOptionsFor(session);
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
+      const changed = moveRegion(session, request.region, request.to, options);
+      return {
+        ok: true,
+        changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
@@ -1151,6 +1545,22 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     },
   );
 
+  ipcMain.handle(IPC.docClipboardMesh, async (): Promise<RegionMeshResponse> => {
+    try {
+      const settings = await getSettings();
+      const result = await clipboardMesh(requireSession(), {
+        resourcePackPath: null,
+        fallbackResourcePackPath: await defaultResourcePackPath(),
+        biomeColor: settings.preview.biomeColor,
+        showMarkers: settings.preview.showMarkers,
+        waterColor: settings.preview.waterColor,
+      });
+      return { ok: true, ...result };
+    } catch (err) {
+      return failure(err);
+    }
+  });
+
   ipcMain.handle(IPC.skyTextures, async (): Promise<SkyTextures> => {
     try {
       return await loadSkyTextures(null, await defaultResourcePackPath());
@@ -1164,8 +1574,25 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.docTransform, async (_event, request: TransformRequest): Promise<EditResponse> => {
     try {
       const session = requireSession();
-      const changed = transformRegion(session, request.region, request.transform);
-      return { ok: true, changed, state: shellState(session) };
+      const options = await editOptionsFor(session);
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
+      const changed = transformRegion(session, request.region, request.transform, {
+        ...options,
+        to: request.to ?? null,
+      });
+      return {
+        ok: true,
+        changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
@@ -1199,8 +1626,27 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.docPaste, async (_event, request: PasteRequest): Promise<EditResponse> => {
     try {
       const session = requireSession();
-      const changed = pasteSelection(session, request, { includeAir: request.includeAir });
-      return { ok: true, changed, state: shellState(session) };
+      // The same options a move gets, and for the same reason: a paste that
+      // reached past the edge used to lose the overhang without a word.
+      /*
+       * The id before the edit, so the shift can be read back off what the
+       * transaction recorded. Growing below the origin moves every block that
+       * was already there, and until now nothing outside main was told --
+       * `contentShiftSince` says why the answer is derived rather than passed
+       * up through five return types.
+       */
+      const before = session.history.nextId;
+      const changed = pasteSelection(session, request, {
+        ...(await editOptionsFor(session)),
+        includeAir: request.includeAir,
+        skipEmpty: request.skipEmpty === true,
+      });
+      return {
+        ok: true,
+        changed,
+        shift: contentShiftSince(session.history, before),
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
@@ -1210,7 +1656,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     try {
       const session = requireSession();
       undoEdit(session);
-      return { ok: true, changed: 0, state: shellState(session) };
+      return { ok: true, changed: 0, shift: NO_SHIFT, state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
@@ -1220,7 +1666,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     try {
       const session = requireSession();
       redoEdit(session);
-      return { ok: true, changed: 0, state: shellState(session) };
+      return { ok: true, changed: 0, shift: NO_SHIFT, state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
@@ -1240,8 +1686,17 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.docSave, async (_event, request: SaveRequest): Promise<SaveResponse> => {
     try {
       const session = requireSession();
-      if (request.version !== undefined) {
-        const refusal = refusalFor(request.format ?? session.doc.format, request.version);
+      const stamped =
+        request.version === undefined ? undefined : resolveVersionName(request.version);
+      if (stamped === null) {
+        return {
+          ok: false,
+          kind: "invalid-input",
+          message: `${String(request.version)} is not a Minecraft version this build knows.`,
+        };
+      }
+      if (stamped !== undefined) {
+        const refusal = refusalFor(request.format ?? session.doc.format, stamped);
         if (refusal !== null) {
           return { ok: false, kind: "invalid-input", message: refusal };
         }
@@ -1252,7 +1707,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         // Only when asked. Omitting it means "keep what the document carries",
         // which is what a plain Save wants; passing `null` unconditionally would
         // strip the version tag off every file the app touched.
-        ...(request.version === undefined ? {} : { dataVersion: dataVersionOf(request.version) }),
+        ...(stamped === undefined ? {} : { dataVersion: dataVersionOf(stamped) }),
         legacyBlocksPath: legacyBlocksPath(),
       });
       /*
@@ -1271,6 +1726,11 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
        */
       await rememberProject(result.filePath, {
         format: result.format,
+        // Always written, including the empty string, because "this
+        // schematic is back to air" is an answer and `rememberProject`
+        // merges rather than replaces -- omitting it would leave the old
+        // choice standing after somebody deliberately cleared it.
+        voidBlock: session.voidBlock,
         ...(request.version === undefined ? {} : { version: request.version }),
       });
       return {
@@ -1451,21 +1911,18 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         return refuse(failed.kind, failed.message);
       }
 
-      // The same key gate as generation, for the same reason: a paid model with
-      // no key returns an opaque 401 that reaches the user as "LLM API Error".
+      // The same key gate as generation, and now literally the same function:
+      // a paid model with no key returns an opaque 401 that reaches the user as
+      // "LLM API Error", which says nothing about which key.
       const apiKey = await getApiKey(settings.provider);
-      if (settings.provider === "OpenCode") {
-        const catalogue = await fetchOpenCodeModels({ snapshotPath: openCodeSnapshotPath() });
-        const model = catalogue?.find((entry) => entry.id === settings.model);
-        if (apiKey.trim() === "" && openCodeModelRequiresKey(model)) {
-          return refuse(
-            "no-api-key",
-            `${model?.name ?? settings.model} is a paid OpenCode model. Add an API key, or pick a free one.`,
-          );
-        }
-      } else if (apiKey.trim() === "" && providerRequiresApiKey(settings.provider)) {
-        return refuse("no-api-key", `Add an API key for ${settings.provider} in Settings.`);
-      }
+      const noKey = await apiKeyRefusal({
+        provider: settings.provider,
+        model: settings.model,
+        apiKey,
+        snapshotPath: openCodeSnapshotPath(),
+        legacyProfilePath: (await orphanedProfile(app.getPath("userData"), legacyUserDataDir()))?.path ?? null,
+      });
+      if (noKey !== null) return refuse("no-api-key", noKey);
 
       // Registered before the run so a Stop arriving while the model is still
       // being resolved still finds something to abort.

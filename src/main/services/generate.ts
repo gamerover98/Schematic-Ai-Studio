@@ -30,9 +30,63 @@ import { callLlm } from "./llm.js";
 import { sanitizeName } from "./naming.js";
 import { TraceRecorder, type TraceSink } from "./trace.js";
 import { resolveOutputPath } from "./output.js";
-import { generatedDir, loadBlockIdListText, loadPrompts, resourcesDir } from "./resources.js";
+import {
+  generatedDir,
+  legacyBlocksPath,
+  loadBlockIdListText,
+  loadPrompts,
+  resourcesDir,
+} from "./resources.js";
+import { eraOf, mcVersion } from "../../shared/mc_versions.js";
+import { blocksIn } from "../../shared/block_versions.js";
+import { legacyBlockNames } from "./writers.js";
+import { loadLegacyBlockTable } from "../pipeline/loader_formats.js";
 import { SpongeSchematicWriter, SpongeSchematicWriterFactory } from "./schematic.js";
 import { VERSION_TABLE } from "./versions.js";
+
+/**
+ * The block ids a generation for this version is allowed to name.
+ *
+ * Whole for the flat era, and cut to `legacy_blocks.json` below 1.13 -- the
+ * same table the writer decides the save on, so the list a model is given and
+ * the set it will be judged against cannot drift.
+ *
+ * Falls back to the whole list if the set cannot be worked out. A generation
+ * that offers too much is recoverable; one that offers nothing is not.
+ */
+async function blockListFor(version: string): Promise<string> {
+  const whole = await loadBlockIdListText();
+  try {
+    /*
+     * Two tables, each authoritative where the other says nothing:
+     * `legacy_blocks.json` enumerates the pre-Flattening set exactly, and
+     * `block_versions.json` is the flat era only. Which one answers is decided
+     * by the era rather than by merging them.
+     */
+    let names: ReadonlySet<string>;
+    if (eraOf(version) === "legacy") {
+      names = legacyBlockNames(await loadLegacyBlockTable(legacyBlocksPath()));
+    } else {
+      const dataVersion = mcVersion(version)?.dataVersion ?? null;
+      // A version with no tag is not a question the flat table can be asked.
+      if (dataVersion === null) return whole;
+      names = blocksIn(dataVersion);
+    }
+    return whole
+      .split(/\r?\n/)
+      .filter((line) => {
+        const id = line.trim();
+        // Comments and blanks are the file's own header; they carry no id and
+        // are what tells the model where the list came from.
+        if (id === "" || id.startsWith("#")) return true;
+        return names.has(id.includes(":") ? id : `minecraft:${id}`);
+      })
+      .join("\n");
+  } catch {
+    return whole;
+  }
+}
+
 
 export class EmptyResultError extends Error {
   /*
@@ -126,7 +180,19 @@ export async function generate(options: GenerateOptions): Promise<GenerateOutcom
   try {
 
     const prompts = await loadPrompts();
-    const blockIdList = await loadBlockIdListText();
+    /*
+     * The block list is cut to the target version, and that is not a nicety.
+     *
+     * The prompt says "you must only use block types from the following list"
+     * and then handed the same list for every version -- so a generation aimed
+     * at 1.12.2 was told, in its own instructions, that deepslate was allowed.
+     * The model obeyed the list it was given and the save refused the result.
+     *
+     * Only the legacy boundary is cut, for `inventoryBlocks`' reason: there is
+     * no per-block introduction data above 1.13, and telling a model a block
+     * does not exist when it does is worse than the reverse.
+     */
+    const blockIdList = await blockListFor(options.version);
 
     // component.py:112-118
     const humanVersion = formatVersionForPrompt(options.version);

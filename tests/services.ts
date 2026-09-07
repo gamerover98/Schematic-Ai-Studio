@@ -16,7 +16,7 @@
 
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { createServer } from "http";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -38,6 +38,11 @@ import {
   saveConversation,
   useConversationDirectory,
 } from "../src/main/services/conversation.js";
+import {
+  readHotbar,
+  useHotbarDirectory,
+  writeHotbar,
+} from "../src/main/services/hotbars.js";
 import {
   abridgeTrace,
   coerceProject,
@@ -62,6 +67,13 @@ import {
 } from "../src/main/services/output.js";
 import { labelFor, mergeCatalogue } from "../src/main/services/opencode.js";
 import {
+  clipboardMesh,
+  closeDocument,
+  cutSelection,
+  newDocument,
+  regionMesh,
+} from "../src/main/services/session.js";
+import {
   atlasBuildCount,
   buildDocumentPreview,
   buildPreview,
@@ -82,9 +94,16 @@ import {
   coerceEditing,
   coerceMcp,
   coerceSettings,
+  coerceHotbar,
   coerceUi,
 } from "../src/main/services/settings_coerce.js";
 import { discardPrompt } from "../src/main/services/discard_prompt.js";
+import {
+  failurePrompt,
+  failureReport,
+  issueBody,
+  issueUrl,
+} from "../src/main/services/failure_prompt.js";
 import {
   buildBlockIcons,
   forgetBlockIcons,
@@ -115,8 +134,13 @@ import {
 } from "../src/main/domain/grow.js";
 import {
   DEFAULT_EDITING_SETTINGS,
+  normaliseVoidBlock,
   DEFAULT_HOTBAR,
+  HOTBAR_SLOTS,
+  type Hotbar,
   DEFAULT_MCP_SETTINGS,
+  bindAddressRefusal,
+  isLoopbackAddress,
   DEFAULT_SETTINGS,
   DEFAULT_UI_SETTINGS,
   SIDEBAR_WIDTH,
@@ -126,6 +150,7 @@ import {
   type Settings,
   type UiSettings,
 } from "../src/shared/settings.js";
+import { MC_VERSIONS, eraOf, resolveVersionName } from "../src/shared/mc_versions.js";
 
 /**
  * Mirrors `services/resources.ts`'s `defaultResourcePackPath()` without pulling
@@ -183,6 +208,12 @@ function equal(label: string, actual: unknown, expected: unknown): void {
   }
   check(label, ok);
 }
+
+import { apiKeyRefusal } from "../src/main/services/llm_key.js";
+import {
+  orphanedProfile,
+  type OrphanedProfile,
+} from "../src/main/services/legacy_profile.js";
 
 console.log("=== Schematic AI Studio redesign-slice service smoke test ===\n");
 
@@ -1362,6 +1393,245 @@ console.log("\n--- growth ---");
 }
 
 // --- settings coercion: the fields that vanish when nobody names them ------
+console.log("\n--- a stored key and a readable one ---");
+{
+  /*
+   * `settings-store.ts` imports `safeStorage`, so it cannot be loaded here --
+   * which is why `settings_coerce.ts` exists at all. The rule is checked in the
+   * source, like `closeAllConnections` in `tests/mcp.ts`, because the mistake is
+   * a single predicate and its absence is invisible from every angle but one.
+   *
+   * The mistake: `hasKey` was `Boolean(encryptedKeys[provider])` -- the presence
+   * of *ciphertext*. `getApiKey` returns `""` for absent, for no keyring, and
+   * for ciphertext that will not decrypt, so a key encrypted under a keyring
+   * this profile no longer has presents as **saved** in the pane and as
+   * **missing** to every caller. The provider then answers `Invalid API key.`
+   * and nothing anywhere suggests the app is the one that lost it.
+   */
+  const store = await readFile(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "services", "settings-store.ts"),
+    "utf8",
+  );
+  const status = store.slice(store.indexOf("export async function getKeyStatus"));
+  check(
+    "a saved key is one that decrypts, not one that is merely there",
+    status.includes("decrypts("),
+    "hasKey read the presence of ciphertext, which getApiKey does not",
+  );
+  /*
+   * And the two states stay apart. `unreadable` is what lets the pane say
+   * "paste it again" rather than "paste one", which is the only part of this
+   * that is not obvious from `hasKey: false`.
+   */
+  check(
+    "...and ciphertext that will not decrypt says so",
+    status.includes("unreadable"),
+    "the two states were collapsed into one",
+  );
+}
+console.log("\n--- the profile the rename left behind ---");
+{
+  /*
+   * `app.getName()` names the userData directory, so renaming the app at 1.0.0
+   * started it on an empty profile. Nothing migrates, which is defensible --
+   * and was done in silence, which is what cost.
+   *
+   * The whole failure, once: an install with working keys came back with none.
+   * Generation stopped and every other part of the app kept working, because
+   * nothing else needs a key. What surfaced was the provider's own
+   * `Invalid API key.` -- true, and pointing at a key that *was* set, in a
+   * folder this app no longer reads. It took two reports and a wrong diagnosis
+   * about the MCP bearer token to find.
+   */
+  const root = await mkdtemp(path.join(tmpdir(), "bgpt-profiles-"));
+  const make = async (name: string, body: unknown): Promise<string> => {
+    const dir = path.join(root, name);
+    await mkdir(dir, { recursive: true });
+    if (body !== undefined) {
+      await writeFile(path.join(dir, "settings.json"), JSON.stringify(body), "utf8");
+    }
+    return dir;
+  };
+
+  /*
+   * Every call below goes through this. `orphanedProfile` runs at startup and
+   * its whole contract on a bad directory is *silence*, so a guard removed
+   * makes these throw -- and an uncaught throw takes the rest of the suite
+   * with it, which is the failure `check.sh` is arranged not to have. The
+   * message comes back as the value and the equality names the fault.
+   */
+  const orphan = async (a: string, b: string): Promise<unknown> => {
+    try {
+      return await orphanedProfile(a, b);
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  };
+
+  const withKeys = await make("old", {
+    encryptedKeys: { OpenCode: "AAAA", "Custom (OpenAI Compatible)": "BBBB" },
+  });
+  const empty = await make("new", { encryptedKeys: {} });
+
+  {
+    const found = (await orphan(empty, withKeys)) as OrphanedProfile | null;
+    check("a profile with keys beside one without is found", found !== null);
+    equal(
+      "...and it names which providers, so the sentence can",
+      found?.providers,
+      ["Custom (OpenAI Compatible)", "OpenCode"],
+    );
+    equal("...and where to look", found?.path, withKeys);
+  }
+
+  /*
+   * The one that stops the notice outliving its cause. Once a key has been
+   * pasted back, there is nothing to recover and a warning still on screen is
+   * one people learn to ignore.
+   */
+  const alsoHasOne = await make("done", { encryptedKeys: { OpenAI: "CCCC" } });
+  equal(
+    "a profile that already has a key is told nothing",
+    await orphan(alsoHasOne, withKeys),
+    null,
+  );
+
+  /*
+   * Existing is not the same as holding something. A fresh install on a machine
+   * that once ran the old build leaves the directory behind with no keys in it.
+   */
+  const oldButEmpty = await make("old-empty", { encryptedKeys: {} });
+  equal(
+    "an old profile with no keys is nothing to report",
+    await orphan(empty, oldButEmpty),
+    null,
+  );
+  equal(
+    "...and neither is one that was never there",
+    await orphan(empty, path.join(root, "never-existed")),
+    null,
+  );
+
+  /*
+   * And it must not be able to stop the app starting. This runs at startup, and
+   * a corrupt file in a directory the app has *stopped using* is the least
+   * deserving reason to fail to launch there is.
+   */
+  const corrupt = path.join(root, "corrupt");
+  await mkdir(corrupt, { recursive: true });
+  await writeFile(path.join(corrupt, "settings.json"), "{ not json at all", "utf8");
+  equal(
+    "an unreadable old profile is silence, not an exception",
+    await orphan(empty, corrupt),
+    null,
+  );
+
+  // Same directory twice: nothing is next door to itself.
+  equal(
+    "a profile is not its own predecessor",
+    await orphan(withKeys, withKeys),
+    null,
+  );
+
+  /*
+   * Conversations are counted but do not raise the notice on their own: losing
+   * a chat log is an inconvenience, and losing a key looks like the app being
+   * broken. They are worth naming once somebody is being sent to the folder.
+   */
+  await mkdir(path.join(withKeys, "conversations"), { recursive: true });
+  await writeFile(path.join(withKeys, "conversations", "a.json"), "{}", "utf8");
+  await writeFile(path.join(withKeys, "conversations", "b.json"), "{}", "utf8");
+  equal(
+    "the conversations left behind are counted",
+    ((await orphan(empty, withKeys)) as OrphanedProfile | null)?.conversations,
+    2,
+  );
+
+  /*
+   * And the clause reaches the sentence somebody actually reads. Without a
+   * legacy profile it says nothing about folders -- a clean install must not be
+   * told about a directory that was never there.
+   */
+  const plain = await apiKeyRefusal({
+    provider: "OpenAI",
+    model: "gpt-4o-mini",
+    apiKey: "",
+    snapshotPath: null,
+  });
+  check(
+    "a refusal on a clean install invents no folder",
+    !(plain ?? "").includes("earlier version"),
+    plain ?? "(none)",
+  );
+  const hinted = await apiKeyRefusal({
+    provider: "OpenAI",
+    model: "gpt-4o-mini",
+    apiKey: "",
+    snapshotPath: null,
+    legacyProfilePath: withKeys,
+  });
+  check(
+    "...and one with a profile next door says where",
+    (hinted ?? "").includes(withKeys),
+    hinted ?? "(none)",
+  );
+
+  await rm(root, { recursive: true, force: true });
+}
+console.log("\n--- whose API key it is ---");
+{
+  /*
+   * Reported as an MCP authentication failure, and it is not one.
+   *
+   * `generate_schematic` spends the *user's* provider budget, and with no key
+   * the provider's own answer came back verbatim through `LlmError`:
+   *
+   *     generate_schematic  LLM API Error: Invalid API key.
+   *
+   * A sentence about an API key, arriving over a connection the reader had just
+   * authenticated to with a bearer token. The two IPC callers had a gate that
+   * says which key and where it lives; the MCP one had none -- this file's
+   * recurring shape, a rule reaching every place that asks but one.
+   *
+   * The OpenCode arm is deliberately not exercised here: it consults the live
+   * catalogue, and a check that reaches the network is a check that fails on a
+   * train. What is covered is every path that decides without one.
+   */
+  const refusal = await apiKeyRefusal({
+    provider: "OpenAI",
+    model: "gpt-4o-mini",
+    apiKey: "",
+    snapshotPath: null,
+  });
+  check("a provider with no key is refused", refusal !== null);
+  check(
+    "...and the refusal names the provider",
+    (refusal ?? "").includes("OpenAI"),
+    refusal ?? "(none)",
+  );
+  equal(
+    "...and a key is all it takes",
+    await apiKeyRefusal({ provider: "OpenAI", model: "gpt-4o-mini", apiKey: "sk-x", snapshotPath: null }),
+    null,
+  );
+  // Whitespace is not a key. This is what a field pasted into and cleared again
+  // leaves behind.
+  check(
+    "blank space is not a key",
+    (await apiKeyRefusal({ provider: "OpenAI", model: "m", apiKey: "   ", snapshotPath: null })) !== null,
+  );
+
+  /*
+   * There is deliberately no second function relabelling the provider's own
+   * refusal.
+   *
+   * There were two, because `generate_schematic` carried this sentence to a
+   * reader outside the window and it had to say *whose* key it was. That tool
+   * is gone -- it asked a second model to do what the calling one was already
+   * doing -- so the only readers left are in front of the pane that has the
+   * field in it, and a paragraph explaining where they are would be noise.
+   */
+}
 console.log("\n--- settings coercion ---");
 {
   /*
@@ -1394,20 +1664,12 @@ console.log("\n--- settings coercion ---");
     inspectorWindowY: 480,
     inspectorWindowW: 380,
     inspectorWindowH: 400,
-    // Nine entries, none of them the default, so a `coerceUi` that quietly
-    // substituted the default hotbar would not survive the comparison.
-    hotbar: [
-      "minecraft:granite",
-      "minecraft:andesite",
-      "minecraft:diorite",
-      "minecraft:birch_planks",
-      "minecraft:glass_pane",
-      "minecraft:red_sand",
-      "minecraft:mossy_cobblestone",
-      "minecraft:sea_lantern",
-      "minecraft:water",
-    ],
-    hotbarSlot: 4,
+    /*
+     * `hotbar` and `hotbarSlot` were here and belong to a *document* now,
+     * keyed on its path, so they are no longer part of the window's state.
+     * The check they used to earn is below, on `coerceHotbar`, which is the
+     * same validation moved rather than dropped.
+     */
   } satisfies UiSettings;
 
   equal("every ui field survives a round-trip", coerceUi(ui), ui);
@@ -1419,16 +1681,66 @@ console.log("\n--- settings coercion ---");
     port: 4600,
     root: "C:/builds/mcp",
     allowDelete: true,
+    // The opposite of the default, so a `coerceMcp` that dropped the field
+    // and substituted the default would fail rather than round-trip.
+    requireAuth: false,
+    bindAddress: "127.0.0.1",
   } satisfies McpSettings;
 
   equal("every mcp field survives a round-trip", coerceMcp(mcp), mcp);
+
+  /*
+   * The one field here whose safe answer is `true`, and therefore the one
+   * read as `!== false` while `enabled` and `allowDelete` are read as
+   * `=== true`.
+   *
+   * This is the check that fails if somebody copies the two lines above it.
+   * **No settings file in existence carries this key** -- it did not exist
+   * until now -- so `=== true` would come back `false` for every user the app
+   * has, and turn authentication off on the next launch without a word.
+   */
+  equal("a settings file with no mcp block still requires a token", coerceMcp(undefined).requireAuth, true);
+  equal("...and one with an mcp block that predates the field", coerceMcp({ port: 4571 }).requireAuth, true);
+  // Only an explicit `false` turns it off, which is what the checkbox writes.
+  equal("an explicit false is honoured", coerceMcp({ requireAuth: false }).requireAuth, false);
+  equal("...and a truthy string does not turn it off", coerceMcp({ requireAuth: "no" }).requireAuth, true);
+
+  /*
+   * The address is a single address, and the CIDR case is the one worth
+   * naming: it is what somebody reaches for when they mean "only my LAN",
+   * and it is not a thing `listen` can bind. Which clients may connect is the
+   * token's question, not this one.
+   */
+  equal("loopback is an address", bindAddressRefusal("127.0.0.1"), null);
+  equal("...and so is every interface", bindAddressRefusal("0.0.0.0"), null);
+  equal("...and a real IPv4 one", bindAddressRefusal("192.168.1.42"), null);
+  equal("...and IPv6", bindAddressRefusal("::1"), null);
+  check(
+    "a CIDR is refused as the range it is",
+    (bindAddressRefusal("192.168.1.0/24") ?? "").includes("range"),
+    bindAddressRefusal("192.168.1.0/24") ?? "(none)",
+  );
+  /*
+   * A hostname is refused too, and the reason is not tidiness: the `Host`
+   * header is compared against this string as written, so a value that would
+   * have to be resolved first could never be compared at all.
+   */
+  check("a hostname is refused", bindAddressRefusal("my-desktop.local") !== null);
+  check("...and so is nonsense", bindAddressRefusal("999.1.1.1") !== null);
+  check("an empty address says what to type", (bindAddressRefusal("") ?? "").includes("127.0.0.1"));
+  // A bad value falls back rather than reaching `listen`, where it would come
+  // back as EADDRNOTAVAIL naming nothing.
+  equal(
+    "a refused address falls back to the default",
+    coerceMcp({ bindAddress: "192.168.1.0/24" }).bindAddress,
+    DEFAULT_MCP_SETTINGS.bindAddress,
+  );
 
   // The opposite of its default, for the reason above: a `coerceEditing`
   // that dropped the field and substituted the default would still pass a
   // round-trip written with the default in it.
   const editing = {
     autoGrow: false,
-    voidBlock: "minecraft:lava",
     voidOpacity: 0.75,
   } satisfies EditingSettings;
 
@@ -1458,26 +1770,35 @@ console.log("\n--- settings coercion ---");
    * index is void and none of them draws anything -- the expensive way of
    * doing precisely what the default already does for free.
    */
-  for (const spelling of [
-    "minecraft:air",
-    "air",
-    "  minecraft:air  ",
-  ]) {
+  for (const spelling of ["minecraft:air", "air", "  minecraft:air  "]) {
     equal(
       `${JSON.stringify(spelling)} is stored as no void block at all`,
-      coerceEditing({ voidBlock: spelling }).voidBlock,
+      normaliseVoidBlock(spelling),
       "",
     );
   }
-  equal(
-    "a real block survives, trimmed",
-    coerceEditing({ voidBlock: "  minecraft:water  " }).voidBlock,
-    "minecraft:water",
-  );
+  equal("a real block survives, trimmed", normaliseVoidBlock("  minecraft:water  "), "minecraft:water");
   equal(
     "...and so does one carrying a state",
-    coerceEditing({ voidBlock: "minecraft:water[level=0]" }).voidBlock,
+    normaliseVoidBlock("minecraft:water[level=0]"),
     "minecraft:water[level=0]",
+  );
+  equal("...and air carrying one is still air", normaliseVoidBlock("minecraft:air[x=1]"), "");
+  equal("anything that is not a string is air", normaliseVoidBlock(undefined), "");
+
+  /*
+   * `voidBlock` is gone from the settings, and this states it rather than
+   * leaving it to the type.
+   *
+   * What empty space is made of is written into one schematic, so it belongs
+   * to the document; as a global it followed you between files silently
+   * changing what a break wrote. `coerceEditing` names every field it keeps,
+   * so a settings file from an older build still carrying the key must come
+   * back without it -- and that is a runtime fact, not a compile-time one.
+   */
+  check(
+    "an older settings file's void block is not carried into `editing`",
+    !("voidBlock" in coerceEditing({ voidBlock: "minecraft:lava" })),
   );
 
   /*
@@ -1497,11 +1818,6 @@ console.log("\n--- settings coercion ---");
     coerceEditing({ voidOpacity: "quite" }).voidOpacity,
     DEFAULT_EDITING_SETTINGS.voidOpacity,
   );
-  equal(
-    "a missing editing block is air",
-    coerceEditing(undefined).voidBlock,
-    "",
-  );
 
   const settings = {
     provider: "OpenAI",
@@ -1517,6 +1833,45 @@ console.log("\n--- settings coercion ---");
   } satisfies Settings;
 
   equal("every settings field survives a round-trip", coerceSettings(settings), settings);
+
+  /*
+   * The default version is the newest release this build knows.
+   *
+   * A **decision** rather than a derivation -- a default is a statement to a
+   * person, the same argument that keeps this app's own version bump manual --
+   * so it is written out in `settings.ts` and pinned here instead of being read
+   * from `MC_VERSIONS[0]` at runtime. What that costs is one edit per release;
+   * what it buys is that the edit cannot be forgotten in silence.
+   *
+   * It was forgotten in silence. `JE_1_20_4` stood through fifteen newer
+   * releases while generation stamped it and the New and Save As dialogs fell
+   * back to it, and the first anybody heard was a report that an MCP client
+   * would not stop producing 1.20.4 schematics. Nothing in the app could have
+   * said so, because nothing was looking.
+   */
+  equal(
+    "the default version is the newest the table knows",
+    DEFAULT_SETTINGS.version,
+    MC_VERSIONS[0].name,
+  );
+  /*
+   * And it has to be a flat one, which is not pedantry: generation writes
+   * Sponge, and Sponge cannot express a pre-Flattening version at all, so a
+   * legacy default would make the app's own default configuration unable to
+   * generate anything.
+   */
+  equal("...and is one Sponge can carry", eraOf(DEFAULT_SETTINGS.version), "flat");
+  /*
+   * Stated as a resolution as well, because the two spellings are now both
+   * accepted and a default written as a label -- 26.2 -- would round-trip
+   * through settings, work everywhere, and quietly stop matching the name
+   * every other table is keyed on.
+   */
+  equal(
+    "...spelled as a canonical name rather than a label",
+    resolveVersionName(DEFAULT_SETTINGS.version),
+    DEFAULT_SETTINGS.version,
+  );
 
   /*
    * The two flags are compared against `true` rather than coerced, because
@@ -1552,13 +1907,35 @@ console.log("\n--- settings coercion ---");
   equal("a missing ui block is all defaults", coerceUi(undefined), DEFAULT_UI_SETTINGS);
 
   /*
-   * A slot holding air draws nothing and places nothing, and a settings file
-   * written before that rule has one in slot nine -- the old default. Refused
-   * on read, so it heals rather than needing a migration.
+   * The hotbar's own coercion, which used to live inside `coerceUi` and now
+   * answers for a per-document file as well. Both callers read something
+   * nobody validated, so there is one function rather than two that come to
+   * disagree about what a hotbar is.
+   */
+  const bar = {
+    slots: [
+      "minecraft:granite",
+      "minecraft:andesite",
+      "minecraft:diorite",
+      "minecraft:birch_planks",
+      "minecraft:glass_pane",
+      "minecraft:red_sand",
+      "minecraft:mossy_cobblestone",
+      "minecraft:sea_lantern",
+      "minecraft:water",
+    ],
+    slot: 4,
+  } satisfies Hotbar;
+  equal("a hotbar survives a round-trip", coerceHotbar(bar), bar);
+
+  /*
+   * A slot holding air draws nothing and places nothing, and a file written
+   * before that rule has one in slot nine -- the old default. Refused on
+   * read, so it heals rather than needing a migration.
    */
   equal(
     "air is refused from a hotbar slot",
-    coerceUi({ hotbar: ["minecraft:air", ...DEFAULT_HOTBAR.slice(1)] }).hotbar[0],
+    coerceHotbar({ slots: ["minecraft:air", ...DEFAULT_HOTBAR.slice(1)], slot: 0 }).slots[0],
     DEFAULT_HOTBAR[0],
   );
   check(
@@ -1566,6 +1943,30 @@ console.log("\n--- settings coercion ---");
     DEFAULT_HOTBAR.every((block) => block !== "minecraft:air"),
     DEFAULT_HOTBAR.join(", "),
   );
+  /*
+   * Length is not negotiable: the template indexes by slot and the keys 1-9
+   * have to land somewhere. Short is padded, long is cut.
+   */
+  equal(
+    "a short hotbar is padded to nine",
+    coerceHotbar({ slots: ["minecraft:stone"], slot: 0 }).slots.length,
+    HOTBAR_SLOTS,
+  );
+  equal(
+    "...and a long one cut back",
+    coerceHotbar({
+      slots: Array.from({ length: 20 }, () => "minecraft:stone"),
+      slot: 0,
+    }).slots.length,
+    HOTBAR_SLOTS,
+  );
+  // Wrapped rather than clamped, so an index from a build with a different
+  // slot count lands somewhere reachable instead of always on the first.
+  equal("a slot past the end wraps", coerceHotbar({ slot: 11 }).slot, 2);
+  equal("...and nonsense reads as the first", coerceHotbar({ slot: "x" }).slot, 0);
+  equal("a hotbar from nothing at all is the default", coerceHotbar(undefined).slots, [
+    ...DEFAULT_HOTBAR,
+  ]);
 
   // A settings file copied from a 4K screen onto a laptop.
   equal(
@@ -1635,6 +2036,71 @@ console.log("\n--- chat memory boundary ---");
   // shape. Both must put the divider above everything, not below.
   equal("nothing remembered puts the line at the top of nothing", rememberedFromIndex(log, 0), 6);
   equal("an empty log has no boundary", rememberedFromIndex([], 4), 0);
+}
+
+// --- a hotbar belongs to a schematic ---------------------------------------
+//
+// It used to be one bar for the whole app, in `UiSettings`. That is right for
+// a window's chrome and wrong for what you are *holding*: opening the next
+// schematic handed you the last one's blocks, and a legacy `.schematic`
+// inherited nine that its version does not have.
+//
+// Keyed on the file path, like the conversation above and the version history
+// -- the same `storeFileName` hash, so one schematic's three files can be
+// matched up by eye on disk.
+console.log("\n--- a hotbar belongs to a schematic ---");
+{
+  const dir = path.join(workDir, "hotbars");
+  useHotbarDirectory(dir);
+  const houseA = path.join(workDir, "house.schem");
+  const houseB = path.join(workDir, "tower.schem");
+
+  equal(
+    "a schematic nobody has built in yet gets the factory nine",
+    (await readHotbar(houseA)).slots,
+    [...DEFAULT_HOTBAR],
+  );
+
+  await writeHotbar(houseA, { slots: Array.from({ length: HOTBAR_SLOTS }, () => "minecraft:sandstone"), slot: 3 });
+  await writeHotbar(houseB, { slots: Array.from({ length: HOTBAR_SLOTS }, () => "minecraft:obsidian"), slot: 7 });
+
+  /*
+   * Two schematics, two bars. This is the whole feature: without the path in
+   * the key the second write would answer for the first, which is exactly what
+   * one shared bar did.
+   */
+  equal("one schematic keeps its own blocks", (await readHotbar(houseA)).slots[0], "minecraft:sandstone");
+  equal("...and another keeps its own", (await readHotbar(houseB)).slots[0], "minecraft:obsidian");
+  equal("...including which slot was held", (await readHotbar(houseA)).slot, 3);
+  equal("...separately", (await readHotbar(houseB)).slot, 7);
+
+  /*
+   * Coerced on the way in as well as out. Validating only on read would let a
+   * bad value sit on disk; only on write would trust whatever an older build
+   * left there. Air is the case that matters, because it was a *default* once.
+   */
+  await writeHotbar(houseA, { slots: ["minecraft:air"], slot: 99 });
+  const healed = await readHotbar(houseA);
+  equal("air never reaches the file", healed.slots[0], DEFAULT_HOTBAR[0]);
+  equal("...and a short one comes back full length", healed.slots.length, HOTBAR_SLOTS);
+  equal("...with the slot wrapped into range", healed.slot, 99 % HOTBAR_SLOTS);
+
+  /*
+   * Unreadable is not an error. A file half-written by a crash, or one from a
+   * build that spelled this differently, is answered with the factory nine --
+   * a hotbar is a convenience, and refusing to open the schematic over one
+   * would be wildly out of proportion.
+   */
+  await writeFile(path.join(dir, storeFileName(houseB)), "{ not json", "utf8");
+  equal("a corrupt file reads as the default", (await readHotbar(houseB)).slots, [...DEFAULT_HOTBAR]);
+
+  /*
+   * And with no directory injected -- which is every suite that does not ask
+   * for one, and main before startup -- nothing is written and nothing throws.
+   * A document with no path never reaches here at all: the renderer has
+   * nothing to key on and keeps its bar in memory.
+   */
+  useHotbarDirectory(null as unknown as string);
 }
 
 // --- conversations on disk -------------------------------------------------
@@ -1874,6 +2340,43 @@ console.log("\n--- project notes ---");
   });
 
   /*
+   * `litematic` used to be dropped here, in silence.
+   *
+   * The fourth container was added to `SchematicFormat` and this whitelist was
+   * written out as three names, so a `.litematic` remembered its container and
+   * then opened Save As on Sponge -- with nothing failing anywhere, because a
+   * missing note is a legal state. It is checked against the format list now,
+   * which is why a fifth container cannot repeat it.
+   */
+  equal("the fourth container is remembered like the other three", coerceProject({ format: "litematic" }), {
+    format: "litematic",
+  });
+
+  /*
+   * What empty space is made of rides here too, and for the reason the whole
+   * sidecar exists: it is written into *this* file when a block is broken, so
+   * an underwater jetty and a cathedral want different answers. As a global
+   * setting it followed you between them, silently changing what a break wrote.
+   */
+  equal("the void block is remembered per file", coerceProject({ voidBlock: "minecraft:water" }), {
+    voidBlock: "minecraft:water",
+  });
+  equal(
+    "...carrying its state, because that is what a break writes",
+    coerceProject({ voidBlock: "minecraft:water[level=0]" }),
+    { voidBlock: "minecraft:water[level=0]" },
+  );
+  /*
+   * Air is absence, both ways round. A sidecar written by an older build, or
+   * by hand, can spell it out; storing that rather than nothing would make
+   * `fillVoid` intern air over air and hand the mesher a palette in which every
+   * index is void and none of them draws anything.
+   */
+  equal("air is no answer at all", coerceProject({ voidBlock: "minecraft:air" }), undefined);
+  equal("...however it is spelled", coerceProject({ voidBlock: "  air  " }), undefined);
+  equal("...and an empty one is the same", coerceProject({ voidBlock: "" }), undefined);
+
+  /*
    * A record with notes and no conversations survives. Someone can set a
    * version on a file and never open the chat, and reading that back as "no
    * record" would throw the setting away on the next save.
@@ -1950,6 +2453,337 @@ console.log("\n--- recovering is opening ---");
       `${channel} puts a document on screen without saying which conversation it belongs to`,
     );
   }
+
+  /*
+   * And the five handlers that can move the document say how far.
+   *
+   * Growing below the origin moves every block already in the document, and
+   * `EditSuccess.shift` is how anything outside main hears about it. The field
+   * is required, so the *compiler* already names a producer that forgets it --
+   * but not one that answers `NO_SHIFT` where the honest answer is derived,
+   * and that is the mistake with no other tripwire: it typechecks, every suite
+   * passes, and a selection dragged below the origin is left behind again.
+   *
+   * The five are exactly the callers of `growthFor`. Named rather than
+   * counted, so a failure says which one went quiet.
+   */
+  for (const channel of ["docApply", "docMove", "docTransform", "docScale", "docPaste"]) {
+    const body = bodyOf(channel);
+    check(`${channel} is registered`, body !== "");
+    check(
+      `${channel} reports how far the document moved`,
+      /shift: contentShiftSince\(session\.history, before\)/.test(body),
+      `${channel} can grow below the origin and does not say so`,
+    );
+    // Read against an id captured *before* the call, or an edit that changed
+    // nothing would report whatever the previous one did.
+    check(
+      `...against an id taken before the edit`,
+      /const before = session\.history\.nextId;/.test(body),
+    );
+  }
+}
+
+// --- what the window says on its way down -----------------------------------
+/*
+ * The failure this wording is for is silent and total: a reactive loop that
+ * Svelte or the browser aborts takes every effect in the window with it, while
+ * the viewport goes on drawing and main goes on answering. Navigable and
+ * completely dead, with a clean console -- reported that way twice before
+ * anything was listening for it.
+ */
+console.log("\n--- what the window says on its way down ---");
+{
+  const plain = failurePrompt("");
+  /*
+   * Escape and the window's close button both land on `cancelId`, so the half
+   * that reloads must never be the one they reach. `discard_prompt`'s rule, and
+   * here it matters more: this dialog is raised *by* an error, so it can appear
+   * while somebody is in the middle of something else.
+   *
+   * The indices are literal types, so `tsc` rejects any comparison between them
+   * outright -- which is a stronger statement than a check could make, and is
+   * why there is not one. What no type states is that they are three distinct
+   * buttons with words on them.
+   */
+  check(
+    "three buttons, and they say different things",
+    plain.buttons.length === 3 &&
+      plain.buttons.every((label) => label.trim() !== "") &&
+      new Set(plain.buttons).size === 3,
+    plain.buttons.join(" | "),
+  );
+  check(
+    "it says what a reload costs",
+    plain.detail.includes("undo history"),
+    plain.detail,
+  );
+  /*
+   * And what it does not cost. Autosave lives in main, on a 20-second timer,
+   * and main is the half still working -- so the snapshot is current however
+   * long the window has been dead. A dialog that only warned would leave
+   * somebody weighing a reload against an unknown.
+   */
+  check(
+    "...and what it does not",
+    plain.detail.includes("20 seconds"),
+    plain.detail,
+  );
+
+  const said = failurePrompt("effect_update_depth_exceeded");
+  check(
+    "what the renderer managed to say is carried through",
+    said.detail.includes("effect_update_depth_exceeded"),
+    said.detail,
+  );
+
+  /*
+   * The count, and only when there is one. The renderer reports once, so a
+   * number here means something genuinely kept failing underneath -- worth
+   * knowing before choosing, and misleading shown as a zero.
+   */
+  check("no count when nothing followed", !plain.detail.includes("further"), plain.detail);
+  check(
+    "...and one when something did",
+    failurePrompt("x", 3).detail.includes("3 further errors"),
+  );
+  check(
+    "...counted in the singular when it is one",
+    failurePrompt("x", 1).detail.includes("1 further error since"),
+  );
+
+  /*
+   * The report, which is the thing a person actually pastes. The versions are
+   * in it because an issue asks for them every time, and because main has all
+   * of them without asking the renderer -- which matters when the renderer is
+   * the half that has stopped answering.
+   */
+  const facts = {
+    appName: "Schematic AI Studio",
+    appVersion: "1.0.0",
+    platform: "win32 x64",
+    electron: "33.0.0",
+    chrome: "130.0.0",
+    node: "20.18.0",
+    kind: "error" as const,
+    message: "Cannot read properties of null (reading 'children')",
+    at: "app.js:1:2",
+    stack: "at $effect (BlockPicker.svelte)",
+  };
+  const text = failureReport(facts);
+  for (const wanted of [
+    "1.0.0",
+    "win32 x64",
+    "33.0.0",
+    "Cannot read properties of null",
+    "BlockPicker.svelte",
+  ]) {
+    check(`the report carries ${wanted}`, text.includes(wanted), text);
+  }
+
+  /*
+   * An empty stack or location leaves no ragged blank line behind. It is the
+   * ordinary case for a rejection, not an edge one.
+   */
+  const bare = failureReport({ ...facts, at: "", stack: "" });
+  check(
+    "...and says nothing where there was nothing to say",
+    !bare.includes("at ") && !/\n\s*\n\s*$/.test(bare),
+    JSON.stringify(bare),
+  );
+
+  /*
+   * The issue URL is built from the repository the manifest already names, and
+   * carries an **abridged** body: GitHub takes it as a query parameter, so it
+   * travels in a URL, and a stack clears that ceiling easily. `abridgeTrace`'s
+   * rule -- cap on the way out and say what was dropped. The whole report is on
+   * the clipboard by then, so the sentence is an instruction, not an apology.
+   */
+  const long = failureReport({ ...facts, stack: "at frame\n".repeat(400) });
+  check(
+    "a long report is abridged for the URL",
+    issueBody(long).length < long.length,
+    `${issueBody(long).length} vs ${long.length}`,
+  );
+  check(
+    "...and says where the rest of it is",
+    issueBody(long).includes("clipboard"),
+  );
+  check(
+    "a short one is carried whole",
+    issueBody(text).includes(facts.message),
+  );
+
+  const url = issueUrl("https://github.com/gamerover98/Schematic-Ai-Studio", text);
+  check(
+    "the URL points at the repository the manifest names",
+    url.startsWith("https://github.com/gamerover98/Schematic-Ai-Studio/issues/new?"),
+    url,
+  );
+  /*
+   * And it survives the round trip. A body that arrived percent-mangled would
+   * still open a page, which is exactly the kind of wrong that looks right.
+   */
+  const body = new URL(url).searchParams.get("body") ?? "";
+  check(
+    "...and the body decodes back to what was put in it",
+    body === issueBody(text),
+  );
+  check(
+    "...trailing slash or not",
+    issueUrl("https://example.com/repo/", text).includes("/repo/issues/new?"),
+  );
+}
+
+// --- what the window says on its way down -----------------------------------
+/*
+ * The failure this wording is for is silent and total: a reactive loop that
+ * Svelte or the browser aborts takes every effect in the window with it, while
+ * the viewport goes on drawing and main goes on answering. Navigable and
+ * completely dead, with a clean console -- reported that way twice before
+ * anything was listening for it.
+ */
+console.log("\n--- what the window says on its way down ---");
+{
+  const plain = failurePrompt("");
+  /*
+   * Escape and the window's close button both land on `cancelId`, so the half
+   * that reloads must never be the one they reach. `discard_prompt`'s rule, and
+   * here it matters more: this dialog is raised *by* an error, so it can appear
+   * while somebody is in the middle of something else.
+   *
+   * The indices are literal types, so `tsc` rejects any comparison between them
+   * outright -- which is a stronger statement than a check could make, and is
+   * why there is not one. What no type states is that they are three distinct
+   * buttons with words on them.
+   */
+  check(
+    "three buttons, and they say different things",
+    plain.buttons.length === 3 &&
+      plain.buttons.every((label) => label.trim() !== "") &&
+      new Set(plain.buttons).size === 3,
+    plain.buttons.join(" | "),
+  );
+  check(
+    "it says what a reload costs",
+    plain.detail.includes("undo history"),
+    plain.detail,
+  );
+  /*
+   * And what it does not cost. Autosave lives in main, on a 20-second timer,
+   * and main is the half still working -- so the snapshot is current however
+   * long the window has been dead. A dialog that only warned would leave
+   * somebody weighing a reload against an unknown.
+   */
+  check(
+    "...and what it does not",
+    plain.detail.includes("20 seconds"),
+    plain.detail,
+  );
+
+  const said = failurePrompt("effect_update_depth_exceeded");
+  check(
+    "what the renderer managed to say is carried through",
+    said.detail.includes("effect_update_depth_exceeded"),
+    said.detail,
+  );
+
+  /*
+   * The count, and only when there is one. The renderer reports once, so a
+   * number here means something genuinely kept failing underneath -- worth
+   * knowing before choosing, and misleading shown as a zero.
+   */
+  check("no count when nothing followed", !plain.detail.includes("further"), plain.detail);
+  check(
+    "...and one when something did",
+    failurePrompt("x", 3).detail.includes("3 further errors"),
+  );
+  check(
+    "...counted in the singular when it is one",
+    failurePrompt("x", 1).detail.includes("1 further error since"),
+  );
+
+  /*
+   * The report, which is the thing a person actually pastes. The versions are
+   * in it because an issue asks for them every time, and because main has all
+   * of them without asking the renderer -- which matters when the renderer is
+   * the half that has stopped answering.
+   */
+  const facts = {
+    appName: "Schematic AI Studio",
+    appVersion: "1.0.0",
+    platform: "win32 x64",
+    electron: "33.0.0",
+    chrome: "130.0.0",
+    node: "20.18.0",
+    kind: "error" as const,
+    message: "Cannot read properties of null (reading 'children')",
+    at: "app.js:1:2",
+    stack: "at $effect (BlockPicker.svelte)",
+  };
+  const text = failureReport(facts);
+  for (const wanted of [
+    "1.0.0",
+    "win32 x64",
+    "33.0.0",
+    "Cannot read properties of null",
+    "BlockPicker.svelte",
+  ]) {
+    check(`the report carries ${wanted}`, text.includes(wanted), text);
+  }
+
+  /*
+   * An empty stack or location leaves no ragged blank line behind. It is the
+   * ordinary case for a rejection, not an edge one.
+   */
+  const bare = failureReport({ ...facts, at: "", stack: "" });
+  check(
+    "...and says nothing where there was nothing to say",
+    !bare.includes("at ") && !/\n\s*\n\s*$/.test(bare),
+    JSON.stringify(bare),
+  );
+
+  /*
+   * The issue URL is built from the repository the manifest already names, and
+   * carries an **abridged** body: GitHub takes it as a query parameter, so it
+   * travels in a URL, and a stack clears that ceiling easily. `abridgeTrace`'s
+   * rule -- cap on the way out and say what was dropped. The whole report is on
+   * the clipboard by then, so the sentence is an instruction, not an apology.
+   */
+  const long = failureReport({ ...facts, stack: "at frame\n".repeat(400) });
+  check(
+    "a long report is abridged for the URL",
+    issueBody(long).length < long.length,
+    `${issueBody(long).length} vs ${long.length}`,
+  );
+  check(
+    "...and says where the rest of it is",
+    issueBody(long).includes("clipboard"),
+  );
+  check(
+    "a short one is carried whole",
+    issueBody(text).includes(facts.message),
+  );
+
+  const url = issueUrl("https://github.com/gamerover98/Schematic-Ai-Studio", text);
+  check(
+    "the URL points at the repository the manifest names",
+    url.startsWith("https://github.com/gamerover98/Schematic-Ai-Studio/issues/new?"),
+    url,
+  );
+  /*
+   * And it survives the round trip. A body that arrived percent-mangled would
+   * still open a page, which is exactly the kind of wrong that looks right.
+   */
+  const body = new URL(url).searchParams.get("body") ?? "";
+  check(
+    "...and the body decodes back to what was put in it",
+    body === issueBody(text),
+  );
+  check(
+    "...trailing slash or not",
+    issueUrl("https://example.com/repo/", text).includes("/repo/issues/new?"),
+  );
 }
 
 // --- every declared channel is actually served ------------------------------
@@ -1965,6 +2799,44 @@ console.log("\n--- recovering is opening ---");
 // `AbortSignal` since it was written and was never handed one, and there was no
 // channel to ask for it. This walks the source rather than the module, because
 // `handlers.ts` imports Electron and cannot be loaded here.
+// --- the picture a copy leaves behind ------------------------------------------
+//
+// Ctrl+C arms a ghost of what is held, drawn where Ctrl+V would put it. It is
+// the *clipboard's* geometry and not the selection's, and a **cut** is the one
+// gesture that can tell those apart: by the time the ghost is asked for, the
+// region it came from is empty, so a picture meshed from the region would be
+// nothing at all -- on the gesture where seeing what you are holding matters
+// most.
+console.log("\n--- the picture a copy leaves behind ---");
+{
+  const pack = await findBundledResourcePack();
+  const options = { resourcePackPath: null, fallbackResourcePackPath: pack };
+  const session = newDocument({ width: 8, height: 4, length: 8 });
+
+  // Nothing has been copied in this suite, so this is genuinely the state
+  // before the first copy rather than a leftover -- which is the null arm.
+  const nothing = await clipboardMesh(session, options);
+  equal("nothing copied yet is nothing to draw", nothing.chunks.length, 0);
+
+  for (let x = 1; x <= 2; x += 1) {
+    for (let z = 1; z <= 2; z += 1) {
+      setBlock(session.doc, x, 0, z, { namespacedName: "minecraft:stone", properties: {} });
+    }
+  }
+  const region = { minX: 1, minY: 0, minZ: 1, maxX: 2, maxY: 0, maxZ: 2 };
+  cutSelection(session, region);
+
+  const fromRegion = await regionMesh(session, region, options);
+  equal("a cut region has nothing left to draw", fromRegion.chunks.length, 0);
+  const held = await clipboardMesh(session, options);
+  check(
+    "...and the clipboard still draws what was taken",
+    held.chunks.some((chunk) => chunk.positions.length > 0),
+    String(held.chunks.length),
+  );
+  closeDocument();
+}
+
 console.log("\n--- ipc channels ---");
 {
   /*
@@ -1989,9 +2861,14 @@ console.log("\n--- ipc channels ---");
   walk(mainDir);
   const handlers = sources.join("\n");
 
-  // Two ways a channel is legitimately served: answered as a request, or sent
-  // as an event. A mention in a comment or a name in a type does not count,
-  // which is the whole point of matching the call and not the identifier.
+  // Three ways a channel is legitimately served: answered as a request, sent
+  // as an event, or *listened for* as one. A mention in a comment or a name in
+  // a type does not count, which is the whole point of matching the call and
+  // not the identifier.
+  // `ipcMain.on` is the third and arrived with `rendererFailed`, which is sent
+  // by a window that may be moments from being unable to run anything -- so it
+  // has to be an event with nothing to reply to, and a walk that knew only the
+  // other two called a served channel unserved.
   // The whitespace is loose because a handler with a long signature is split
   // across lines by the formatter, and a check that only recognised the
   // one-line form would report perfectly good channels as unserved.
@@ -1999,7 +2876,7 @@ console.log("\n--- ipc channels ---");
   // no payload is `send(IPC.menuNew)` through a local helper, and the older
   // pattern would have missed every one of them.
   const served = (name: string): boolean =>
-    new RegExp(`(?:ipcMain\\.handle|\\bsend)\\(\\s*IPC\\.${name}\\s*[,)]`).test(handlers);
+    new RegExp(`(?:ipcMain\\.(?:handle|on)|\\bsend)\\(\\s*IPC\\.${name}\\s*[,)]`).test(handlers);
 
   const unserved = Object.keys(IPC).filter((name) => !served(name));
   equal("every channel in IPC is handled or sent by main", unserved.join(", "), "");

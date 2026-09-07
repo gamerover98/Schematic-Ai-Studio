@@ -36,6 +36,7 @@
 
 import {
   paletteEntryCacheKey,
+  matchesBlockPattern,
   type BlockEntityRecord,
   type EntityRecord,
   type NbtCompound,
@@ -43,7 +44,6 @@ import {
 } from "../pipeline/types.js";
 import { deriveConnections } from "./connect.js";
 import {
-  internPalette,
   posKey,
   resizeDocument,
   setBlock,
@@ -184,6 +184,47 @@ export function nextRedoLabel(history: History): string | null {
 }
 
 /**
+ * How far the transactions pushed since `sinceId` moved the document's content.
+ *
+ * The grid has no negative index, so making room *below* the origin can only
+ * be done by moving everything that is already there up and out of the way --
+ * `growthToInclude` says so in as many words, and `resizeDocument` compensates
+ * `offset` and `worldOrigin` in the opposite direction so the build keeps its
+ * place in the world.
+ *
+ * What had no answer was everything **outside** main. The renderer holds a
+ * selection, a pivot and a stamp, all of which name particular cells, and none
+ * of them was told. Drag a selection below the origin and the schematic grew,
+ * the content slid one way, and the box stayed where the pointer left it --
+ * outside the document, to be clamped by the next `normalizeRegion`.
+ *
+ * Derived here rather than returned by the five functions that grow, because
+ * `tx.resize` is the one place that knows and every one of them goes through
+ * it. Read against an id captured before the call: a body that changed nothing
+ * pushes no transaction, and then there is no shift to find rather than a
+ * stale one to report.
+ *
+ * Summed rather than taken from the newest, because a transaction is a list
+ * and nothing says a future one holds only a single resize.
+ */
+export function contentShiftSince(
+  history: History,
+  sinceId: number,
+): readonly [number, number, number] {
+  const total: [number, number, number] = [0, 0, 0];
+  for (const transaction of history.undoStack) {
+    if (transaction.id < sinceId) continue;
+    for (const command of transaction.commands) {
+      if (command.kind !== "resize") continue;
+      total[0] += command.shift[0];
+      total[1] += command.shift[1];
+      total[2] += command.shift[2];
+    }
+  }
+  return total;
+}
+
+/**
  * The id of the transaction an undo would revert, or `null` for an empty stack.
  *
  * The label's counterpart, and the one to compare against: a caller holding an
@@ -209,6 +250,27 @@ export interface TransactionScope {
   setBlockEntity(x: number, y: number, z: number, record: BlockEntityRecord | null): void;
   fill(region: Region, entry: PaletteEntry): number;
   replace(region: Region, from: PaletteEntry, to: PaletteEntry): number;
+  /**
+   * `replace` for several patterns at once, in **one** pass over the voxels.
+   *
+   * Calling `replace` in a loop is N passes, and the caller that wants this is
+   * backporting a schematic: fifty blocks the older version never had, over a
+   * document that may be tens of millions of cells. One pass is the difference
+   * between a wait and a hang.
+   */
+  replaceAny(region: Region, from: readonly PaletteEntry[], to: PaletteEntry): number;
+  /**
+   * Rewrites every cell whose palette entry the function gives an answer for.
+   *
+   * One pass, and the function is asked **once per palette entry** rather than
+   * once per cell -- which is what makes it affordable on the operation that
+   * needs it. A version change is the one edit that genuinely may touch every
+   * block in the document, and it has three things to do at once: rename what
+   * was renamed, rewrite the property values the target cannot say, and drop
+   * what it does not have. Expressed as three `replaceAny` calls those are
+   * three passes over the voxels; expressed as one function they are one.
+   */
+  remap(region: Region, rewrite: (entry: PaletteEntry) => PaletteEntry | null): number;
   resize(
     size: { width: number; height: number; length: number },
     shift?: readonly [number, number, number],
@@ -356,16 +418,100 @@ class Recorder implements TransactionScope {
     return count;
   }
 
+  /**
+   * Rewrites every cell in `region` holding `from`.
+   *
+   * **`from` is a pattern, and naming no properties means the block in any
+   * state.** That is what the rest of the codebase already assumed it was: it
+   * is the stated reason `replace_blocks` parses its `from` with `toEntry`
+   * rather than `toPlacedEntry`, so that asking to take out the campfires does
+   * not quietly become asking for the ones that happen to face north.
+   *
+   * It was not one. `from` was interned and compared as an exact index, so a
+   * bare name matched only a palette entry that carried no properties at all --
+   * and interning it *added* that entry, leaving a dead row behind on every
+   * miss. On a flat document that reads as an occasional puzzle. On a legacy
+   * one it is total: `legacy_blocks.json` gives a state to 1,449 of its 1,682
+   * rows, so a `.schematic` opens with `grass_block[snowy=false]` and
+   * `oak_fence[east=false,...]` in its palette and *nothing a person can type*
+   * matches any of it. Every replace answered `changed: 0`.
+   *
+   * Spelling the state out still means exactly that state, which is how you
+   * take out one stair orientation and leave the others.
+   *
+   * The palette may grow underneath this: `setBlock` interns `to` if it is new.
+   * Reading past the end of `wanted` yields `undefined`, which is falsy and is
+   * the right answer -- a row added during the pass is `to`, and rewriting what
+   * has just been written is precisely what must not happen.
+   */
   replace(region: Region, from: PaletteEntry, to: PaletteEntry): number {
-    // Matched on the interned index rather than by comparing names at every
-    // cell: one lookup up front, then an integer compare per voxel.
-    const fromIndex = internPalette(this.doc, from);
+    return this.replaceAny(region, [from], to);
+  }
+
+  remap(region: Region, rewrite: (entry: PaletteEntry) => PaletteEntry | null): number {
+    /*
+     * Decided once over the palette, read per voxel -- `replaceAny`'s trade,
+     * and here it is the difference between one string comparison per block
+     * and one array read.
+     */
+    const targets: (PaletteEntry | null)[] = this.doc.palette.map((entry) => rewrite(entry));
+    if (!targets.some((entry) => entry !== null)) return 0;
+
     let count = 0;
     for (let x = region.minX; x <= region.maxX; x += 1) {
       for (let y = region.minY; y <= region.maxY; y += 1) {
         for (let z = region.minZ; z <= region.maxZ; z += 1) {
           const index = x * this.doc.height * this.doc.length + y * this.doc.length + z;
-          if (this.doc.voxels[index] === fromIndex && this.setBlock(x, y, z, to)) {
+          /*
+           * The palette grows underneath this pass -- `setBlock` interns a
+           * target that is new -- so an index past the end of `targets` reads
+           * as `undefined`, which is falsy and is the right answer: a row added
+           * during the pass is something this pass just wrote, and rewriting it
+           * again would chase its own tail.
+           */
+          const to = targets[this.doc.voxels[index]];
+          if (to !== null && to !== undefined && this.setBlock(x, y, z, to)) {
+            count += 1;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
+  replaceAny(region: Region, from: readonly PaletteEntry[], to: PaletteEntry): number {
+    /*
+     * Decided once over the palette, then read per voxel. Comparing names at
+     * every cell would be a string compare per block; this is an array read,
+     * which is what the interned-index version bought and is worth keeping.
+     */
+    const wanted = new Uint8Array(this.doc.palette.length);
+    let any = false;
+    for (const pattern of from) {
+      for (let i = 0; i < this.doc.palette.length; i += 1) {
+        if (wanted[i] === 1) continue;
+        /*
+         * `matchesBlockPattern` rather than the two-branch comparison this
+         * used to spell out for itself. The rule is unchanged; what changed
+         * is that it is now written in one place, because two other callers
+         * were asking the same question and answering it differently.
+         */
+        if (matchesBlockPattern(this.doc.palette[i], pattern)) {
+          wanted[i] = 1;
+          any = true;
+        }
+      }
+    }
+    // Nothing to match, and deliberately nothing interned: a miss must not
+    // leave a palette entry for a block the schematic does not contain.
+    if (!any) return 0;
+
+    let count = 0;
+    for (let x = region.minX; x <= region.maxX; x += 1) {
+      for (let y = region.minY; y <= region.maxY; y += 1) {
+        for (let z = region.minZ; z <= region.maxZ; z += 1) {
+          const index = x * this.doc.height * this.doc.length + y * this.doc.length + z;
+          if (wanted[this.doc.voxels[index]] === 1 && this.setBlock(x, y, z, to)) {
             count += 1;
           }
         }

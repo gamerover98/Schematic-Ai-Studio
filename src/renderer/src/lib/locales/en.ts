@@ -69,7 +69,11 @@ export const en = {
   "mcp.title": "MCP server",
   "mcp.short": "MCP",
   "mcp.keywords": "mcp server claude code codex api integration remote",
-  "mcp.stateListening": "listening, no client connected",
+  // The client count is its own line now, so this no longer says it. It said
+  // "listening, no client connected", which the unauthenticated state then
+  // displaced -- and with it the only place the count appeared.
+  "mcp.stateListening": "listening",
+  "mcp.stateUnauthenticated": "listening — no token required",
   "mcp.stateStarting": "starting",
   "mcp.stateError": "could not start",
   "mcp.stateOff": "off",
@@ -103,8 +107,15 @@ export const en = {
   "mcp.activity": "Recent calls",
   "mcp.activityEmpty": "Nothing yet.",
   "mcp.activityFailed": "failed",
+  "mcp.clients": "Clients",
   "mcp.clients.one": "1 client connected",
   "mcp.clients.other": "{count} clients connected",
+  "mcp.requireAuth": "Require a token",
+  "mcp.requireAuthHint":
+    "On, a client has to send the token above. Off, anything that can reach the address below can read, write and save your schematics — and delete them if that is allowed too. Only offered while the server is bound to this machine.",
+  "mcp.bindAddress": "Listen on",
+  "mcp.bindAddressHint":
+    "127.0.0.1 is this machine only. 0.0.0.0 is every network interface, which puts the editor on your network — the token is what stands between it and anyone who can route to you, so it cannot be turned off there. This is an address, not a range.",
   "settings.theme": "Theme",
   "settings.theme.system": "Match the system",
   "settings.theme.light": "Light",
@@ -172,6 +183,11 @@ export const en = {
   "void.air": "Air",
   "void.block": "Block",
   "void.opacity": "Opacity \u2014 {percent}%",
+  "void.replaceApply": "Replace what is already there",
+  "void.replaceWhat":
+    "Every cell holding {from} becomes {to} \u2014 one step, so Ctrl+Z takes it all back. Choosing a block changes what is drawn and what a break writes; this changes the schematic itself.",
+  "void.replaceNone":
+    "Nothing to convert: no cell in this schematic holds {from}. Choose a different block, or place some first.",
   "void.pickNote":
     "Clicks pass through this block wherever it appears, including where you placed it by hand. That is what lets you reach the build inside it.",
   "dimensions.openHint": "How big the schematic is, and whether editing may change it",
@@ -195,9 +211,9 @@ export const en = {
     "Draw without perspective, so parallel lines stay parallel and distance does not shrink a block. Orbit only \u2014 flying needs a point of view.",
   "viewport.creativeHint": "Fly through it — WASD, Space and Shift",
   "viewport.hudOrbit":
-    "Left: pan · Right: rotate · Wheel: zoom · Click: select · Drag a face: resize · R: reset",
+    "Left: pan · Right: rotate · Wheel: zoom · Click: select · Shift+drag: region · R: reset",
   "viewport.hudFlying":
-    "WASD: move · Space/Shift: up, down · Ctrl: faster · Left: break · Right: place · Esc: release",
+    "WASD: move · Space/Shift: up, down · Left: break · Right: use · Shift+right: place · Esc: release",
   "viewport.hudClickToFly": "Click the viewport to fly",
   "viewport.unavailable": "Preview unavailable.",
   "viewport.noAtlas": "The mesh arrived without a texture atlas and none is held.",
@@ -244,6 +260,21 @@ export const en = {
   "doc.length": "Length (z)",
   "doc.volume": "{count} blocks",
   "doc.savingSize": "Saving {size} as it stands. Empty space around the build is trimmed on the way out.",
+  "mcversion.open": "Version",
+  "mcversion.openHint": "Change which Minecraft this schematic is for",
+  "mcversion.title": "Minecraft version",
+  "mcversion.container":
+    "This schematic is a {format}, and stays one. Changing the container is Save As or Convert.",
+  "mcversion.unstated": "Not stated in the file",
+  "mcversion.useSaveAs":
+    "Save As or Convert can write it in a container that fits, in one step.",
+  "mcversion.toLegacy":
+    "Before 1.13 blocks were numeric ids, and the set is much smaller. Anything the older version never had is replaced with the empty space block \u2014 you will be told how much before it happens, and it can be undone.",
+  "mcversion.backport":
+    "Blocks the older version never had are replaced with the empty space block, and you will be told how many before it happens. Blocks that were only renamed are simply renamed \u2014 nothing is lost and nothing is asked.",
+  "mcversion.apply": "Change version",
+  "mcversion.applyAnyway": "Change it and drop those blocks",
+  "status.versionChanged": "Now a Minecraft {version} schematic. {notes}",
   "doc.version": "Minecraft",
   "doc.format": "Container",
   "doc.legacyEra": "legacy",
@@ -268,6 +299,31 @@ export const en = {
   "hotbar.slotHint": "Press {key} to hold this, right-click to replace it",
 
   "selection.legend": "Selection",
+  "gizmo.legend": "Transform",
+  "gizmo.move": "Move",
+  "gizmo.move.hint": "Drag an arrow to slide the selection along one axis",
+  "gizmo.rotate": "Turn",
+  "gizmo.rotate.hint":
+    "Drag the ring to turn the selection about the pivot, a quarter at a time",
+  "gizmo.scale": "Scale",
+  "gizmo.scale.hint": "Drag a cube to resample the selection by a whole factor",
+  "gizmo.pivot": "Pivot",
+  "gizmo.pivot.hint":
+    "Drag an arrow to move the point turns and mirrors happen about, leaving the blocks where they are",
+  "gizmo.mirror.x": "Mirror east to west, through the pivot",
+  "gizmo.mirror.y": "Flip top to bottom, through the pivot",
+  "gizmo.mirror.z": "Mirror north to south, through the pivot",
+  "gizmo.copy": "Copy",
+  "gizmo.copy.hint":
+    "Take the selection to the clipboard, and leave a ghost of it where a paste would land",
+  "gizmo.paste": "Paste",
+  "gizmo.paste.hint": "Write the clipboard in at the selection's corner",
+  "gizmo.skipEmpty": "Keep what is under it",
+  "gizmo.skipEmpty.hint":
+    "Leave {block} where it falls, so a paste does not stamp empty space over what is already there",
+  "gizmo.skipEmpty.air": "Empty space here is air, which a paste never writes",
+  "gizmo.resetPivot": "Centre pivot",
+  "gizmo.resetPivotHint": "Put the pivot back in the middle of the selection",
   "selection.size": "{width}×{height}×{length}",
   "selection.hint":
     "Click a block in the viewport to select it, Shift-click another to extend the box.",
@@ -276,28 +332,8 @@ export const en = {
   "selection.all": "Select all",
   "selection.clear": "Deselect",
   "selection.clearHint": "Drop the selection (Esc)",
-  "selection.move": "Move",
-  "selection.moveHint": "Pick the selection up, then click where it goes",
-  "selection.moveCancel": "Cancel move",
-  "selection.moveCancelHint": "Put it back (Esc)",
   "selection.delete": "Delete",
   "selection.deleteHint": "Replace the selection with air (Del)",
-  "selection.copy": "Copy",
-  "selection.cut": "Cut",
-  "selection.paste": "Paste",
-  "selection.pasteNoClipboard": "Copy something first",
-  "selection.pasteNoSelection": "Select where it should go",
-  "selection.pasteHint": "Paste {width}×{height}×{length} at the selection's corner",
-  "selection.clipboard": "Clipboard: {width}×{height}×{length}, {blocks} blocks",
-  "selection.rotate90": "⟳ 90°",
-  "selection.rotate90Hint":
-    "Turn the selection a quarter clockwise — needs a square footprint",
-  "selection.rotate180": "180°",
-  "selection.rotate180Hint": "Turn the selection halfway round",
-  "selection.flipX": "Flip X",
-  "selection.flipXHint": "Reflect the selection east to west",
-  "selection.flipZ": "Flip Z",
-  "selection.flipZHint": "Reflect the selection north to south",
   "selection.block": "Block",
   "selection.browse": "Choose from all blocks",
   "selection.fill": "Fill",
@@ -449,6 +485,13 @@ export const en = {
   "provider.needsKey":
     "{model} is billed per token, so it needs a key. The free models in the list above do not.",
   "provider.keyStored": "A key is stored for {provider}. It is never sent back to this window.",
+  "start.legacyProfile":
+    "An earlier version of this app kept your {providers} API key in a different folder, and this one does not read it. Generation will not work until you paste it in again.",
+  "provider.legacyProfile":
+    "An earlier version of this app stored keys for {providers} in {path}. This version reads a different folder and does not migrate them — paste the keys again below.",
+  "provider.legacyProfileReveal": "Show me that folder",
+  "provider.keyUnreadable":
+    "A key for {provider} is stored but this machine can no longer decrypt it — paste it again.",
   "provider.addKey": "Add one in Settings",
   "provider.noEncryption":
     "OS-backed encryption is unavailable on this system, so keys are kept in memory for this " +
@@ -475,6 +518,13 @@ export const en = {
     "preview.",
   "preview.sunAzimuth": "Sun azimuth — {value}°",
   "preview.sunElevation": "Sun elevation — {value}°",
+  "preview.antialias": "Anti-aliasing",
+  "preview.antialias.off": "Off",
+  "preview.antialiasHint":
+    "Smooths the edges of blocks. Applies straight away: the scene is drawn into a multisampled buffer rather than asking the browser for it, which cannot be changed once a window is open.",
+  "preview.showFps": "Show the frame counter",
+  "preview.showFpsHint":
+    "Frames per second and frame time, with the triangles and draw calls behind them.",
   "preview.maxDpr": "Max device pixel ratio — {value}",
   "preview.renderScale": "Render scale — {value}",
   "preview.maxDrawDistance": "Max draw distance — {value}",
@@ -495,6 +545,20 @@ export const en = {
   "preview.shadowsHint":
     "The most expensive thing in the viewport: a second pass over the geometry from the light’s point of view.",
   "preview.shadowQuality": "Shadow detail",
+  "preview.globalIllumination": "Light the build from the sky",
+  "preview.globalIlluminationHint":
+    "Every surface takes the colour of the sky it faces — blue from above, orange at sunset. It only reaches where the sky already did, so a sealed room stays dark.",
+  "preview.globalIlluminationNeedsSky":
+    "Needs the sky: the light comes from the sky itself, so with it off there is nothing to gather.",
+  "preview.shaderMode": "Look",
+  "preview.shaderMode.vanilla": "Vanilla",
+  "preview.shaderMode.vanilla.hint": "The viewport as it has always been drawn.",
+  "preview.shaderMode.cinematic": "Cinematic",
+  "preview.shaderMode.cinematic.hint":
+    "Filmic tone mapping and a stronger sun: bright skies keep their detail instead of clipping to white.",
+  "preview.shaderMode.flat": "Flat",
+  "preview.shaderMode.flat.hint":
+    "No sun at all, so nothing is shaded by where the light is. For looking at the blocks rather than at the building.",
   "preview.ground": "Virtual floor",
   "preview.groundHint":
     "A plane at height zero for the build to stand on and cast shadows onto. Not part of the schematic and never saved.",
@@ -535,6 +599,8 @@ export const en = {
 
   "blocks.all": "all {count} blocks",
   "blocks.matches": "{count} of {total}",
+  "blocks.capped":
+    "First {shown} of {count} matches — type another letter to narrow it.",
 
   "recovery.title": "Unsaved work was found",
   "recovery.unnamed": "An unsaved schematic",
@@ -606,6 +672,7 @@ export const en = {
   "task.redoing": "Redoing",
   "task.placingBlock": "Placing a block",
   "task.breakingBlock": "Breaking a block",
+  "task.usingBlock": "Opening a block",
   "task.changingBlockState": "Changing a block state",
   "task.removingBlockState": "Removing a block state",
   "task.editingNbt": "Editing block entity data",
@@ -614,6 +681,7 @@ export const en = {
   "task.settingOrigin": "Setting the WorldEdit origin",
   "task.pasting": "Pasting",
   "task.transforming": "Transforming the selection",
+  "task.scaling": "Resampling the selection",
   "task.filling": "Filling the selection",
   "task.replacing": "Replacing blocks",
   "task.copying": "Copying the selection",
@@ -641,8 +709,8 @@ export const en = {
   "status.notASchematic": "{name} is not a schematic — open a .schem or .schematic.",
   "status.recovered": "Recovered your unsaved work.",
   "status.recoveredNamed": "Recovered your unsaved work on {name}.",
-  "status.copied": "Copied {count} blocks.",
-  "status.cut": "Cut {count} blocks.",
+  "status.copied": "Copied {count} blocks. Move the selection, Ctrl+V to paste, Esc to stop.",
+  "status.cut": "Cut {count} blocks. Move the selection, Ctrl+V to paste, Esc to stop.",
   "status.nothingMatched": "No blocks matched, so nothing changed.",
   "status.restored.one": "Went back 1 edit. The conversation before it was kept.",
   "status.restored.other": "Went back {count} edits. The conversation before it was kept.",

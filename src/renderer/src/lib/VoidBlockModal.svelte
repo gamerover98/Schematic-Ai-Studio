@@ -19,8 +19,14 @@
    * The last of those has a consequence worth reading before it is met: with
    * water chosen, water placed by hand is unpickable too. There is no way to
    * have both, and this is the half that was asked for.
+   *
+   * **The choice belongs to the schematic, not to the app.** It used to be a
+   * global setting, which meant it followed you from an underwater build to
+   * a cathedral quietly changing what a break wrote into the file. It is now
+   * remembered per path, beside the version and the container.
    */
-  import { VOID_OPACITY } from "../../../shared/settings.js";
+  import type { LegacyIndex } from "../../../shared/legacy_ids.js";
+  import { VOID_OPACITY, voidSources } from "../../../shared/settings.js";
   import BlockPicker from "./BlockPicker.svelte";
   import { t } from "./i18n.svelte.js";
 
@@ -32,14 +38,70 @@
     busy: boolean;
     /** Every id the app can place; the picker searches it. */
     blocks: readonly string[];
+    /** What this schematic can hold; see `BlockPicker`. */
+    placeable?: ReadonlySet<string> | null;
+    /** Passed straight to the block fields; see `BlockPicker`. */
+    legacy?: LegacyIndex | null;
+    /** A failure from main, shown here: the app banner is behind the scrim. */
+    error: string;
+    /**
+     * What empty space was made of before the current pick.
+     *
+     * Owned by the parent, for `VersionModal`'s `needsConfirmation` reason:
+     * only the parent sees whether a conversion actually landed. Picking a
+     * block takes effect at once, so by the time the button is pressed the
+     * document's own value is the *new* one and this is the only thing still
+     * holding the old one.
+     *
+     * It says what to convert **from**, and deliberately nothing about whether
+     * there is anything to convert -- see `present`.
+     */
+    converted: string;
+    /**
+     * Every block the document actually contains.
+     *
+     * This decides whether the button is live, and a *belief* could not: a
+     * schematic whose empty space is set to barrier with its cells still air
+     * looks identical, from the setting, to one where the conversion already
+     * happened. Both say barrier; only one has anything to do. Deciding from
+     * the setting disabled the button in both, so the one gesture that would
+     * have fixed it was the one with no answer.
+     */
+    present: ReadonlySet<string>;
+    /** Choose what empty space is. Takes effect at once; moves no block. */
     onblock: (block: string) => void;
+    /**
+     * Rewrite the cells that hold `from` so they hold `to`. One transaction.
+     *
+     * A press of its own rather than a checkbox carried along with the choice.
+     * The checkbox was read at the moment the block changed, so ticking it
+     * after picking water did nothing, and re-picking water to make it fire
+     * was refused as choosing what was already chosen -- the one gesture
+     * anybody would try was the one with no answer.
+     */
+    onreplace: (from: string, to: string) => void;
     onopacity: (opacity: number) => void;
     onclose: () => void;
   }
 
-  const { open, block, opacity, busy, blocks, onblock, onopacity, onclose }: Props = $props();
+  const {
+    open,
+    block,
+    opacity,
+    busy,
+    blocks,
+    placeable = null,
+    legacy = null,
+    error,
+    converted,
+    present,
+    onblock,
+    onreplace,
+    onopacity,
+    onclose,
+  }: Props = $props();
 
-  let dialog = $state<HTMLDivElement | undefined>(undefined);
+  let dialog = $state<HTMLDivElement | null>(null);
 
   /**
    * The blocks worth offering, and why they are a list rather than the whole
@@ -59,6 +121,36 @@
     "minecraft:structure_void",
   ] as const;
 
+  /*
+   * Cut to what this schematic can hold. `structure_void` arrived in 1.10 and
+   * `barrier` in 1.8, so a legacy document can be offered some of these and
+   * not others -- and a preset that is refused the moment it is clicked is
+   * worse than one that is not there.
+   */
+  const offered = $derived(
+    SUGGESTED.filter(
+      (candidate) => candidate === "" || placeable === null || placeable.has(candidate),
+    ),
+  );
+
+  /** A block id as a person reads it; `""` is air, which has no id to show. */
+  const readable = (id: string): string =>
+    id === "" ? t("void.air") : id.replace("minecraft:", "");
+
+  /*
+   * What a press converts *from*, from the same function main converts with.
+   * Two copies of that rule is how the button comes to be live over an edit
+   * that changes nothing, or dead over one that would work.
+   */
+  const sources = $derived(voidSources(converted, block));
+
+  /*
+   * Dead only when the document holds none of them -- observed, not inferred.
+   * The setting cannot tell the two identical-looking states apart; the
+   * palette can, because one of them has air in it and the other does not.
+   */
+  const nothingToDo = $derived(!sources.some((id) => present.has(id)));
+
   function onKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
       event.stopPropagation();
@@ -67,7 +159,11 @@
   }
 
   $effect(() => {
-    if (open) dialog?.focus();
+    if (!open) return;
+    // Over the viewport, where the canvas may hold the pointer: a panel on
+    // top of a camera still turning underneath is the documented failure.
+    document.exitPointerLock();
+    dialog?.focus();
   });
 </script>
 
@@ -95,7 +191,7 @@
       <p class="hint">{t("void.hint")}</p>
 
       <div class="presets" role="group" aria-label={t("void.presets")}>
-        {#each SUGGESTED as candidate (candidate)}
+        {#each offered as candidate (candidate)}
           <button
             class:active={block === candidate}
             disabled={busy}
@@ -112,6 +208,8 @@
           value={block}
           placeholder="minecraft:air"
           {blocks}
+          {placeable}
+          {legacy}
           onchange={(next) => onblock(next)}
         />
       </label>
@@ -133,6 +231,41 @@
           oninput={(event) => onopacity(Number(event.currentTarget.value))}
         />
       </label>
+
+      <!--
+        The rewrite, on a press of its own.
+
+        It converts the cells that hold the *previous* answer -- the air a
+        schematic has always been full of, or whatever was chosen before. One
+        transaction, so it is one Ctrl+Z.
+
+        It was a checkbox carried along with the choice, and that could not
+        work: it was read at the moment the block changed, so ticking it after
+        picking water did nothing, and re-picking water to make it fire was
+        refused as choosing what was already chosen. Two acts that happen at
+        different moments need two controls.
+      -->
+      <div class="field rewrite">
+        <button
+          class="primary"
+          disabled={busy || nothingToDo}
+          onclick={() => onreplace(converted, block)}
+        >
+          {t("void.replaceApply")}
+        </button>
+      </div>
+      <p class="note">
+        {nothingToDo
+          ? t("void.replaceNone", { from: sources.map(readable).join(", ") })
+          : t("void.replaceWhat", {
+              from: sources.map(readable).join(", "),
+              to: readable(block),
+            })}
+      </p>
+
+      {#if error}
+        <p class="error">{error}</p>
+      {/if}
 
       <p class="note">{t("void.pickNote")}</p>
 
@@ -229,6 +362,29 @@
 
   .inert {
     opacity: 0.5;
+  }
+
+  /* The one control here that changes the document, so it is the one that
+     looks like it. `button.primary` is the app's own accent -- stated in
+     `app.css` and shared with every other modal's confirming button -- so
+     only the width is this panel's business. */
+  .field.rewrite {
+    margin-bottom: 6px;
+  }
+
+  .field.rewrite button {
+    width: 100%;
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .error {
+    margin: 0;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--bg-input);
+    color: var(--text);
+    font-size: 11px;
   }
 
   .note {

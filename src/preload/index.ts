@@ -29,6 +29,9 @@ import {
   type DocumentStateResponse,
   type EditRequest,
   type ResizeRequest,
+  type VersionRequest,
+  type RendererFailure,
+  type VoidBlockRequest,
   type EditResponse,
   type GenerateRequest,
   type GenerateResponse,
@@ -59,9 +62,10 @@ import {
   type PackTexture,
   type SchematicNbtResponse,
   type SetNbtRequest,
+  type ScaleRequest,
   type TransformRequest,
 } from "../shared/ipc.js";
-import type { KeyStorageStatus, Provider, Settings } from "../shared/settings.js";
+import type { Hotbar, KeyStorageStatus, Provider, Settings } from "../shared/settings.js";
 
 const api: BgptApi = {
   getSettings: () => ipcRenderer.invoke(IPC.settingsGet) as Promise<Settings>,
@@ -88,6 +92,12 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.clipboardWrite, text) as Promise<void>,
   getDefaultOutputDir: () => ipcRenderer.invoke(IPC.defaultOutputDir) as Promise<string>,
   listBlocks: () => ipcRenderer.invoke(IPC.blocksList) as Promise<string[]>,
+  listLegacyBlocks: () =>
+    ipcRenderer.invoke(IPC.blocksLegacy) as Promise<Record<string, string>>,
+  readHotbar: (filePath: string) =>
+    ipcRenderer.invoke(IPC.hotbarRead, filePath) as Promise<Hotbar>,
+  writeHotbar: (filePath: string, hotbar: Hotbar) =>
+    ipcRenderer.invoke(IPC.hotbarWrite, filePath, hotbar) as Promise<void>,
   getBlockIcons: (req) => ipcRenderer.invoke(IPC.blockIcons, req) as Promise<BlockIconsResponse>,
   warmBlockIcons: () => ipcRenderer.invoke(IPC.blockIconsWarm) as Promise<number>,
 
@@ -116,6 +126,14 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.docApply, request) as Promise<EditResponse>,
   resizeDocument: (request: ResizeRequest) =>
     ipcRenderer.invoke(IPC.docResize, request) as Promise<EditResponse>,
+  setVoidBlock: (request: VoidBlockRequest) =>
+    ipcRenderer.invoke(IPC.docSetVoidBlock, request) as Promise<EditResponse>,
+  setDocumentVersion: (request: VersionRequest) =>
+    ipcRenderer.invoke(IPC.docSetVersion, request) as Promise<EditResponse>,
+  // `send`, not `invoke`: the window reporting this may be moments from being
+  // unable to run anything, and a promise to await is the one thing that would
+  // never come back.
+  reportFailure: (report: RendererFailure) => ipcRenderer.send(IPC.rendererFailed, report),
   convertFile: (request: ConvertRequest) =>
     ipcRenderer.invoke(IPC.convertFile, request) as Promise<ConvertResponse>,
   undo: () => ipcRenderer.invoke(IPC.docUndo) as Promise<EditResponse>,
@@ -130,6 +148,8 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.docNbtApply, request) as Promise<EditResponse>,
   setWorldOrigin: (origin: [number, number, number] | null) =>
     ipcRenderer.invoke(IPC.docSetOrigin, origin) as Promise<EditResponse>,
+  scaleRegion: (request: ScaleRequest) =>
+    ipcRenderer.invoke(IPC.docScale, request) as Promise<EditResponse>,
   transformRegion: (request: TransformRequest) =>
     ipcRenderer.invoke(IPC.docTransform, request) as Promise<EditResponse>,
   copyRegion: (region) => ipcRenderer.invoke(IPC.docCopy, region) as Promise<ClipboardResponse>,
@@ -139,6 +159,7 @@ const api: BgptApi = {
   moveRegion: (request: MoveRegionRequest) =>
     ipcRenderer.invoke(IPC.docMove, request) as Promise<EditResponse>,
   regionMesh: (region) => ipcRenderer.invoke(IPC.docRegionMesh, region) as Promise<RegionMeshResponse>,
+  clipboardMesh: () => ipcRenderer.invoke(IPC.docClipboardMesh) as Promise<RegionMeshResponse>,
   getSkyTextures: () => ipcRenderer.invoke(IPC.skyTextures) as Promise<SkyTextures>,
   getAnchorTexture: () => ipcRenderer.invoke(IPC.anchorTexture) as Promise<PackTexture | null>,
   setWorldEditAnchor: (anchor: [number, number, number] | null) =>

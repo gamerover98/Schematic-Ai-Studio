@@ -18,6 +18,7 @@
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { mcVersion } from "../../../shared/mc_versions.js";
   import { blockLabel, gridWindow, inventoryBlocks } from "./inventory.js";
+import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
   import { t } from "./i18n.svelte.js";
 
   interface Props {
@@ -26,13 +27,39 @@
     blocks: readonly string[];
     /** Shown beside the search, so the target is never a mystery. */
     version: string;
+    /**
+     * The names this schematic can hold, or `null` for no restriction.
+     *
+     * Only a legacy document supplies one: `legacy_blocks.json` says exactly
+     * which blocks a pre-Flattening file can name, and it is the same table
+     * the writer refuses a save on. Above 1.13 there is no such data and
+     * nothing is cut -- see `inventoryBlocks`.
+     */
+    placeable?: ReadonlySet<string> | null;
+    /**
+     * The pre-Flattening table, when this schematic is one.
+     *
+     * A legacy file stores `35:14`, not `minecraft:red_wool` -- so on a legacy
+     * document the grid says both. Naming only the modern spelling would be
+     * telling somebody the app's word for a block instead of the file's.
+     */
+    legacy?: LegacyIndex | null;
     /** What the chosen block is for — named so the title can say it. */
     purpose: "hand" | "fill" | "replace";
     onclose: () => void;
     onpick: (block: string) => void;
   }
 
-  const { open, blocks, version, purpose, onclose, onpick }: Props = $props();
+  const {
+    open,
+    blocks,
+    version,
+    placeable = null,
+    legacy = null,
+    purpose,
+    onclose,
+    onpick,
+  }: Props = $props();
 
   const TILE = 68;
   const COLUMNS = 8;
@@ -40,10 +67,10 @@
   let query = $state("");
   let scrollTop = $state(0);
   let viewportHeight = $state(420);
-  let scroller = $state<HTMLDivElement | undefined>(undefined);
-  let search = $state<HTMLInputElement | undefined>(undefined);
+  let scroller = $state<HTMLDivElement | null>(null);
+  let search = $state<HTMLInputElement | null>(null);
 
-  const filtered = $derived(inventoryBlocks(blocks, query));
+  const filtered = $derived(inventoryBlocks(blocks, query, placeable));
   const view = $derived(
     gridWindow({
       count: filtered.length,
@@ -139,7 +166,7 @@
                 onpick(block);
                 onclose();
               }}
-              title={block}
+              title={legacyIdFor(legacy, block) ?? block}
             >
               {#if icons.get(block)}
                 <img src={icons.get(block)} alt="" width="40" height="40" />
@@ -149,6 +176,9 @@
                 <span class="pending" aria-hidden="true"></span>
               {/if}
               <span class="name">{blockLabel(block)}</span>
+              {#if legacyIdFor(legacy, block)}
+                <span class="legacy">{legacyIdFor(legacy, block)}</span>
+              {/if}
             </button>
           {/each}
         </div>
@@ -258,6 +288,19 @@
     height: 40px;
     border-radius: 4px;
     background: var(--bg-input);
+  }
+
+  /*
+   * The `ID:DATA` the file will really store, on a legacy schematic only.
+   * Smaller than the name and dimmer, because it answers a question the name
+   * has already answered -- it is there for the person writing commands
+   * against the same build.
+   */
+  .legacy {
+    font-size: 8px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.7;
   }
 
   .name {

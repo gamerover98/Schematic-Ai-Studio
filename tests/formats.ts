@@ -56,6 +56,15 @@ import {
 } from "../src/main/services/writers.js";
 import { dataVersionFor } from "../src/main/services/versions.js";
 import { bitsPerEntry } from "../src/main/pipeline/litematic_bits.js";
+import {
+  blockExistsIn,
+  blocksIn,
+  isVersioned,
+  propertyExistsIn,
+  propertyValueIn,
+  renameFor,
+  versionedBlockCount,
+} from "../src/shared/block_versions.js";
 import { parseMcfunction } from "../src/main/pipeline/mcfunction.js";
 import { convertFile, extensionForKind } from "../src/main/services/convert.js";
 import {
@@ -78,6 +87,8 @@ import {
   MAX_FILL_VOLUME,
   MCFUNCTION_MIN_DATA_VERSION,
   commandLimit,
+  mcfunctionCanCarry,
+  mcfunctionRefusal,
 } from "../src/shared/command_syntax.js";
 import { dataVersionFor as _unusedDataVersionFor, VERSION_NAMES } from "../src/main/services/versions.js";
 import {
@@ -97,7 +108,10 @@ import {
   MC_VERSIONS,
   mcVersion,
   refusalFor,
+  resolveVersionName,
   versionNameOf,
+  versionRangesSentence,
+  versionsFor,
 } from "../src/shared/mc_versions.js";
 
 let failures = 0;
@@ -124,6 +138,15 @@ const block = (name: string, properties: Record<string, string> = {}): PaletteEn
   properties,
 });
 
+import {
+  buildLegacyIndex,
+  legacyIdFor,
+  legacyIdLabel,
+  parseLegacyId,
+  resolveBlockInput,
+} from "../src/shared/legacy_ids.js";
+import { loadLegacyBlockTable } from "../src/main/pipeline/loader_formats.js";
+import { buildReverseLegacyTable } from "../src/main/services/writers.js";
 const LEGACY_BLOCKS = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -1688,6 +1711,78 @@ console.log("\n--- convert ---");
       legacy ?? "",
     );
 
+    /*
+     * ...and the `.mcfunction` case, which used to be refused by nothing at all.
+     *
+     * `convertFile` skipped `refusalFor` for this format outright -- reasonably,
+     * because a function carries no version tag for a container rule to be about
+     * -- and the consequence was that `MCFUNCTION_MIN_DATA_VERSION` was read by
+     * the tests and by nothing else. A 1.12.2 schematic converted happily into
+     * commands naming flattened blocks that version has never had: a file that
+     * runs, places almost nothing, and reports no error at all.
+     */
+    let commands: string | null = null;
+    try {
+      await convertFile({
+        source: start,
+        target: path.join(workDir, "legacy.mcfunction"),
+        format: "mcfunction",
+        version: "JE_1_12_2",
+      });
+    } catch (err) {
+      commands = err instanceof Error ? err.message : String(err);
+    }
+    check("a pre-Flattening version as commands is refused", commands !== null);
+    check(
+      "...naming the release setblock needs, not Sponge's palette",
+      (commands ?? "").includes("1.13") && !(commands ?? "").includes("palette"),
+      commands ?? "",
+    );
+
+    /*
+     * And the label, which this file refused while accepting the name -- the
+     * same asymmetry that produced the report, one verb along. `26.2` is what
+     * anybody types.
+     */
+    /*
+     * Caught rather than awaited bare: dropping the label index makes this
+     * *throw*, and an uncaught throw here would abort the suite and hide every
+     * check after it -- which is the failure `check.sh` is arranged not to have.
+     */
+    let labelled: number | null | string = null;
+    try {
+      const byLabel = await convertFile({
+        source: start,
+        target: path.join(workDir, "labelled.schem"),
+        format: "sponge3",
+        version: "1.16.5",
+      });
+      labelled = documentFromLoaded(
+        await loadStructure(byLabel.files[0]),
+        byLabel.files[0],
+      ).dataVersion;
+    } catch (err) {
+      labelled = err instanceof Error ? err.message : String(err);
+    }
+    equal(
+      "a version named by label converts like one named canonically",
+      labelled,
+      mcVersion("JE_1_16_5")?.dataVersion ?? null,
+    );
+
+    let nonsense: string | null = null;
+    try {
+      await convertFile({
+        source: start,
+        target: path.join(workDir, "nonsense.schem"),
+        format: "sponge3",
+        version: "banana",
+      });
+    } catch (err) {
+      nonsense = err instanceof Error ? err.message : String(err);
+    }
+    check("...while a version this build never had is still refused", nonsense !== null);
+
     const stamped = await convertFile({
       source: start,
       target: path.join(workDir, "stamped.schem"),
@@ -2082,6 +2177,124 @@ console.log("\n--- litematic and mcfunction floors ---");
   check("an unknown limit throws rather than defaulting", refused);
 
   /*
+   * ...and the mcfunction floor stops being a number only the tests look at.
+   *
+   * `MCFUNCTION_MIN_DATA_VERSION` was declared, documented and read nowhere:
+   * the converter skipped `refusalFor` for `.mcfunction` outright, so a 1.12.2
+   * schematic came out as commands naming blocks that version has never had --
+   * a file that runs, places nothing recognisable, and reports no error.
+   */
+  check("commands cannot be written for the legacy era", !mcfunctionCanCarry("legacy", 1343));
+  check(
+    "...not even for the two releases that carry no DataVersion at all",
+    !mcfunctionCanCarry("legacy", null),
+  );
+  /*
+   * That second one is the case a number-only rule lets through, and it is not
+   * hypothetical: 1.8.8 and 1.8.9 have `dataVersion: null` in the table, so
+   * "no number" and "no claim" would be the same answer without the era.
+   */
+  check("1.13 can", mcfunctionCanCarry("flat", 1519));
+  check(
+    "...and so can a conversion that named no version at all",
+    mcfunctionCanCarry("flat", null),
+  );
+  check(
+    "the refusal names the release rather than saying unavailable",
+    (mcfunctionRefusal("legacy", 1343, "1.12.2") ?? "").includes("1.13"),
+    mcfunctionRefusal("legacy", 1343, "1.12.2") ?? "(none)",
+  );
+  equal("a version that can be written is not refused", mcfunctionRefusal("flat", 1519, "1.13"), null);
+
+  // --- a version is one thing under two spellings -------------------------
+  console.log("\n--- a name and a label are the same version ---");
+
+  /*
+   * The whole table, both ways round.
+   *
+   * `JE_26_2` is what everything is keyed on and `26.2` is what a person says,
+   * and until `resolveVersionName` existed only the first one worked: the
+   * second reached `dataVersionOf`, missed, and came back `null` -- which is
+   * indistinguishable from 1.8.8's genuine absence of a DataVersion and from
+   * no version having been asked for. An MCP client asked for 26.2 and got a
+   * schematic with no version tag, in silence.
+   *
+   * Stated over every row rather than on a couple of examples, because a row
+   * added by hand to the generated table is exactly what a sampled check
+   * misses.
+   */
+  {
+    const wrong: string[] = [];
+    for (const row of MC_VERSIONS) {
+      if (resolveVersionName(row.name) !== row.name) wrong.push(`name ${row.name}`);
+      if (resolveVersionName(row.label) !== row.name) wrong.push(`label ${row.label}`);
+    }
+    equal("every version resolves from its name and from its label", wrong, []);
+  }
+
+  /*
+   * And a near miss is refused rather than repaired. Two spellings is the
+   * limit: this is the function every caller checks before refusing by name,
+   * so a guess here would put the silence back one level down.
+   */
+  equal("a version this build has never heard of resolves to nothing", resolveVersionName("banana"), null);
+  equal("...and so does an empty string", resolveVersionName(""), null);
+  equal("...and a partial label is not completed", resolveVersionName("26"), null);
+  /*
+   * `26` and not `1.20`: that one is a real label of its own, which is the
+   * mistake this line was first written with and the check caught.
+   */
+  equal("...nor is a name with the wrong separators", resolveVersionName("JE-26-2"), null);
+  equal("surrounding space is not a different version", resolveVersionName("  26.2  "), "JE_26_2");
+
+  /*
+   * The sentence the MCP schemas carry is composed from the table, so a
+   * release added tomorrow moves it with no edit anywhere near the server.
+   * Checked against the floors rather than against its own wording -- the
+   * phrasing is free to change, the numbers in it are not.
+   */
+  {
+    const sentence = versionRangesSentence();
+    const oldestSponge = versionsFor("sponge3").slice(-1)[0] ?? "";
+    const oldestLitematic = versionsFor("litematic").slice(-1)[0] ?? "";
+    check(
+      "the ranges sentence names the Sponge floor",
+      sentence.includes(mcVersion(oldestSponge)?.label ?? "\u0000"),
+      sentence,
+    );
+    check(
+      "...and the litematic floor, which is a later release",
+      sentence.includes(mcVersion(oldestLitematic)?.label ?? "\u0000"),
+      sentence,
+    );
+    check(
+      "...and says mcedit is lossy rather than listing a floor for it",
+      sentence.includes("mcedit") && sentence.includes("lossily"),
+      sentence,
+    );
+  }
+
+  /*
+   * The refusal used to interpolate an empty label when no version was named,
+   * producing "a .litematic claiming  would open in the mod as the wrong
+   * blocks" -- a sentence with a hole where the fact belongs. Reachable from
+   * `create_document`, which treated an absent version as a version.
+   */
+  {
+    const empty = refusalFor("litematic", "") ?? "";
+    check(
+      "an absent version is refused by saying so",
+      empty.includes("No Minecraft version was given"),
+      empty,
+    );
+    check(
+      "...and the sentence has no hole in it",
+      !empty.includes("claiming  ") && !empty.includes("  "),
+      empty,
+    );
+  }
+
+  /*
    * The forms are the ones the writer emits, without a mode word. Omitted means
    * `replace`, and it is the one spelling every release from 1.13 accepts --
    * 1.21.5 added `strict` without touching it.
@@ -2190,6 +2403,284 @@ console.log("\n--- the tag the panel names is the tag the file uses ---");
   equal("a litematic has nowhere to keep an anchor", anchorLocation("litematic"), null);
   equal("...nor a world origin", originLocation("litematic"), null);
 }
+// --- the legacy id table, read both ways ------------------------------------
+/*
+ * `shared/legacy_ids.ts` exists because three places now ask which `ID:DATA` a
+ * block name maps to: the MCEdit writer, the inventory that labels a legacy
+ * schematic with what its file will really store, and the block field that
+ * accepts one typed in. The answer involves a tie-break, and two
+ * implementations of a tie-break is how they come to disagree.
+ */
+console.log("\n--- the legacy id table, read both ways ---");
+{
+  const table = await loadLegacyBlockTable(LEGACY_BLOCKS);
+  const index = buildLegacyIndex(table);
+
+  /*
+   * Seventy-four modern states come from more than one `id:meta`. Water is the
+   * one everybody meets: `8:0` is still water and `9:0` is flowing, and both
+   * flatten to `minecraft:water[level=0]`. Lowest wins, so the answer does not
+   * depend on which order the JSON happened to be written in.
+   */
+  equal("water resolves to the lower of its two ids", index.byName.get("minecraft:water"), {
+    id: 8,
+    meta: 0,
+  });
+  equal("...and reads back", index.byId.get("8:0"), table["8:0"]);
+
+  // The writer and the shared index are one table, not two that agree.
+  const reverse = buildReverseLegacyTable(table);
+  let mismatched = 0;
+  for (const [name, id] of index.byName) {
+    const theirs = reverse.byName.get(name);
+    if (theirs === undefined || theirs.id !== id.id || theirs.meta !== id.meta) mismatched += 1;
+  }
+  equal("the writer names blocks the same way, on every row", mismatched, 0);
+  equal("...over the whole table", index.byName.size, reverse.byName.size);
+
+  /*
+   * The name set is what the editor refuses against, so it has to be exactly
+   * what the writer can encode -- not a superset, which would let a block
+   * through to fail at save time, and not a subset, which would refuse one that
+   * is fine.
+   */
+  check("a 1.12 block is in the set", index.names.has("minecraft:oak_fence"));
+  check("...and a 1.17 one is not", !index.names.has("minecraft:deepslate"));
+  equal("the set is exactly what can be named", index.names.size, index.byName.size);
+
+  // A legacy id is a shape, not just a string with a colon in it. This decides
+  // whether something typed into the block field is an id at all, and
+  // `minecraft:stone` has a colon too.
+  equal("a plain pair parses", parseLegacyId("35:14"), { id: 35, meta: 14 });
+  equal("...with spaces round it", parseLegacyId("  35:14  "), { id: 35, meta: 14 });
+  equal("a block id does not", parseLegacyId("minecraft:stone"), null);
+  equal("nor does a nibble out of range", parseLegacyId("35:16"), null);
+  equal("nor an empty string", parseLegacyId(""), null);
+  equal("and it round-trips", legacyIdLabel({ id: 35, meta: 14 }), "35:14");
+
+  /*
+   * Shown and accepted, which is the same table read the two ways somebody
+   * actually uses it. A legacy file stores `35:14`; naming only
+   * `minecraft:red_wool` tells them the app's word for a block instead of the
+   * file's, and refusing `35:14` in the block field refuses the vocabulary
+   * they arrived with.
+   */
+  equal("a block is labelled with what the file will store", legacyIdFor(index, "minecraft:red_wool"), "35:14");
+  equal("...from the base name, states and all", legacyIdFor(index, "minecraft:red_wool[x=1]"), "35:14");
+  equal("a block the era never had is labelled with nothing", legacyIdFor(index, "minecraft:deepslate"), null);
+  equal("no table, no label", legacyIdFor(null, "minecraft:red_wool"), null);
+
+  equal("typing an id finds the block", resolveBlockInput("35:14", index), "minecraft:red_wool");
+  /*
+   * The answer carries its states, because that is what the metadata value
+   * *means*. `53:0` is not oak stairs in general -- it is one particular
+   * corner of them, and resolving to the bare name would silently throw away
+   * the half of the id that is not the id.
+   */
+  check(
+    "...with the state the metadata value stands for",
+    resolveBlockInput("53:0", index).startsWith("minecraft:oak_stairs["),
+    resolveBlockInput("53:0", index),
+  );
+  /*
+   * Anything that is not an id comes back untouched, which is what lets this
+   * sit in front of the ordinary parse with no mode to get out of step.
+   * `minecraft:stone` has a colon in it too.
+   */
+  equal("a block id is left alone", resolveBlockInput("minecraft:stone", index), "minecraft:stone");
+  equal("...and so is one with states", resolveBlockInput("minecraft:oak_stairs[facing=north]", index), "minecraft:oak_stairs[facing=north]");
+  /*
+   * A well-formed id with no row is a typo, not an invitation to guess. `256`
+   * is past the last block the era ever had, and `250:3` -- the obvious pick
+   * for this check -- is black glazed terracotta, which is the reminder that
+   * the numbers go further than anyone remembers.
+   */
+  equal("an id with no row is not guessed at", resolveBlockInput("256:0", index), "256:0");
+  equal("and on a flat document nothing resolves at all", resolveBlockInput("35:14", null), "35:14");
+}
+
+
+// --- what exists in which Minecraft version ---------------------------------
+/*
+ * The dataset that makes a version change mean something. Before it, only the
+ * pre-Flattening boundary was checked -- so backporting a 1.21 build to 1.13
+ * moved the tag and left up to 501 kinds of block in a file for a game that has
+ * never heard of them, and upgrading past 1.21.9 left every `chain` under a
+ * name that release renamed.
+ */
+console.log("\n--- what exists in which Minecraft version ---");
+{
+  // The DataVersions this section reasons in, from the corroborated table.
+  const V = {
+    v1_13: 1519,
+    v1_14: 1952,
+    v1_15_2: 2230,
+    v1_16: 2566,
+    v1_17: 2724,
+    v1_19: 3105,
+    v1_19_4: 3337,
+    v1_20: 3463,
+    v1_20_2: 3578,
+    v1_20_4: 3700,
+    v1_21_4: 4189,
+    v1_21_8: 4440,
+    v1_21_9: 4554,
+    v26_2: 4903,
+  };
+  for (const [name, dv] of Object.entries(V)) {
+    const info = MC_VERSIONS.find((entry) => entry.dataVersion === dv);
+    check(
+      `the fixture DataVersion ${dv} (${name}) is one this build knows`,
+      info !== undefined,
+    );
+  }
+
+  /*
+   * The trap, stated as the case it would have produced.
+   *
+   * misode/mcmeta's summary lists only blocks that carry properties before
+   * 1.20.5 and every block from 1.20.5 on -- 686 entries then 1060, `stone`
+   * appearing at the boundary. A plain diff of it therefore claims `stone`,
+   * `dirt`, `oak_planks` and some 370 others arrived in 1.20.5, and acting on
+   * that would replace every stone block in a build with empty space on any
+   * backport to 1.19. Nothing else in this repo could ever have seen it.
+   */
+  for (const id of ["minecraft:stone", "minecraft:dirt", "minecraft:oak_planks", "minecraft:cobblestone"]) {
+    check(
+      `${id} did not arrive in 1.20.5`,
+      blockExistsIn(id, V.v1_13) && blockExistsIn(id, V.v1_19) && blockExistsIn(id, V.v26_2),
+    );
+  }
+
+  /*
+   * A rename is not a removal, and this pair is the whole reason the dataset
+   * has a curated half. Read as a removal, a backport across 1.21.9 replaces
+   * every chain in the build with empty space; read as a rename, it writes the
+   * name the older game uses and loses nothing.
+   */
+  check("chain exists from 1.16", !blockExistsIn("minecraft:chain", V.v1_15_2) && blockExistsIn("minecraft:chain", V.v1_16));
+  check("...up to 1.21.8", blockExistsIn("minecraft:chain", V.v1_21_8) && !blockExistsIn("minecraft:chain", V.v1_21_9));
+  check("iron_chain starts exactly where chain stops", !blockExistsIn("minecraft:iron_chain", V.v1_21_8) && blockExistsIn("minecraft:iron_chain", V.v1_21_9));
+  equal(
+    "...and the rename says so, going forward",
+    renameFor("minecraft:chain", V.v1_21_9),
+    "iron_chain",
+  );
+  equal(
+    "...and coming back",
+    renameFor("minecraft:iron_chain", V.v1_21_4),
+    "chain",
+  );
+  equal("a name the version already has is left alone", renameFor("minecraft:chain", V.v1_21_8), null);
+  equal("...in the other direction too", renameFor("minecraft:iron_chain", V.v26_2), null);
+
+  // The other four, each a boundary somebody would otherwise have to remember.
+  equal("sign became oak_sign in 1.14", renameFor("sign", V.v1_14), "oak_sign");
+  equal("...and comes back before it", renameFor("oak_sign", V.v1_13), "sign");
+  equal("grass_path became dirt_path in 1.17", renameFor("grass_path", V.v1_17), "dirt_path");
+  equal("grass became short_grass", renameFor("grass", V.v1_20_4), "short_grass");
+  equal("...and 1.20.2 still calls it grass", renameFor("short_grass", V.v1_20_2), "grass");
+
+  /*
+   * Unknown ids fail open, and the doubt goes one way on purpose: the cost of
+   * an omission is a block that survives a backport, and the cost of a wrong
+   * guess is a block destroyed.
+   */
+  check("a block this table never heard of is allowed", blockExistsIn("mymod:reactor", V.v1_13));
+  check("...and says so when asked directly", !isVersioned("mymod:reactor") && isVersioned("minecraft:stone"));
+  equal("...and is never renamed", renameFor("mymod:reactor", V.v1_21_9), null);
+
+  // The state is ignored: this is a question about the block.
+  check("a state does not change the answer", blockExistsIn("minecraft:chain[axis=y]", V.v1_16));
+
+  /*
+   * The sets the inventory filters by. 1.13 has to be a strict subset of 1.21.4
+   * except for the names that were renamed away -- which is the whole shape of
+   * the flat era, and would not hold if a `since` had been mis-derived.
+   */
+  const early = blocksIn(V.v1_13);
+  const late = blocksIn(V.v1_21_4);
+  /*
+   * Namespaced, and this is the check rather than a detail. Everything that
+   * consumes this set -- block_id_list.txt, the inventory, the hotbar,
+   * LegacyIndex.names -- deals in `minecraft:oak_fence`, so a set of bare
+   * names would intersect none of them and the inventory would come back empty
+   * for every flat document.
+   */
+  check("the set is spelled the way the rest of the app spells a block", late.has("minecraft:oak_fence") && !late.has("oak_fence"));
+  check("1.13 offers fewer blocks than 1.21.4", early.size < late.size, `${early.size} vs ${late.size}`);
+  const lost = [...early].filter((name) => !late.has(name)).sort().map((name) => name.replace("minecraft:", ""));
+  equal(
+    "...and everything it has that 1.21.4 lacks is a rename",
+    lost.join(", "),
+    "grass, grass_path, sign, wall_sign",
+  );
+  check("deepslate is 1.17 and later", !early.has("minecraft:deepslate") && late.has("minecraft:deepslate"));
+  check("the set is memoised, not rebuilt", blocksIn(V.v1_13) === early);
+
+  /*
+   * Properties. A wall's connections stopped being a boolean in 1.16, and it is
+   * the one value change in the whole flat era that touches a real build.
+   */
+  equal(
+    "a tall wall comes back as an ordinary connection",
+    propertyValueIn("minecraft:cobblestone_wall", "north", "tall", V.v1_15_2),
+    "true",
+  );
+  equal(
+    "...and none comes back as false",
+    propertyValueIn("minecraft:cobblestone_wall", "north", "none", V.v1_15_2),
+    "false",
+  );
+  equal(
+    "...and going the other way, true becomes low",
+    propertyValueIn("minecraft:cobblestone_wall", "north", "true", V.v1_16),
+    "low",
+  );
+  /*
+   * The round trip is deliberately NOT the identity, and it must not pretend to
+   * be: `tall` and `low` both come back as `true`, and `true` goes out as `low`.
+   * A wall that was tall is one block shorter afterwards, which is the whole of
+   * what 1.15 can say about it.
+   */
+  equal(
+    "a backported tall wall does not come back tall",
+    propertyValueIn("minecraft:cobblestone_wall", "north", propertyValueIn("minecraft:cobblestone_wall", "north", "tall", V.v1_15_2) ?? "", V.v1_16),
+    "low",
+  );
+  equal(
+    "a value the version already has needs no rewriting",
+    propertyValueIn("minecraft:cobblestone_wall", "up", "true", V.v1_15_2),
+    null,
+  );
+  equal(
+    "...and a block outside the rule is untouched",
+    propertyValueIn("minecraft:oak_fence", "north", "true", V.v1_15_2),
+    null,
+  );
+  equal(
+    "a mob-head note block backports to a harp",
+    propertyValueIn("minecraft:note_block", "instrument", "creeper", V.v1_19),
+    "harp",
+  );
+  equal(
+    "torchflower_crop lost a growth stage going forward, not back",
+    propertyValueIn("minecraft:torchflower_crop", "age", "2", V.v1_20),
+    "1",
+  );
+
+  // Property presence, which is a different question from its values.
+  check("leaves got waterlogged in 1.19", !propertyExistsIn("minecraft:oak_leaves", "waterlogged", V.v1_17) && propertyExistsIn("minecraft:oak_leaves", "waterlogged", V.v1_19));
+  check("a cauldron kept level until 1.17", propertyExistsIn("minecraft:cauldron", "level", V.v1_16) && !propertyExistsIn("minecraft:cauldron", "level", V.v1_17));
+  check("a property with no recorded event is present", propertyExistsIn("minecraft:oak_stairs", "facing", V.v1_13));
+
+  check(
+    "the table holds the whole registry, not a sample",
+    versionedBlockCount() > 1100,
+    String(versionedBlockCount()),
+  );
+}
+
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);
