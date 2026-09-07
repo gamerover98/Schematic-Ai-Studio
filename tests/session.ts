@@ -1974,6 +1974,285 @@ console.log("\n--- moving a region ---");
   );
 }
 
+// --- a solid block is not replaced -------------------------------------------
+//
+// Vanilla's `#minecraft:replaceable` decides what a placement writes over, and
+// nothing in this repo had the concept: the `setBlock` arm never looked at the
+// destination cell at all. `floodedPlacement` reads it and only to decide
+// `waterlogged`; `floorUnder` reads the cell below; `doubleSlabTarget` reads
+// across the face; `twoPartPlacement` reads the *far* cell of a bed or a door
+// and its own comment states the missing rule for the near one.
+//
+// Reported with a fence: its post is inset to 6..10 of the cell, so a click on
+// the exposed side gives `place = the cell next door`, and the iron block
+// standing there was written over.
+console.log("\n--- a solid block is not replaced ---");
+{
+  const iron = { namespacedName: "minecraft:iron_block", properties: {} };
+  const fence = { namespacedName: "minecraft:oak_fence", properties: {} };
+  const stone = { namespacedName: "minecraft:stone", properties: {} };
+  const grass = { namespacedName: "minecraft:short_grass", properties: {} };
+  const water = { namespacedName: "minecraft:water", properties: { level: "0" } };
+
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 2, 0, 2, fence);
+    setBlock(session.doc, 1, 0, 2, iron);
+    // The click: the fence's west face, so the block would go into the cell at
+    // x = 1 -- which is where the iron block is.
+    const changed = applyEdit(session, {
+      kind: "setBlock",
+      x: 1,
+      y: 0,
+      z: 2,
+      against: "west",
+      block: { namespacedName: "minecraft:stone" },
+    });
+    equal("a placement into a solid block writes nothing", changed, 0);
+    equal(
+      "...and the block that was there is still there",
+      getBlock(session.doc, 1, 0, 2).namespacedName,
+      "minecraft:iron_block",
+    );
+    equal("...and nothing is left on the undo stack", session.history.undoStack.length, 0);
+  }
+
+  /*
+   * The case that diverges from the obvious reading of the report -- *refuse
+   * if either block is solid*. Vanilla asks only about the block already
+   * there, and water is replaceable, so stone goes in. This app supports that
+   * deliberately: `floodedPlacement` is the rule that makes what lands come
+   * out waterlogged.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 3, 0, 3, water);
+    equal(
+      "stone still goes into water",
+      applyEdit(session, {
+        kind: "setBlock",
+        x: 3,
+        y: 0,
+        z: 3,
+        block: { namespacedName: "minecraft:stone" },
+      }),
+      1,
+    );
+    equal(
+      "...and the cell holds it",
+      getBlock(session.doc, 3, 0, 3).namespacedName,
+      "minecraft:stone",
+    );
+  }
+
+  /*
+   * The other half of the wiki's sentence: a block placed **on** a replaceable
+   * one goes into its cell rather than above it. `against` is deliberately
+   * unchanged -- vanilla's `BlockPlaceContext` keeps the clicked face and
+   * moves only the clicked position.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 4, 0, 4, grass);
+    applyEdit(session, {
+      kind: "setBlock",
+      x: 4,
+      y: 1,
+      z: 4,
+      against: "up",
+      block: { namespacedName: "minecraft:stone" },
+    });
+    equal(
+      "a block placed on short grass takes its place",
+      getBlock(session.doc, 4, 0, 4).namespacedName,
+      "minecraft:stone",
+    );
+    equal(
+      "...rather than standing on top of it",
+      getBlock(session.doc, 4, 1, 4).namespacedName,
+      "minecraft:air",
+    );
+  }
+
+  /*
+   * Empty space is replaceable whatever block it is made of. With barrier
+   * chosen, a cell that reads as empty holds a barrier -- which is not in the
+   * tag -- so deciding from the tag alone would make it impossible to build
+   * inside your own empty space.
+   */
+  {
+    const barrier = { namespacedName: "minecraft:barrier", properties: {} };
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 5, 0, 5, barrier);
+    equal(
+      "a placement into the chosen empty space goes in",
+      applyEdit(
+        session,
+        { kind: "setBlock", x: 5, y: 0, z: 5, block: { namespacedName: "minecraft:stone" } },
+        { voidBlock: "minecraft:barrier" },
+      ),
+      1,
+    );
+    // ...and with air as the empty space, that same barrier is a block again.
+    const other = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(other.doc, 5, 0, 5, barrier);
+    equal(
+      "...and is refused where it is an ordinary block",
+      applyEdit(other, {
+        kind: "setBlock",
+        x: 5,
+        y: 0,
+        z: 5,
+        block: { namespacedName: "minecraft:stone" },
+      }),
+      0,
+    );
+  }
+
+  /*
+   * And the reach: this is the *hand*. A fill, a paste, a transform and every
+   * agent tool go through `runTransaction` bodies that never touch this arm,
+   * which is the same reach the slab merge, the two-part rule and the redstone
+   * guard have. A fill across mixed ground should lay what it can.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 6, 0, 6, iron);
+    applyEdit(session, {
+      kind: "fill",
+      region: { minX: 6, minY: 0, minZ: 6, maxX: 6, maxY: 0, maxZ: 6 },
+      block: { namespacedName: "minecraft:stone" },
+    });
+    equal(
+      "a fill still writes over a solid block",
+      getBlock(session.doc, 6, 0, 6).namespacedName,
+      "minecraft:stone",
+    );
+  }
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 0, 0, 0, stone);
+    setBlock(session.doc, 7, 0, 7, iron);
+    copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 });
+    pasteSelection(session, { x: 7, y: 0, z: 7 });
+    equal(
+      "...and so does a paste",
+      getBlock(session.doc, 7, 0, 7).namespacedName,
+      "minecraft:stone",
+    );
+  }
+
+  /*
+   * Breaking is not placing. A break is `setBlock` with the void, and it
+   * empties a cell rather than building in one -- so the rule has to stand
+   * aside for it, or nothing could ever be removed.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 1, 0, 1, iron);
+    equal(
+      "a break still empties a solid cell",
+      applyEdit(session, {
+        kind: "setBlock",
+        x: 1,
+        y: 0,
+        z: 1,
+        block: { namespacedName: "minecraft:air" },
+      }),
+      1,
+    );
+  }
+
+  /*
+   * **And a break carries `against`, which is what made the redirect a
+   * catastrophe rather than a nicety.**
+   *
+   * `Viewer.svelte` sends `lookAt(target)` for all three verbs, so a break
+   * names the block itself *and* the face the crosshair found. The redirect
+   * steps back along that face -- correct for a placement, where `x/y/z` is
+   * the cell across it, and meaningless here, where it lands on the empty
+   * cell the ray came in through. Empty is replaceable, always, so every
+   * break in the app moved into thin air, wrote the void over the void and
+   * came back `changed: 0` with the block still standing.
+   *
+   * The check has to carry the face. The one above does not, which is
+   * exactly why it went on passing.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 2, 1, 2, iron);
+    equal(
+      "a break aimed at a face still removes the block",
+      applyEdit(session, {
+        kind: "setBlock",
+        x: 2,
+        y: 1,
+        z: 2,
+        against: "west",
+        block: { namespacedName: "minecraft:air" },
+      }),
+      1,
+    );
+    equal(
+      "...and the cell it named is the one that is empty",
+      getBlock(session.doc, 2, 1, 2).namespacedName,
+      "minecraft:air",
+    );
+  }
+
+  /*
+   * Every face, because `against` is whichever one the ray found and the
+   * arithmetic is per axis: a break from above steps down, one from the
+   * south steps north, and each of the six lands somewhere different.
+   */
+  {
+    for (const against of ["up", "down", "north", "south", "east", "west"] as const) {
+      const session = newDocument({ width: 8, height: 4, length: 8 });
+      setBlock(session.doc, 3, 1, 3, iron);
+      applyEdit(session, {
+        kind: "setBlock",
+        x: 3,
+        y: 1,
+        z: 3,
+        against,
+        block: { namespacedName: "minecraft:air" },
+      });
+      equal(
+        `a break against ${against} removes what it was aimed at`,
+        getBlock(session.doc, 3, 1, 3).namespacedName,
+        "minecraft:air",
+      );
+    }
+  }
+
+  /*
+   * ...and with a void block chosen, where the break writes that block
+   * instead of air. `emptiness` is a pattern rather than a name, so this is
+   * the spelling that decides whether the guard asks the right question.
+   */
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 });
+    setBlock(session.doc, 4, 1, 4, iron);
+    applyEdit(
+      session,
+      {
+        kind: "setBlock",
+        x: 4,
+        y: 1,
+        z: 4,
+        against: "up",
+        block: { namespacedName: "minecraft:water", properties: { level: "0" } },
+      },
+      { voidBlock: "minecraft:water" },
+    );
+    equal(
+      "a break into a chosen empty space still empties the cell",
+      getBlock(session.doc, 4, 1, 4).namespacedName,
+      "minecraft:water",
+    );
+  }
+}
+
 // --- a growth that moves the build says so -----------------------------------
 //
 // The grid has no negative index, so making room *below* the origin can only

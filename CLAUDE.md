@@ -177,6 +177,90 @@ click that meant "place beside it" would destroy the slab already there. A fill
 carries no `against`, which is what keeps this a click gesture rather than
 something that halves a filled region.
 
+**A placement writes over a *replaceable* block and never over anything else,
+and this app had no such concept at all.** `replaceable`, `canBeReplaced`,
+`isReplaceable` — every spelling appeared **zero times** across `src/`,
+`tests/` and `resources/`. The `setBlock` arm never looked at the destination
+cell: `floodedPlacement` reads it and only to decide `waterlogged`,
+`floorUnder` reads the cell below, `doubleSlabTarget` reads across the face,
+and `twoPartPlacement` reads the *far* cell of a bed or a door — its own
+comment stating the missing rule for the near one.
+
+Reported with a fence, which is exactly the shape of it: a fence post is inset
+to 6..10 of its cell, so a click on the exposed side gives `place = the cell
+next door`, and the iron block standing there was written over. Every non-cube
+with inset faces does it — walls, stairs, torches, chains, lanterns, panes,
+pots.
+
+The rule is vanilla's `#minecraft:replaceable`, and the wiki's *Block
+properties* page states it from the other side: «blocks placed **on, against,
+or in the same location as** the replaceable block replace it rather than
+being placed on or against it». Both halves of that sentence are here — the
+**refusal** when the destination is not replaceable, and the **redirect** when
+the block that was *clicked* is, which is what makes a block placed on tall
+grass take the grass's cell instead of standing above it. `against` is
+deliberately unchanged by the redirect: vanilla's `BlockPlaceContext` keeps
+`getClickedFace()` and moves only `getClickedPos()`, and the orientation rules
+want the face that was clicked.
+
+**The existing predicates cannot serve and must not be reached for.**
+`isSeeThrough` holds glass, leaves, ice, slime and honey — every one of them a
+solid block a placement must not destroy — and it is a *rendering* answer
+besides. `FLUIDS` in `block_support.ts` is five names.
+
+Three boundaries, each a way to be wrong:
+
+- **silently, and only from the hand.** That is already what this arm does
+  when a door's far half is blocked, and the block in the way is on screen. A
+  fill, a paste, a transform and every agent tool go through `runTransaction`
+  bodies that never reach it — the same reach the slab merge, the two-part
+  rule and the redstone guard have, and for the same reason: a fill across
+  mixed ground should lay what it can rather than refuse the lot;
+- **breaking is not placing**, and saying that of the *refusal* alone is not
+  enough. Both halves stand behind `emptiness`, the predicate this arm
+  already owns, and leaving the **redirect** out of it stops any block being
+  broken at all.
+
+  The two verbs do not mean the same thing by `x/y/z`. A placement names the
+  cell *across* the face, so one step back along `against` is the block that
+  was clicked; a break names the block **itself** and carries the same
+  `against`, because `Viewer.svelte` sends `lookAt(target)` for all three
+  verbs. So the step back lands on the empty cell the ray came in through --
+  and empty is replaceable, always. An unguarded redirect therefore moves
+  every break into thin air, writes the void over the void, and answers
+  `changed: 0` with the block still standing.
+
+  It is checked with the face, and with all six of them: a check that sends
+  no `against` passes either way, and no `against` is the one thing the app
+  never does.
+- **empty space is replaceable whatever block it is made of.** With `barrier`
+  chosen as the void block a cell that reads as empty holds a barrier, which
+  is not in the tag — deciding from the tag alone would make it impossible to
+  build inside your own empty space.
+
+**The user's own reading of the report was «refuse if either block is solid»,
+and that differs from the game on one case this app supports deliberately:**
+stone placed *into water*. Water is replaceable, so it goes in and comes out
+waterlogged, which is the rule directly below this one. On every case actually
+reported the two readings agree.
+
+The set is vendored into `resources/block_states.json` beside `blocks` rather
+than into an eighth dataset: same project, same two pinned releases, same
+registry, and only the branch differs (`-data`, not `-summary`). It **moves** —
+25 entries at 1.21.4 and 29 now — which is the argument against writing it out
+by hand, and both pinned releases give the identical 29, so the union is the
+same list rather than a merge.
+
+**One name cannot come from the registry.** `minecraft:grass` is the
+pre-Flattening spelling of short grass and one of the four ids this app
+deliberately offers that the modern registry has never named, so it is
+hand-written outside the generator's markers — `SPUN_LEGACY`'s arrangement for
+`SPUN_LEGACY`'s reason. Measured, and this is why it is a list of one: every
+*other* replaceable block reaches a 1.12.2 document under its modern name.
+`31:2` is `fern`, `31:0` is `dead_bush`, `78:0` is `snow[layers=1]`, `175:2`
+is `tall_grass`, `217:0` is `structure_void`, and water and lava carry all 32
+of their states each.
+
 **A block placed into water comes out waterlogged.** That is what the game does
 — a fence, a slab or a stair put into a pond displaces nothing, it floods — and
 `floodedPlacement` is what makes the property reachable without opening the

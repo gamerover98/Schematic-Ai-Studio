@@ -57,6 +57,7 @@ import {
   hasProperty,
   isKnownBlock,
   knownBlockCount,
+  isReplaceable,
   knownBlockNames,
   legalValuesFor,
   propertiesOf,
@@ -3454,6 +3455,101 @@ if (pack === null) {
 // rule is the game's rule. The baking ones say the property reaches the
 // picture -- a `facing` the mesher ignores would pass every arithmetic check
 // ever written and still place the same staircase four times.
+// --- what a placement writes over --------------------------------------------
+//
+// Vanilla's `#minecraft:replaceable`, which the wiki states from the other
+// side: blocks placed on, against, or in the same location as a replaceable
+// block replace it rather than being placed on or against it.
+//
+// Nothing in this repo had the concept -- `replaceable`, `canBeReplaced` and
+// every other spelling appeared zero times -- so a placement wrote over
+// whatever was in the cell. Reported as a block placed beside a fence
+// destroying the iron block behind it, which is what a fence post inset to
+// 6..10 of its cell does to `place = the cell next door`.
+console.log("\n--- what a placement writes over ---");
+{
+  /*
+   * The table against the data it was generated from.
+   *
+   * The registry walk elsewhere in this file deliberately reads the *table*
+   * rather than the JSON, because the table is what the app consults. Here
+   * both are read, because there are two ways to be wrong and they need
+   * separating: a generator that dropped rows, and a hand-written addition
+   * that drifted.
+   */
+  const vendored = new Set<string>(
+    (
+      JSON.parse(
+        readFileSync(
+          path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "resources", "block_states.json"),
+          "utf8",
+        ),
+      ) as { replaceable: string[] }
+    ).replaceable.map((id) => id.replace(/^minecraft:/, "")),
+  );
+  equal("the vendored tag is the 29 entries both releases give", vendored.size, 29);
+
+  const wrong: string[] = [];
+  for (const name of knownBlockNames()) {
+    if (isReplaceable(name) !== vendored.has(name)) wrong.push(name);
+  }
+  equal("every block in the registry answers as the tag does", wrong, []);
+
+  /*
+   * And the one name the registry cannot give.
+   *
+   * `minecraft:grass` is the pre-Flattening spelling of short grass and one of
+   * the four ids this app offers that the modern registry has never had --
+   * `legacy_blocks.json` maps `31:1` to it. Every *other* replaceable block in
+   * that era arrives under its modern name, which is why this is a list of one
+   * rather than a table.
+   */
+  check("the pre-Flattening short grass is replaceable too", isReplaceable("grass"));
+  check(
+    "...and it is not in the registry, which is why it is written by hand",
+    !knownBlockNames().includes("grass"),
+  );
+
+  // A namespace and a state are both things a caller may be holding.
+  check("a namespaced id is understood", isReplaceable("minecraft:short_grass"));
+  check("...and a stated one", isReplaceable("minecraft:snow[layers=1]"));
+
+  /*
+   * The trap, named. `isSeeThrough` is the predicate somebody reaches for and
+   * it holds glass, leaves, ice, slime and honey -- every one of them a solid
+   * block a placement must not destroy, and it is a rendering answer besides.
+   * `FLUIDS` in `block_support.ts` is five names.
+   */
+  for (const name of [
+    "stone",
+    "glass",
+    "oak_leaves",
+    "ice",
+    "slime_block",
+    "honey_block",
+    "barrier",
+    "oak_fence",
+  ]) {
+    check(`${name} is not written over`, !isReplaceable(name));
+  }
+  for (const name of [
+    "air",
+    "water",
+    "lava",
+    "short_grass",
+    "tall_grass",
+    "fern",
+    "dead_bush",
+    "snow",
+    "fire",
+    "vine",
+    "structure_void",
+    "light",
+  ]) {
+    check(`${name} is`, isReplaceable(name));
+  }
+}
+
 console.log("\n--- placement orientation ---");
 {
   const looking = (

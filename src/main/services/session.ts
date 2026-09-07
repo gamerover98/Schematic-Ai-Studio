@@ -80,7 +80,7 @@ import { loadStructure } from "../pipeline/loader.js";
 import type { PaletteEntry } from "../pipeline/types.js";
 import { matchesBlockPattern, paletteEntryCacheKey } from "../pipeline/types.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
-import { hasProperty, isOpenable } from "../../shared/block_states.js";
+import { hasProperty, isOpenable, isReplaceable } from "../../shared/block_states.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
 import { standsOn, type SupportBelow } from "../../shared/block_support.js";
 import { coversFace } from "../pipeline/block_shapes.js";
@@ -611,6 +611,27 @@ interface OpenTarget {
  * The far half is only taken when it is the same block. A door with something
  * else above it is already broken, and opening half of it would not mend it.
  */
+/**
+ * The cell that was clicked, one step back along `against`.
+ *
+ * `request.x/y/z` is where the block would *go*, which is the cell across the
+ * face; the renderer computes it and main only ever steps back. Written out
+ * here rather than reusing `openTarget`, which asks a different question and
+ * answers `null` for everything that is not a door.
+ */
+function clickedCell(request: {
+  x: number;
+  y: number;
+  z: number;
+  against?: string;
+}): { x: number; y: number; z: number } | null {
+  const against = request.against;
+  if (against === undefined) return null;
+  const step = FACE_VECTOR[against as keyof typeof FACE_VECTOR];
+  if (step === undefined) return null;
+  return { x: request.x - step.x, y: request.y - step.y, z: request.z - step.z };
+}
+
 function openTarget(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number; against?: string },
@@ -939,7 +960,83 @@ export function applyEdit(
   }
 
   if (request.kind === "setBlock") {
-    const entry = placeable(floodedPlacement(doc, request, toEntry(request.block)));
+    /*
+     * A placement writes over a **replaceable** block and never over anything
+     * else, and this arm never asked.
+     *
+     * Vanilla's rule, from the wiki's own sentence: *blocks placed on, against,
+     * or in the same location as the replaceable block replace it rather than
+     * being placed on or against it*. Two halves, and both are here.
+     *
+     * Nothing in this repo had the concept -- `replaceable`, `canBeReplaced`
+     * and every other spelling appeared zero times -- and the existing
+     * predicates cannot stand in for it. `isSeeThrough` holds glass, leaves,
+     * ice, slime and honey, all of them solid blocks a placement must not
+     * destroy, and it is a rendering answer besides; `FLUIDS` is five names.
+     *
+     * The reported case is a fence: its post is inset to 6..10 of the cell, so
+     * a click on the exposed side gives `place = the cell next door`, and that
+     * cell's iron block was simply written over. Every non-cube with inset
+     * faces does it -- walls, stairs, torches, chains, lanterns, panes, pots.
+     */
+    /*
+     * **The redirect.** Clicking *on* tall grass or a snow layer puts the block
+     * in the grass's own cell, not above it. `against` is deliberately left
+     * alone -- vanilla's `BlockPlaceContext` keeps `getClickedFace()` and moves
+     * only `getClickedPos()`, and the orientation rules want the face that was
+     * clicked rather than the cell that was chosen.
+     */
+    /*
+     * **Only for a placement**, and that is not a refinement of the rule --
+     * it is what makes the coordinates mean what this arithmetic assumes.
+     *
+     * A placement's `x/y/z` is the cell *across* the face, so one step back
+     * along `against` is the block that was clicked. A **break** names the
+     * block itself and carries the same `against`, so the step back lands on
+     * the empty cell the ray came in through -- which is replaceable, always.
+     * The redirect then moved the break into that empty cell, wrote the void
+     * over the void, and reported `changed: 0` while the block the user was
+     * looking at stayed exactly where it was. Every break in the app, from
+     * the moment the redirect landed.
+     */
+    const held = toEntry(request.block);
+    const clicked = emptiness(held) ? null : clickedCell(request);
+    const target =
+      clicked !== null && isReplaceable(getBlock(doc, clicked.x, clicked.y, clicked.z).namespacedName)
+        ? { ...request, x: clicked.x, y: clicked.y, z: clicked.z }
+        : request;
+    const entry = placeable(floodedPlacement(doc, target, held));
+
+    /*
+     * **The refusal**, and three boundaries on it.
+     *
+     * *Silently, and only from the hand*: this arm is the click, and a fill, a
+     * paste, a transform and every agent tool go through `runTransaction`
+     * bodies that never reach it -- the same reach the slab merge, the
+     * two-part rule and the redstone guard already have. The block in the way
+     * is on screen, which says as much as a message would, and this path is
+     * also `use`'s, where there is nobody to word it for.
+     *
+     * *Breaking is not placing*: a break is `setBlock` with the void, and it
+     * empties a cell rather than building in one. `emptiness` is the predicate
+     * this arm already owns.
+     *
+     * *Empty space is replaceable whatever block it is made of*: with barrier
+     * chosen as the void block a cell that reads as empty holds a barrier,
+     * which is not in the tag -- deciding from the tag alone would make it
+     * impossible to build inside your own empty space.
+     *
+     * Before the growth below, for the redstone guard's stated reason: a
+     * refused placement must not have resized the document on its way out.
+     */
+    const standing = getBlock(doc, target.x, target.y, target.z);
+    if (
+      !emptiness(entry) &&
+      !emptiness(standing) &&
+      !isReplaceable(standing.namespacedName)
+    ) {
+      return 0;
+    }
 
     /*
      * Two slabs meeting in one cell are one double slab.
@@ -975,11 +1072,11 @@ export function applyEdit(
      * Before the growth below it, or a refused placement would still have
      * resized the document.
      */
-    if (!standsOn(entry.namespacedName, floorUnder(doc, request))) {
+    if (!standsOn(entry.namespacedName, floorUnder(doc, target))) {
       return 0;
     }
 
-    const merged = doubleSlabTarget(doc, request, entry);
+    const merged = doubleSlabTarget(doc, target, entry);
     if (merged !== null) {
       return runTransaction(doc, history, `Place ${entry.namespacedName}`, (tx) =>
         tx.setBlock(merged.x, merged.y, merged.z, merged.entry) ? 1 : 0,
@@ -996,18 +1093,18 @@ export function applyEdit(
      * the document, or a door hung at the ceiling, makes room for itself
      * exactly as a single block does.
      */
-    const pair = twoPartPlacement(doc, request, entry);
+    const pair = twoPartPlacement(doc, target, entry);
     // The far cell has something in it. The game does not place it either, and
     // the block in the way is on screen.
     if (pair === "blocked") return 0;
 
     const cell = {
-      minX: Math.min(request.x, pair?.other.x ?? request.x),
-      minY: Math.min(request.y, pair?.other.y ?? request.y),
-      minZ: Math.min(request.z, pair?.other.z ?? request.z),
-      maxX: Math.max(request.x, pair?.other.x ?? request.x),
-      maxY: Math.max(request.y, pair?.other.y ?? request.y),
-      maxZ: Math.max(request.z, pair?.other.z ?? request.z),
+      minX: Math.min(target.x, pair?.other.x ?? target.x),
+      minY: Math.min(target.y, pair?.other.y ?? target.y),
+      minZ: Math.min(target.z, pair?.other.z ?? target.z),
+      maxX: Math.max(target.x, pair?.other.x ?? target.x),
+      maxY: Math.max(target.y, pair?.other.y ?? target.y),
+      maxZ: Math.max(target.z, pair?.other.z ?? target.z),
     };
     /*
      * Breaking is `setBlock` with air, and growing to make room for air would
@@ -1052,7 +1149,7 @@ export function applyEdit(
         if (growth !== null) tx.resize(growth.size, growth.shift);
         if (pair !== null) {
           const [sx, sy, sz] = growth?.shift ?? [0, 0, 0];
-          const here = tx.setBlock(request.x + sx, request.y + sy, request.z + sz, pair.here) ? 1 : 0;
+          const here = tx.setBlock(target.x + sx, target.y + sy, target.z + sz, pair.here) ? 1 : 0;
           const there = tx.setBlock(
             pair.other.x + sx,
             pair.other.y + sy,
