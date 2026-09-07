@@ -2635,6 +2635,157 @@ console.log("\n--- what the window says on its way down ---");
   );
 }
 
+// --- what the window says on its way down -----------------------------------
+/*
+ * The failure this wording is for is silent and total: a reactive loop that
+ * Svelte or the browser aborts takes every effect in the window with it, while
+ * the viewport goes on drawing and main goes on answering. Navigable and
+ * completely dead, with a clean console -- reported that way twice before
+ * anything was listening for it.
+ */
+console.log("\n--- what the window says on its way down ---");
+{
+  const plain = failurePrompt("");
+  /*
+   * Escape and the window's close button both land on `cancelId`, so the half
+   * that reloads must never be the one they reach. `discard_prompt`'s rule, and
+   * here it matters more: this dialog is raised *by* an error, so it can appear
+   * while somebody is in the middle of something else.
+   *
+   * The indices are literal types, so `tsc` rejects any comparison between them
+   * outright -- which is a stronger statement than a check could make, and is
+   * why there is not one. What no type states is that they are three distinct
+   * buttons with words on them.
+   */
+  check(
+    "three buttons, and they say different things",
+    plain.buttons.length === 3 &&
+      plain.buttons.every((label) => label.trim() !== "") &&
+      new Set(plain.buttons).size === 3,
+    plain.buttons.join(" | "),
+  );
+  check(
+    "it says what a reload costs",
+    plain.detail.includes("undo history"),
+    plain.detail,
+  );
+  /*
+   * And what it does not cost. Autosave lives in main, on a 20-second timer,
+   * and main is the half still working -- so the snapshot is current however
+   * long the window has been dead. A dialog that only warned would leave
+   * somebody weighing a reload against an unknown.
+   */
+  check(
+    "...and what it does not",
+    plain.detail.includes("20 seconds"),
+    plain.detail,
+  );
+
+  const said = failurePrompt("effect_update_depth_exceeded");
+  check(
+    "what the renderer managed to say is carried through",
+    said.detail.includes("effect_update_depth_exceeded"),
+    said.detail,
+  );
+
+  /*
+   * The count, and only when there is one. The renderer reports once, so a
+   * number here means something genuinely kept failing underneath -- worth
+   * knowing before choosing, and misleading shown as a zero.
+   */
+  check("no count when nothing followed", !plain.detail.includes("further"), plain.detail);
+  check(
+    "...and one when something did",
+    failurePrompt("x", 3).detail.includes("3 further errors"),
+  );
+  check(
+    "...counted in the singular when it is one",
+    failurePrompt("x", 1).detail.includes("1 further error since"),
+  );
+
+  /*
+   * The report, which is the thing a person actually pastes. The versions are
+   * in it because an issue asks for them every time, and because main has all
+   * of them without asking the renderer -- which matters when the renderer is
+   * the half that has stopped answering.
+   */
+  const facts = {
+    appName: "Schematic AI Studio",
+    appVersion: "1.0.0",
+    platform: "win32 x64",
+    electron: "33.0.0",
+    chrome: "130.0.0",
+    node: "20.18.0",
+    kind: "error" as const,
+    message: "Cannot read properties of null (reading 'children')",
+    at: "app.js:1:2",
+    stack: "at $effect (BlockPicker.svelte)",
+  };
+  const text = failureReport(facts);
+  for (const wanted of [
+    "1.0.0",
+    "win32 x64",
+    "33.0.0",
+    "Cannot read properties of null",
+    "BlockPicker.svelte",
+  ]) {
+    check(`the report carries ${wanted}`, text.includes(wanted), text);
+  }
+
+  /*
+   * An empty stack or location leaves no ragged blank line behind. It is the
+   * ordinary case for a rejection, not an edge one.
+   */
+  const bare = failureReport({ ...facts, at: "", stack: "" });
+  check(
+    "...and says nothing where there was nothing to say",
+    !bare.includes("at ") && !/\n\s*\n\s*$/.test(bare),
+    JSON.stringify(bare),
+  );
+
+  /*
+   * The issue URL is built from the repository the manifest already names, and
+   * carries an **abridged** body: GitHub takes it as a query parameter, so it
+   * travels in a URL, and a stack clears that ceiling easily. `abridgeTrace`'s
+   * rule -- cap on the way out and say what was dropped. The whole report is on
+   * the clipboard by then, so the sentence is an instruction, not an apology.
+   */
+  const long = failureReport({ ...facts, stack: "at frame\n".repeat(400) });
+  check(
+    "a long report is abridged for the URL",
+    issueBody(long).length < long.length,
+    `${issueBody(long).length} vs ${long.length}`,
+  );
+  check(
+    "...and says where the rest of it is",
+    issueBody(long).includes("clipboard"),
+  );
+  check(
+    "a short one is carried whole",
+    issueBody(text).includes(facts.message),
+  );
+
+  const url = issueUrl("https://github.com/gamerover98/Schematic-Ai-Studio", text);
+  check(
+    "the URL points at the repository the manifest names",
+    url.startsWith("https://github.com/gamerover98/Schematic-Ai-Studio/issues/new?"),
+    url,
+  );
+  /*
+   * And it survives the round trip. A body that arrived percent-mangled would
+   * still open a page, which is exactly the kind of wrong that looks right.
+   */
+  const body = new URL(url).searchParams.get("body") ?? "";
+  check(
+    "...and the body decodes back to what was put in it",
+    body === issueBody(text),
+  );
+  check(
+    "...trailing slash or not",
+    issueUrl("https://example.com/repo/", text).includes("/repo/issues/new?"),
+  );
+}
+
 // --- every declared channel is actually served ------------------------------
 //
 // `shared/ipc.ts` is a list of verbs and `handlers.ts` is where they are
