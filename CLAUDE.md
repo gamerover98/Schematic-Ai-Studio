@@ -3243,6 +3243,80 @@ screenshot:
   towards +Z makes it deterministic *and* the one a map has, with north at the
   top.
 
+**The orbit turns around what you are looking at, and it used to turn around
+the middle of the document forever.** `controls.target` was written exactly
+twice in the app's life — the box centre when a file opens, and 24 blocks
+ahead when flight hands back — and nothing but a pan moved it in between.
+three's dolly changes the *radius* and never the target unless `zoomToCursor`
+says otherwise, and it defaults to false.
+
+So on a 512-block build every rotation swung on `max(dimension) * 1.6`, which
+is 819, and the pan speed scaled with the same number — about 0.9 blocks per
+pixel. Reaching a far corner was a fight, and that is the whole of *«the orbit
+fixes on the distance rather than on what is in front of you»*.
+
+Two changes, and the second is what the report was actually about:
+
+- **`zoomToCursor`**, so the wheel pulls the camera towards the pointer and
+  takes the pivot with it, plus a small `minDistance` — three leaves it at
+  zero, and a pivot that moves makes reaching it easy rather than theoretical,
+  where there is nothing left to rotate about;
+- **the pivot is reseated at the press that starts a rotation**, from the block
+  under the ray, else the build grid's cell, else not at all — which leaves the
+  target where it was and is therefore the old behaviour, kept for the case
+  this cannot improve. At the press and not continuously: the pivot has to hold
+  still for the whole drag or the camera chases what the rotation swings into
+  view. And it moves the pivot without moving the camera, which is the half
+  that is easy to write and get wrong -- see below.
+
+**Only the depth of what was picked is taken, never its position**, and the
+obvious spelling is the one that snaps the camera. OrbitControls re-aims at
+`controls.target` on every `update()`, so a target set to the cell that was
+actually under the pointer -- off to one side by however far the pointer was
+from the middle -- turns the view to face it, before the drag that asked for
+it has begun. Reported as exactly that, and it typechecks, and it rotates
+about the right place.
+
+`pivotDepth` in `framing.ts` is the answer: the target goes on the axis the
+camera is already looking down, at the depth of what was picked, so `lookAt`
+has nothing to do and nothing on screen moves at all. What changes is the
+*radius*, which is the whole of what was being asked for. It is what a 3D
+editor\'s "auto depth" does -- Blender sets the view\'s own offset along its
+axis rather than pointing the camera at the surface it found -- and it is
+why the answer to "the camera snaps" is not a transition: there is nothing
+left to animate.
+
+`tests/ui.ts` reads the assignment out of the source, because both spellings
+put the pivot on the thing under the pointer and nothing else in the file
+can tell them apart.
+
+**The compass was right about everything except which target it kept.**
+`flyToAxis` faithfully keeps `controls.target` and `arcBetween` sweeps about
+it — and that target *was* the centre of the build, so `UP` meant «fly over
+the middle of the structure» wherever you were standing. It reseats first now,
+and from the **centre of the canvas** rather than from the pointer, because
+the pointer is over the compass: that is its own element, not the scene. The
+bug survives every check written about `orbitFor` and `arcBetween`, which is
+why `tests/ui.ts` states it about the call site instead.
+
+**Orthographic needs the zoom compensating, and that is the part to not leave
+out.** `applyProjection` derives the frustum from the distance to the target,
+and the comment above `orthoFrustumHeight` leans on that distance holding
+still — true while only a dolly moved, because in orthographic OrbitControls
+writes `camera.zoom` and never moves the camera. Moving the *pivot* breaks
+exactly that: the camera has not moved and the distance has, so the build
+resizes on screen and reads as a zoom nobody asked for.
+
+The visible height is `2 · d · tan(fov / 2) / zoom`, so scaling `d` by `k`
+scales `zoom` by `k`. `zoomAfterPivot` is exact rather than a correction
+factor, and `applyProjection` has to run again immediately or the sides are
+left at the old distance while the zoom is at the new one.
+
+What deliberately did **not** change: `documentFraming` still frames the whole
+box on open and on `R`, which is right and is pinned; `LEFT` is still
+`THREE.MOUSE.PAN`, which several other rules are built on; and `onCompassClick`
+keeps the shape the source greps read.
+
 **A flight goes around the build rather than through it.** A straight line
 between two points on a sphere is a chord, so a lerped quarter turn passes a
 third of the way inside the structure and out again; `arcBetween` interpolates

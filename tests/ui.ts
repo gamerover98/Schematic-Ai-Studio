@@ -120,6 +120,8 @@ import {
   ORBIT_FOV,
   orthoBounds,
   orthoFrustumHeight,
+  pivotDepth,
+  zoomAfterPivot,
 } from "../src/renderer/src/lib/framing.js";
 import {
   dotColor,
@@ -1915,6 +1917,152 @@ console.log("\n--- orthographic projection ---");
   check("the floor still wins by depth-buffer steps, not by world units", COPLANAR_OFFSET.units >= 1);
 }
 
+// --- the orbit turns around what you are looking at --------------------------
+//
+// `controls.target` used to be written exactly twice in the app's life: the
+// box centre when a document opens, and 24 blocks ahead when flight hands
+// back. Nothing but a pan moved it in between, because three's dolly changes
+// the radius and never the target unless `zoomToCursor` says otherwise -- and
+// it defaults to false. So on a large build every rotation swung on the radius
+// the whole structure was framed at, and the compass, which faithfully kept
+// that target, flew over the middle of the build wherever you were standing.
+//
+// The pivot itself is reseated from a raycast in a pointer handler, which this
+// harness cannot drive. What *is* testable is the arithmetic that keeps the
+// picture still while it moves -- and that is the half that would be left out.
+console.log("\n--- the orbit turns around what you are looking at ---");
+{
+  /*
+   * Orthographic frames from the distance to the target, so moving the pivot
+   * with the camera still would resize the build on screen. The visible height
+   * is `2 * d * tan(fov / 2) / zoom`, so scaling `d` by `k` has to scale `zoom`
+   * by `k` -- exact, rather than a correction factor.
+   */
+  const visible = (distance: number, zoom: number): number =>
+    orthoFrustumHeight(ORBIT_FOV, distance) / zoom;
+
+  equal("a pivot that did not move leaves the zoom alone", zoomAfterPivot(2.5, 80, 80), 2.5);
+  for (const [before, after] of [
+    [80, 40],
+    [40, 80],
+    [819, 12],
+  ]) {
+    const zoom = zoomAfterPivot(1.75, before, after);
+    check(
+      `${before} to ${after} shows the same slice of the world`,
+      Math.abs(visible(after, zoom) - visible(before, 1.75)) < 1e-9,
+      `${visible(after, zoom)} against ${visible(before, 1.75)}`,
+    );
+  }
+  /*
+   * The target can be reached exactly -- fly into the middle of a build and
+   * come back to orbit -- and a zoom of zero or infinity is a degenerate
+   * projection matrix that draws nothing and reports nothing. Same guard, and
+   * the same reason, as `orthoFrustumHeight`'s clamp.
+   */
+  equal("a pivot reached exactly changes nothing", zoomAfterPivot(1.5, 80, 0), 1.5);
+  equal("...and neither does starting from nowhere", zoomAfterPivot(1.5, 0, 80), 1.5);
+
+  /*
+   * And the pivot itself lands on the **view axis**, which is the whole of
+   * why moving it disturbs nothing. OrbitControls re-aims at the target on
+   * every `update()`, so a target set to the cell that was under the pointer
+   * -- off to one side by however far the pointer was from the middle --
+   * turns the camera to face it, before the drag that asked for it has
+   * begun. Reported as the camera snapping.
+   */
+  {
+    // Straight ahead: the depth is the distance, and the target lands exactly
+    // where it was picked.
+    equal(
+      "a point dead ahead gives its own distance",
+      pivotDepth([0, 0, 0], [0, 0, -1], [0, 0, -40]),
+      40,
+    );
+    /*
+     * Off to the side by 30 degrees: the depth is the *projection*, which is
+     * shorter than the distance to it. Taking the distance instead would be
+     * the same snap by a longer route -- the pivot would sit past what was
+     * picked, on the axis.
+     */
+    const off = pivotDepth([0, 0, 0], [0, 0, -1], [40 * Math.tan(Math.PI / 6), 0, -40]);
+    equal("...and one off to the side gives its projection, not its range", off, 40);
+    check(
+      "...which is shorter than the range itself",
+      Math.hypot(40 * Math.tan(Math.PI / 6), 40) > off,
+    );
+    // Behind the camera is negative, which is what the caller refuses on.
+    check("a point behind the camera is negative", pivotDepth([0, 0, 0], [0, 0, -1], [0, 0, 8]) < 0);
+    // The camera's own position is zero, not a small positive number: the
+    // guard is `> minDistance` rather than `!== 0` for exactly this.
+    equal("the camera's own position is no distance at all", pivotDepth([3, 4, 5], [0, 1, 0], [3, 4, 5]), 0);
+  }
+  /*
+   * And the wiring, which runs from a pointer event and from a click on an
+   * element, neither of which this harness delivers.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  check(
+    "the wheel pulls the pivot towards the pointer",
+    /next\.zoomToCursor = true;/.test(viewer),
+  );
+  // A pivot that moves makes reaching it easy rather than theoretical, and at
+  // zero distance there is nothing left to rotate about.
+  check("...and the dolly has a floor under it", /next\.minDistance = [0-9.]+;/.test(viewer));
+
+  check(
+    "the rotate press reseats the pivot",
+    /event\.button === 2 &&[\s\S]{0,400}?repivotAt\(event\.clientX, event\.clientY\)/.test(viewer),
+  );
+  /*
+   * ...along the direction the camera is already facing, and **not** to the
+   * point that was picked. Written the obvious way -- `controls.target.set`
+   * with the cell's own centre -- it typechecks, it rotates about the right
+   * place, and it snaps the view a fraction of a second before the drag.
+   * Nothing else in this file can see the difference, because both spellings
+   * put the pivot on the thing under the pointer.
+   */
+  const repivot = viewer.slice(viewer.indexOf("function repivotAt"));
+  const inRepivot = repivot.slice(0, repivot.indexOf("\n  }"));
+  check(
+    "...on the axis the camera is already looking down",
+    /controls\.target\.copy\(camera\.position\)\.addScaledVector\(pivotForward, after\)/.test(
+      inRepivot,
+    ),
+  );
+  check(
+    "...and never at the point that was picked",
+    !/controls\.target\.set\(/.test(inRepivot),
+  );
+  // The depth is what the orthographic zoom is compensated against too, or
+  // the sides would be recomputed from a distance the target no longer has.
+  check(
+    "...and the orthographic zoom is compensated against that same depth",
+    /zoomAfterPivot\(ortho\.zoom, before, after\)/.test(inRepivot),
+  );
+  /*
+   * The compass reseats it too, and from the **centre of the canvas** rather
+   * than from the pointer -- the pointer is over the compass, which is its own
+   * element and not the scene. Without this the flight still goes round
+   * `controls.target`, correctly, and that target is still the middle of the
+   * document: the bug survives every check written about `orbitFor` and
+   * `arcBetween`, which is why it is stated here about the call site.
+   */
+  const fly = viewer.slice(viewer.indexOf("function flyToAxis"));
+  check(
+    "the compass reseats it from the middle of the canvas",
+    /repivotAt\(box\.left \+ box\.width \/ 2, box\.top \+ box\.height \/ 2\)/.test(
+      fly.slice(0, fly.indexOf("\n  }")),
+    ),
+  );
+  // ...before it reads the target it is going to fly around, or it would fly
+  // around the one it was replacing.
+  check(
+    "...before it reads the target",
+    fly.indexOf("repivotAt(") < fly.indexOf("const target = controls.target;"),
+  );
+}
+
 // --- the compass in the corner ----------------------------------------------
 //
 // A viewport that orbits freely has no other answer to which way you are
@@ -3018,7 +3166,6 @@ console.log("\n--- a normal that names no face ---");
     /entryFace\(\s*\r?\n?\s*\[raycaster\.ray\.origin/.test(pick),
   );
 }
-
 
 /*
  * In flight, Ctrl belongs to the camera.

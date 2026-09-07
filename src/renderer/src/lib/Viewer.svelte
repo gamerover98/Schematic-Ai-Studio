@@ -82,6 +82,8 @@ import {
     ORBIT_FOV,
     orthoBounds,
     orthoFrustumHeight,
+    pivotDepth,
+    zoomAfterPivot,
   } from "./framing.js";
   import { skyAt, skyDistance } from "./sky.js";
   import { fitShadow } from "./shadow_fit.js";
@@ -780,7 +782,23 @@ import { isTyping } from "./typing.js";
    * you are to it.
    */
   function flyToAxis(face: Face): void {
-    if (!camera || !controls) return;
+    if (!camera || !controls || !container) return;
+    /*
+     * What the flight goes round is what is in front of the camera *now*.
+     *
+     * The target and the distance were both kept faithfully before this, and
+     * the result was still wrong, because the target was the centre of the
+     * whole document and nothing had moved it since the file opened. Clicking
+     * `UP` therefore meant \"fly over the middle of the build\" wherever you
+     * happened to be standing, which is the report.
+     *
+     * The pick is at the **centre of the canvas** rather than under the
+     * pointer, because the pointer is over the compass -- it is its own
+     * element, not the scene. That is also the honest reading of \"what is in
+     * front of you\".
+     */
+    const box = container.getBoundingClientRect();
+    repivotAt(box.left + box.width / 2, box.top + box.height / 2);
     const target = controls.target;
     const distance = camera.position.distanceTo(target);
     flight = {
@@ -1230,6 +1248,9 @@ import { isTyping } from "./typing.js";
 
   /** Reused, because this is read on every placement and allocates otherwise. */
   const heading = new THREE.Vector3();
+
+  /** The same, for the pivot -- a second one, so neither can clobber the other. */
+  const pivotForward = new THREE.Vector3();
 
   /**
    * The half of a placement that is about the camera rather than the target.
@@ -2493,10 +2514,94 @@ import { isTyping } from "./typing.js";
       MIDDLE: THREE.MOUSE.DOLLY,
       RIGHT: THREE.MOUSE.ROTATE,
     };
+    /*
+     * The wheel pulls the camera towards the pointer, and takes the pivot
+     * with it.
+     *
+     * Left at three's default of `false` the dolly is a pure change of radius
+     * along the camera-to-target line: it never moves the target. So the pivot
+     * was written exactly twice in the app's life -- the box centre when a
+     * document opens, and 24 blocks ahead when flight hands back -- and every
+     * rotation in between swung on `max(dimension) * 1.6`, which on a 512-block
+     * build is 819. That is the whole of \"the orbit fixes on the distance
+     * rather than on what is in front of you\".
+     */
+    next.zoomToCursor = true;
+    /*
+     * And a floor under it, which three leaves at zero.
+     *
+     * A pivot that moves makes reaching it easy rather than theoretical, and
+     * at zero distance there is nothing left to rotate about: the view sticks
+     * and the only way out is a pan. Small enough to still get inside a block.
+     */
+    next.minDistance = 0.25;
     next.target.copy(target);
     next.enabled = cameraMode !== "fly";
     next.update();
     return next;
+  }
+
+  /**
+   * Puts the orbit's pivot on what is in front of the camera.
+   *
+   * Rotating turns about `controls.target`, and until now that target was the
+   * **centre of the document** for the whole of a session: `documentFraming`
+   * writes it when a file opens, and nothing but a pan moved it afterwards. On
+   * a large build that means every rotation swings on the radius the whole
+   * structure was framed at, so reaching a far corner is a fight -- and it is
+   * why clicking `UP` on the compass flew over the middle of the build rather
+   * than over what was being looked at.
+   *
+   * The source, in order, and each step is a fallback rather than a preference:
+   * the block under the ray, then the build grid's cell where there is no
+   * block, then nothing at all -- which leaves the target exactly where it was
+   * and is therefore the behaviour this replaces, unchanged, for the case it
+   * cannot improve on.
+   *
+   * **Only the depth of what was picked is taken, never its position**, and
+   * without that the camera *snaps*. OrbitControls re-aims at
+   * `controls.target` on every `update()`, so a target set to the cell that
+   * was actually under the pointer -- off to one side, by however far the
+   * pointer was from the middle -- turns the view to face it before the drag
+   * that asked for it has started. Reported exactly that way. Taking the
+   * depth alone leaves the target on the axis the camera is already looking
+   * down, so `lookAt` has nothing to do: nothing moves, and what changes is
+   * the radius, which is the thing being asked for. `pivotDepth` is the
+   * arithmetic, and it is what an editor's "auto depth" does.
+   *
+   * **Orthographic needs the zoom compensating.** `applyProjection` derives the
+   * frustum from the distance to the target and its comment leans on that
+   * distance not moving; moving the pivot with the camera still would resize
+   * the build on screen. `zoomAfterPivot` is the arithmetic and `applyProjection`
+   * has to run again immediately, or the sides are left at the old distance
+   * while the zoom is at the new one.
+   */
+  function repivotAt(clientX: number, clientY: number): void {
+    if (!camera || !controls || !container) return;
+    const block = pickBlockAt(clientX, clientY);
+    const cell = block ?? gridCellAt(clientX, clientY);
+    if (cell === null) return;
+    const at = outlineCentre(cell);
+
+    camera.getWorldDirection(pivotForward);
+    const after = pivotDepth(
+      [camera.position.x, camera.position.y, camera.position.z],
+      [pivotForward.x, pivotForward.y, pivotForward.z],
+      [at.x, at.y, at.z],
+    );
+    // Behind the camera, or on top of it. The pointer's ray leans away from
+    // the view axis, so a cell at the very edge of a wide field of view can
+    // be a great deal nearer along it than it is along the ray -- and a
+    // pivot at zero is a rotation with nothing to turn about.
+    if (!(after > controls.minDistance)) return;
+
+    const before = camera.position.distanceTo(controls.target);
+    controls.target.copy(camera.position).addScaledVector(pivotForward, after);
+    if (camera === ortho && ortho !== undefined) {
+      ortho.zoom = zoomAfterPivot(ortho.zoom, before, after);
+      applyProjection((container.clientWidth || 1) / (container.clientHeight || 1));
+    }
+    controls.update();
   }
 
   /**
@@ -3024,6 +3129,33 @@ import { isTyping } from "./typing.js";
           event.button === 0 || event.button === 1
             ? { x: event.clientX, y: event.clientY, button: event.button }
             : null;
+
+        /*
+         * The right button rotates, so this is the moment to decide what it
+         * rotates *about*.
+         *
+         * Reseated at the press rather than followed continuously: the pivot
+         * has to hold still for the whole drag, or the camera would chase
+         * whatever the rotation swung into view. It moves the pivot and not
+         * the camera, so nothing on screen jumps -- what changes is the centre
+         * the next drag turns around.
+         *
+         * `pointerOnHandle` is the same rule the block outline and the build
+         * grid already ask: a press that belongs to a handle is not a press on
+         * what is behind it. A flight owns the camera outright while it runs.
+         */
+        if (
+          event.button === 2 &&
+          cameraMode === "orbit" &&
+          flight === null &&
+          !pointerOnHandle({
+            overHandle: hovered !== null,
+            overGizmo: gizmoHover !== null,
+            dragging: gizmoDrag !== null,
+          })
+        ) {
+          repivotAt(event.clientX, event.clientY);
+        }
 
         /*
          * A press on a face handle takes over the gesture.
