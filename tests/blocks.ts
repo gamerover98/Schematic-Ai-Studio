@@ -1685,6 +1685,124 @@ if (pack === null) {
   );
 }
 
+console.log("\n--- seagrass is four planes in a hash ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `tall_seagrass` had no shape at all, so it was a **solid opaque cube** two
+   * blocks high wearing a texture half made of water -- the amethyst bud's
+   * fault in a plant. `occludesNeighbours` answers from the shape and
+   * `lighting.ts` floods from that predicate, so a bed of it sealed every cell
+   * it stood in and put the seabed underneath in the dark, and `coversFace`
+   * called it sturdy ground.
+   *
+   * `seagrass` was a `cross`, which is the right kind of wrong -- see-through,
+   * culling nothing -- and still the wrong model. It is here because it is not
+   * a related block: `seagrass.json`, `tall_seagrass_bottom.json` and
+   * `tall_seagrass_top.json` are three names for one `template_seagrass`.
+   */
+  const grassFaces = async (name: string, props: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block(name, props));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const states: ReadonlyArray<readonly [string, Record<string, string>]> = [
+    ["seagrass", {}],
+    ["tall_seagrass", { half: "lower" }],
+    ["tall_seagrass", { half: "upper" }],
+  ];
+
+  for (const [name, props] of states) {
+    const label = `${name}${props.half ? `[half=${props.half}]` : ""}`;
+    const entry: PaletteEntry = { namespacedName: `minecraft:${name}`, properties: props };
+    check(`${label} is boxes, not a cube`, shapeFor(entry).kind === "boxes");
+    check(`...${label} seals nothing`, !occludesNeighbours(entry));
+    check(
+      `...${label} is not sturdy ground`,
+      !(["north", "south", "west", "east", "up", "down"] as const).some((f) => coversFace(entry, f)),
+    );
+    // Four planes, two faces each: a plane's other four collapse to a line and
+    // `boxFaces` drops them.
+    equal(`...${label} is four planes`, (await grassFaces(name, props)).length, 8);
+  }
+
+  /*
+   * Where the planes stand, which is the whole of what "a hash and not a
+   * cross" means: two across the north-south axis and two across the
+   * east-west, each spanning its cell whole. A cross is two diagonals through
+   * the middle and would put no face on any of these four planes.
+   */
+  const planes = (faces: BakedFace[], axis: number): number[] =>
+    [
+      ...new Set(
+        faces
+          .filter((f) => Math.abs(f.normal[axis]) > 0.99)
+          .map((f) => Math.round(f.positions[axis] * 16)),
+      ),
+    ].sort((a, b) => a - b);
+  const bare = await grassFaces("seagrass", {});
+  equal("the north-south planes stand at z = 4 and z = 12", planes(bare, 2), [4, 12]);
+  equal("...the east-west ones at x = 4 and x = 12", planes(bare, 0), [4, 12]);
+  const spans = bare.every((f) => {
+    const at = (i: number): number[] => [0, 1, 2].map((a) => f.positions[i * 3 + a] * 16);
+    return Math.abs(Math.hypot(...[0, 1, 2].map((a) => at(0)[a] - at(1)[a])) - 16) < 1e-6;
+  });
+  check("...and every one of them spans its cell", spans);
+
+  /*
+   * One texel per world unit, which here is also the argument for stating no
+   * `uv` at all: every plane spans 0..16 on both of its own axes, so the
+   * derived window already is vanilla's `[0, 0, 16, 16]`. `amethystBud`'s rule
+   * for `amethystBud`'s reason.
+   */
+  const offSquare: string[] = [];
+  for (const [name, props] of states) {
+    for (const face of await grassFaces(name, props)) {
+      const at = (i: number): number[] => [0, 1, 2].map((a) => face.positions[i * 3 + a] * 16);
+      const edge = (i: number, j: number): number =>
+        Math.hypot(...[0, 1, 2].map((a) => at(i)[a] - at(j)[a]));
+      const window = (i: number, j: number): number =>
+        Math.hypot(
+          (face.uvs[i * 2] - face.uvs[j * 2]) * 16,
+          (face.uvs[i * 2 + 1] - face.uvs[j * 2 + 1]) * 16,
+        );
+      for (const [i, j] of [
+        [0, 1],
+        [0, 3],
+      ]) {
+        if (Math.abs(window(i, j) / edge(i, j) - 1) > 0.005) offSquare.push(name);
+      }
+    }
+  }
+  equal("every plane wears one texel per unit", offSquare, []);
+
+  /*
+   * And `half`, which splits the texture and not one coordinate. Checked as
+   * two different keys rather than by name, because the fault it guards
+   * against is one texture on both halves -- a tall plant drawing its tip
+   * twice, which is what `plainCandidates`' `half` arm exists to prevent.
+   */
+  const keyOf = async (props: Record<string, string>): Promise<string> =>
+    (await baker.bakeBlockstate(block("tall_seagrass", props))).textureKey;
+  equal(
+    "the lower half wears the root texture",
+    await keyOf({ half: "lower" }),
+    "minecraft:block/tall_seagrass_bottom",
+  );
+  equal(
+    "...and the upper half a different one",
+    await keyOf({ half: "upper" }),
+    "minecraft:block/tall_seagrass_top",
+  );
+
+  /*
+   * The control, and the reason `seagrass` is not a suffix rule: kelp grows in
+   * the same water and really is `block/cross`, both `kelp.json` and
+   * `kelp_plant.json`.
+   */
+  check("kelp is still a cross", shapeFor(block("kelp")).kind === "cross");
+}
+
 console.log("\n--- a bamboo fence is a custom fence ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");

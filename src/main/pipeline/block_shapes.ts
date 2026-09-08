@@ -3720,6 +3720,46 @@ function pistonHead(): BlockShape {
   );
 }
 
+/**
+ * `template_seagrass`: four upright planes in a hash, and not a cross.
+ *
+ * Two across the north-south axis at `z = 4` and `z = 12`, two across the
+ * east-west at `x = 4` and `x = 12`, each spanning its cell whole. That is a
+ * denser, squarer silhouette than `block/cross`, which is two diagonals, and
+ * it is what makes a seabed of the stuff read as a meadow rather than as a
+ * scattering of Xs.
+ *
+ * `tall_seagrass` had no shape at all, so it was a **solid opaque cube** two
+ * blocks high wearing a texture half made of water. That is the amethyst bud's
+ * fault in a plant: `occludesNeighbours` answers from the shape and
+ * `lighting.ts` floods from that predicate, so a bed of it sealed every cell
+ * it stood in and put the seabed underneath in the dark.
+ *
+ * `seagrass` was a `cross`, which is the right *kind* of wrong -- see-through,
+ * culling nothing -- and still the wrong model. It comes along here because it
+ * is not a related block, it is the identical file: `seagrass.json`,
+ * `tall_seagrass_bottom.json` and `tall_seagrass_top.json` are three names for
+ * `template_seagrass` with three textures.
+ *
+ * **No `uv` window is stated, and that is deliberate**, which is
+ * `amethystBud`'s rule for `amethystBud`'s reason: every plane spans 0..16 on
+ * both of its own axes, so the derived window already *is* vanilla's
+ * `[0, 0, 16, 16]`. Stating them would be a copy of the coordinates to keep
+ * correct.
+ *
+ * The `half` splits the texture and not one coordinate -- `tall_seagrass_top`
+ * against `tall_seagrass_bottom` -- and `plainCandidates` has read that
+ * property since the two-tall flowers needed it.
+ */
+const SEAGRASS_PLANES: readonly ShapeBox[] = [
+  { box: [0, 0, 4, 16, 16, 4] },
+  { box: [0, 0, 12, 16, 16, 12] },
+  { box: [4, 0, 0, 4, 16, 16] },
+  { box: [12, 0, 0, 12, 16, 16] },
+];
+
+const seagrass = (): BlockShape => boxes(...SEAGRASS_PLANES);
+
 /** Exact block names, taking precedence over the suffix table. */
 const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>> = {
   /*
@@ -3869,6 +3909,11 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   dragon_egg: () => boxes([1, 0, 1, 15, 16, 15]),
   turtle_egg: () => boxes([5, 0, 5, 11, 7, 11]),
   chorus_flower: () => boxes([2, 2, 2, 14, 14, 14]),
+  // `template_seagrass` for all three of its names. Kelp is **not** one of
+  // them: `kelp.json` and `kelp_plant.json` really are `block/cross`.
+  seagrass: seagrass,
+  tall_seagrass: seagrass,
+
   big_dripleaf: () => boxes([0, 11, 0, 16, 15, 16]),
   big_dripleaf_stem: () => boxes([5, 0, 5, 11, 16, 11]),
 
@@ -3930,7 +3975,6 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "fern",
   "large_fern",
   "dead_bush",
-  "seagrass",
   "sugar_cane",
   "wheat",
   "carrots",
