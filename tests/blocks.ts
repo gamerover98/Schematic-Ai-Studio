@@ -1648,6 +1648,124 @@ if (pack === null) {
   );
 }
 
+console.log("\n--- a pillar wears its end on both ends ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `cube_column` writes `down: #end` beside `up: #end`, and the two *lying*
+   * arms of `cubeFaceTextures` had always said so -- east **and** west for
+   * `axis=x`, north **and** south for `axis=z`. The standing arm handed
+   * `faces.down` straight back, and what the generic list resolves for a
+   * `down` face is `_bottom`, `_down`, `_lower` and `_end`, not one of which
+   * vanilla ships for a log. So the list ran on to the bare name and **every
+   * log in the game stood on its own bark**, with its growth rings on the lid
+   * alone.
+   *
+   * Walked over every id carrying an `axis` rather than written out as the
+   * wood families, because the fault was uniform and the membership is the
+   * part nobody would have got right: 59 blocks, with `deepslate`, `basalt`,
+   * `bamboo_block`, `hay_block`, `bone_block`, the three froglights,
+   * `muddy_mangrove_roots` and `creaking_heart` in it beside the logs.
+   *
+   * Stated as an equality between the two ends rather than against a list of
+   * texture names: a name list is a second copy of the pack, and this is one
+   * sentence about what a pillar *is*.
+   */
+  const listPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "block_id_list.txt",
+  );
+  const ALONG: Readonly<Record<string, readonly [string, string, readonly string[]]>> = {
+    x: ["east", "west", ["up", "down", "north", "south"]],
+    y: ["up", "down", ["north", "south", "east", "west"]],
+    z: ["north", "south", ["up", "down", "east", "west"]],
+  };
+  const mismatched: string[] = [];
+  const undifferentiated: string[] = [];
+  let pillars = 0;
+  for (const id of parseBlockList(readFileSync(listPath, "utf8"))) {
+    for (const axis of legalValuesFor(id, "axis") ?? []) {
+      const entry: PaletteEntry = {
+        namespacedName: id,
+        properties: { ...(defaultStateFor(id) ?? {}), axis },
+      };
+      // The ten chains and everything else with an `axis` and a real shape
+      // take their textures per box; only a cube reads this map.
+      if (shapeFor(entry).kind !== "cube") continue;
+      pillars += 1;
+      const baked = await baker.bakeBlockstate(entry);
+      const key = (face: string): string => baked.faces[face]?.textureKey ?? "-";
+      const [near, far, flanks] = ALONG[axis];
+      const short = id.replace("minecraft:", "");
+      if (key(near) !== key(far)) {
+        mismatched.push(`${short}[axis=${axis}] ${near}=${key(near)} ${far}=${key(far)}`);
+      }
+      for (const flank of flanks) {
+        if (key(flank) !== key(flanks[0])) {
+          mismatched.push(`${short}[axis=${axis}] ${flank}=${key(flank)}`);
+        }
+      }
+      if (key(near) === key(flanks[0])) undifferentiated.push(`${short}[axis=${axis}]`);
+    }
+  }
+  check("there are pillars to walk", pillars > 100, String(pillars));
+  equal(`both ends of a pillar wear one texture (${pillars} states)`, mismatched, []);
+  /*
+   * ...and it is not the flank's, which is the clause that would go on passing
+   * if the two ends were made equal by giving them both the side.
+   *
+   * `nether_portal` is the one exception and is named rather than filtered:
+   * its `axis` is `x|z` and its model is not `cube_column` at all but two
+   * planes, so it has one texture and reaches this walk only because nothing
+   * has given it a shape. A remainder, not a pillar.
+   */
+  equal("...and it is a texture of its own", undifferentiated, [
+    "nether_portal[axis=x]",
+    "nether_portal[axis=z]",
+  ]);
+
+  const faceKey = async (name: string, axis: string, face: string): Promise<string> => {
+    const baked = await baker.bakeBlockstate(
+      block(name, { ...(defaultStateFor(`minecraft:${name}`) ?? {}), axis }),
+    );
+    return baked.faces[face]?.textureKey ?? "-";
+  };
+  equal(
+    "a standing log shows its rings underneath",
+    await faceKey("oak_log", "y", "down"),
+    "minecraft:block/oak_log_top",
+  );
+  /*
+   * The control, and the reason this is one line rather than a rewrite: the
+   * lying arms were right the whole time, which is what made the standing one
+   * look deliberate.
+   */
+  equal(
+    "...and a lying one still shows its bark on the lid",
+    await faceKey("oak_log", "x", "up"),
+    "minecraft:block/oak_log",
+  );
+  equal(
+    "...with the rings on the end it actually points at",
+    await faceKey("oak_log", "x", "east"),
+    "minecraft:block/oak_log_top",
+  );
+  /*
+   * And the guard. A jukebox is `cube_top`, whose `down` really is `#side`,
+   * and it carries no `axis` -- so offering `_top` for a `down` face outright,
+   * which is the change this one looks like, would have taken its floor with
+   * nothing anywhere failing.
+   */
+  equal(
+    "a jukebox, which is no pillar, keeps its side underneath",
+    (await baker.bakeBlockstate(block("jukebox", defaultStateFor("minecraft:jukebox") ?? {}))).faces
+      .down?.textureKey,
+    "minecraft:block/jukebox_side",
+  );
+}
+
 console.log("\n--- a lever is a switch, not a plate ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");
