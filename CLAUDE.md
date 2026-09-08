@@ -4647,6 +4647,67 @@ knowing:
   omission.** It changes the height of the smoke column, which is a particle and
   part of no model. Giving it a shape would be inventing, which is the one thing
   this file is not allowed to do.
+- **The two sculk sensors and the shrieker were cubes, and all three are half
+  a block tall with something standing on them.** Four faults, of which the
+  silhouette is only the first:
+
+  - **`sculk_sensor_side.png` is 50% transparent, and that is the block being
+    8 high.** Only the lower half of the tile is the sensor's flank — vanilla
+    says so with `uv: [0, 8, 16, 16]` — so stretched over a full cube every
+    sensor in the game drew its side at twice its height with the top half
+    empty;
+  - **`occludesNeighbours` answered true**, so a sensor sealed its own cell.
+    `lighting.ts` floods from that predicate, which is the amethyst bud's fault
+    in a redstone block: a corridor of sensors put itself in the dark. It also
+    took the face off whatever stood on top, the sensor's lid being opaque
+    while the block under it is only half there;
+  - **the calibrated one wore its own lid on all six faces.** It ships three
+    textures — `_amethyst`, `_input_side`, `_top` — and borrows
+    `sculk_sensor_side` and `sculk_sensor_bottom` from the plain sensor, which
+    no candidate list can guess. So `calibrated_sculk_sensor_top` was the one
+    name that resolved and the fallback painted it on the other five: the
+    dispenser's fault, one block along;
+  - **and the tendrils, the amethyst and the shrieker's bowl were not drawn at
+    all**, which is what these blocks look like.
+
+  **What each property does is smaller than it looks.** `sculk_sensor_phase`
+  chooses the tendril *texture* and nothing else — `active` and `cooldown`
+  share one model and `inactive` has the other, and the two files differ by one
+  line. `can_summon` chooses the shrieker's `inner_top` the same way. `power`
+  moves nothing in any of its sixteen values, and neither does `shrieking`: a
+  shrieking shrieker is an animation and a particle, which is `signal_fire`'s
+  answer. The calibrated sensor's `facing` turns the model, and its amethyst
+  input is the face **opposite** it — `facing=north` selects the unrotated
+  model, whose `#calibrated_side` is on the south.
+
+  **The shrieker is a bowl, and that is why vanilla states five inward planes.**
+  `sculk_shrieker_top.png` is 16.5% opaque with a hole clean through the middle,
+  so what you see through it is the rim's inside and the `inner_top` on the
+  floor of the slab below. Each of those planes carries one face in vanilla and
+  would emit two here — coincident with the rim's own, which is a flickering
+  seam — so each `omit`s the outward one.
+
+  **The amethyst is the one place a window is load-bearing, and it is the
+  check.** Vanilla writes the two crossed planes 0..16 with `rescale: true`,
+  which this file has no notion of, so they are written already rescaled —
+  `pottedPlant`'s idiom. A 45° rescale is exactly `sqrt(2)`, so the planes run
+  `8 ± 8·sqrt(2)` before the turn and land corner to corner of the cell, and the
+  picture comes out stretched along them by `1/sqrt(2)` and by nothing else.
+  `tests/blocks.ts` asks for one texel per world unit on every face **except**
+  the amethyst, and for exactly `1/sqrt(2)` there: written at any other width
+  that number moves.
+
+  **Everything else states no window, and that is `amethystBud`'s rule rather
+  than an omission.** Vanilla's `[0, 8, 16, 16]` on the slab's flanks and
+  `[1, 1, 15, 8]` on the rim's are precisely what this file derives from the
+  box — the flank of an 8-tall block *is* the lower half of its tile, which is
+  why that texture is half transparent. Measured over all 102 faces of the
+  three blocks at every facing, stating them changes not one uv; what they
+  would add is a copy of the coordinates to keep correct.
+
+  `calibrated_sculk_sensor` was also missing from `lighting.ts`, at the light
+  level 1 the plain sensor already had. A hand-written table's ordinary
+  failure, and the same shape as the eleven blocks the `axis` walk recovered.
 - **A lever was a plate the size of a wall, and `face` was read nowhere.** It
   had `againstWall(e, 3)` — the ladder's shape with a thickness — which is
   three faults at once: the silhouette is a plate where the block is a switch;

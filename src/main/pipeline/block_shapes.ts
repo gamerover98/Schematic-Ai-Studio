@@ -2180,6 +2180,230 @@ function lever(entry: PaletteEntry): BlockShape {
   return transform(parts, northFacingSteps(entry), false);
 }
 
+/**
+ * The three sculk sensors and the shrieker: `sculk_sensor.json`,
+ * `calibrated_sculk_sensor.json` and `template_sculk_shrieker.json`.
+ *
+ * All three were full opaque cubes, and every one of them is **half a block
+ * tall with something standing on it**. What that cost is four separate
+ * things, and only the first is the silhouette:
+ *
+ * - **`sculk_sensor_side.png` is 50% transparent, and that is the block being
+ *   8 high.** Only the bottom half of the tile is the sensor's flank; vanilla
+ *   says so with `uv: [0, 8, 16, 16]`. Stretched over a full cube by
+ *   coordinate-derived UVs, every sensor in the game drew its side twice as
+ *   tall and half of it was empty;
+ * - **`occludesNeighbours` answered true**, so a sensor sealed its own cell.
+ *   `lighting.ts` floods from that predicate, which is the amethyst bud's
+ *   fault in a redstone block: a corridor of sensors lit itself out. It also
+ *   deleted the face of whatever stood on top, the sensor's lid being opaque
+ *   while the block under it is only half there;
+ * - **the calibrated one wore its own lid on all six faces.** It ships three
+ *   textures -- `_amethyst`, `_input_side`, `_top` -- and borrows
+ *   `sculk_sensor_side` and `sculk_sensor_bottom` from the plain sensor, which
+ *   no candidate list can guess. So `calibrated_sculk_sensor_top` was the one
+ *   name that resolved and `cubeFaceTextures`' fallback painted it on the
+ *   other five: the dispenser's fault, one block along;
+ * - **and the tendrils, the amethyst and the shrieker's bowl were simply not
+ *   there.** They are what these blocks look like.
+ *
+ * ## What each property does, and what it does not
+ *
+ * `sculk_sensor_phase` chooses the **tendril texture and nothing else**:
+ * `active` and `cooldown` share one model and `inactive` has the other, and
+ * the difference between the two files is one line. `can_summon` chooses the
+ * shrieker's `inner_top` the same way -- one texture, no coordinate.
+ *
+ * `power` moves nothing at all, on either sensor, and neither does
+ * `shrieking`: a shrieking shrieker is an animation and a particle, which is
+ * `signal_fire`'s answer. `waterlogged` is the generic one.
+ *
+ * ## The pieces
+ *
+ * The body is the same 16x8x16 slab on all three, and the tendrils are the
+ * same four planes -- zero thickness, 8 by 8, each turned 45 degrees about its
+ * own corner, reaching a unit outside the cell on x and up to the top of it.
+ * Their windows are `[4, 8, 12, 16]` one way and `[12, 8, 4, 16]` the other,
+ * and the reversal is vanilla's own: a window with `u0 > u1` is a mirror,
+ * which is how one plane wears the picture from both sides.
+ *
+ * **Only the tendrils and the amethyst state a window**, and the absence
+ * elsewhere is deliberate rather than an omission -- `amethystBud`'s rule.
+ * Vanilla writes `[0, 8, 16, 16]` on the slab's flanks and `[1, 1, 15, 8]` on
+ * the rim's, and both are exactly what this file derives from the box: the
+ * flank of an 8-tall block *is* the lower half of its tile, which is why that
+ * texture is half transparent. Measured over all 102 faces of the three blocks
+ * at every facing, stating them changes not one uv. What would have to be kept
+ * correct is a copy of the coordinates.
+ *
+ * The calibrated sensor adds two crossed amethyst planes and an input side.
+ * They carry `rescale: true`, which this file has no notion of, so they are
+ * written **already rescaled** -- `pottedPlant`'s idiom. A 45-degree turn
+ * rescales by `sqrt(2)`, so vanilla's 0..16 becomes `8 +/- 8 * sqrt(2)` here
+ * and lands corner to corner of the cell, which is where a rescaled cross ends
+ * up and where the amethyst has to be.
+ *
+ * The shrieker is a bowl, and that needs the five inward planes vanilla
+ * states: `sculk_shrieker_top.png` is 16.5% opaque with a hole clean through
+ * the middle, so what you see through it is the rim's inside and the
+ * `inner_top` on the floor of the slab below. Each of those planes carries one
+ * face in vanilla and would emit two here -- coincident with the rim's own,
+ * which is a flickering seam -- so each `omit`s the outward one.
+ */
+const SCULK_TENDRILS: readonly ShapeBox[] = [
+  {
+    box: [-1, 8, 3, 7, 16, 3],
+    rotation: { origin: [3, 12, 3], axis: "y", angle: 45 },
+    uv: { north: [4, 8, 12, 16], south: [12, 8, 4, 16] },
+  },
+  {
+    box: [9, 8, 3, 17, 16, 3],
+    rotation: { origin: [13, 12, 3], axis: "y", angle: -45 },
+    uv: { north: [12, 8, 4, 16], south: [4, 8, 12, 16] },
+  },
+  {
+    box: [9, 8, 13, 17, 16, 13],
+    rotation: { origin: [13, 12, 13], axis: "y", angle: 45 },
+    uv: { north: [12, 8, 4, 16], south: [4, 8, 12, 16] },
+  },
+  {
+    box: [-1, 8, 13, 7, 16, 13],
+    rotation: { origin: [3, 12, 13], axis: "y", angle: -45 },
+    uv: { north: [4, 8, 12, 16], south: [12, 8, 4, 16] },
+  },
+];
+
+/** `active` and `cooldown` are one model; only the tendril texture moves. */
+function sculkTendrils(entry: PaletteEntry): ShapeBox[] {
+  const phase = entry.properties.sculk_sensor_phase;
+  const texture =
+    phase === "active" || phase === "cooldown"
+      ? "sculk_sensor_tendril_active"
+      : "sculk_sensor_tendril_inactive";
+  return SCULK_TENDRILS.map((part) => ({ ...part, texture }));
+}
+
+function sensorBody(textures: Readonly<Record<string, string>>): ShapeBox {
+  return { box: [0, 0, 0, 16, 8, 16], textures };
+}
+
+function sculkSensor(entry: PaletteEntry): BlockShape {
+  return boxes(
+    sensorBody({
+      up: "sculk_sensor_top",
+      down: "sculk_sensor_bottom",
+      north: "sculk_sensor_side",
+      east: "sculk_sensor_side",
+      south: "sculk_sensor_side",
+      west: "sculk_sensor_side",
+    }),
+    ...sculkTendrils(entry),
+  );
+}
+
+/** Vanilla's `rescale: true` on a 45-degree turn is a factor of `sqrt(2)`. */
+const AMETHYST_REACH = 8 * Math.SQRT2;
+const AMETHYST_SPIN: BoxRotation = { origin: [8, 9, 8], axis: "y", angle: 45 };
+
+const CALIBRATED_AMETHYST: readonly ShapeBox[] = [
+  {
+    box: [8, 8, 8 - AMETHYST_REACH, 8, 20, 8 + AMETHYST_REACH],
+    rotation: AMETHYST_SPIN,
+    texture: "calibrated_sculk_sensor_amethyst",
+    uv: { east: [0, 4, 16, 16], west: [0, 4, 16, 16] },
+  },
+  {
+    box: [8 - AMETHYST_REACH, 8, 8, 8 + AMETHYST_REACH, 20, 8],
+    rotation: AMETHYST_SPIN,
+    texture: "calibrated_sculk_sensor_amethyst",
+    uv: { north: [0, 4, 16, 16], south: [0, 4, 16, 16] },
+  },
+];
+
+function calibratedSculkSensor(entry: PaletteEntry): BlockShape {
+  /*
+   * North-authored -- `facing=north` is the variant with no `y` -- and the
+   * amethyst input is the face **opposite** `facing`, which is what the model
+   * says: the unrotated one wears `#calibrated_side` on its south.
+   */
+  return transform(
+    [
+      sensorBody({
+        up: "calibrated_sculk_sensor_top",
+        down: "sculk_sensor_bottom",
+        north: "sculk_sensor_side",
+        east: "sculk_sensor_side",
+        south: "calibrated_sculk_sensor_input_side",
+        west: "sculk_sensor_side",
+      }),
+      ...sculkTendrils(entry),
+      ...CALIBRATED_AMETHYST,
+    ],
+    northFacingSteps(entry),
+    false,
+  );
+}
+
+/** The rim's inside, one face each: the outward one is the rim's own. */
+const SHRIEKER_BOWL: readonly ShapeBox[] = [
+  {
+    box: [1, 14.98, 1, 15, 14.98, 15],
+    texture: "sculk_shrieker_top",
+    omit: ["up"],
+  },
+  {
+    box: [1, 8, 14.98, 15, 15, 14.98],
+    texture: "sculk_shrieker_side",
+    omit: ["south"],
+  },
+  {
+    box: [1, 8, 1.02, 15, 15, 1.02],
+    texture: "sculk_shrieker_side",
+    omit: ["north"],
+  },
+  {
+    box: [14.98, 8, 1, 14.98, 15, 15],
+    texture: "sculk_shrieker_side",
+    omit: ["east"],
+  },
+  {
+    box: [1.02, 8, 1, 1.02, 15, 15],
+    texture: "sculk_shrieker_side",
+    omit: ["west"],
+  },
+];
+
+function sculkShrieker(entry: PaletteEntry): BlockShape {
+  const inner =
+    entry.properties.can_summon === "true"
+      ? "sculk_shrieker_can_summon_inner_top"
+      : "sculk_shrieker_inner_top";
+  return boxes(
+    sensorBody({
+      up: inner,
+      down: "sculk_shrieker_bottom",
+      north: "sculk_shrieker_side",
+      east: "sculk_shrieker_side",
+      south: "sculk_shrieker_side",
+      west: "sculk_shrieker_side",
+    }),
+    {
+      box: [1, 8, 1, 15, 15, 15],
+      textures: {
+        up: "sculk_shrieker_top",
+        north: "sculk_shrieker_side",
+        east: "sculk_shrieker_side",
+        south: "sculk_shrieker_side",
+        west: "sculk_shrieker_side",
+      },
+      // Coincident with the slab's lid, which is the `inner_top` you see
+      // through the hole.
+      omit: ["down"],
+    },
+    ...SHRIEKER_BOWL,
+  );
+}
+
 const END_ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
   up: undefined,
   down: { origin: [8, 8, 8], axis: "x", angle: 180 },
@@ -3354,6 +3578,13 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   // which for a rail means the track is invisible and the ground is too.
   rail,
   lever,
+
+  // Half a block tall with something standing on it: tendrils, an amethyst
+  // cross, a bowl. As cubes they sealed their own cell and drew a side texture
+  // that is half transparent over twice the height it belongs on.
+  sculk_sensor: sculkSensor,
+  calibrated_sculk_sensor: calibratedSculkSensor,
+  sculk_shrieker: sculkShrieker,
   tripwire_hook: (e) => againstWall(e, 3),
   glow_lichen: (e) => againstWall(e, 1),
 
