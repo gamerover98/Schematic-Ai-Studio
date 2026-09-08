@@ -4525,6 +4525,32 @@ knowing:
   what a pillar is. Beside it, that the end is not the flank's texture, which
   is the clause that would go on passing if the two ends were made equal by
   giving them both the side.
+- **Seagrass is four planes in a hash, and tall seagrass was a solid cube.**
+  `template_seagrass` states two planes across the north-south axis at `z = 4`
+  and `z = 12` and two across the east-west at `x = 4` and `x = 12`, each
+  spanning its cell whole — a denser, squarer silhouette than `block/cross`,
+  which is two diagonals, and what makes a seabed of it read as a meadow.
+
+  `tall_seagrass` was in no shape table at all, so it was a cube: **opaque**,
+  two blocks high, wearing a texture 51.5% made of water. That is the amethyst
+  bud's fault in a plant — `occludesNeighbours` answers from the shape and
+  `lighting.ts` floods from that predicate, so a bed of it sealed every cell it
+  stood in and put the seabed underneath in the dark, while `coversFace` called
+  it sturdy ground.
+
+  `seagrass` comes along with it, and not as a related block: `seagrass.json`,
+  `tall_seagrass_bottom.json` and `tall_seagrass_top.json` are **three names
+  for one model**. It was a `cross`, which is the right kind of wrong —
+  see-through, culling nothing — and still not what vanilla draws. **Kelp is
+  the control**: `kelp.json` and `kelp_plant.json` really are `block/cross`, so
+  this is an exact-name rule and not a rule about things that grow in water.
+
+  **No `uv` window is stated, and that is deliberate**, which is `amethystBud`'s
+  rule for its reason: every plane spans 0..16 on both of its own axes, so the
+  derived window already *is* vanilla's `[0, 0, 16, 16]`, and stating it would
+  be a copy of the coordinates to keep correct. `half` splits the texture and
+  not one coordinate, and `plainCandidates` has read that property since the
+  two-tall flowers needed it.
 - **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
   one member.** Every other fence in the game parents `block/fence_post` and
   `block/fence_side` and paints them with a plank tile, so its UVs derive
