@@ -4418,6 +4418,39 @@ knowing:
     of. Falling through costs nothing anywhere else — what follows offers
     `_side` and the bare name in the same order those did — and the observer
     is the control, because it really does ship an `observer_back`.
+- **A block that points somewhere never wears its front on a flat face, and
+  the underside of every furnace in the game was wearing the fire.** Every
+  template vanilla builds one of these from puts `#top`, `#bottom` or `#side`
+  on the lid and the floor, and not one of them ever puts `#front` there:
+  `orientable` is `orientable_with_bottom` with `bottom` set to `#top`,
+  `template_command_block` writes `down: #side, up: #side`, and the observer
+  writes `#top` on both. But `<name>_top` was not offered for a `down` face and
+  `<name>_side` was offered for neither, so those faces resolved nothing and
+  took the fallback above — the first face that *did* resolve, which on a block
+  whose front is the only texture named after it is the front.
+
+  **It is guarded on the block having a `facing`, which is the difference
+  between a rule and a guess.** A jukebox is `cube_top` and its floor really is
+  `jukebox_side`; a log is `cube_column` and its ends really are `#end`.
+  Neither points anywhere and neither is touched — offered outright, `_top` on
+  a `down` face would have taken the jukebox's floor with nothing anywhere
+  failing.
+
+  `end_portal_frame` is the one member of the set vanilla does not derive: its
+  floor is `end_stone`, written out in the model. It costs one line, because a
+  `SPECIAL_FACE_RULES` row is consulted before the generic list.
+
+  **26 of 745 answers move**, over every cube-shaped id at every one of its
+  facings: the furnace and the blast furnace, the observer, the chiseled
+  bookshelf, the three command blocks and the end portal frame.
+
+  What is deliberately left is the blocks that point **nowhere**, and it is a
+  real remainder rather than a clean edge: a log's underside wears its bark
+  where `cube_column` says `#end`, and a crafting table, a cartography table
+  and a fletching table each stand on their own wood's planks, which is a name
+  nothing here could derive. Fixing that means offering `_top` for a `down`
+  face outright, which is a change across all 1197 ids and one the `cube_top`
+  family disagrees with — so it is a commit of its own, like `<name>_sides`.
 - **A rail's `shape` was decoded, derived and rotated -- and drawn by
   nobody.** It comes out of `legacy_blocks.json` and out of a `.schem`, it is
   derived from the neighbours by `block_connections.ts`, and it turns with
