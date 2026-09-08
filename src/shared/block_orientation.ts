@@ -291,13 +291,31 @@ const WALL_MOUNTED_SUFFIXES = [
  * argument for it. While all six facings drew the same cube, deriving `facing`
  * bought exactly nothing; the moment the model turns, not deriving it is half
  * the block coming out wrong.
+ *
+ * **A lightning rod is the same rule and arrived the same way.** Vanilla's
+ * placement is `setValue(FACING, context.getClickedFace())` and nothing else,
+ * so a rod stands up off a floor, hangs down off a ceiling and juts out of a
+ * wall -- and every one of the eight was landing on the registry's `facing=up`
+ * however it was placed, because it was in none of these tables. The camera
+ * comes in exactly where a trapdoor's does: only when there is no face to
+ * read, which is the build grid or a cell in mid-air.
  */
 const GROWS_FROM_CLICKED: ReadonlySet<string> = new Set([
   "small_amethyst_bud",
   "medium_amethyst_bud",
   "large_amethyst_bud",
   "amethyst_cluster",
+  "lightning_rod",
 ]);
+
+/**
+ * The three oxidation stages and their four waxed mirrors, as one suffix.
+ *
+ * `_chain`'s arrangement in `block_shapes.ts`, for `_chain`'s reason: the
+ * copper golem update multiplied one block into eight, and a hand-written list
+ * of eight is what the `axis` walk found eleven missing names in.
+ */
+const GROWS_FROM_CLICKED_SUFFIXES = ["_lightning_rod"] as const;
 
 /**
  * Blocks carrying `face` (floor/wall/ceiling) alongside a horizontal `facing`.
@@ -476,7 +494,10 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return { facing: OPPOSITE[horizontalFacing(look.direction)] };
   }
 
-  if (GROWS_FROM_CLICKED.has(name)) {
+  if (
+    GROWS_FROM_CLICKED.has(name) ||
+    GROWS_FROM_CLICKED_SUFFIXES.some((suffix) => name.endsWith(suffix))
+  ) {
     /*
      * The clicked face, exactly as `WALL_MOUNTED` has it, and the fallback is
      * that rule's own extended to six: with no face to go on -- the build grid,

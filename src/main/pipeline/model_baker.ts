@@ -2008,6 +2008,28 @@ export class ModelBaker {
     }
 
     /*
+     * A lightning rod carrying a strike wears `lightning_rod_on` -- **the
+     * plain one, whatever the oxidation**, which is what every stage's
+     * blockstate says: `exposed_lightning_rod.json` sends `powered=true` to
+     * `block/lightning_rod_on` exactly as the unweathered one does.
+     *
+     * `powered` moves not one coordinate, which is why it is here rather than
+     * in the shape function -- the swap is of the whole block, `lit`'s case
+     * and not the campfire's.
+     *
+     * The bare name behind it is not decoration. Vanilla ships that texture
+     * and the bundled pack does not override it, and this app reads only the
+     * pack; a single name with `resolveBoxTexture`'s silent fallback would
+     * come to the same answer here and would be invisible to
+     * `tests/blocks.ts`, which asks a candidate *list* to resolve something.
+     * So a powered rod comes out looking unpowered rather than like nothing,
+     * and a pack that ships the file gets the right picture with no change.
+     */
+    if (normalized.endsWith("lightning_rod") && flagOf(entry, "powered")) {
+      return ["lightning_rod_on", normalized];
+    }
+
+    /*
      * The face a block *points* is drawn from its own texture, and there was no
      * rule for it at all -- so every furnace, dispenser and dropper in the game
      * wore `furnace_side` on all four sides, including the one with the fire in

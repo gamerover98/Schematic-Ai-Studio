@@ -4284,6 +4284,49 @@ knowing:
   reason and never reported — which is the argument for the check over the fix.
   `some` rather than `every`, because a chest's hidden faces and a plane's back
   are legitimately blank.
+- **All eight lightning rods were cubes, and it is the end rod's fault on the
+  block beside it in the same file.** `lightning_rod.png` is 15.6% opaque with
+  its art in `u 0..4, v 0..16`, a quarter of the tile, so a full cube wore a
+  mostly transparent picture on all six faces — and sealed its own cell, since
+  `occludesNeighbours` answers from the shape. Eight, because the copper golem
+  update gave the rod the three oxidation stages and their four waxed mirrors:
+  `_lightning_rod` is one `SUFFIX_SHAPES` entry, `_chain`'s arrangement for
+  `_chain`'s reason, and a stage added tomorrow needs no edit.
+
+  The model is a 4x4x4 head on a 2x12x2 shaft. The shaft has no `up` face
+  because the head stands on it, and the head's lid states `[4, 4, 0, 0]` —
+  reversed on both axes, which is a half turn, and vanilla means it.
+
+  **The six variants are `end_rod.json`'s byte for byte**, so `ROD_TURN` is one
+  table for both rods rather than two copies of the same six rotations. East
+  and west are restated there as a single turn about z where vanilla writes an
+  x *and* a y, and the difference between the two spellings is a roll about the
+  rod's own length — unobservable on either block, because all four side faces
+  of each wear the identical window and the two that would show a roll are on
+  the ends, where a roll moves nothing.
+
+  **The placement was the other half of the report, and vanilla's rule is one
+  line**: `setValue(FACING, context.getClickedFace())`. Every one of the eight
+  was landing on the registry's `facing=up` however it was placed, because the
+  rod was in none of `block_orientation.ts`' tables. It is `GROWS_FROM_CLICKED`
+  now — the amethyst bud's rule exactly — so the camera comes in where a
+  trapdoor's does and nowhere else: only when there is no face to read, which
+  is the build grid or a cell in mid-air, and there the rod points back at the
+  viewer.
+
+  **`powered` swaps the whole block's texture and moves no coordinate**, to the
+  *plain* `lightning_rod_on` whatever the oxidation — which is what every
+  stage's blockstate says. So it lives in `candidatesForName` beside `lit`
+  rather than in a shape function, and the bare name behind it is load-bearing:
+  vanilla ships that texture, the bundled pack does not override it, and a
+  one-name list would leave the plain rod resolving nothing at all.
+
+  That last rule is checked by **reading the source**, which is the weaker kind
+  and is worth saying. Deleting it fails no bake here — with or without it a
+  powered rod comes out wearing its own unpowered texture, which is
+  `resolveBoxTexture`'s fallback working — so it is `closeAllConnections`'
+  idiom for `closeAllConnections`' reason. What makes the rule worth having
+  anyway is that a request may carry its own `resourcePackPath`.
 - **The candle's flame is this file's one deliberate invention, and it is
   labelled.** No vanilla model has one: `candle_one_candle_lit.json` is the
   same `template_candle` with `all: block/candle_lit`, and the two textures
@@ -4743,7 +4786,7 @@ knowing:
 
   **The three `face` values are written out**, because the blockstate turns the
   one model with `x` and `rotateShapeBox` knows only `y`. That is
-  `END_ROD_TURN`'s problem with one extra turn of the screw: there the parts
+  `ROD_TURN`'s problem with one extra turn of the screw: there the parts
   carry no rotation of their own, and here the handle does, and a `ShapeBox`
   holds one. So the `x` is applied by hand and the tilt stays as the residual,
   which lands the pivot where the handle meets the base each time — `[8, 1, 8]`
