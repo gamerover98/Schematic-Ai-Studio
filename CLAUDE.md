@@ -4525,6 +4525,47 @@ knowing:
   what a pillar is. Beside it, that the end is not the flank's texture, which
   is the clause that would go on passing if the two ends were made equal by
   giving them both the side.
+- **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
+  one member.** Every other fence in the game parents `block/fence_post` and
+  `block/fence_side` and paints them with a plank tile, so its UVs derive
+  correctly and `fence` is right for all of them. `bamboo_fence` parents
+  `block/custom_fence_post` and the four `custom_fence_side_<dir>` models, and
+  those wear a **sheet**: `bamboo_fence.png` carries the post's flank, the
+  post's lid, the rail's long side, the rail's end cap and the rail's lid each
+  in its own patch.
+
+  So it is the lantern's fault on a block that looked like it had none — a post
+  full of holes still reads as a fence. Measured on the shipped pack: the
+  flanks want `u 0..4, v 0..16`, which is **100% opaque**, and were reading
+  `u 6..10`, which is **40.6%**; the lid wants `[4, 0, 8, 4]`, 100%, and was
+  reading its own footprint, **25%**. A post six tenths made of holes, and a
+  lid three quarters.
+
+  The geometry differs too, by three units nobody would have reported: a custom
+  fence's rails run to `z = 9`, three deep inside the post, where an ordinary
+  fence's stop at `z = 7`. Vanilla omits the face that ends up buried, which is
+  why a rail here is five faces and an ordinary fence's is six.
+
+  **The four side models are transcribed one at a time rather than turned, and
+  that is a finding rather than laziness.** They are hand-authored in vanilla
+  and are not y-rotations of one another: north's end cap is stated `rotation:
+  180` where east's and south's have none, and west's window is written
+  `[15, 4, 13, 7]`, reversed, which is a mirror. On this pack that 2x3 patch
+  differs from its own half-turn in **72 of 96 texels** and from its own mirror
+  in the same 72, so the three spellings are three different pictures.
+
+  **The check that catches this is opacity, not `facePaintsSomething`.**
+  Deleting the post's windows leaves the derived ones, which are four wide by
+  sixteen tall on a sixteen-unit face: one texel per unit, inside the tile,
+  vanilla geometry, and 40.6% opaque — so every check in `tests/blocks.ts`
+  passed with them gone, which was verified by removing them. `faceOpacity`
+  requires every face of all sixteen connection states to be **wholly** opaque,
+  which is a sentence about the block: a bamboo fence has no holes in it.
+
+  `bamboo_fence_gate` is **deliberately not done**, and it is the same fault one
+  block along: `template_custom_fence_gate` is eight hand-authored elements on
+  its own 75%-opaque sheet, `bamboo_fence_gate.png`. A second transcription, so
+  a second commit.
 - **A rail's `shape` was decoded, derived and rotated -- and drawn by
   nobody.** It comes out of `legacy_blocks.json` and out of a `.schem`, it is
   derived from the neighbours by `block_connections.ts`, and it turns with
