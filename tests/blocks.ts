@@ -1642,6 +1642,170 @@ if (pack === null) {
   );
 }
 
+console.log("\n--- a lever is a switch, not a plate ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was `againstWall(e, 3)`: a 16x16x3 plate over a whole face of the cell,
+   * with `face` never read at all -- so a lever on the floor or the ceiling was
+   * drawn flat against a wall, and the plate, lying exactly on the cell
+   * boundary, made `coversFace` answer true and took the face off the block the
+   * lever was screwed to.
+   *
+   * Transcribed from `lever.json` / `lever_on.json` and the blockstate: a 6x3x8
+   * cobblestone base and a 2x10x2 handle tilted 45 degrees through where it
+   * meets the base, turned by `face` and then by `facing`.
+   */
+  const LEVER_FACES = ["north", "south", "west", "east", "up", "down"] as const;
+  const at = (f: BakedFace, i: number): number[] =>
+    [f.positions[i * 3], f.positions[i * 3 + 1], f.positions[i * 3 + 2]].map((n) => n * 16);
+  const uAt = (f: BakedFace, i: number): number => f.uvs[i * 2] * 16;
+  const vAt = (f: BakedFace, i: number): number => f.uvs[i * 2 + 1] * 16;
+  const mean = (points: number[][], axis: number): number =>
+    points.reduce((sum, p) => sum + p[axis], 0) / points.length;
+
+  const partsOf = async (
+    face: string,
+    facing: string,
+    powered: string,
+  ): Promise<{ handle: BakedFace[]; base: BakedFace[] }> => {
+    const baked = await baker.bakeBlockstate(block("lever", { face, facing, powered }));
+    const all = [...Object.values(baked.faces), ...baked.extraFaces];
+    return {
+      handle: all.filter((f) => f.textureKey.endsWith("/lever")),
+      base: all.filter((f) => f.textureKey.endsWith("/cobblestone")),
+    };
+  };
+
+  /*
+   * The walk over all 24 states, which is three properties multiplied out:
+   * three faces, four facings, two powers. Four things are asked of each, and
+   * the second and third are what a hand-rotated model gets wrong.
+   */
+  const counts: string[] = [];
+  const stretched: string[] = [];
+  const offStrip: string[] = [];
+  const backwards: string[] = [];
+  for (const face of ["floor", "wall", "ceiling"]) {
+    for (const facing of ["north", "east", "south", "west"]) {
+      for (const powered of ["false", "true"]) {
+        const where = `${face}/${facing}/${powered}`;
+        const { handle, base } = await partsOf(face, facing, powered);
+        // Six faces of base and five of handle: vanilla omits the handle's
+        // `down`, which is buried in the base, and so does this.
+        if (handle.length !== 5 || base.length !== 6) {
+          counts.push(`${where} faces ${handle.length}+${base.length}`);
+          continue;
+        }
+        const centre = [0, 1, 2].map((axis) =>
+          mean(
+            base.flatMap((f) => [0, 1, 2, 3].map((i) => at(f, i))),
+            axis,
+          ),
+        );
+        const fromBase = (p: number[]): number =>
+          Math.hypot(p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]);
+        for (const f of [...handle, ...base]) {
+          /*
+           * **One texel per world unit, on every face.** This is what catches a
+           * missing `uvRotation`: the window still names the right pixels and
+           * lays them across the face sideways, which is the anvil's fault and
+           * is exactly what the `x: 90` of a wall lever produces if the turn is
+           * left out. Nothing else here can see it -- the UVs stay inside the
+           * tile and the geometry is untouched.
+           */
+          const edge = (i: number, j: number): number =>
+            Math.hypot(...[0, 1, 2].map((axis) => at(f, i)[axis] - at(f, j)[axis]));
+          const window = (i: number, j: number): number =>
+            Math.hypot(uAt(f, i) - uAt(f, j), vAt(f, i) - vAt(f, j));
+          for (const [i, j] of [
+            [0, 1],
+            [0, 3],
+          ]) {
+            const density = window(i, j) / Math.max(1e-6, edge(i, j));
+            if (Math.abs(density - 1) > 0.02) {
+              stretched.push(`${where} ${f.textureKey.split("/").pop()} ${density.toFixed(2)}x`);
+            }
+          }
+        }
+        for (const f of handle) {
+          /*
+           * All 320 opaque texels of `lever.png` are in `u 7..9, v 6..16`, so a
+           * window that wandered would draw nothing -- the chain's fault.
+           */
+          for (const i of [0, 1, 2, 3]) {
+            if (uAt(f, i) < 6.99 || uAt(f, i) > 9.01 || vAt(f, i) < 5.99 || vAt(f, i) > 16.01) {
+              offStrip.push(`${where} at ${uAt(f, i)}/${vAt(f, i)}`);
+            }
+          }
+          /*
+           * And the strip has a right way up: its first two rows are the cap,
+           * mean luminance 119 against 72 at the foot. The 2x2 end cap has every
+           * corner at the free end, so only the four long faces have an end to
+           * get backwards.
+           */
+          const cap = [0, 1, 2, 3].reduce((a, b) => (vAt(f, b) < vAt(f, a) ? b : a));
+          const foot = [0, 1, 2, 3].reduce((a, b) => (vAt(f, b) > vAt(f, a) ? b : a));
+          if (vAt(f, foot) - vAt(f, cap) > 5 && fromBase(at(f, cap)) <= fromBase(at(f, foot))) {
+            backwards.push(where);
+          }
+        }
+      }
+    }
+  }
+  equal("all 24 states draw six faces of base and five of handle", counts, []);
+  equal("...every one of them at one texel per unit", stretched, []);
+  equal("...every handle face over the art rather than the empty tile", offStrip, []);
+  equal("...and none with the strip laid end for end", backwards, []);
+
+  /*
+   * Where the base sits is the whole of what `face` decides, and it was read
+   * nowhere. On a wall it lands **opposite** `facing`, which is
+   * `WALL_MOUNTED`'s rule seen from the geometry: the thing points out of the
+   * wall it is screwed to.
+   */
+  const baseCentre = async (face: string, facing: string): Promise<number[]> => {
+    const { base } = await partsOf(face, facing, "false");
+    const points = base.flatMap((f) => [0, 1, 2, 3].map((i) => at(f, i)));
+    return [0, 1, 2].map((axis) => +mean(points, axis).toFixed(1));
+  };
+  equal("a floor lever's base is on the floor", await baseCentre("floor", "north"), [8, 1.5, 8]);
+  equal("a ceiling lever's base is on the ceiling", await baseCentre("ceiling", "north"), [8, 14.5, 8]);
+  equal("a wall lever facing north is screwed to the south wall", await baseCentre("wall", "north"), [8, 8, 14.5]);
+  equal("...and one facing east to the west wall", await baseCentre("wall", "east"), [1.5, 8, 8]);
+
+  /*
+   * The half that reads backwards. `powered=false` selects the model called
+   * **`lever_on`**, which is the one that leans `+45`, and the wiki settles the
+   * appearance: "when placed on the side of blocks, down is on and up is off".
+   * So an unpowered wall lever has its handle up. Written as the two heights
+   * rather than as a difference, because "they differ" passes with the pair
+   * swapped.
+   */
+  const handleHeight = async (powered: string): Promise<number> => {
+    const { handle } = await partsOf("wall", "north", powered);
+    return Math.round(mean(handle.flatMap((f) => [0, 1, 2, 3].map((i) => at(f, i))), 1));
+  };
+  equal("an unpowered wall lever has its handle up", await handleHeight("false"), 12);
+  equal("...and a powered one has it down", await handleHeight("true"), 4);
+
+  /*
+   * And it is not a cube any more, which is the fault nobody would have
+   * reported: a 16x16x3 plate lies exactly on the cell boundary, so
+   * `coversFace` said yes and the lever deleted the face of the block behind
+   * it.
+   */
+  const lever = block("lever", defaultStateFor("minecraft:lever") ?? {});
+  check("a lever is boxes rather than a cube", shapeFor(lever).kind === "boxes");
+  check("...it does not occlude", !occludesNeighbours(lever));
+  equal(
+    "...and it covers no face of its cell",
+    LEVER_FACES.filter((face) => coversFace(lever, face)),
+    [],
+  );
+}
+
 console.log("\n--- animated textures ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");

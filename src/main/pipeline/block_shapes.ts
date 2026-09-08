@@ -1999,6 +1999,187 @@ const END_ROD: readonly ShapeBox[] = [
  * -90 and not +90. Getting that backwards points every rod at the block behind
  * the one it grew from.
  */
+/**
+ * A lever: a cobblestone base and a handle tilted 45 degrees off it, from
+ * `lever.json` and `lever_on.json`.
+ *
+ * It was `againstWall(e, 3)` -- the ladder's shape with a thickness -- which is
+ * a 16x16x3 plate covering a whole face of the cell, and that is three faults
+ * rather than one:
+ *
+ * - the silhouette is a plate where the block is a switch;
+ * - **`face` was not read at all**, so a lever on the floor or on the ceiling
+ *   was drawn flat against a wall;
+ * - a plate lying exactly on the cell boundary makes `coversFace` answer true,
+ *   so a lever **deleted the face of the block it was screwed to**.
+ *
+ * ## Eight positions became twelve, and that is the era's doing
+ *
+ * 1.8 to 1.12.2 spelled the lever's position *and* its direction as one
+ * metadata nibble, and `legacy_blocks.json` still holds it: `0` is the ceiling
+ * facing north, `1..4` are the four walls, `5` and `6` are the floor facing
+ * east and north, `7` is the ceiling facing east, and `+8` is powered. So the
+ * pre-Flattening block has **eight** positions where the flat one has twelve:
+ * a lever on the floor or on the ceiling could only lie north-south or
+ * east-west, and `south` and `west` there are what 1.13 added.
+ *
+ * All sixteen values already map onto `face`, `facing` and `powered`, so a
+ * 1.12 schematic arrives here with all three set. Only the drawing was ever
+ * wrong, and it was wrong in both eras for the same reason.
+ *
+ * ## The two elements
+ *
+ * A 6x3x8 cobblestone base at `[5, -0.02, 4]`..`[11, 2.98, 12]` -- the two
+ * hundredths are vanilla's own, holding the base off the surface it sits on --
+ * and a 2x10x2 handle at `[7, 1, 7]`..`[9, 11, 9]`, tilted about x through
+ * `[8, 1, 8]`, which is where it meets the base. The handle's `down` face is
+ * omitted, as vanilla omits it: it is buried in the base.
+ *
+ * **The windows are not optional.** All 320 opaque texels of `lever.png` are
+ * in `u 7..9, v 6..16`, so UVs derived from the box would address an empty
+ * corner of the tile and the handle would draw *nothing at all* -- the chain's
+ * fault on a smaller strip. The strip is not symmetric end to end either: its
+ * first two rows are the cap and are measurably brighter, mean luminance 119
+ * against 72 at the foot, so laid the wrong way round it is visible.
+ *
+ * ## Which way it leans, which is the part that reads backwards
+ *
+ * `powered=false` selects the model called **`lever_on`**, and `powered=true`
+ * the one called `lever`. That is not a transcription slip: it is what
+ * `blockstates/lever.json` has said in every release from 1.13 to 1.21.9, and
+ * it is the model *names* that are misleading rather than the mapping. The
+ * appearance settles it -- the wiki's "when placed on the side of blocks, down
+ * is on and up is off" -- so an unpowered wall lever has its handle **up**,
+ * and the angle that produces that is `lever_on.json`'s `+45`.
+ *
+ * ## Three positions written out
+ *
+ * The blockstate turns the one model with `x`, which `rotateShapeBox` knows
+ * nothing about. That is `END_ROD_TURN`'s problem, except that there the parts
+ * carry no rotation of their own and here the handle does -- and a `ShapeBox`
+ * holds one. So the `x` is applied by hand and the tilt is left as the
+ * residual, which puts the pivot where the handle meets the base each time:
+ * `[8, 1, 8]` on the floor, `[8, 8, 15]` on a wall, `[8, 15, 8]` on the
+ * ceiling. The face names travel with it -- `x: 90` sends up to north, north
+ * to down, south to up and down to south -- so the windows are the same six
+ * numbers under permuted keys rather than six new ones.
+ *
+ * The `y` is `rotateShapeBox`'s, from `facing`, and the model is
+ * **north-authored**: `face=floor,facing=north` is the variant with no `y` at
+ * all. A wall lever's base therefore comes out on the side *opposite* its
+ * `facing`, which is `WALL_MOUNTED`'s rule seen from the geometry -- the thing
+ * points out of the wall it is screwed to.
+ */
+const LEVER_BASE = "cobblestone";
+
+/** `x: 0`: vanilla's own face names and windows, unmoved. */
+function leverFloor(angle: number): ShapeBox[] {
+  return [
+    {
+      box: [5, -0.02, 4, 11, 2.98, 12],
+      texture: LEVER_BASE,
+      uv: {
+        down: [5, 4, 11, 12],
+        up: [5, 4, 11, 12],
+        north: [5, 0, 11, 3],
+        south: [5, 0, 11, 3],
+        west: [4, 0, 12, 3],
+        east: [4, 0, 12, 3],
+      },
+    },
+    {
+      box: [7, 1, 7, 9, 11, 9],
+      rotation: { origin: [8, 1, 8], axis: "x", angle },
+      uv: {
+        up: [7, 6, 9, 8],
+        north: [7, 6, 9, 16],
+        south: [7, 6, 9, 16],
+        west: [7, 6, 9, 16],
+        east: [7, 6, 9, 16],
+      },
+      omit: ["down"],
+    },
+  ];
+}
+
+/** `x: 90`: up becomes north, north becomes down, south becomes up. */
+function leverWall(angle: number): ShapeBox[] {
+  return [
+    {
+      box: [5, 4, 13.02, 11, 12, 16.02],
+      texture: LEVER_BASE,
+      uv: {
+        south: [5, 4, 11, 12],
+        north: [5, 4, 11, 12],
+        down: [5, 0, 11, 3],
+        up: [5, 0, 11, 3],
+        west: [4, 0, 12, 3],
+        east: [4, 0, 12, 3],
+      },
+      uvRotation: { west: 90, east: 270 },
+    },
+    {
+      box: [7, 7, 5, 9, 9, 15],
+      rotation: { origin: [8, 8, 15], axis: "x", angle },
+      uv: {
+        north: [7, 6, 9, 8],
+        down: [7, 6, 9, 16],
+        up: [7, 6, 9, 16],
+        west: [7, 6, 9, 16],
+        east: [7, 6, 9, 16],
+      },
+      uvRotation: { down: 180, west: 90, east: 270 },
+      omit: ["south"],
+    },
+  ];
+}
+
+/** `x: 180`: the model over, so up and down swap and so do north and south. */
+function leverCeiling(angle: number): ShapeBox[] {
+  return [
+    {
+      box: [5, 13.02, 4, 11, 16.02, 12],
+      texture: LEVER_BASE,
+      uv: {
+        up: [5, 4, 11, 12],
+        down: [5, 4, 11, 12],
+        south: [5, 0, 11, 3],
+        north: [5, 0, 11, 3],
+        west: [4, 0, 12, 3],
+        east: [4, 0, 12, 3],
+      },
+    },
+    {
+      box: [7, 5, 7, 9, 15, 9],
+      rotation: { origin: [8, 15, 8], axis: "x", angle },
+      uv: {
+        down: [7, 6, 9, 8],
+        south: [7, 6, 9, 16],
+        north: [7, 6, 9, 16],
+        west: [7, 6, 9, 16],
+        east: [7, 6, 9, 16],
+      },
+      uvRotation: { south: 180, north: 180, west: 180, east: 180 },
+      omit: ["up"],
+    },
+  ];
+}
+
+function lever(entry: PaletteEntry): BlockShape {
+  /*
+   * `wall` and not `floor`, for `amethystBud`'s reason: it is the registry's
+   * default and the walk over every offered id bakes with an empty property
+   * bag, so the wrong default here would put the commonest lever in the game
+   * on the wrong branch and every whole-registry check would be judging a
+   * picture nobody sees.
+   */
+  const face = entry.properties.face ?? "wall";
+  const angle = entry.properties.powered === "true" ? -45 : 45;
+  const parts =
+    face === "floor" ? leverFloor(angle) : face === "ceiling" ? leverCeiling(angle) : leverWall(angle);
+  return transform(parts, northFacingSteps(entry), false);
+}
+
 const END_ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
   up: undefined,
   down: { origin: [8, 8, 8], axis: "x", angle: 180 },
@@ -3172,7 +3353,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   // Flat against the face they sit on. As cubes they hid the block underneath,
   // which for a rail means the track is invisible and the ground is too.
   rail,
-  lever: (e) => againstWall(e, 3),
+  lever,
   tripwire_hook: (e) => againstWall(e, 3),
   glow_lichen: (e) => againstWall(e, 1),
 
