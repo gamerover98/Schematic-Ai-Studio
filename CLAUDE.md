@@ -4647,6 +4647,65 @@ knowing:
   omission.** It changes the height of the smoke column, which is a particle and
   part of no model. Giving it a shape would be inventing, which is the one thing
   this file is not allowed to do.
+- **A lever was a plate the size of a wall, and `face` was read nowhere.** It
+  had `againstWall(e, 3)` — the ladder's shape with a thickness — which is
+  three faults at once: the silhouette is a plate where the block is a switch;
+  a lever on the floor or on the ceiling was drawn flat against a wall, because
+  nothing looked at `face` at all; and a 16x16x3 plate lies exactly on the cell
+  boundary, so `coversFace` answered true and **the lever deleted the face of
+  the block it was screwed to**.
+
+  Vanilla is two elements: a 6x3x8 cobblestone base at `[5, -0.02, 4]`, whose
+  two hundredths hold it off the surface it sits on, and a 2x10x2 handle at
+  `[7, 1, 7]`..`[9, 11, 9]` tilted 45° about x through `[8, 1, 8]`, which is
+  where it meets the base. The handle's `down` face is omitted, as vanilla
+  omits it: it is buried in the base.
+
+  **Eight positions became twelve at the Flattening**, which is the era's doing
+  and is why `face` exists. 1.8 to 1.12.2 spelled the lever's position *and*
+  its direction as one metadata nibble, and `legacy_blocks.json` still holds
+  it: `0` is the ceiling facing north, `1..4` are the four walls, `5` and `6`
+  are the floor facing east and north, `7` is the ceiling facing east, and `+8`
+  is powered. So a pre-Flattening lever on the floor or the ceiling could only
+  lie north–south or east–west, and `south` and `west` there are what 1.13
+  added. All sixteen values already map onto `face`, `facing` and `powered`, so
+  a 1.12 schematic arrives with all three set — only the drawing was ever
+  wrong, and it was wrong in both eras for the same reason.
+
+  **`powered=false` selects the model called `lever_on`.** That reads backwards
+  and is not a transcription slip: it is what `blockstates/lever.json` has said
+  in every release from 1.13 to 1.21.9, and it is the model *names* that
+  mislead. The appearance settles which is which — the wiki's «when placed on
+  the side of blocks, down is on and up is off» — so an unpowered wall lever
+  has its handle **up**, and the angle that produces that is `lever_on.json`'s
+  `+45`.
+
+  **The three `face` values are written out**, because the blockstate turns the
+  one model with `x` and `rotateShapeBox` knows only `y`. That is
+  `END_ROD_TURN`'s problem with one extra turn of the screw: there the parts
+  carry no rotation of their own, and here the handle does, and a `ShapeBox`
+  holds one. So the `x` is applied by hand and the tilt stays as the residual,
+  which lands the pivot where the handle meets the base each time — `[8, 1, 8]`
+  on the floor, `[8, 8, 15]` on a wall, `[8, 15, 8]` on the ceiling. The face
+  names travel with it, `x: 90` sending up to north, north to down, south to up
+  and down to south, so the windows are the same six numbers under permuted
+  keys rather than six new ones.
+
+  **The windows are not optional and the turns are not cosmetic.** All 320
+  opaque texels of `lever.png` are in `u 7..9, v 6..16`, so UVs derived from
+  the box would address an empty corner of the tile and the handle would draw
+  nothing at all — the chain's fault on a smaller strip. And a window that
+  survives the hand-applied `x` still arrives a quarter turn out on the faces
+  whose normal did not move: the wall's `west: 90, east: 270` is the anvil's
+  pair, for the anvil's reason, on both the handle and the base.
+
+  What `tests/blocks.ts` states is **one texel per world unit on every face of
+  all 24 states**, which is the only check that can see a missing `uvRotation`:
+  the window still names the right pixels and lays them across the face
+  sideways, with the UVs inside the tile and the geometry untouched. Beside it,
+  that the strip is not laid end for end — its first two rows are the cap, mean
+  luminance 119 against 72 at the foot, so a half turn is visible — and where
+  the base sits for each `face`, which is the property that was read nowhere.
 - **An amethyst bud was a cube, and the cube sealed the geode.** All four --
   the three buds and the cluster -- fell through every table to `CUBE`, so a
   pointed crystal was drawn as a solid block wearing its own sprite on six
