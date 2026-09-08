@@ -391,6 +391,134 @@ function fence(entry: PaletteEntry): BlockShape {
   return boxes(...list);
 }
 
+/**
+ * `bamboo_fence`: vanilla's **custom fence**, which is a family of one.
+ *
+ * Every other fence in the game parents `block/fence_post` and
+ * `block/fence_side` and paints them with a plank tile, so its UVs are
+ * derivable and `fence` above is right. `bamboo_fence` parents
+ * `block/custom_fence_post` and the four `custom_fence_side_<dir>` models
+ * instead, and those carry a **sheet**: `bamboo_fence.png` is one texture with
+ * the post's flank, the post's lid, the rail's long side, the rail's end cap
+ * and the rail's lid each in their own patch of it.
+ *
+ * So the derived window sampled the wrong part of the sheet, and measurably so:
+ * the post's four flanks want `u 0..4, v 0..16`, which is **100% opaque**,
+ * and were reading `u 6..10, v 0..16`, which is **40.6%** -- a post six tenths
+ * made of holes. Its lid wants `[4, 0, 8, 4]`, 100%, and was reading 25%. That
+ * is the lantern's fault on a block that looked like it had none, because a
+ * fence post full of gaps still reads as a fence.
+ *
+ * The geometry differs too, by three units nobody would report: a custom
+ * fence's rails run to `z = 9`, three deep inside the post, where an ordinary
+ * fence's stop at `z = 7`. Vanilla states them that way and omits the face
+ * that ends up buried, which is what `omit` carries here.
+ *
+ * **The four side models are transcribed one at a time rather than turned**,
+ * and that is a finding rather than laziness. They are hand-authored in
+ * vanilla and are *not* y-rotations of one another: north's end cap is stated
+ * `rotation: 180` where east's and south's have none, and west's is written
+ * `[15, 4, 13, 7]`, reversed, which is a mirror. On this pack's sheet that
+ * cap patch differs from its own half-turn in **72 of 96 texels** and from its
+ * own mirror in the same 72, so the three spellings are three different
+ * pictures and deriving any of them from another would be visible.
+ */
+const CUSTOM_FENCE_POST: ShapeBox = {
+  box: [6, 0, 6, 10, 16, 10],
+  uv: {
+    up: [4, 0, 8, 4],
+    down: [4, 0, 8, 4],
+    north: [0, 0, 4, 16],
+    south: [0, 0, 4, 16],
+    west: [0, 0, 4, 16],
+    east: [0, 0, 4, 16],
+  },
+};
+
+/**
+ * One connection's pair of rails, as `[x0, z0, x1, z1]` in plan plus the
+ * windows that ride on it. The two rails of a connection are the same box at
+ * two heights -- 12..15 and 6..9 -- exactly as vanilla writes them.
+ */
+interface CustomFenceArm {
+  readonly plan: readonly [number, number, number, number];
+  readonly uv: Readonly<Record<string, UvWindow>>;
+  readonly uvRotation?: Readonly<Record<string, number>>;
+  /** The face buried in the post, which vanilla does not state. */
+  readonly omit: readonly string[];
+}
+
+const CUSTOM_FENCE_ARMS: Readonly<Record<string, CustomFenceArm>> = {
+  north: {
+    plan: [7, 0, 9, 9],
+    uv: {
+      north: [13, 4, 15, 7],
+      east: [4, 4, 13, 7],
+      west: [4, 4, 13, 7],
+      up: [13, 7, 15, 16],
+      down: [13, 7, 15, 16],
+    },
+    uvRotation: { north: 180 },
+    omit: ["south"],
+  },
+  east: {
+    plan: [7, 7, 16, 9],
+    uv: {
+      north: [4, 4, 13, 7],
+      east: [13, 4, 15, 7],
+      south: [4, 4, 13, 7],
+      up: [13, 7, 15, 16],
+      down: [13, 7, 15, 16],
+    },
+    uvRotation: { up: 270, down: 90 },
+    omit: ["west"],
+  },
+  south: {
+    plan: [7, 7, 9, 16],
+    uv: {
+      east: [4, 4, 13, 7],
+      south: [13, 4, 15, 7],
+      west: [4, 4, 13, 7],
+      up: [13, 7, 15, 16],
+      down: [13, 7, 15, 16],
+    },
+    omit: ["north"],
+  },
+  west: {
+    plan: [0, 7, 9, 9],
+    uv: {
+      north: [4, 4, 13, 7],
+      south: [4, 4, 13, 7],
+      west: [15, 4, 13, 7],
+      up: [13, 7, 15, 16],
+      down: [13, 7, 15, 16],
+    },
+    uvRotation: { up: 270, down: 90 },
+    omit: ["east"],
+  },
+};
+
+function customFence(entry: PaletteEntry): BlockShape {
+  const parts: ShapeBox[] = [CUSTOM_FENCE_POST];
+  for (const direction of ["north", "east", "south", "west"] as const) {
+    if (entry.properties[direction] !== "true") continue;
+    const arm = CUSTOM_FENCE_ARMS[direction];
+    const [x0, z0, x1, z1] = arm.plan;
+    for (const [y0, y1] of [
+      [12, 15],
+      [6, 9],
+    ] as const) {
+      parts.push({
+        box: [x0, y0, z0, x1, y1, z1],
+        uv: arm.uv,
+        uvRotation: arm.uvRotation,
+        omit: arm.omit,
+      });
+    }
+  }
+  return boxes(...parts);
+}
+
 /** `wall_post` + `wall_side` / `wall_side_tall`, connections are none|low|tall. */
 function wall(entry: PaletteEntry): BlockShape {
   const list: Box[] = [];
@@ -3657,6 +3785,14 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   cactus: () => boxes([1, 0, 1, 15, 16, 15]),
   scaffolding: () => boxes([0, 14, 0, 16, 16, 16]),
   bamboo: () => boxes([6.5, 0, 6.5, 9.5, 16, 9.5]),
+  /*
+   * Ahead of the `_fence` suffix, which is where it had been landing: a
+   * bamboo fence is vanilla's `custom_fence`, a different model on a
+   * different kind of texture. It is the only one in the game, so an exact
+   * name rather than a suffix -- and `bamboo_fence_gate` is deliberately
+   * not here, being `template_custom_fence_gate`, a second transcription.
+   */
+  bamboo_fence: customFence,
   kelp: () => ({ kind: "cross" }),
   kelp_plant: () => ({ kind: "cross" }),
   sea_pickle: () => boxes([6, 0, 6, 10, 6, 10]),

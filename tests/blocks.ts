@@ -231,6 +231,43 @@ function facePaintsSomething(face: BakedFace): boolean {
   return false;
 }
 
+/**
+ * The fraction of the window a face samples that is opaque.
+ *
+ * `facePaintsSomething` above asks whether there is *anything* there, which is
+ * the right question for a block that came out invisible. It is too weak for a
+ * window transcribed onto the wrong patch of a sheet that has art all over it:
+ * a bamboo fence post reading the wrong four columns of `bamboo_fence.png` is
+ * 40.6% opaque, which passes both that check and every uv check in this file
+ * while drawing a post six tenths made of holes.
+ *
+ * Rounded rather than floored/ceiled at the edges: these windows land on texel
+ * boundaries exactly, and a half-texel of slop either side would put a
+ * transparent margin into a rect that is genuinely solid.
+ */
+function faceOpacity(face: BakedFace): number {
+  const image = baker.textures[face.textureKey];
+  if (image === undefined) return 1;
+  const us = [face.uvs[0], face.uvs[2], face.uvs[4], face.uvs[6]];
+  const vs = [face.uvs[1], face.uvs[3], face.uvs[5], face.uvs[7]];
+  const span = (values: number[], size: number): [number, number] => {
+    const lo = Math.max(0, Math.round(Math.min(...values) * size));
+    const hi = Math.min(size, Math.round(Math.max(...values) * size));
+    return [lo, Math.max(lo + 1, hi)];
+  };
+  const [x0, x1] = span(us, image.width);
+  const [y0, y1] = span(vs, image.height);
+  let opaque = 0;
+  let total = 0;
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      total += 1;
+      if (image.data[(y * image.width + x) * 4 + 3] > 0) opaque += 1;
+    }
+  }
+  return total === 0 ? 1 : opaque / total;
+}
+
 // --- texture orientation ----------------------------------------------------
 //
 // The defect: `_UNIT_UVS` put V=0 at the world *bottom* of a face, but glTF
@@ -1645,6 +1682,181 @@ if (pack === null) {
     "a jukebox, which points nowhere, keeps its side underneath",
     await keyUnder("jukebox"),
     "minecraft:block/jukebox_side",
+  );
+}
+
+console.log("\n--- a bamboo fence is a custom fence ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was reaching `["_fence", fence]` in `SUFFIX_SHAPES`, which is right for
+   * every other fence in the game and wrong for this one: `bamboo_fence`
+   * parents `block/custom_fence_post` and the four `custom_fence_side_<dir>`
+   * models, and those wear a **sheet** rather than a plank tile.
+   *
+   * So the fault was the lantern's, on a block that looked like it had none --
+   * a post full of holes still reads as a fence. The two halves are checked
+   * apart, because only the first of them is visible from the geometry.
+   */
+  const fenceStates = (conns: readonly string[]): Record<string, string> =>
+    Object.fromEntries(
+      (["north", "east", "south", "west"] as const).map((d) => [
+        d,
+        conns.includes(d) ? "true" : "false",
+      ]),
+    );
+  const fenceFaces = async (id: string, conns: readonly string[]): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block(id, fenceStates(conns)));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+
+  /*
+   * A custom fence's rails run three units *into* the post -- `z = 9` against
+   * an ordinary fence's `z = 7` -- and vanilla omits the face that ends up
+   * buried, which is the whole of the difference in the counts: five faces per
+   * rail here against six there.
+   */
+  equal("a bare post is six faces", (await fenceFaces("bamboo_fence", [])).length, 6);
+  equal(
+    "...one connection adds two rails of five faces",
+    (await fenceFaces("bamboo_fence", ["north"])).length,
+    16,
+  );
+  equal(
+    "...and an ordinary fence's rails keep the sixth",
+    (await fenceFaces("oak_fence", ["north"])).length,
+    18,
+  );
+
+  /*
+   * One texel per world unit on every face of all sixteen connection states.
+   *
+   * That is the only shape of check that can see a window transcribed at the
+   * wrong size or missing a `rotation`: the pixels named would still be inside
+   * the tile and the geometry would still be vanilla's, and the picture would
+   * be laid across the face sideways or squashed. It is the lever's check, and
+   * it holds here because every window vanilla states for this model is
+   * exactly the size of the face it goes on.
+   */
+  const stretched: string[] = [];
+  const holed: string[] = [];
+  for (let mask = 0; mask < 16; mask += 1) {
+    const conns = (["north", "east", "south", "west"] as const).filter(
+      (_, i) => (mask & (1 << i)) !== 0,
+    );
+    for (const face of await fenceFaces("bamboo_fence", conns)) {
+      const at = (i: number): number[] => [0, 1, 2].map((a) => face.positions[i * 3 + a] * 16);
+      const edge = (i: number, j: number): number =>
+        Math.hypot(...[0, 1, 2].map((a) => at(i)[a] - at(j)[a]));
+      const window = (i: number, j: number): number =>
+        Math.hypot(
+          (face.uvs[i * 2] - face.uvs[j * 2]) * 16,
+          (face.uvs[i * 2 + 1] - face.uvs[j * 2 + 1]) * 16,
+        );
+      for (const [i, j] of [
+        [0, 1],
+        [0, 3],
+      ]) {
+        if (Math.abs(window(i, j) / Math.max(1e-6, edge(i, j)) - 1) > 0.005) {
+          stretched.push(`${conns.join("+") || "bare"} ${face.textureKey}`);
+        }
+      }
+      /*
+       * **Wholly** opaque, not merely "paints something", and that is the only
+       * clause that can see the fault this commit is about.
+       *
+       * Deleting the post's windows leaves the derived ones, which are four
+       * wide by sixteen tall on a sixteen-unit face -- one texel per unit, and
+       * 40.6% opaque. So the stretch clause passes, `facePaintsSomething`
+       * passes because a fifth of a post is still some pixels, the geometry is
+       * untouched and the uvs are inside the tile. Verified by doing exactly
+       * that: with the windows removed nothing else in this file failed.
+       *
+       * A bamboo fence has no holes in it. That is a sentence about the block,
+       * and it happens to be the sentence the sheet enforces.
+       */
+      const opaque = faceOpacity(face);
+      if (opaque < 1) holed.push(`${conns.join("+") || "bare"} ${opaque.toFixed(3)}`);
+    }
+  }
+  equal("every face of all sixteen states is one texel per unit", stretched, []);
+  equal("...and every one of them is drawn on solid pixels", holed, []);
+
+  /*
+   * And the half the geometry cannot show: **where on the sheet** each window
+   * looks. Read in pixels, because that is what was wrong -- the box was
+   * always the right size and it was always reading the wrong patch.
+   */
+  const sheet = baker.textures["minecraft:block/bamboo_fence"];
+  const opacity = (u0: number, v0: number, u1: number, v1: number): number => {
+    const sx = sheet.width / 16;
+    const sy = sheet.height / 16;
+    let opaque = 0;
+    let total = 0;
+    for (let y = Math.round(v0 * sy); y < Math.round(v1 * sy); y += 1) {
+      for (let x = Math.round(u0 * sx); x < Math.round(u1 * sx); x += 1) {
+        total += 1;
+        if (sheet.data[(y * sheet.width + x) * 4 + 3] > 0) opaque += 1;
+      }
+    }
+    return total === 0 ? 0 : opaque / total;
+  };
+  check("the post's flank is stated at u 0..4 and is solid there", opacity(0, 0, 4, 16) === 1);
+  check(
+    "...where the window derived from its box would have been six tenths holes",
+    Math.abs(opacity(6, 0, 10, 16) - 0.406) < 0.005,
+    opacity(6, 0, 10, 16).toFixed(3),
+  );
+  check("the post's lid is stated at [4, 0, 8, 4] and is solid there", opacity(4, 0, 8, 4) === 1);
+  check(
+    "...where its own footprint would have been three quarters holes",
+    Math.abs(opacity(6, 6, 10, 10) - 0.25) < 0.005,
+    opacity(6, 6, 10, 10).toFixed(3),
+  );
+
+  /*
+   * The four side models are transcribed one at a time rather than turned, and
+   * this is the measurement that says they have to be. Vanilla writes north's
+   * end cap `rotation: 180`, east's and south's with none, and west's window
+   * reversed -- three different pictures of one 2x3 patch, and only if that
+   * patch is symmetric would deriving three of them from the fourth be
+   * invisible. It is not.
+   */
+  const capDiffers = (mirror: boolean): number => {
+    const sx = sheet.width / 16;
+    const sy = sheet.height / 16;
+    let differ = 0;
+    for (let y = Math.round(4 * sy); y < Math.round(7 * sy); y += 1) {
+      for (let x = Math.round(13 * sx); x < Math.round(15 * sx); x += 1) {
+        const rx = Math.round(13 * sx) + (Math.round(15 * sx) - 1 - x);
+        const ry = mirror ? y : Math.round(4 * sy) + (Math.round(7 * sy) - 1 - y);
+        const a = (y * sheet.width + x) * 4;
+        const b = (ry * sheet.width + rx) * 4;
+        for (let k = 0; k < 4; k += 1) {
+          if (sheet.data[a + k] !== sheet.data[b + k]) {
+            differ += 1;
+            break;
+          }
+        }
+      }
+    }
+    return differ;
+  };
+  check("the rail's end cap is not its own half-turn", capDiffers(false) === 72, String(capDiffers(false)));
+  check("...nor its own mirror", capDiffers(true) === 72, String(capDiffers(true)));
+
+  /*
+   * The control. Every other fence is a plank tile and derives its windows
+   * correctly, so a rule that reached them would be a regression with nothing
+   * else to catch it.
+   */
+  const oak = await fenceFaces("oak_fence", ["north", "east", "south", "west"]);
+  equal("an oak fence is untouched", oak.length, 54);
+  equal(
+    "...and still wears its planks",
+    [...new Set(oak.map((f) => f.textureKey))],
+    ["minecraft:block/oak_planks"],
   );
 }
 
