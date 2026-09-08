@@ -86,6 +86,18 @@ export interface SpecialFaceRule {
   readonly top?: readonly string[];
   readonly side?: readonly string[];
   readonly bottom?: readonly string[];
+  /**
+   * What every face **but the one it points at** wears when the block points
+   * up or down, for the blocks vanilla draws with a second model there.
+   *
+   * `dispenser_vertical.json` is the only shape of this in the game: it is
+   * `orientable_vertical`, whose floor and four walls are all `#side`, and it
+   * sets `side` to `furnace_top` -- a different picture from the one the
+   * horizontal model puts on those same faces. A candidate list cannot say
+   * that, because it is a *property* choosing the texture, which is the
+   * campfire's lesson one table along.
+   */
+  readonly vertical?: readonly string[];
 }
 
 /**
@@ -438,6 +450,36 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
    * sides of the block. `block_shapes.ts` names it per box.
    */
   hopper: { top: ["hopper_top"], side: ["hopper_outside"], bottom: ["hopper_outside"] },
+
+  /*
+   * **A dispenser's and a dropper's side and top textures are the
+   * furnace's**, and no naming rule could ever guess that:
+   * `dispenser_side.png` and `dispenser_top.png` are files vanilla has never
+   * had. `dispenser.json` and `dropper.json` say it outright -- `side:
+   * block/furnace_side`, `top: block/furnace_top` -- and only the front is
+   * the block's own.
+   *
+   * So `dispenser_front` was the one name of the six that resolved, and the
+   * fallback in `cubeFaceTextures` painted it on the other five: the block
+   * wearing its own face on its back, its sides, its lid and its floor.
+   * Reported as exactly that, and it is `hopper_side` one block along.
+   *
+   * `bottom` is the top texture rather than a bottom of its own, because
+   * `orientable.json` is `orientable_with_bottom` with `bottom` set to
+   * `#top`. That is the furnace's underside too, which was wearing the fire.
+   */
+  dispenser: {
+    top: ["furnace_top"],
+    side: ["furnace_side"],
+    bottom: ["furnace_top"],
+    vertical: ["furnace_top"],
+  },
+  dropper: {
+    top: ["furnace_top"],
+    side: ["furnace_side"],
+    bottom: ["furnace_top"],
+    vertical: ["furnace_top"],
+  },
   fire: { top: ["fire_0"], side: ["fire_0"], bottom: ["fire_0"] },
   soul_fire: { top: ["soul_fire_0"], side: ["soul_fire_0"], bottom: ["soul_fire_0"] },
 
@@ -1971,23 +2013,55 @@ export class ModelBaker {
      * `_front_on` first when the block is lit, which is the difference between
      * a lit furnace and a cold one -- and `lighting.ts` already treats them as
      * different blocks.
+     *
+     * **Both arms are a prefix rather than an answer**, and that is the half
+     * that was missing. Written as three candidates that stopped there, a
+     * dropper's back asked for `dropper_back` and `dropper_side` -- neither of
+     * which vanilla has -- and then gave up, short of the rule that knows what
+     * a dropper's sides are. Falling through costs nothing anywhere else: what
+     * follows offers `_side` and the bare name in the same order these did.
      */
     const facing = entry.properties.facing;
     if (facing !== undefined) {
       const lit = entry.properties.lit === "true";
+      const vertical = facing === "up" || facing === "down";
       if (face === facing) {
         return [
           ...(lit ? [`${normalized}_front_on`] : []),
+          /*
+           * A block that points up or down may be drawn from a second model
+           * with a front of its own -- `dispenser_front_vertical`. Derived
+           * rather than tabulated, so the pack decides which blocks have one:
+           * the dispenser and the dropper are the only two that ship it, and
+           * for everything else this candidate simply misses.
+           */
+          ...(vertical ? [`${normalized}_front_vertical`] : []),
           `${normalized}_front`,
-          `${normalized}_side`,
-          normalized,
+          ...ModelBaker.plainCandidates(entry, normalized, face),
         ];
       }
+      /*
+       * The vertical model's own sides, which are not the horizontal model's
+       * and are not confined to the face opposite the front:
+       * `orientable_vertical` puts `#side` on the floor and all four walls.
+       */
+      const turned = SPECIAL_FACE_RULES[normalized]?.vertical;
+      if (vertical && turned !== undefined) {
+        return [...turned];
+      }
       if (face === OPPOSITE_FACE[facing]) {
-        return [`${normalized}_back`, `${normalized}_side`, normalized];
+        return [`${normalized}_back`, ...ModelBaker.plainCandidates(entry, normalized, face)];
       }
     }
+    return ModelBaker.plainCandidates(entry, normalized, face);
+  }
 
+  /** What one name offers for one face, once the block's *front* is settled. */
+  private static plainCandidates(
+    entry: PaletteEntry,
+    normalized: string,
+    face: string,
+  ): string[] {
     // Two-block-tall plants and doors carry their half in a property and split
     // their texture accordingly. Without this a peony draws its flowering top
     // on both halves, because the generic `_top` candidate wins for every face.

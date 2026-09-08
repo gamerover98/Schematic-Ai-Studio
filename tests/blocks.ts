@@ -1469,6 +1469,98 @@ if (pack === null) {
   );
 }
 
+console.log("\n--- a dispenser is not made of its own front ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `dispenser_side.png` and `dispenser_top.png` are files vanilla has never
+   * had -- `dispenser.json` names `block/furnace_side` and `block/furnace_top`
+   * outright -- so `dispenser_front` was the one name of the six that resolved,
+   * and `cubeFaceTextures`' fallback painted it on the other five. The block
+   * wore its own face on its back, its sides, its lid and its floor. Reported
+   * as exactly that, and it is `hopper_side` one block along.
+   *
+   * Stated as the whole six-face map rather than as "the sides changed",
+   * because the fault was a face resolving *nothing* and being handed a
+   * neighbour's answer: a check naming one face would pass with the next one
+   * still guessed.
+   */
+  const facesOf = async (name: string, facing: string): Promise<Record<string, string>> => {
+    const state = await baker.bakeBlockstate(
+      block(name, { ...defaultStateFor(`minecraft:${name}`), facing }),
+    );
+    return Object.fromEntries(
+      Object.entries(state.faces).map(([face, drawn]) => [face, drawn?.textureKey ?? "-"]),
+    );
+  };
+  const T = (key: string): string => `minecraft:block/${key}`;
+
+  for (const name of ["dispenser", "dropper"]) {
+    const north = await facesOf(name, "north");
+    equal(`a ${name} facing north wears its own front there`, north.north, T(`${name}_front`));
+    equal(
+      `...and the furnace sides on the other three`,
+      [north.south, north.east, north.west],
+      [T("furnace_side"), T("furnace_side"), T("furnace_side")],
+    );
+    /*
+     * Both flat faces, and the underside is the half that would be left out:
+     * `orientable.json` is `orientable_with_bottom` with `bottom` set to
+     * `#top`, so the lid is what this family shows underneath as well.
+     */
+    equal(
+      `...and the furnace lid above and below`,
+      [north.up, north.down],
+      [T("furnace_top"), T("furnace_top")],
+    );
+
+    /*
+     * Pointing up or down is a **different model**, and not only in the front:
+     * `dispenser_vertical.json` is `orientable_vertical`, whose floor and four
+     * walls are all `#side`, and it sets `side` to `furnace_top`. So one
+     * standing on end has the furnace lid all round it -- which no candidate
+     * list could say, because a property is choosing the texture.
+     */
+    for (const facing of ["up", "down"]) {
+      const turned = await facesOf(name, facing);
+      equal(
+        `a ${name} facing ${facing} wears the vertical front`,
+        turned[facing],
+        T(`${name}_front_vertical`),
+      );
+      equal(
+        `...and the furnace lid on the other five, not the furnace side`,
+        Object.entries(turned)
+          .filter(([face]) => face !== facing)
+          .map(([, key]) => key),
+        Array(5).fill(T("furnace_top")),
+      );
+    }
+  }
+
+  /*
+   * A dropper has no `dropper_back`, and the arm that asks for one used to stop
+   * there -- three candidates, none of which the pack has, and no way through
+   * to the rule that knows what a dropper is made of. So the face opposite the
+   * front is what says that arm is a prefix rather than an answer.
+   */
+  equal(
+    `the face opposite a dropper front is a side, not a guess`,
+    (await facesOf("dropper", "north")).south,
+    T("furnace_side"),
+  );
+  /*
+   * The observer is what that arm exists for, and is the control: it does ship
+   * an `observer_back`, so falling through must not have cost it.
+   */
+  equal(
+    `...while an observer, which has one, still wears it`,
+    (await facesOf("observer", "north")).south,
+    T("observer_back"),
+  );
+}
+
 console.log("\n--- animated textures ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");

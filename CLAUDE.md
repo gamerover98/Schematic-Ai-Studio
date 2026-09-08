@@ -4383,6 +4383,41 @@ knowing:
   and the funnel's underside rather than to a side of the block. The hopper is
   also the one of the five whose UVs were right and whose *geometry* was the
   whole fault: the rim as a solid lump, with no bowl, funnel or spout.
+- **A dispenser and a dropper are made of a *furnace*, and that is the whole
+  fault.** `dispenser.json` and `dropper.json` name `block/furnace_side` and
+  `block/furnace_top` outright, and `dispenser_side.png` and
+  `dispenser_top.png` are files vanilla has never had. So `dispenser_front` was
+  the one name of the six that resolved, and `cubeFaceTextures`' fallback —
+  which gives a face that resolved nothing whatever the first face that did
+  resolve came back with — painted it on the other five. The block wore its
+  own face on its back, its sides, its lid and its floor. Reported as exactly
+  that, and it is `hopper_side` one block along.
+
+  That fallback is `bakeFallback` one level down, and worse in the same way:
+  the answer it gives is not missing, it is *plausible*. Nothing anywhere
+  reports it, and the walk that fails on any block reaching the hashed-colour
+  cube cannot see it, because a texture did resolve.
+
+  Three things follow, and none of them is the row in the table:
+
+  - **the underside is the lid.** `orientable.json` is
+    `orientable_with_bottom` with `bottom` set to `#top`, so `bottom` in the
+    rule is the top texture rather than a bottom of its own;
+  - **pointing up or down is a different model, and not only in the front.**
+    `dispenser_vertical.json` is `orientable_vertical`, whose floor *and all
+    four walls* are `#side`, and it sets `side` to `furnace_top`. So one
+    standing on end has the furnace's lid all round it rather than its side —
+    a property choosing the texture, which a candidate list cannot do. That is
+    the campfire's lesson one table along, and `SpecialFaceRule.vertical` is
+    where it lives. The front itself needs no table: `_front_vertical` is
+    offered when the facing is vertical and the pack decides who has one,
+    which is these two and nothing else;
+  - **the `facing` arms are a prefix and used to be an answer.** `[_back,
+    _side, normalized]` stopped there, and a dropper has none of those three,
+    so its back face never reached the rule that knows what a dropper is made
+    of. Falling through costs nothing anywhere else — what follows offers
+    `_side` and the bare name in the same order those did — and the observer
+    is the control, because it really does ship an `observer_back`.
 - **A rail's `shape` was decoded, derived and rotated -- and drawn by
   nobody.** It comes out of `legacy_blocks.json` and out of a `.schem`, it is
   derived from the neighbours by `block_connections.ts`, and it turns with
