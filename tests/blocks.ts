@@ -268,6 +268,18 @@ function faceOpacity(face: BakedFace): number {
   return total === 0 ? 1 : opaque / total;
 }
 
+/** North, east, south, west: one quarter-turn apart, in that order. */
+const WIRE_SIDES = ["north", "east", "south", "west"] as const;
+const WIRE_OFF: Record<string, string> = {
+  north: "false",
+  east: "false",
+  south: "false",
+  west: "false",
+  attached: "false",
+  disarmed: "false",
+  powered: "false",
+};
+
 // --- texture orientation ----------------------------------------------------
 //
 // The defect: `_UNIT_UVS` put V=0 at the world *bottom* of a face, but glTF
@@ -1697,6 +1709,251 @@ if (pack === null) {
     await keyUnder("jukebox"),
     "minecraft:block/jukebox_side",
   );
+}
+
+console.log("\n--- a tripwire is a wire, not a cube ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was a full opaque cube. `tripwire.png` is 11.2% opaque -- a thin
+   * diagonal line and nothing else -- so the cube wore an almost empty picture
+   * on all six faces, and because `occludesNeighbours` answers from the shape
+   * it sealed its own cell and `coversFace` called a length of string sturdy
+   * ground. The amethyst bud's fault in a redstone block.
+   *
+   * Vanilla writes it as elements with `from` and `to` equal on **y**, so four
+   * of the six faces have no area and `boxFaces` drops them: two quads per
+   * segment, exactly as a rail is two.
+   */
+  const wireOf = async (props: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block("tripwire", { ...WIRE_OFF, ...props }));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+
+  const sealed: string[] = [];
+  for (let mask = 0; mask < 16; mask += 1) {
+    for (const attached of ["false", "true"]) {
+      const props: Record<string, string> = { ...WIRE_OFF, attached };
+      WIRE_SIDES.forEach((side, i) => {
+        if ((mask & (1 << i)) !== 0) props[side] = "true";
+      });
+      const entry: PaletteEntry = { namespacedName: "minecraft:tripwire", properties: props };
+      if (shapeFor(entry).kind !== "boxes") sealed.push(`${mask}/${attached} is a cube`);
+      if (occludesNeighbours(entry)) sealed.push(`${mask}/${attached} seals its cell`);
+      if ((["up", "down", "north", "south", "west", "east"] as const).some((f) => coversFace(entry, f))) {
+        sealed.push(`${mask}/${attached} is sturdy ground`);
+      }
+    }
+  }
+  equal("no state of it is a solid block", sealed, []);
+
+  /*
+   * How much wire there is, per model. These are the five vanilla files, and
+   * the counts are what says a rotation picked the right one: `n` is three
+   * segments and `ne` is four, so a wire with one connection and a wire with
+   * two adjacent ones cannot be confused.
+   */
+  equal("nothing connected is a full north-south run", (await wireOf({})).length, 8);
+  equal("...one connection is three quarters of one", (await wireOf({ north: "true" })).length, 6);
+  equal(
+    "...two opposite is the full run again",
+    (await wireOf({ north: "true", south: "true" })).length,
+    8,
+  );
+  equal(
+    "...two adjacent is two half-runs",
+    (await wireOf({ north: "true", east: "true" })).length,
+    8,
+  );
+  equal(
+    "...three is a run and a half",
+    (await wireOf({ north: "true", south: "true", east: "true" })).length,
+    12,
+  );
+  equal(
+    "...and four is a cross",
+    (await wireOf({ north: "true", south: "true", east: "true", west: "true" })).length,
+    16,
+  );
+
+  /*
+   * And where it lies, which is what the rotation decides. Stated on all four
+   * quadrants for a lone connection, because a half-turn error leaves the
+   * north-south pair right and only the sideways ones wrong.
+   */
+  const extent = (faces: BakedFace[], axis: number): string => {
+    const values = faces.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3 + axis] * 16));
+    return `${Math.min(...values).toFixed(2)}..${Math.max(...values).toFixed(2)}`;
+  };
+  equal("a wire hanging free runs the length of its cell", extent(await wireOf({}), 2), "0.00..16.00");
+  equal(
+    "...and is half a unit wide",
+    extent(await wireOf({}), 0),
+    "7.75..8.25",
+  );
+  equal(
+    "a wire tied to the north runs from that wall to z = 12",
+    extent(await wireOf({ north: "true" }), 2),
+    "0.00..12.00",
+  );
+  equal(
+    "...tied to the east, from that wall back to x = 4",
+    extent(await wireOf({ east: "true" }), 0),
+    "4.00..16.00",
+  );
+  equal(
+    "...tied to the south, to z = 4",
+    extent(await wireOf({ south: "true" }), 2),
+    "4.00..16.00",
+  );
+  equal(
+    "...and tied to the west, to x = 12",
+    extent(await wireOf({ west: "true" }), 0),
+    "0.00..12.00",
+  );
+  /*
+   * A corner: each arm stops at the middle, which is the difference between
+   * `ne` and two lone connections and the only thing that makes a right angle
+   * of string look like one.
+   */
+  const corner = await wireOf({ north: "true", east: "true" });
+  equal("a corner's north arm stops at the middle", extent(corner, 2), "0.00..8.25");
+  equal("...and its east arm starts there", extent(corner, 0), "7.75..16.00");
+
+  /*
+   * ...and the other three corners, and all four three-armed states, because
+   * each is a *different* rotation of one model and nothing above can see
+   * which. Verified by sabotage: putting the three-arm turn off by one quarter
+   * failed nothing at all until these were written.
+   *
+   * Read as a pair of extents, which is what says both which model was chosen
+   * and how far round it went: an arm that runs the whole way is a crossing
+   * pair, and one that stops at 8.25 or starts at 7.75 is a half.
+   */
+  const box = async (props: Record<string, string>): Promise<string> => {
+    const faces = await wireOf(props);
+    return `x ${extent(faces, 0)} z ${extent(faces, 2)}`;
+  };
+  /*
+   * A pair on one axis runs straight through, and the east-west one has to be
+   * turned to do it. Left unturned it draws a north-south wire, which is a
+   * whole quarter wrong and failed nothing until this line existed.
+   */
+  equal(
+    "a pair on the north-south axis runs that way",
+    await box({ north: "true", south: "true" }),
+    "x 7.75..8.25 z 0.00..16.00",
+  );
+  equal(
+    "...and a pair on the east-west axis runs across it",
+    await box({ east: "true", west: "true" }),
+    "x 0.00..16.00 z 7.75..8.25",
+  );
+
+  equal(
+    "a corner facing south-east",
+    await box({ south: "true", east: "true" }),
+    "x 7.75..16.00 z 7.75..16.00",
+  );
+  equal(
+    "...south-west",
+    await box({ south: "true", west: "true" }),
+    "x 0.00..8.25 z 7.75..16.00",
+  );
+  equal(
+    "...and north-west",
+    await box({ north: "true", west: "true" }),
+    "x 0.00..8.25 z 0.00..8.25",
+  );
+  equal(
+    "a tee open to the east",
+    await box({ north: "true", south: "true", east: "true" }),
+    "x 7.75..16.00 z 0.00..16.00",
+  );
+  equal(
+    "...to the west",
+    await box({ north: "true", south: "true", west: "true" }),
+    "x 0.00..8.25 z 0.00..16.00",
+  );
+  equal(
+    "...to the north",
+    await box({ east: "true", west: "true", north: "true" }),
+    "x 0.00..16.00 z 0.00..8.25",
+  );
+  equal(
+    "...and to the south",
+    await box({ east: "true", west: "true", south: "true" }),
+    "x 0.00..16.00 z 7.75..16.00",
+  );
+
+  /*
+   * Every quad lies at `y = 1.5`, which is the whole of what "off the floor"
+   * means and is why a wire does not z-fight with the block under it.
+   */
+  const offFloor: string[] = [];
+  for (let mask = 0; mask < 16; mask += 1) {
+    const props: Record<string, string> = {};
+    WIRE_SIDES.forEach((side, i) => {
+      if ((mask & (1 << i)) !== 0) props[side] = "true";
+    });
+    for (const face of await wireOf(props)) {
+      for (let i = 0; i < 4; i += 1) {
+        if (Math.abs(face.positions[i * 3 + 1] * 16 - 1.5) > 1e-6) offFloor.push(String(mask));
+      }
+    }
+  }
+  equal("every quad lies a unit and a half off the floor", offFloor, []);
+
+  /*
+   * The magnification, which is vanilla's and is why a "one texel per world
+   * unit" check would be the wrong check here: the window is 16x2 on a quad
+   * four long and half a unit wide, so the string is blown up **four-fold on
+   * both axes** and repeats four times along a full run.
+   */
+  const magnifications = new Set<string>();
+  for (const face of await wireOf({ north: "true", south: "true", east: "true", west: "true" })) {
+    const at = (i: number): number[] => [0, 1, 2].map((a) => face.positions[i * 3 + a] * 16);
+    const edge = (i: number, j: number): number =>
+      Math.hypot(...[0, 1, 2].map((a) => at(i)[a] - at(j)[a]));
+    const window = (i: number, j: number): number =>
+      Math.hypot(
+        (face.uvs[i * 2] - face.uvs[j * 2]) * 16,
+        (face.uvs[i * 2 + 1] - face.uvs[j * 2 + 1]) * 16,
+      );
+    for (const [i, j] of [
+      [0, 1],
+      [0, 3],
+    ]) {
+      magnifications.add((window(i, j) / edge(i, j)).toFixed(3));
+    }
+  }
+  equal("the string is magnified four-fold, on both axes and every quad", [...magnifications], [
+    "4.000",
+  ]);
+
+  /*
+   * `attached` moves the window two rows down the sheet and not one
+   * coordinate; `disarmed` and `powered` move nothing at all, because the
+   * blockstate keys on neither. Stated as geometry-equal and texels-different,
+   * which is the only shape of check that can tell those two apart.
+   */
+  const loose = await wireOf({ north: "true" });
+  const taut = await wireOf({ north: "true", attached: "true" });
+  const armed = await wireOf({ north: "true", disarmed: "true", powered: "true" });
+  const positions = (faces: BakedFace[]): string => faces.map((f) => [...f.positions].join()).join("|");
+  const texels = (faces: BakedFace[]): string => faces.map((f) => [...f.uvs].join()).join("|");
+  check("pulling a wire taut moves no coordinate", positions(loose) === positions(taut));
+  check("...but does move the texels", texels(loose) !== texels(taut));
+  check("disarming or powering one moves neither", positions(loose) === positions(armed) && texels(loose) === texels(armed));
+
+  const empty: string[] = [];
+  for (const attached of ["false", "true"]) {
+    for (const face of await wireOf({ north: "true", east: "true", attached })) {
+      if (!facePaintsSomething(face)) empty.push(attached);
+    }
+  }
+  equal("and every quad has string on it", empty, []);
 }
 
 console.log("\n--- a small dripleaf is leaves on a crossed stem ---");

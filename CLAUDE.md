@@ -4525,6 +4525,51 @@ knowing:
   what a pillar is. Beside it, that the end is not the flank's texture, which
   is the clause that would go on passing if the two ends were made equal by
   giving them both the side.
+- **A tripwire is a ribbon of string a unit and a half off the floor, and it
+  was a full opaque cube.** `tripwire.png` is 11.2% opaque — a thin diagonal
+  line and nothing else — so the cube wore an almost empty picture on all six
+  faces, and, `occludesNeighbours` answering from the shape, it sealed its own
+  cell and `coversFace` called a length of string sturdy ground. A corridor of
+  them put itself in the dark: the amethyst bud's fault in a redstone block.
+
+  Vanilla writes it as elements with `from` and `to` equal on **y**, so four of
+  the six faces have no area and `boxFaces` drops them — two quads a segment,
+  exactly as a rail is two.
+
+  **It is segments of four rather than one long ribbon, and that is the texture
+  rather than the geometry.** Each segment carries the whole `0..16` of its
+  window, so the string repeats four times along a full run, and the window is
+  16x2 on a quad four long and half a unit wide: a uniform **four-fold**
+  magnification. That is why a "one texel per world unit" check would be the
+  wrong check here, and why the check written instead is that the four-fold
+  holds on both axes of every quad.
+
+  **Five models and a quarter-turn, and the five are not a rule.** A lone
+  connection runs three quarters of the way across, a pair on one axis runs the
+  whole way, and an arm that meets a crossing one stops at the middle. So the
+  models are transcribed and only the *choice* between them is derived, from
+  the same five booleans `blockstates/tripwire.json` keys its thirty-two rows
+  on — and the derivation was checked against those rows: **all 32 states
+  reproduce vanilla's own geometry exactly**, model and `y` together, compared
+  element by element against the fetched files.
+
+  Which is what the rotations needed, because they are where this hides. Three
+  of them failed **nothing at all** when they were first sabotaged: the
+  three-armed turn off by one quarter, the corner turned the other way, and the
+  east-west pair left unturned. The extents of every corner, every tee and both
+  axis pairs are stated by name now.
+
+  `attached` moves the window two rows down the sheet and not one coordinate.
+  `disarmed` and `powered` move **nothing** — the blockstate keys on neither,
+  which is `signal_fire`'s answer: what they change is behaviour and particles,
+  and this file may not invent geometry for either.
+
+  Two things are deliberately left. **The connections are not derived**, so a
+  placed wire is unconnected and lies north-south, which is what the game draws
+  for an isolated one; `block_connections.ts` dispatches on fence, wall and
+  pane and has never had a wire arm. And `tripwire_hook` is still
+  `againstWall(e, 3)`, which is the lever's fault on the block that pulls this
+  one taut.
 - **A small dripleaf was a placeholder, and the walk that exists to catch that
   could not see it.** The pack ships `small_dripleaf_top`, `_side`, `_stem_top`
   and `_stem_bottom` and no `small_dripleaf.png` at all. At `half=lower` —

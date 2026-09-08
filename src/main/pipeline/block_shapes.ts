@@ -3878,6 +3878,117 @@ function smallDripleaf(entry: PaletteEntry): BlockShape {
   return transform(parts, northFacingSteps(entry), false);
 }
 
+/**
+ * A tripwire: a flat ribbon of string lying **1.5 units off the floor**, and it
+ * was a full opaque cube.
+ *
+ * `tripwire.png` is 11.2% opaque -- a thin diagonal line and nothing else --
+ * so the cube wore an almost empty picture on all six faces, and, because
+ * `occludesNeighbours` answers from the shape, it sealed its own cell and made
+ * `coversFace` call a length of string sturdy ground. A corridor of trip wires
+ * put itself in the dark, which is the amethyst bud's fault in a redstone
+ * block.
+ *
+ * Vanilla writes it as elements with `from` and `to` equal on **y**, so four
+ * of the six faces have no area and `boxFaces` drops them: two quads per
+ * segment, up and down, exactly as a rail is two.
+ *
+ * **It is segments of four rather than one long ribbon, and that is the
+ * texture rather than the geometry.** Each segment carries the whole `0..16`
+ * of its window, so the string repeats four times along a full run. The window
+ * is 16x2 on a quad 4 long and half a unit wide, which is a uniform four-fold
+ * magnification -- vanilla's, and the reason a "one texel per world unit"
+ * check would be the wrong check here.
+ *
+ * `attached` moves the window down two rows, `[4..6]` to `[6..8]`, and moves
+ * not one coordinate. `disarmed` and `powered` move nothing at all: the
+ * blockstate keys only on `attached` and the four directions, which is
+ * `signal_fire`'s answer -- what they change is behaviour and particles, and
+ * this file may not invent geometry for either.
+ */
+const TRIPWIRE_HEIGHT = 1.5;
+/** The two rows of the sheet, loose and pulled taut. */
+const TRIPWIRE_BANDS: Readonly<Record<string, readonly [number, number]>> = {
+  loose: [4, 6],
+  attached: [6, 8],
+};
+
+function tripwireSegment(
+  axis: "ns" | "ew",
+  from: number,
+  band: readonly [number, number],
+): ShapeBox {
+  const [v0, v1] = band;
+  if (axis === "ns") {
+    return {
+      box: [7.75, TRIPWIRE_HEIGHT, from, 8.25, TRIPWIRE_HEIGHT, from + 4],
+      uv: { up: [0, v0, 16, v1], down: [16, v0, 0, v1] },
+      uvRotation: { up: 90, down: 90 },
+    };
+  }
+  return {
+    box: [from, TRIPWIRE_HEIGHT, 7.75, from + 4, TRIPWIRE_HEIGHT, 8.25],
+    uv: { up: [0, v0, 16, v1], down: [0, v1, 16, v0] },
+  };
+}
+
+/**
+ * The five models the blockstate picks between, as the near edges of their
+ * segments. Transcribed rather than derived, because they are not a rule: a
+ * lone connection runs three quarters of the way across (`n`), a pair of them
+ * on one axis runs the whole way (`ns`), and an arm that meets a crossing one
+ * stops at the middle (`ne`, `nse`).
+ */
+const TRIPWIRE_MODELS: Readonly<
+  Record<string, { readonly ns: readonly number[]; readonly ew: readonly number[] }>
+> = {
+  n: { ns: [0, 4, 8], ew: [] },
+  ns: { ns: [0, 4, 8, 12], ew: [] },
+  ne: { ns: [0, 4], ew: [8, 12] },
+  nse: { ns: [0, 4, 8, 12], ew: [8, 12] },
+  nsew: { ns: [0, 4, 8, 12], ew: [0, 4, 8, 12] },
+};
+
+/**
+ * Which model, and how far round, for one set of connections.
+ *
+ * This is `blockstates/tripwire.json`'s own thirty-two rows derived rather than
+ * copied out, and every arm of it is checked against them: nothing connected
+ * takes `ns`, so a wire with no neighbours lies north-south, which is what the
+ * game draws.
+ */
+function tripwireVariant(entry: PaletteEntry): { model: string; steps: number } {
+  const on = TRIPWIRE_DIRECTIONS.map((face) => entry.properties[face] === "true");
+  const count = on.filter(Boolean).length;
+  if (count === 4) return { model: "nsew", steps: 0 };
+  if (count === 0) return { model: "ns", steps: 0 };
+  if (count === 1) return { model: "n", steps: on.indexOf(true) };
+  if (count === 3) return { model: "nse", steps: (on.indexOf(false) + 1) % 4 };
+  // Two: either the pair is opposite, and the wire runs straight through, or
+  // it is a corner and `ne` is turned so its north arm lands on the first of
+  // the two that are adjacent going clockwise.
+  if (on[0] === on[2]) return { model: "ns", steps: on[0] ? 0 : 1 };
+  const corner = [0, 1, 2, 3].find((i) => on[i] && on[(i + 1) % 4]) ?? 0;
+  return { model: "ne", steps: corner };
+}
+
+/** North, east, south, west -- one `rotateBoxY` step apart, in that order. */
+const TRIPWIRE_DIRECTIONS = ["north", "east", "south", "west"] as const;
+
+function tripwire(entry: PaletteEntry): BlockShape {
+  const band = TRIPWIRE_BANDS[entry.properties.attached === "true" ? "attached" : "loose"];
+  const { model, steps } = tripwireVariant(entry);
+  const runs = TRIPWIRE_MODELS[model];
+  return transform(
+    [
+      ...runs.ns.map((from) => tripwireSegment("ns", from, band)),
+      ...runs.ew.map((from) => tripwireSegment("ew", from, band)),
+    ],
+    steps,
+    false,
+  );
+}
+
 /** Exact block names, taking precedence over the suffix table. */
 const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>> = {
   /*
@@ -3935,6 +4046,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   sculk_sensor: sculkSensor,
   calibrated_sculk_sensor: calibratedSculkSensor,
   sculk_shrieker: sculkShrieker,
+  tripwire: tripwire,
   tripwire_hook: (e) => againstWall(e, 3),
   glow_lichen: (e) => againstWall(e, 1),
 
