@@ -1788,27 +1788,52 @@ export class ModelBaker {
       }
     }
 
-    // inventory.tsv row `PaletteEntry.properties consumer`: "axis" is a
-    // known key read out of the generic property bag (values "x"/"y"/"z").
+    /*
+     * A pillar wears its end on **both** ends, and the standing one did not.
+     *
+     * inventory.tsv row `PaletteEntry.properties consumer`: "axis" is a known
+     * key read out of the generic property bag (values "x"/"y"/"z"). What it
+     * means is `cube_column`, whose `down` and `up` are both `#end` -- so a
+     * lying log puts the end texture on east *and* west, or on north *and*
+     * south, and the two arms below have always said so.
+     *
+     * The standing arm wrote `faces.down` back unchanged, which is whatever
+     * the generic list resolved for a `down` face: `_bottom`, `_down`,
+     * `_lower` and `_end`, none of which is a file vanilla has ever had for a
+     * log. So the list ran to the bare name and **every log in the game stood
+     * on its own bark**, with its growth rings on the lid alone.
+     *
+     * Measured over every id the app offers that carries an `axis`: **59 of
+     * 59** cube-shaped ones resolved a `down` identical to their side, which
+     * is to say not one of them had an underside of its own to lose. The other
+     * eleven -- the ten chains and `nether_portal` -- are not cubes and take
+     * their textures per box.
+     *
+     * `axis` is the guard, and it is the difference between this and the
+     * change it looks like. Offering `_top` for a `down` face outright is a
+     * rule across all 1197 ids that the `cube_top` family contradicts: a
+     * jukebox's floor really is `jukebox_side`. A jukebox has no `axis` and is
+     * not touched, exactly as the `facing` guard one function down leaves it
+     * alone.
+     */
     const axis = entry.properties.axis;
     if (axis === "x" || axis === "y" || axis === "z") {
-      const topKey = faces.up;
-      const bottomKey = faces.down;
+      const endKey = faces.up;
       const sideKey = faces.north;
       if (axis === "x") {
-        faces.east = topKey;
-        faces.west = topKey;
+        faces.east = endKey;
+        faces.west = endKey;
         faces.up = sideKey;
         faces.down = sideKey;
       } else if (axis === "z") {
-        faces.north = topKey;
-        faces.south = topKey;
+        faces.north = endKey;
+        faces.south = endKey;
         faces.up = sideKey;
         faces.down = sideKey;
       } else {
         // axis === "y"
-        faces.up = topKey;
-        faces.down = bottomKey;
+        faces.up = endKey;
+        faces.down = endKey;
       }
     }
 

@@ -4487,13 +4487,44 @@ knowing:
   facings: the furnace and the blast furnace, the observer, the chiseled
   bookshelf, the three command blocks and the end portal frame.
 
-  What is deliberately left is the blocks that point **nowhere**, and it is a
-  real remainder rather than a clean edge: a log's underside wears its bark
-  where `cube_column` says `#end`, and a crafting table, a cartography table
-  and a fletching table each stand on their own wood's planks, which is a name
-  nothing here could derive. Fixing that means offering `_top` for a `down`
-  face outright, which is a change across all 1197 ids and one the `cube_top`
-  family disagrees with — so it is a commit of its own, like `<name>_sides`.
+  What was deliberately left is the blocks that point **nowhere**. Half of that
+  remainder is the bullet below; the other half stands: a crafting table, a
+  cartography table and a fletching table each stand on their own wood's
+  planks, which is a name nothing here could derive, and reaching it means
+  offering `_top` for a `down` face outright — a change across all 1197 ids
+  that the `cube_top` family disagrees with, so it is still a commit of its
+  own, like `<name>_sides`.
+- **A pillar wears its end on both ends, and the standing one stood on its own
+  bark.** `cube_column` writes `down: #end` beside `up: #end`, and the two
+  *lying* arms of `cubeFaceTextures` had always said so — the end texture on
+  east **and** west for `axis=x`, north **and** south for `axis=z`. The
+  standing arm handed `faces.down` straight back, and what the generic list
+  resolves for a `down` face is `_bottom`, `_down`, `_lower` and `_end`, not
+  one of which vanilla ships for a log. So the list ran on to the bare name and
+  every log in the game had its growth rings on the lid alone.
+
+  **59 of 59.** Measured over every id the app offers that carries an `axis`
+  and bakes as a cube: not one of them resolved a `down` of its own, so there
+  was no underside anywhere to lose by writing the end there. The other eleven
+  — the ten chains and `nether_portal` — are not cubes, or not columns, and
+  take their textures per box.
+
+  **`axis` is the guard, and it is the whole difference between this and the
+  change it looks like.** A jukebox is `cube_top`, its floor really is
+  `jukebox_side`, and it carries no `axis`: offering `_top` for a `down` face
+  outright would have taken that floor with nothing anywhere failing. It is the
+  `facing` guard one bullet up, on the other property, and it leaves the
+  crafting tables exactly where the paragraph above left them.
+
+  The membership is the part nobody would have written out by hand —
+  `deepslate`, `basalt`, `bamboo_block`, `hay_block`, `bone_block`, the three
+  froglights, `muddy_mangrove_roots` and `creaking_heart` are all in it beside
+  the logs — so `tests/blocks.ts` states it as a walk, and as an *equality
+  between the two ends* rather than against a list of texture names: a name
+  list would be a second copy of the pack, where this is one sentence about
+  what a pillar is. Beside it, that the end is not the flank's texture, which
+  is the clause that would go on passing if the two ends were made equal by
+  giving them both the side.
 - **A rail's `shape` was decoded, derived and rotated -- and drawn by
   nobody.** It comes out of `legacy_blocks.json` and out of a `.schem`, it is
   derived from the neighbours by `block_connections.ts`, and it turns with
