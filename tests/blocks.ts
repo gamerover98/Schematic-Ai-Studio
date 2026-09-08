@@ -1561,6 +1561,87 @@ if (pack === null) {
   );
 }
 
+console.log("\n--- a block that points somewhere keeps its front on one face ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * The walk that turns the report above into a finite list.
+   *
+   * Every template vanilla builds a pointing block from puts `#top`, `#bottom`
+   * or `#side` on the lid and the floor, and not one of them ever puts
+   * `#front` there. But `<name>_top` was not offered for a `down` face and
+   * `<name>_side` was offered for neither, so those faces resolved nothing and
+   * took `cubeFaceTextures`' fallback -- the first face that *did* resolve,
+   * which on a block whose front is the only texture named after it is the
+   * front. **The underside of every furnace in the game was wearing the fire.**
+   *
+   * Stated over every cube-shaped id at every one of its facings rather than
+   * as six named blocks, because the whole point is that nobody could have
+   * listed them: the answer was plausible, so nothing looked broken.
+   */
+  const listPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "block_id_list.txt",
+  );
+  const FLAT_AND_SIDE = ["north", "south", "west", "east", "up", "down"] as const;
+  const stray: string[] = [];
+  let walked = 0;
+  for (const id of parseBlockList(readFileSync(listPath, "utf8"))) {
+    const base = defaultStateFor(id) ?? {};
+    for (const facing of legalValuesFor(id, "facing") ?? []) {
+      const entry: PaletteEntry = { namespacedName: id, properties: { ...base, facing } };
+      if (shapeFor(entry).kind !== "cube") continue;
+      walked += 1;
+      const baked = await baker.bakeBlockstate(entry);
+      for (const face of FLAT_AND_SIDE) {
+        if (face === facing) continue;
+        const key = baked.faces[face]?.textureKey ?? "";
+        if (/_front(_|$)/.test(key)) stray.push(`${id} facing=${facing} ${face}=${key}`);
+      }
+    }
+  }
+  check("there are pointing cubes to walk", walked > 300, String(walked));
+  equal(`no face but the front wears one (${walked} states)`, stray, []);
+
+  const keyUnder = async (name: string): Promise<string> => {
+    const baked = await baker.bakeBlockstate(
+      block(name, defaultStateFor(`minecraft:${name}`) ?? {}),
+    );
+    return baked.faces.down?.textureKey ?? "-";
+  };
+
+  /*
+   * The three shapes of correct answer, one named block each, because no
+   * single rule produces all three and a walk that only counted would not say
+   * which of them had moved.
+   */
+  equal("a furnace shows its lid underneath", await keyUnder("furnace"), "minecraft:block/furnace_top");
+  equal(
+    "...a command block shows its side there instead",
+    await keyUnder("command_block"),
+    "minecraft:block/command_block_side",
+  );
+  equal(
+    "...and an end portal frame stands on end stone, which is a row of its own",
+    await keyUnder("end_portal_frame"),
+    "minecraft:block/end_stone",
+  );
+
+  /*
+   * The control, and the reason the rule is guarded on the block pointing
+   * somewhere at all: a jukebox is `cube_top`, its floor really is
+   * `jukebox_side`, and it has no `facing`. Offered outright, `_top` would
+   * have taken that face and nothing anywhere would have failed.
+   */
+  equal(
+    "a jukebox, which points nowhere, keeps its side underneath",
+    await keyUnder("jukebox"),
+    "minecraft:block/jukebox_side",
+  );
+}
+
 console.log("\n--- animated textures ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");

@@ -452,6 +452,16 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
   hopper: { top: ["hopper_top"], side: ["hopper_outside"], bottom: ["hopper_outside"] },
 
   /*
+   * An end portal frame stands on end stone, and it is the one block with a
+   * `facing` whose floor vanilla names outright rather than deriving:
+   * `end_portal_frame.json` writes `bottom: block/end_stone`. Without the row
+   * the flat-face rule below would give it its own lid, which is the wrong
+   * picture arrived at by a rule that is right everywhere else -- and a rule
+   * consults this table first, which is what makes an exception cost one line.
+   */
+  end_portal_frame: { bottom: ["end_stone"] },
+
+  /*
    * **A dispenser's and a dropper's side and top textures are the
    * furnace's**, and no naming rule could ever guess that:
    * `dispenser_side.png` and `dispenser_top.png` are files vanilla has never
@@ -2086,6 +2096,29 @@ export class ModelBaker {
       }
     }
 
+    /*
+     * **A block that points somewhere never wears its front on a flat face**,
+     * and that is what the two extra candidates below are.
+     *
+     * Every template vanilla builds one of these from puts `#top`, `#bottom`
+     * or `#side` on the lid and the floor -- `orientable` is
+     * `orientable_with_bottom` with `bottom` set to `#top`, and the command
+     * blocks and the observer state `#side` and `#top` outright. None of them
+     * ever puts `#front` there. But `<name>_top` is not offered for a `down`
+     * face and `<name>_side` is offered for neither, so a furnace, a
+     * blast furnace, an observer and the three command blocks resolved
+     * nothing at all on those faces and took the fallback -- which is the
+     * first face that *did* resolve, and for a block whose front is the only
+     * texture named after it, that is the front. So the underside of every
+     * furnace in the game was wearing the fire.
+     *
+     * Guarded on the block pointing somewhere rather than added to the list
+     * outright, which is the difference between a rule and a guess. A jukebox
+     * is `cube_top` and its floor really is `jukebox_side`; a log is
+     * `cube_column` and its end really is `#end`. Neither has a `facing`, and
+     * neither is touched.
+     */
+    const points = entry.properties.facing !== undefined;
     let candidates: string[];
     if (face === "up") {
       candidates = [
@@ -2093,6 +2126,7 @@ export class ModelBaker {
         `${normalized}_up`,
         `${normalized}_upper`,
         `${normalized}_end`,
+        ...(points ? [`${normalized}_side`] : []),
         `${normalized}_face`,
         normalized,
       ];
@@ -2102,6 +2136,7 @@ export class ModelBaker {
         `${normalized}_down`,
         `${normalized}_lower`,
         `${normalized}_end`,
+        ...(points ? [`${normalized}_top`, `${normalized}_side`] : []),
         `${normalized}_face`,
         normalized,
       ];
