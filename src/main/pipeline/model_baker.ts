@@ -2119,17 +2119,39 @@ export class ModelBaker {
     normalized: string,
     face: string,
   ): string[] {
-    // Two-block-tall plants and doors carry their half in a property and split
-    // their texture accordingly. Without this a peony draws its flowering top
-    // on both halves, because the generic `_top` candidate wins for every face.
+    /*
+     * Two-block-tall plants and doors carry their half in a property and split
+     * their texture accordingly. Without this a peony draws its flowering top
+     * on both halves, because the generic `_top` candidate wins for every face.
+     *
+     * **It is a prefix, and it used to be an answer**, which is the `facing`
+     * arms' fault two functions up, in another property. The list stopped at
+     * the bare name, so a block with none of the three -- `small_dripleaf` is
+     * one: its textures are `_top`, `_side`, `_stem_top` and `_stem_bottom`,
+     * and there is no `small_dripleaf.png` -- resolved *nothing at all* on
+     * every face and went to the hashed-colour cube, geometry and all, because
+     * `bakeFallback` throws the shape away when no face resolves.
+     *
+     * Falling through costs nothing, and the bare name is deliberately left in
+     * the prefix rather than moved to the end of the generic list, so that
+     * every block this already answered for keeps the answer it had.
+     */
     const half = entry.properties.half;
-    if (half === "upper") {
-      return [`${normalized}_top`, `${normalized}_upper`, normalized];
-    }
-    if (half === "lower") {
-      return [`${normalized}_bottom`, `${normalized}_lower`, normalized];
-    }
+    const halfFirst =
+      half === "upper"
+        ? [`${normalized}_top`, `${normalized}_upper`, normalized]
+        : half === "lower"
+          ? [`${normalized}_bottom`, `${normalized}_lower`, normalized]
+          : [];
+    return [...halfFirst, ...ModelBaker.unhalvedCandidates(entry, normalized, face)];
+  }
 
+  /** The rest of the list, once the block's half has had its say. */
+  private static unhalvedCandidates(
+    entry: PaletteEntry,
+    normalized: string,
+    face: string,
+  ): string[] {
     const rules = SPECIAL_FACE_RULES[normalized];
     if (rules) {
       if (face === "up" && rules.top) {

@@ -1144,28 +1144,42 @@ if (pack === null) {
   const offTile: string[] = [];
   const invisible: string[] = [];
   const backwards: string[] = [];
+  let walked = 0;
   for (const id of ids) {
-    const entry: PaletteEntry = { namespacedName: id, properties: {} };
     // Air is every empty cell in the document and is never drawn; it has no
     // texture by definition, so it would fail this on a technicality.
-    if (paletteEntryIsAir(entry)) continue;
-    const baked = await baker.bakeBlockstate(entry);
-    if (baked.textureKey === paletteEntryCacheKey(entry)) {
-      unresolved.push(id.replace("minecraft:", ""));
-    }
-    const all: BakedFace[] = [...Object.values(baked.faces), ...baked.extraFaces];
-    if (all.some((f) => [...f.uvs].some((n) => n < -1e-6 || n > 1 + 1e-6))) {
-      offTile.push(id.replace("minecraft:", ""));
-    }
-    if (all.length > 0 && !all.some(facePaintsSomething)) {
-      invisible.push(id.replace("minecraft:", ""));
-    }
-    if (!all.every(windingAgrees)) {
-      backwards.push(id.replace("minecraft:", ""));
+    if (paletteEntryIsAir({ namespacedName: id, properties: {} })) continue;
+    /*
+     * Bare **and** at the state the game would place it in, and those are two
+     * different questions: only the second can see a fault that lives in a
+     * *property*.
+     *
+     * `small_dripleaf` is the proof. Bare, it resolved `small_dripleaf_top`
+     * through the generic `_top` candidate and passed every clause below. At
+     * its own default `half=lower` -- which is what `defaultStateFor` writes,
+     * so what every placed one carries -- the `half` arm offered `_bottom`,
+     * `_lower` and the bare name, the pack has none of the three, and the
+     * block came out as the hashed-colour cube, **geometry and all**, because
+     * `bakeFallback` throws the shape away when no face resolves.
+     */
+    const bags: Array<Record<string, string>> = [{}];
+    const asPlaced = defaultStateFor(id) ?? {};
+    if (Object.keys(asPlaced).length > 0) bags.push(asPlaced);
+    for (const properties of bags) {
+      const entry: PaletteEntry = { namespacedName: id, properties };
+      walked += 1;
+      const placed = Object.keys(entry.properties).length > 0 ? " (as placed)" : "";
+      const label = id.replace("minecraft:", "") + placed;
+      const baked = await baker.bakeBlockstate(entry);
+      if (baked.textureKey === paletteEntryCacheKey(entry)) unresolved.push(label);
+      const all: BakedFace[] = [...Object.values(baked.faces), ...baked.extraFaces];
+      if (all.some((f) => [...f.uvs].some((n) => n < -1e-6 || n > 1 + 1e-6))) offTile.push(label);
+      if (all.length > 0 && !all.some(facePaintsSomething)) invisible.push(label);
+      if (!all.every(windingAgrees)) backwards.push(label);
     }
   }
   check(
-    `all ${ids.length} offered ids resolve a real texture`,
+    `all ${ids.length} offered ids resolve a real texture, bare and as placed (${walked} states)`,
     unresolved.length === 0,
     unresolved.length === 0
       ? undefined
@@ -1682,6 +1696,112 @@ if (pack === null) {
     "a jukebox, which points nowhere, keeps its side underneath",
     await keyUnder("jukebox"),
     "minecraft:block/jukebox_side",
+  );
+}
+
+console.log("\n--- a small dripleaf is leaves on a crossed stem ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was in `CROSS_BLOCKS` and it was a **placeholder**, which is two faults
+   * with one cause. The pack has `small_dripleaf_top`, `_side`, `_stem_top`
+   * and `_stem_bottom` and no `small_dripleaf.png`, so at `half=lower` -- what
+   * `defaultStateFor` writes, so what every placed one carries -- not a single
+   * candidate resolved and `bakeFallback` threw the shape away with them: a
+   * solid lump in an arbitrary colour where a plant should be.
+   *
+   * The walk above could not see it because it baked bare, where the generic
+   * `_top` candidate answers. It bakes both now.
+   */
+  const dripleaf = async (props: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block("small_dripleaf", props));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const hashed = async (props: Record<string, string>): Promise<boolean> => {
+    const entry: PaletteEntry = { namespacedName: "minecraft:small_dripleaf", properties: props };
+    return (await baker.bakeBlockstate(entry)).textureKey === paletteEntryCacheKey(entry);
+  };
+
+  const placeholders: string[] = [];
+  for (const facing of ["north", "east", "south", "west"] as const) {
+    for (const half of ["lower", "upper"] as const) {
+      const props = { facing, half };
+      if (await hashed(props)) placeholders.push(`${facing}/${half}`);
+      if (shapeFor(block("small_dripleaf", props)).kind !== "boxes") {
+        placeholders.push(`${facing}/${half} is not boxes`);
+      }
+    }
+  }
+  equal("no state of it is a placeholder", placeholders, []);
+
+  /*
+   * Three paper-thin leaf plates with a one-unit rim under each, and two stem
+   * quads crossed at 45 degrees: 3x2 + 3x4 + 2x2. The rims' tops are
+   * coincident with the plate standing on them and their undersides are not
+   * stated in vanilla, which is what `omit` carries -- and what the count of
+   * upward faces says out loud.
+   */
+  const upper = await dripleaf({ facing: "north", half: "upper" });
+  equal("the upper half is three plates, three rims and a crossed stem", upper.length, 22);
+  equal(
+    "...with one upward face per plate, and none on a rim",
+    upper.filter((f) => f.normal[1] > 0.99).length,
+    3,
+  );
+  equal("the lower half is the stem alone", (await dripleaf({ half: "lower" })).length, 4);
+  equal(
+    "...and it is a different texture from the top's stem",
+    [...new Set((await dripleaf({ half: "lower" })).map((f) => f.textureKey))],
+    ["minecraft:block/small_dripleaf_stem_bottom"],
+  );
+
+  /*
+   * `facing` turns the model, and the plates are what shows it: they sit in an
+   * L in plan, so the overall bounding box is 1..15 whichever way it points
+   * and only a *part* of the model can say the turn happened. Four quadrants,
+   * because a half-turn error leaves north and south right.
+   */
+  const topPlateCentre = async (facing: string): Promise<number[]> => {
+    const faces = await dripleaf({ facing, half: "upper" });
+    const ups = faces.filter((f) => f.normal[1] > 0.99);
+    const highest = ups.reduce((a, b) => (a.positions[1] > b.positions[1] ? a : b));
+    return [0, 2].map(
+      (axis) =>
+        +(
+          ([0, 1, 2, 3].reduce((sum, i) => sum + highest.positions[i * 3 + axis], 0) / 4) *
+          16
+        ).toFixed(2),
+    );
+  };
+  equal("the top leaf sits north-west facing north", await topPlateCentre("north"), [4.5, 11.5]);
+  equal("...and turns a quarter to the east", await topPlateCentre("east"), [4.5, 4.5]);
+  equal("...a half to the south", await topPlateCentre("south"), [11.5, 4.5]);
+  equal("...and three quarters to the west", await topPlateCentre("west"), [11.5, 11.5]);
+
+  /*
+   * And the placement, which arrived with the model rather than before it: for
+   * as long as all four facings drew the same hashed cube, deriving `facing`
+   * bought exactly nothing. The wiki states it in the same words as the rest
+   * of `FRONT_TO_PLAYER` -- "the opposite from the direction the player faces
+   * while placing the small dripleaf" -- so it is stated here as the
+   * *opposite* of a look, which is the half that would be silently backwards.
+   */
+  const looking = (x: number, z: number): PlacementLook => ({
+    direction: { x, y: 0, z },
+    against: "up",
+    cursorY: 0.5,
+    run: null,
+  });
+  equal(
+    "a dripleaf placed by someone looking north faces back at them",
+    orientPlacement("minecraft:small_dripleaf", looking(0, -1)).facing,
+    "south",
+  );
+  equal(
+    "...and one placed looking east faces west",
+    orientPlacement("minecraft:small_dripleaf", looking(1, 0)).facing,
+    "west",
   );
 }
 

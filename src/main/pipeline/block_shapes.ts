@@ -3760,6 +3760,124 @@ const SEAGRASS_PLANES: readonly ShapeBox[] = [
 
 const seagrass = (): BlockShape => boxes(...SEAGRASS_PLANES);
 
+/**
+ * A small dripleaf: three leaf plates on a crossed stem, `small_dripleaf_top`
+ * and `small_dripleaf_bottom`.
+ *
+ * It was in `CROSS_BLOCKS` and it was **a placeholder**, which is two faults
+ * with one cause. The pack has `small_dripleaf_top`, `_side`, `_stem_top` and
+ * `_stem_bottom` and no `small_dripleaf.png` at all, so with `half=lower` --
+ * which is what `defaultStateFor` writes and therefore what every placed one
+ * carries -- not a single candidate resolved, and `bakeFallback` throws the
+ * *shape* away when no face resolves. So the block came out as the hashed
+ * colour cube: a solid lump in an arbitrary colour where a plant should be.
+ *
+ * The model is nothing like a cross either. Three paper-thin leaf plates,
+ * 7x7, at `y = 3`, `8.02` and `12.02`, each with a one-unit rim underneath it,
+ * and two stem quads crossed at ±45°. The two hundredths are vanilla's and are
+ * left exactly as written: they hold the upper plates off the rims they stand
+ * on, which is the same job the lever base's `-0.02` does.
+ *
+ * The rims state only their four sides in vanilla. Their tops are coincident
+ * with the plate above -- same footprint, same height -- so drawing one is a
+ * flickering seam, and their undersides vanilla simply does not draw.
+ *
+ * **The windows are vanilla's and are not one texel per world unit**, which is
+ * worth saying because every other transcription in this file is: the stem's
+ * `[4, 0, 12, 14]` is eight texels wide on a seven-wide quad, and the rims'
+ * `[0, 0, 8, 1]` is eight on seven as well. Vanilla stretches them by 8/7 and
+ * copying the numbers is the rule.
+ */
+const DRIPLEAF_TILT: readonly [BoxRotation, BoxRotation] = [
+  { origin: [8, 8, 8], axis: "y", angle: 45 },
+  { origin: [8, 8, 8], axis: "y", angle: -45 },
+];
+
+const DRIPLEAF_RIM: Readonly<Record<string, UvWindow>> = {
+  north: [0, 0, 8, 1],
+  south: [0, 0, 8, 1],
+  west: [0, 0, 8, 1],
+  east: [0, 0, 8, 1],
+};
+
+const SMALL_DRIPLEAF_TOP: readonly ShapeBox[] = [
+  {
+    box: [8, 3, 8, 15, 3, 15],
+    texture: "small_dripleaf_top",
+    uv: { down: [8, 0, 0, 8], up: [8, 8, 0, 0] },
+  },
+  {
+    box: [1, 8.02, 1, 8, 8.02, 8],
+    texture: "small_dripleaf_top",
+    uv: { down: [0, 8, 8, 0], up: [0, 0, 8, 8] },
+  },
+  {
+    box: [1, 12.02, 8, 8, 12.02, 15],
+    texture: "small_dripleaf_top",
+    uv: { down: [8, 0, 0, 8], up: [0, 0, 8, 8] },
+    uvRotation: { down: 270, up: 270 },
+  },
+  {
+    box: [8, 2, 8, 15, 3, 15],
+    texture: "small_dripleaf_side",
+    uv: DRIPLEAF_RIM,
+    omit: ["up", "down"],
+  },
+  {
+    box: [1, 7.02, 1, 8, 8.02, 8],
+    texture: "small_dripleaf_side",
+    uv: DRIPLEAF_RIM,
+    omit: ["up", "down"],
+  },
+  {
+    box: [1, 11.02, 8, 8, 12.02, 15],
+    texture: "small_dripleaf_side",
+    uv: DRIPLEAF_RIM,
+    omit: ["up", "down"],
+  },
+  {
+    box: [4.5, 0, 8, 11.5, 14, 8],
+    rotation: DRIPLEAF_TILT[0],
+    texture: "small_dripleaf_stem_top",
+    uv: { north: [4, 0, 12, 14], south: [4, 0, 12, 14] },
+  },
+  {
+    box: [4.5, 0, 8, 11.5, 14, 8],
+    rotation: DRIPLEAF_TILT[1],
+    texture: "small_dripleaf_stem_top",
+    uv: { north: [4, 0, 12, 14], south: [4, 0, 12, 14] },
+  },
+];
+
+/** The lower half is the stem alone, and a taller one: `[5, 0, 12, 16]`. */
+const SMALL_DRIPLEAF_BOTTOM: readonly ShapeBox[] = [
+  {
+    box: [4.5, 0, 8, 11.5, 16, 8],
+    rotation: DRIPLEAF_TILT[0],
+    texture: "small_dripleaf_stem_bottom",
+    uv: { north: [5, 0, 12, 16], south: [5, 0, 12, 16] },
+  },
+  {
+    box: [4.5, 0, 8, 11.5, 16, 8],
+    rotation: DRIPLEAF_TILT[1],
+    texture: "small_dripleaf_stem_bottom",
+    uv: { north: [5, 0, 12, 16], south: [5, 0, 12, 16] },
+  },
+];
+
+/**
+ * **Only an explicit `lower` gets the stem alone**, which is the cauldron's
+ * rule for the cauldron's reason. The walk over every offered id bakes with an
+ * empty property bag and the inventory tile *is* that bake, so a bare stalk
+ * there would look exactly like the bug this fixes. Nothing is lost by it: a
+ * dripleaf out of a file carries its half, and so does one placed here, because
+ * `defaultStateFor` writes `half=lower`.
+ */
+function smallDripleaf(entry: PaletteEntry): BlockShape {
+  const parts = entry.properties.half === "lower" ? SMALL_DRIPLEAF_BOTTOM : SMALL_DRIPLEAF_TOP;
+  return transform(parts, northFacingSteps(entry), false);
+}
+
 /** Exact block names, taking precedence over the suffix table. */
 const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>> = {
   /*
@@ -3914,6 +4032,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   seagrass: seagrass,
   tall_seagrass: seagrass,
 
+  small_dripleaf: smallDripleaf,
   big_dripleaf: () => boxes([0, 11, 0, 16, 15, 16]),
   big_dripleaf_stem: () => boxes([5, 0, 5, 11, 16, 11]),
 
@@ -4038,7 +4157,6 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "warped_fungus",
   "mangrove_propagule",
   "hanging_roots",
-  "small_dripleaf",
   "melon_stem",
   "pumpkin_stem",
   "attached_melon_stem",

@@ -149,6 +149,14 @@ const FRONT_TO_PLAYER: ReadonlySet<string> = new Set([
   "campfire",
   "soul_campfire",
   "end_portal_frame",
+  /*
+   * The plant in the set, and it arrived with its model rather than before it:
+   * while all four facings drew the same hashed cube, deriving `facing` bought
+   * exactly nothing. The wiki states the rule in the same words as the rest of
+   * this table -- *"the opposite from the direction the player faces while
+   * placing the small dripleaf"* -- so it is one line and not a branch.
+   */
+  "small_dripleaf",
 ]);
 
 /** The same, for the ones whose `facing` also takes `up` and `down`. */
