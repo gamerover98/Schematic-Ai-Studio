@@ -113,6 +113,9 @@ const EMISSION: Record<string, number> = {
   small_amethyst_bud: 1,
   brown_mushroom: 1,
   sculk_sensor: 1,
+  // 1.20's calibrated sensor emits exactly what the plain one does, and was
+  // simply never added: a hand-written table's ordinary failure.
+  calibrated_sculk_sensor: 1,
   brewing_stand: 1,
   dragon_egg: 1,
 };

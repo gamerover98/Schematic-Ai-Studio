@@ -1806,6 +1806,182 @@ if (pack === null) {
   );
 }
 
+console.log("\n--- the sculk sensors and the shrieker ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * All three were full opaque cubes, and every one of them is half a block
+   * tall with something standing on it. Four faults, of which the silhouette
+   * is only the first: `sculk_sensor_side.png` is 50% transparent because only
+   * its lower half is the block, so a full cube drew the flank at twice its
+   * height with the top half empty; `occludesNeighbours` answered true, so a
+   * sensor sealed its own cell and `lighting.ts` put a corridor of them in the
+   * dark; the calibrated one wore its own lid on all six faces, because it
+   * borrows `sculk_sensor_side` and `sculk_sensor_bottom` from the plain
+   * sensor and no candidate list can guess that; and the tendrils, the
+   * amethyst and the shrieker's bowl were not drawn at all.
+   */
+  const sculk = async (name: string, extra: Record<string, string> = {}): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(
+      block(name, { ...defaultStateFor(`minecraft:${name}`), ...extra }),
+    );
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const shortKey = (f: BakedFace): string => f.textureKey.split("/").pop() ?? "?";
+  /** The multiset of textures a bake produced, optionally with one renamed. */
+  const tally = (faces: BakedFace[], swap?: readonly [string, string]): string =>
+    faces
+      .map((f) => (swap !== undefined && shortKey(f) === swap[0] ? swap[1] : shortKey(f)))
+      .sort()
+      .join(" ");
+  const corner = (f: BakedFace, i: number): number[] =>
+    [f.positions[i * 3], f.positions[i * 3 + 1], f.positions[i * 3 + 2]].map((n) => n * 16);
+  const highest = (faces: BakedFace[]): number =>
+    Math.max(...faces.flatMap((f) => [0, 1, 2, 3].map((i) => corner(f, i)[1])));
+
+  /*
+   * The counts are the model said as arithmetic: six faces of body and two per
+   * tendril plane, plus two per amethyst plane on the calibrated one. The
+   * shrieker's is the one worth spelling out -- six of slab, five of rim (its
+   * underside is the bowl's floor and is omitted), and five inward planes,
+   * each of which would emit two faces here where vanilla states one.
+   */
+  equal("a sculk sensor is a slab and four tendrils", (await sculk("sculk_sensor")).length, 6 + 4 * 2);
+  equal(
+    "...the calibrated one adds a crossed amethyst",
+    (await sculk("calibrated_sculk_sensor")).length,
+    6 + 4 * 2 + 2 * 2,
+  );
+  equal(
+    "...and the shrieker is a slab, a rim, and the inside of the rim",
+    (await sculk("sculk_shrieker")).length,
+    6 + 5 + 5,
+  );
+
+  /*
+   * Half a block, which is the whole silhouette. The amethyst is the one part
+   * that leaves the cell, four units above it, exactly as vanilla draws it.
+   */
+  const sensor = await sculk("sculk_sensor");
+  equal("a sensor's slab stops at half height", highest(sensor.filter((f) => !shortKey(f).includes("tendril"))), 8);
+  equal("...and its tendrils at the top of the cell", highest(sensor), 16);
+  equal("a shrieker's rim stops a unit short of the top", highest(await sculk("sculk_shrieker")), 15);
+  equal("the amethyst stands above the block", highest(await sculk("calibrated_sculk_sensor")), 20);
+
+  /*
+   * The calibrated sensor borrows two textures from the plain one, which is
+   * the dispenser's fault one block along, and its input side is the face
+   * **opposite** `facing`: `facing=north` selects the unrotated model, whose
+   * `#calibrated_side` is on the south.
+   */
+  const inputSideOf = async (facing: string): Promise<string> => {
+    const faces = await sculk("calibrated_sculk_sensor", { facing });
+    const input = faces.find((f) => shortKey(f) === "calibrated_sculk_sensor_input_side");
+    const n = input?.normal ?? [0, 0, 0];
+    if (Math.abs(n[0]) > 0.5) return n[0] > 0 ? "east" : "west";
+    return n[2] > 0 ? "south" : "north";
+  };
+  equal("a calibrated sensor facing north takes its input from the south", await inputSideOf("north"), "south");
+  equal("...and one facing east from the west", await inputSideOf("east"), "west");
+  const borrowed = tally(await sculk("calibrated_sculk_sensor"));
+  check(
+    "...while its flank and its floor are the plain sensor's own textures",
+    borrowed.includes("sculk_sensor_side") && borrowed.includes("sculk_sensor_bottom"),
+    borrowed,
+  );
+
+  /*
+   * `sculk_sensor_phase` chooses the tendril texture and nothing else --
+   * `active` and `cooldown` are one model in vanilla and `inactive` the other.
+   * Stated as the whole multiset rather than as "the tendrils changed",
+   * because a rule that also moved a coordinate would pass the narrower check.
+   */
+  for (const phase of ["active", "cooldown"]) {
+    equal(
+      `sculk_sensor_phase=${phase} lights the tendrils, and moves nothing else`,
+      tally(await sculk("sculk_sensor", { sculk_sensor_phase: phase })),
+      tally(await sculk("sculk_sensor", { sculk_sensor_phase: "inactive" }), [
+        "sculk_sensor_tendril_inactive",
+        "sculk_sensor_tendril_active",
+      ]),
+    );
+  }
+  equal(
+    "can_summon changes the shrieker's throat, also alone",
+    tally(await sculk("sculk_shrieker", { can_summon: "true" })),
+    tally(await sculk("sculk_shrieker", { can_summon: "false" }), [
+      "sculk_shrieker_inner_top",
+      "sculk_shrieker_can_summon_inner_top",
+    ]),
+  );
+  /*
+   * And the two that move nothing, which look like omissions and are the
+   * finding: `power` has sixteen values and no model in any of them, and a
+   * shrieking shrieker is an animation and a particle -- `signal_fire`'s
+   * answer.
+   */
+  equal(
+    "power moves nothing on a sensor",
+    tally(await sculk("sculk_sensor", { power: "15" })),
+    tally(await sculk("sculk_sensor", { power: "0" })),
+  );
+  equal(
+    "...and shrieking moves nothing on a shrieker",
+    tally(await sculk("sculk_shrieker", { shrieking: "true" })),
+    tally(await sculk("sculk_shrieker", { shrieking: "false" })),
+  );
+
+  /*
+   * **One texel per world unit, except the amethyst.** That exception is the
+   * check rather than a hole in it: vanilla writes the two amethyst planes
+   * 0..16 with `rescale: true`, which this file has no notion of, so they are
+   * written already rescaled -- and a 45-degree rescale is exactly `sqrt(2)`,
+   * so the picture comes out stretched along the plane by that and nothing
+   * else. Written at any other width the number moves.
+   */
+  const stretched: string[] = [];
+  const blank: string[] = [];
+  for (const [name, extra] of [
+    ["sculk_sensor", { sculk_sensor_phase: "active" }],
+    ["calibrated_sculk_sensor", { facing: "south" }],
+    ["sculk_shrieker", { can_summon: "true" }],
+  ] as Array<[string, Record<string, string>]>) {
+    for (const f of await sculk(name, extra)) {
+      const edge = (i: number, j: number): number =>
+        Math.hypot(...[0, 1, 2].map((axis) => corner(f, i)[axis] - corner(f, j)[axis]));
+      const window = (i: number, j: number): number =>
+        Math.hypot((f.uvs[i * 2] - f.uvs[j * 2]) * 16, (f.uvs[i * 2 + 1] - f.uvs[j * 2 + 1]) * 16);
+      const want = shortKey(f).endsWith("_amethyst") ? [Math.SQRT1_2, 1] : [1, 1];
+      for (const [k, [i, j]] of ([[0, 1] as const, [0, 3] as const]).entries()) {
+        const density = window(i, j) / Math.max(1e-6, edge(i, j));
+        if (Math.abs(density - want[k]) > 0.005) {
+          stretched.push(`${name} ${shortKey(f)} ${density.toFixed(3)}`);
+        }
+      }
+      if (!facePaintsSomething(f)) blank.push(`${name} ${shortKey(f)}`);
+    }
+  }
+  equal("every face at one texel per unit, the amethyst at 1/sqrt(2)", stretched, []);
+  equal("...and every one of them over art rather than an empty part of its tile", blank, []);
+
+  /*
+   * None of the three is a cube any more. The floor is still covered, because
+   * the slab really does reach it and vanilla writes `cullface: down` there;
+   * everything else is not, which is what stops a sensor sealing its own cell.
+   */
+  for (const name of ["sculk_sensor", "calibrated_sculk_sensor", "sculk_shrieker"]) {
+    const entry = block(name, defaultStateFor(`minecraft:${name}`) ?? {});
+    check(`a ${name} is boxes rather than a cube`, shapeFor(entry).kind === "boxes");
+    check(`...and it does not seal its own cell`, !occludesNeighbours(entry));
+    equal(
+      `...covering its floor and no other face`,
+      (["north", "south", "west", "east", "up", "down"] as const).filter((f) => coversFace(entry, f)),
+      ["down"],
+    );
+  }
+}
+
 console.log("\n--- animated textures ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");
