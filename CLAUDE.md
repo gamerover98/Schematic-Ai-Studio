@@ -4525,6 +4525,57 @@ knowing:
   what a pillar is. Beside it, that the end is not the flank's texture, which
   is the clause that would go on passing if the two ends were made equal by
   giving them both the side.
+- **A small dripleaf was a placeholder, and the walk that exists to catch that
+  could not see it.** The pack ships `small_dripleaf_top`, `_side`, `_stem_top`
+  and `_stem_bottom` and no `small_dripleaf.png` at all. At `half=lower` —
+  which is what `defaultStateFor` writes, so what **every placed one carries**
+  — the `half` arm of `plainCandidates` offered `_bottom`, `_lower` and the
+  bare name, the pack has none of the three, and `bakeFallback` throws the
+  *shape* away when no face resolves. So it came out as the hashed-colour cube:
+  a solid lump in an arbitrary colour where a plant should be.
+
+  **The `half` arm was an answer and is now a prefix**, which is the `facing`
+  arms' fault of the dispenser commit, one property along. Falling through
+  costs nothing and the bare name is deliberately left in the prefix rather
+  than moved to the end of the generic list, so every block the arm already
+  answered for keeps its answer: measured over all **232** `half` states of
+  every offered id, **exactly one moves** — this block, from the hashed cube to
+  `small_dripleaf_side`.
+
+  **And the walk bakes each id twice now, bare and as the game would place
+  it.** That is the hole this fell through: bare, `small_dripleaf` resolves
+  `small_dripleaf_top` through the generic `_top` candidate and passes all four
+  clauses, and the fault lives entirely in a *property*. 1197 ids, 1960 states,
+  and all four clauses were already clean at the second bag — so it cost
+  nothing to add and would have named this block on the day it was written.
+
+  The model is nothing like the `cross` it was listed as: three paper-thin leaf
+  plates at `y = 3`, `8.02` and `12.02`, a one-unit rim under each, and two stem
+  quads crossed at ±45°. The two hundredths are vanilla's, doing the lever
+  base's job of holding a part off the one below it. A rim states only its four
+  sides — its top is coincident with the plate standing on it, and vanilla
+  simply does not draw its underside.
+
+  **Its windows are not one texel per world unit, and that is vanilla**: the
+  stem's `[4, 0, 12, 14]` is eight texels across a seven-wide quad and the
+  rims' `[0, 0, 8, 1]` is eight across seven. Copying the numbers is the rule,
+  here as everywhere.
+
+  `facing` is derived at the click in the same commit, for `amethystBud`'s
+  reason: while all four facings drew the same cube it bought nothing, and the
+  moment the model turns, not deriving it is half the block coming out wrong.
+  It is `FRONT_TO_PLAYER`, and the wiki says so in that table's own words —
+  *«the opposite from the direction the player faces while placing the small
+  dripleaf»*.
+
+  **What is deliberately left is that placing one places a single half.** In
+  the game a dripleaf, a tall fern, a sunflower and tall seagrass are all
+  `DoublePlantBlock` and go in as two cells; `TWO_PART` in `services/session.ts`
+  knows only `_bed` and `_door`, both by suffix. The membership is derivable —
+  a `half` whose legal values are `lower|upper` rather than `top|bottom` is
+  exactly that family, doors included — so it is a real piece of work in
+  `session.ts` rather than a line here, and it is a family of ten rather than
+  this one block.
 - **Seagrass is four planes in a hash, and tall seagrass was a solid cube.**
   `template_seagrass` states two planes across the north-south axis at `z = 4`
   and `z = 12` and two across the east-west at `x = 4` and `x = 12`, each
