@@ -1602,7 +1602,13 @@ if (pack === null) {
       }
     }
   }
-  check("there are pointing cubes to walk", walked > 300, String(walked));
+  /*
+   * A floor rather than a count: this number *falls* as blocks are given real
+   * shapes -- the eight lightning rods took 48 states out of it the day they
+   * stopped being cubes -- so pinning it would be a check that has to be
+   * edited by every fix. What it is for is the walk finding nothing at all.
+   */
+  check("there are pointing cubes to walk", walked > 100, String(walked));
   equal(`no face but the front wears one (${walked} states)`, stray, []);
 
   const keyUnder = async (name: string): Promise<string> => {
@@ -1980,6 +1986,167 @@ if (pack === null) {
       ["down"],
     );
   }
+}
+
+console.log("\n--- a lightning rod points where it was clicked ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * All eight were full opaque cubes -- the plain rod, the three oxidation
+   * stages, and the four waxed mirrors -- which is the end rod's fault word for
+   * word on the block beside it in the same file. `lightning_rod.png` is 15.6%
+   * opaque with its art in `u 0..4, v 0..16`, a quarter of the tile, so the
+   * cube wore a mostly transparent picture on all six faces and sealed its own
+   * cell into the bargain.
+   *
+   * Walked over the id list rather than named, because eight is exactly the
+   * size of list that goes stale: the copper golem update turned one rod into
+   * eight, and it is the same multiplication the `axis` walk found eleven
+   * missing names in.
+   */
+  const rodIds = [
+    ...parseBlockList(
+      readFileSync(
+        path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "block_id_list.txt"),
+        "utf8",
+      ),
+    ),
+  ].filter((id) => id.endsWith("lightning_rod"));
+  check("there are eight lightning rods to walk", rodIds.length === 8, String(rodIds.length));
+
+  const cornerAt = (f: BakedFace, i: number): number[] =>
+    [f.positions[i * 3], f.positions[i * 3 + 1], f.positions[i * 3 + 2]].map((n) => n * 16);
+  const rodFaces = async (id: string, extra: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate({
+      namespacedName: id,
+      properties: { ...defaultStateFor(id), ...extra },
+    });
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+
+  const wrong: string[] = [];
+  for (const id of rodIds) {
+    const entry: PaletteEntry = { namespacedName: id, properties: defaultStateFor(id) ?? {} };
+    if (shapeFor(entry).kind !== "boxes") wrong.push(`${id} is ${shapeFor(entry).kind}`);
+    if (occludesNeighbours(entry)) wrong.push(`${id} occludes`);
+    for (const face of ["north", "south", "west", "east", "up", "down"] as const) {
+      if (coversFace(entry, face)) wrong.push(`${id} covers ${face}`);
+    }
+    // Six faces of head and five of shaft: vanilla omits the shaft's `up`,
+    // which is where the head is standing.
+    const faces = await rodFaces(id, {});
+    if (faces.length !== 6 + 5) wrong.push(`${id} has ${faces.length} faces`);
+    for (const f of faces) {
+      if (!facePaintsSomething(f)) wrong.push(`${id} draws nothing on one face`);
+      const edge = (i: number, j: number): number =>
+        Math.hypot(...[0, 1, 2].map((axis) => cornerAt(f, i)[axis] - cornerAt(f, j)[axis]));
+      const window = (i: number, j: number): number =>
+        Math.hypot((f.uvs[i * 2] - f.uvs[j * 2]) * 16, (f.uvs[i * 2 + 1] - f.uvs[j * 2 + 1]) * 16);
+      for (const [i, j] of [
+        [0, 1],
+        [0, 3],
+      ]) {
+        if (Math.abs(window(i, j) / Math.max(1e-6, edge(i, j)) - 1) > 0.005) {
+          wrong.push(`${id} stretched`);
+        }
+      }
+    }
+  }
+  equal("all eight are a rod, drawn over their own art, sealing nothing", wrong, []);
+
+  /*
+   * Where the head ends up is the whole of what `facing` decides, and it is
+   * the half a single rotation could get backwards: the six variants are
+   * `end_rod.json`'s exactly, so `ROD_TURN` serves both, and east and west are
+   * restated there as one turn about z where vanilla writes an x and a y.
+   */
+  const headCentre = async (facing: string): Promise<number[]> => {
+    const faces = await rodFaces("minecraft:lightning_rod", { facing });
+    const head = faces.filter(
+      (f) =>
+        Math.abs(
+          Math.hypot(...[0, 1, 2].map((a) => cornerAt(f, 0)[a] - cornerAt(f, 1)[a])) - 4,
+        ) < 0.01 &&
+        Math.abs(
+          Math.hypot(...[0, 1, 2].map((a) => cornerAt(f, 0)[a] - cornerAt(f, 3)[a])) - 4,
+        ) < 0.01,
+    );
+    const points = head.flatMap((f) => [0, 1, 2, 3].map((i) => cornerAt(f, i)));
+    return [0, 1, 2].map((axis) => +(points.reduce((sum, p) => sum + p[axis], 0) / points.length).toFixed(1));
+  };
+  for (const [facing, centre] of [
+    ["up", [8, 14, 8]],
+    ["down", [8, 2, 8]],
+    ["north", [8, 8, 2]],
+    ["south", [8, 8, 14]],
+    ["east", [14, 8, 8]],
+    ["west", [2, 8, 8]],
+  ] as Array<[string, number[]]>) {
+    equal(`a rod facing ${facing} puts its head that way`, await headCentre(facing), centre);
+  }
+
+  /*
+   * The placement, which was the other half of the report. Vanilla is
+   * `setValue(FACING, context.getClickedFace())` and nothing else, and every
+   * one of the eight was landing on the registry's `facing=up` however it was
+   * placed. Asked of a **waxed oxidised** rod, because that is the spelling a
+   * hand-written list of eight forgets.
+   */
+  const placed = (against: PlacementLook["against"], direction: PlacementLook["direction"]): string =>
+    String(
+      orientPlacement("minecraft:waxed_oxidized_lightning_rod", {
+        direction,
+        against,
+        cursorY: 0.5,
+        run: null,
+      }).facing,
+    );
+  const NORTHWARD = { x: 0, y: 0, z: -1 };
+  for (const face of ["up", "down", "north", "south", "east", "west"] as const) {
+    equal(`a rod clicked onto a ${face} face points ${face}`, placed(face, NORTHWARD), face);
+  }
+  /*
+   * And the camera, which comes in exactly where a trapdoor's does: only when
+   * there is no face to read -- the build grid, or a cell in mid-air. The rod
+   * then points back at the viewer, which is `WALL_MOUNTED`'s fallback with
+   * two more directions.
+   */
+  equal("with no face to read, a rod points back at the camera", placed(null, NORTHWARD), "south");
+  equal("...and stands up when the camera is looking down", placed(null, { x: 0, y: -1, z: 0 }), "up");
+
+  /*
+   * `powered` swaps the whole block's texture in vanilla -- and to the *plain*
+   * `lightning_rod_on` whatever the oxidation, which is what every stage's
+   * blockstate says.
+   *
+   * **This is the weaker kind of check and that is worth saying.** The rule
+   * cannot be seen from a bake here: vanilla ships that texture, the bundled
+   * pack does not override it, and this app reads only the pack -- so with or
+   * without the rule a powered rod comes out wearing its own unpowered
+   * texture, which is `resolveBoxTexture`'s fallback doing its job. Deleting
+   * the rule failed nothing at all, which is why it is read out of the source
+   * instead, `closeAllConnections`' idiom for `closeAllConnections`' reason.
+   *
+   * The trailing bare name is read too, and it is the load-bearing half: a
+   * one-name list would leave the plain rod resolving nothing whatever, and a
+   * request may carry its own `resourcePackPath`.
+   */
+  const bakerSource = readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "pipeline", "model_baker.ts"),
+    "utf8",
+  );
+  check(
+    "a powered rod is sent to lightning_rod_on, with its own name behind it",
+    /endsWith\("lightning_rod"\) && flagOf\(entry, "powered"\)[\s\S]{0,80}?return \["lightning_rod_on", normalized\]/.test(
+      bakerSource,
+    ),
+  );
+  equal(
+    "waterlogging one moves nothing",
+    (await rodFaces("minecraft:lightning_rod", { waterlogged: "true" })).length,
+    (await rodFaces("minecraft:lightning_rod", { waterlogged: "false" })).length,
+  );
 }
 
 console.log("\n--- animated textures ---");

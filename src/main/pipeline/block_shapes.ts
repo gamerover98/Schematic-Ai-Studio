@@ -1448,6 +1448,13 @@ const SUFFIX_SHAPES: ReadonlyArray<readonly [string, (entry: PaletteEntry) => Bl
    */
   ["_chain", chain],
   /*
+   * `_lightning_rod` is `_chain`'s arrangement for `_chain`'s reason: the
+   * copper golem update gave the rod the three oxidation stages and their
+   * waxed mirrors, so seven ids join the bare one, and a stage added
+   * tomorrow needs no edit here.
+   */
+  ["_lightning_rod", lightningRod],
+  /*
    * `_bars` and `_lantern` are families now, not one block each: the copper
    * golem update added bars and a lantern in four oxidation stages plus their
    * waxed mirrors, twenty ids that all arrived as full opaque cubes.
@@ -1985,21 +1992,6 @@ const END_ROD: readonly ShapeBox[] = [
 ];
 
 /**
- * Where the rod points, as **one** rotation each.
- *
- * `end_rod.json`'s blockstate spells east and west as an x turn *and* a y turn,
- * and a `ShapeBox` carries one rotation rather than a pair -- so those two are
- * restated as a single turn about z, which lands the rod on the same axis. The
- * difference between the two spellings is a roll about the rod's own length,
- * and that is **unobservable here**: all four of the rod's side faces wear the
- * identical window `[0, 0, 2, 15]`, as do the base's. The same argument the
- * bell's body rests on, for the same reason.
- *
- * Vanilla's `x` turns the opposite way from `tiltFace`'s, which is why north is
- * -90 and not +90. Getting that backwards points every rod at the block behind
- * the one it grew from.
- */
-/**
  * A lever: a cobblestone base and a handle tilted 45 degrees off it, from
  * `lever.json` and `lever_on.json`.
  *
@@ -2055,7 +2047,7 @@ const END_ROD: readonly ShapeBox[] = [
  * ## Three positions written out
  *
  * The blockstate turns the one model with `x`, which `rotateShapeBox` knows
- * nothing about. That is `END_ROD_TURN`'s problem, except that there the parts
+ * nothing about. That is `ROD_TURN`'s problem, except that there the parts
  * carry no rotation of their own and here the handle does -- and a `ShapeBox`
  * holds one. So the `x` is applied by hand and the tilt is left as the
  * residual, which puts the pivot where the handle meets the base each time:
@@ -2404,7 +2396,27 @@ function sculkShrieker(entry: PaletteEntry): BlockShape {
   );
 }
 
-const END_ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
+/**
+ * Where a rod points, as **one** rotation each -- and it is one table for both
+ * rods, because `end_rod.json` and `lightning_rod.json` have byte-for-byte the
+ * same six variants.
+ *
+ * That blockstate spells east and west as an x turn *and* a y turn, and a
+ * `ShapeBox` carries one rotation rather than a pair -- so those two are
+ * restated as a single turn about z, which lands the rod on the same axis. The
+ * difference between the two spellings is a roll about the rod's own length,
+ * and that is **unobservable on either block**: all four side faces of an end
+ * rod wear the identical window `[0, 0, 2, 15]`, as do its base's, and all four
+ * of a lightning rod's shaft wear `[0, 4, 2, 16]`, as do its head's. The two
+ * windows that would show a roll -- the head's lid and the shaft's foot -- are
+ * on the ends, where a roll moves nothing. The same argument the bell's body
+ * rests on, for the same reason.
+ *
+ * Vanilla's `x` turns the opposite way from `tiltFace`'s, which is why north is
+ * -90 and not +90. Getting that backwards points every rod at the block behind
+ * the one it grew from.
+ */
+const ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
   up: undefined,
   down: { origin: [8, 8, 8], axis: "x", angle: 180 },
   north: { origin: [8, 8, 8], axis: "x", angle: -90 },
@@ -2413,9 +2425,61 @@ const END_ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
   west: { origin: [8, 8, 8], axis: "z", angle: 90 },
 };
 
+function pointedRod(parts: readonly ShapeBox[], entry: PaletteEntry): BlockShape {
+  const turn = ROD_TURN[entry.properties.facing ?? "up"];
+  return boxes(...(turn === undefined ? parts : parts.map((part) => ({ ...part, rotation: turn }))));
+}
+
 function endRod(entry: PaletteEntry): BlockShape {
-  const turn = END_ROD_TURN[entry.properties.facing ?? "up"];
-  return boxes(...(turn === undefined ? END_ROD : END_ROD.map((part) => ({ ...part, rotation: turn }))));
+  return pointedRod(END_ROD, entry);
+}
+
+/**
+ * A lightning rod: a 4x4x4 head on a 2x12x2 shaft, `template_lightning_rod`.
+ *
+ * All **eight** of them were full opaque cubes -- the plain one and the three
+ * oxidation stages, each with a waxed mirror -- and this is the end rod's fault
+ * word for word, on the block next to it in the same file. `lightning_rod.png`
+ * is 15.6% opaque with its art in `u 0..4, v 0..16`, a quarter of the tile, so
+ * the cube wore a mostly transparent picture on all six faces and sealed its
+ * own cell into the bargain.
+ *
+ * The windows are the template's verbatim, the head's lid included: `[4, 4, 0,
+ * 0]` is reversed on both axes, which is a half turn, and vanilla means it.
+ * The shaft has no `up` face because the head is standing on it.
+ *
+ * **`powered` swaps the texture and moves not one coordinate**, which is why it
+ * is in `candidatesForName` beside `lit` rather than here: vanilla points every
+ * oxidation stage at the same `lightning_rod_on`, so the swap is of the whole
+ * block and there is nothing per-face about it.
+ */
+const LIGHTNING_ROD: readonly ShapeBox[] = [
+  {
+    box: [6, 12, 6, 10, 16, 10],
+    uv: {
+      north: [0, 0, 4, 4],
+      south: [0, 0, 4, 4],
+      west: [0, 0, 4, 4],
+      east: [0, 0, 4, 4],
+      down: [0, 0, 4, 4],
+      up: [4, 4, 0, 0],
+    },
+  },
+  {
+    box: [7, 0, 7, 9, 12, 9],
+    uv: {
+      north: [0, 4, 2, 16],
+      south: [0, 4, 2, 16],
+      west: [0, 4, 2, 16],
+      east: [0, 4, 2, 16],
+      down: [0, 4, 2, 6],
+    },
+    omit: ["up"],
+  },
+];
+
+function lightningRod(entry: PaletteEntry): BlockShape {
+  return pointedRod(LIGHTNING_ROD, entry);
 }
 
 /**
@@ -3635,6 +3699,9 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   cauldron,
   hopper,
   end_rod: endRod,
+  // The bare name; `_lightning_rod` in SUFFIX_SHAPES carries the three
+  // oxidation stages and their four waxed mirrors.
+  lightning_rod: lightningRod,
   chain,
   bell,
   conduit: () => boxes([5, 5, 5, 11, 11, 11]),
