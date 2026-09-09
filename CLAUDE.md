@@ -2293,6 +2293,33 @@ whose local builds disagree with CI. The conventional commits already in use
 still pay for themselves through `gh release create --generate-notes`, which
 costs no dependency and writes nothing.
 
+**And that refusal has a twin on the pull request, because the place it fired
+was after the merge.** `build.yml` asks whether the tag exists at the moment it
+is about to publish, by which time `master` has already taken the merge: the
+release build is red and the only way out is a bump commit pushed straight onto
+a protected branch. `.github/workflows/version.yml` asks the same one-line
+question on every pull request into `master`, so the answer arrives while there
+is still a branch to fix it on.
+
+**Two copies of one rule, and both stay.** That is normally the arrangement
+this file refuses, and the argument is that these cannot drift — it is one
+question with one answer — while they cover different roads: `build.yml` is the
+backstop for everything that does not arrive through a pull request, which is
+`workflow_dispatch` and a direct push to `master`, and the gate is the early
+copy. Deleting the one in `build.yml` would leave a release publishable twice
+from a manual dispatch.
+
+**`fetch-depth: 0` is the whole of whether either of them is a check.** Shallow,
+there are no tags to read, `git rev-parse` finds nothing, and the guard passes
+in silence over a version that is already published — verified by doing it, on
+a `--depth 1` clone of this repo, where the identical snippet answers *«will
+release v1.0.0»* with `v1.0.0` sitting in the tag list. It is the one line to
+sabotage when checking that either guard still guards.
+
+Nothing under `tests/` reads YAML, so neither has an automated check behind it,
+and that is the honest arrangement rather than a gap: the gate **is** the test,
+and it runs on every pull request into `master`.
+
 **Two Windows targets emit a `.exe`, so neither may use `win.artifactName`.**
 `nsis` and `portable` would resolve one shared name to one path and the second
 would overwrite the first — with **no error**, which was verified by doing it:
