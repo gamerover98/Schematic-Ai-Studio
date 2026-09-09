@@ -2320,6 +2320,32 @@ Nothing under `tests/` reads YAML, so neither has an automated check behind it,
 and that is the honest arrangement rather than a gap: the gate **is** the test,
 and it runs on every pull request into `master`.
 
+**`/release-version` is the half a machine must not decide, and it stops short
+of deciding it.** The skill finds the last stable tag, reads the commits since,
+classifies them by their conventional prefix and *proposes* patch, minor or
+major **with the commits that justify it** — then asks. Choosing silently is
+`semantic-release` under another name, which the paragraph above rejects for
+reasons that have not moved; the classification is a strong default and not an
+authority, because a `fix` that changes what a saved file looks like is a
+bigger release than a `feat` that adds a menu item and only a person can say
+so.
+
+**Its one trap is the tag sort.** `git tag --sort=-v:refname` puts
+`v1.0.0-dev.5` **above** `v1.0.0` unless `versionsort.suffix` is configured —
+the opposite of what semver says — so the prereleases are filtered out before
+the newest is taken. Without that filter the "last release" is a dev build of
+the release you are standing on, and every commit since it disappears from the
+classification.
+
+What it does mechanically is one command and the two mistakes that command
+invites: **`--no-git-tag-version`**, because bare `npm version` also tags and
+the tag belongs to the publish job, which pins it to the commit that was
+actually built; and the reminder that the bump has to be on the branch going
+into `master`, since on `develop` alone it changes only what the next
+`-dev.<n>` prerelease is called. It creates no tag, pushes nothing, touches
+nothing under `.github/`, and writes no changelog — each of those is written
+into the skill because each is what somebody would add.
+
 **Two Windows targets emit a `.exe`, so neither may use `win.artifactName`.**
 `nsis` and `portable` would resolve one shared name to one path and the second
 would overwrite the first — with **no error**, which was verified by doing it:
