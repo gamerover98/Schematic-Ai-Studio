@@ -18,6 +18,7 @@
    * which is a real state and is drawn as one rather than as a zero.
    */
   import type { AppInfo } from "../../../shared/ipc.js";
+  import { REPOSITORY_URL } from "../../../shared/app_version.js";
   import { t } from "./i18n.svelte.js";
   /*
    * The only asset import in the renderer. Vite emits it under
@@ -42,7 +43,8 @@
 
   let dialog = $state<HTMLDivElement | null>(null);
 
-  const REPOSITORY = "https://github.com/gamerover98/Schematic-Ai-Studio";
+  // One copy of the address: the updater reads its releases from the same one.
+  const REPOSITORY = REPOSITORY_URL;
   const UPSTREAM = "https://github.com/CyniaAI/BuilderGPT";
   const FAITHFUL = "https://faithfulpack.net/";
   const LICENSE = "https://www.apache.org/licenses/LICENSE-2.0";

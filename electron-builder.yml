@@ -52,6 +52,30 @@ extraResources:
 # this app is pure JS, so the same asar works on all three platforms.
 asar: true
 
+# Where an installed copy looks for its updates, stated rather than inferred.
+#
+# Left out, electron-builder infers it from the git remote, which is what wrote
+# `resources/app-update.yml` until now -- and a build from a tarball or from a
+# fork would infer something else, or nothing. electron-updater needs that file
+# even though the app points it at a release of its own choosing
+# (`services/updates.ts`). `UPDATE_REPOSITORY` in `shared/app_version.ts` says
+# the same thing, and only `tests/services.ts` holds the two together.
+#
+# Nothing is uploaded from here: every `electron-builder` call passes
+# `--publish never`, and publishing is the release job's (`build.yml`).
+publish:
+  provider: github
+  owner: gamerover98
+  repo: Schematic-Ai-Studio
+
+# One metadata file name for every release, dev or stable: `latest.yml` for the
+# installer, `latest-linux.yml` for the AppImage. Left on, a `1.0.1-dev.7` build
+# writes `dev.yml` instead -- a channel, which is electron-updater's way of
+# choosing between prereleases. The app makes that choice itself, from the
+# release list and the development-builds setting, and then reads the one file
+# in the release it picked.
+detectUpdateChannel: false
+
 win:
   # Stated rather than left to the buildResources scan, and `build/icons/` is
   # why. With that directory present app-builder cuts the .ico from the *set*

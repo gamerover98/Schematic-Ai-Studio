@@ -61,6 +61,7 @@ const DISPATCH: Record<MenuCommand, (item: MenuItemModel) => void> = {
   undo: () => send(IPC.menuUndo),
   redo: () => send(IPC.menuRedo),
   about: () => send(IPC.menuAbout),
+  checkUpdates: () => send(IPC.menuCheckUpdates),
 };
 
 function toElectron(item: MenuItemModel): MenuItemConstructorOptions {

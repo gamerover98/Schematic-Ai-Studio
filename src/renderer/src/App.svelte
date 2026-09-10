@@ -17,8 +17,9 @@
   import CommandPalette, { type Command } from "./lib/CommandPalette.svelte";
   import DocumentBar from "./lib/DocumentBar.svelte";
   import McpIndicator from "./lib/McpIndicator.svelte";
+  import UpdateIndicator from "./lib/UpdateIndicator.svelte";
   import { showsIndicator } from "./lib/mcp_status.js";
-  import type { McpActivity, McpStatus } from "../../shared/ipc.js";
+  import type { McpActivity, McpStatus, UpdateStatus } from "../../shared/ipc.js";
   import InspectorPanel from "./lib/InspectorPanel.svelte";
   import AboutModal from "./lib/AboutModal.svelte";
   import AnchorModal from "./lib/AnchorModal.svelte";
@@ -121,6 +122,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     type Provider,
     type ResolvedTheme,
     type Settings,
+    type UpdateSettings,
   } from "../../shared/settings.js";
 
   type Status = { tone: "info" | "ok" | "warn" | "error"; text: string; detail?: string } | null;
@@ -1473,6 +1475,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // question that has not come back -- see `dotFor`.
       }
     })();
+    const unsubscribeUpdates = api().onUpdateStatusChanged((next) => {
+      updateStatus = next;
+    });
+    void (async () => {
+      try {
+        updateStatus = await api().getUpdateStatus();
+      } catch {
+        // Null reads as "not checked yet", which is true of a question that
+        // has not come back.
+      }
+    })();
     const unsubscribeDocument = api().onDocumentChanged((state) => {
       docState = state;
       void refreshDocument();
@@ -1507,6 +1520,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         aboutOpen = true;
         if (appInfo === null) void loadAppInfo();
       }),
+      api().onMenuCheckUpdates(() => {
+        openUpdateSettings();
+        void checkUpdates();
+      }),
     ];
 
     return () => {
@@ -1518,6 +1535,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       unsubscribeTrace();
       unsubscribeDocument();
       unsubscribeMcp();
+      unsubscribeUpdates();
       for (const off of unsubscribeMenu) off();
     };
   });
@@ -1743,8 +1761,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   let mcpStatus = $state<McpStatus | null>(null);
   let mcpActivity = $state<McpActivity[]>([]);
-  /** Which pane the gear opens on. Set by the indicator, cleared by the modal. */
-  let settingsCategory = $state<"mcp" | null>(null);
+  /** Which pane the gear opens on. Set by an indicator, cleared by the modal. */
+  let settingsCategory = $state<"mcp" | "updates" | null>(null);
+
+  /*
+   * The updater, as main reports it: what it found, and what it is doing.
+   * Pushed as well as asked, because the startup check lands on its own a few
+   * seconds after launch and a download counts up without anyone asking.
+   */
+  let updateStatus = $state<UpdateStatus | null>(null);
 
   async function refreshMcpActivity(): Promise<void> {
     // Only while the pane that shows it is open: it is a hundred rows fetched
@@ -1789,6 +1814,49 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     settingsCategory = "mcp";
     settingsOpen = true;
     void refreshMcpActivity();
+  }
+
+  function openUpdateSettings(): void {
+    settingsCategory = "updates";
+    settingsOpen = true;
+  }
+
+  /*
+   * The updater's verbs. None of them throws over a failed check or download
+   * -- that comes back as a status and the pane shows it -- so the `catch` is
+   * only for the bridge itself going away.
+   */
+  async function checkUpdates(): Promise<void> {
+    try {
+      updateStatus = await api().checkForUpdates();
+    } catch (err) {
+      failed(err, t("updates.title"));
+    }
+  }
+
+  async function downloadUpdate(): Promise<void> {
+    try {
+      updateStatus = await api().downloadUpdate();
+    } catch (err) {
+      failed(err, t("updates.title"));
+    }
+  }
+
+  async function installUpdate(): Promise<void> {
+    try {
+      await api().installUpdate();
+    } catch (err) {
+      failed(err, t("updates.title"));
+    }
+  }
+
+  /**
+   * A change in the Updates pane. Changing which builds count asks again
+   * straight away: the answer on screen was given under the other rule.
+   */
+  async function patchUpdates(patch: Partial<UpdateSettings>): Promise<void> {
+    await patchSettings({ updates: { ...settings.updates, ...patch } });
+    if (patch.includeDevBuilds !== undefined) await checkUpdates();
   }
 
 
@@ -2181,6 +2249,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       keywords: t("mcp.keywords"),
       enabled: true,
       run: openMcpSettings,
+    },
+    {
+      id: "updates",
+      title: t("updates.check"),
+      group: t("group.view"),
+      keywords: t("updates.keywords"),
+      enabled: true,
+      run: () => {
+        openUpdateSettings();
+        void checkUpdates();
+      },
     },
     {
       id: "toggle-sidebar",
@@ -4093,6 +4172,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   onmcpenabled={(enabled) => void setMcpEnabled(enabled)}
   onmcpregenerate={() => void regenerateMcpToken()}
   onpickmcproot={() => pick("mcp-root")}
+  {updateStatus}
+  onupdateschange={(patch) => void patchUpdates(patch)}
+  oncheckupdates={() => void checkUpdates()}
+  ondownloadupdate={() => void downloadUpdate()}
+  oninstallupdate={() => void installUpdate()}
 />
 
 <VersionModal
@@ -4358,6 +4442,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     -->
     {#if showsIndicator(settings.mcp.enabled, mcpStatus)}
       <McpIndicator status={mcpStatus} onopen={openMcpSettings} />
+    {/if}
+
+    <!--
+      Draws itself only while there is something to act on -- an update on
+      offer, one downloading, one waiting for a restart. "Up to date" is not
+      news, and a badge saying so would be one more thing in the bar to ignore.
+    -->
+    {#if updateStatus !== null}
+      <UpdateIndicator status={updateStatus} onopen={openUpdateSettings} />
     {/if}
 
     <button

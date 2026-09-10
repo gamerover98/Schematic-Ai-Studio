@@ -64,6 +64,7 @@ import {
   type SetNbtRequest,
   type ScaleRequest,
   type TransformRequest,
+  type UpdateStatus,
 } from "../shared/ipc.js";
 import type { Hotbar, KeyStorageStatus, Provider, Settings } from "../shared/settings.js";
 
@@ -267,8 +268,20 @@ const api: BgptApi = {
   onMenuUndo: (listener) => subscribe(IPC.menuUndo, listener),
   onMenuRedo: (listener) => subscribe(IPC.menuRedo, listener),
   onMenuAbout: (listener) => subscribe(IPC.menuAbout, listener),
+  onMenuCheckUpdates: (listener) => subscribe(IPC.menuCheckUpdates, listener),
 
   getAppInfo: () => ipcRenderer.invoke(IPC.appInfo),
+
+  getUpdateStatus: () => ipcRenderer.invoke(IPC.updateStatus) as Promise<UpdateStatus>,
+  checkForUpdates: () => ipcRenderer.invoke(IPC.updateCheck) as Promise<UpdateStatus>,
+  downloadUpdate: () => ipcRenderer.invoke(IPC.updateDownload) as Promise<UpdateStatus>,
+  installUpdate: () => ipcRenderer.invoke(IPC.updateInstall) as Promise<boolean>,
+
+  onUpdateStatusChanged(listener) {
+    const wrapped = (_event: unknown, payload: UpdateStatus) => listener(payload);
+    ipcRenderer.on(IPC.updateStatusChanged, wrapped);
+    return () => ipcRenderer.removeListener(IPC.updateStatusChanged, wrapped);
+  },
 };
 
 /**

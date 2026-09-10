@@ -33,6 +33,7 @@ import {
   type ConversationList,
   type RestoreResponse,
   type AppInfo,
+  type UpdateStatus,
   type Failure,
   type FailureKind,
   type GenerateRequest,
@@ -217,6 +218,13 @@ import {
 } from "../services/settings-store.js";
 import { discardPrompt } from "../services/discard_prompt.js";
 import {
+  checkForUpdates,
+  downloadUpdate,
+  installUpdate,
+  updateStatus,
+  useUpdateWindow,
+} from "../services/updates.js";
+import {
   failurePrompt,
   failureReport,
   issueUrl,
@@ -350,6 +358,8 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   // Where `announceDocument` pushes. Installed here because this is where the
   // window getter arrives, and before anything can edit a document.
   useWindow(getWindow);
+  // And where the updater pushes its status, for the same reason.
+  useUpdateWindow(getWindow);
 
 
   // Snapshots the open document while it differs from disk. Started here
@@ -450,6 +460,17 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       platform: process.platform,
     }),
   );
+
+  /*
+   * Updates. Thin like the rest, and with no `Failure` to map: every one of
+   * these answers with a status rather than throwing, because a failed check
+   * or download is a state the pane shows -- `mcpSetEnabled`'s arrangement.
+   * See `services/updates.ts`.
+   */
+  ipcMain.handle(IPC.updateStatus, (): UpdateStatus => updateStatus());
+  ipcMain.handle(IPC.updateCheck, async (): Promise<UpdateStatus> => await checkForUpdates());
+  ipcMain.handle(IPC.updateDownload, async (): Promise<UpdateStatus> => await downloadUpdate());
+  ipcMain.handle(IPC.updateInstall, async (): Promise<boolean> => await installUpdate());
 
   ipcMain.handle(IPC.settingsGet, async (): Promise<Settings> => await getSettings());
 

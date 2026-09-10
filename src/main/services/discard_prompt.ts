@@ -5,10 +5,11 @@
  * `settings_coerce.ts` are: the module that would otherwise hold it imports
  * Electron and the suites cannot load it at all.
  *
- * It is also asked from two places that have nothing else in common — the
- * `confirmDiscard` channel, and `mainWindow.on("close")`, where there is no
- * renderer left to ask with — and two dialogs phrasing the same question
- * differently is how a user learns to stop reading them.
+ * It is also asked from three places that have nothing else in common — the
+ * `confirmDiscard` channel, `mainWindow.on("close")`, where there is no
+ * renderer left to ask with, and installing an update, which quits — and two
+ * dialogs phrasing the same question differently is how a user learns to stop
+ * reading them.
  */
 
 import type { DiscardIntent } from "../../shared/ipc.js";
@@ -34,12 +35,14 @@ const CONFIRM_LABEL: Record<DiscardIntent, string> = {
   new: "Discard and create",
   open: "Discard and open",
   close: "Discard and close",
+  update: "Discard and update",
 };
 
 const INTENT_DETAIL: Record<DiscardIntent, string> = {
   new: "Creating a new schematic will replace it.",
   open: "Opening another schematic will replace it.",
   close: "Closing it will throw them away.",
+  update: "Installing the update restarts the app and throws them away.",
 };
 
 export function discardPrompt(intent: DiscardIntent, fileName: string | null): DiscardPrompt {

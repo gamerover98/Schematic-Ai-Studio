@@ -320,9 +320,31 @@ export const IPC = {
    * the Help menu is unconditional where Edit is not.
    */
   menuAbout: "bgpt:menu:about",
+  /**
+   * Help → Check for Updates…
+   *
+   * Answerable with nothing open for About's reason: it is about the app, not
+   * about a document. Opens the Updates pane and asks.
+   */
+  menuCheckUpdates: "bgpt:menu:checkUpdates",
 
   /** What the app is: name, version, and the runtime under it. */
   appInfo: "bgpt:app:info",
+
+  /**
+   * Whether a newer build exists, and the two things to do about it.
+   *
+   * `updateStatus` is asked; `updateStatusChanged` is pushed, because the
+   * answer moves without the window asking -- the startup check landing a few
+   * seconds in, a download counting up. `updateDownload` and `updateInstall`
+   * answer with what happened, `mcpSetEnabled`'s shape: a download can fail,
+   * and an install can be declined over unsaved work.
+   */
+  updateStatus: "bgpt:update:status",
+  updateStatusChanged: "bgpt:update:status:changed",
+  updateCheck: "bgpt:update:check",
+  updateDownload: "bgpt:update:download",
+  updateInstall: "bgpt:update:install",
 
   /** main → renderer: one tool call the agent just made. */
   agentStep: "bgpt:agent:step",
@@ -376,6 +398,69 @@ export interface AppInfo {
   node: string;
   /** `process.platform`, as-is. */
   platform: string;
+}
+
+// ---------------------------------------------------------------------------
+// Updates
+// ---------------------------------------------------------------------------
+
+/**
+ * How this copy was installed, which decides what it can do about an update.
+ *
+ * Only `nsis` and `appimage` replace themselves: electron-updater supports the
+ * setup and the AppImage, and nothing else this app ships. The portable build
+ * is sent to the release page by decision, `mac` is not built by the CI at
+ * all, `unpackaged` is a development run, and `other` is a packaged build that
+ * is none of these -- `win-unpacked` started by hand, say -- which an
+ * installer must not be run over.
+ */
+export type InstallKind = "nsis" | "appimage" | "portable" | "mac" | "unpackaged" | "other";
+
+/** A release newer than the running build, as the settings pane shows it. */
+export interface UpdateRelease {
+  /** Without the `v`: `1.0.1-dev.7`. */
+  version: string;
+  /** As published: `v1.0.1-dev.7`. */
+  tag: string;
+  prerelease: boolean;
+  /** Built from the repository and the tag, never taken from the API's answer. */
+  pageUrl: string;
+  /** ISO 8601, or empty when GitHub did not say. */
+  publishedAt: string;
+  /**
+   * The release carries the metadata this copy updates itself from.
+   *
+   * Every release published before the updater existed lacks it, and so would
+   * one the CI let out without it. `false` turns Download into "Open download
+   * page".
+   */
+  installable: boolean;
+}
+
+export type UpdateState =
+  | "idle"
+  | "checking"
+  | "upToDate"
+  | "available"
+  | "downloading"
+  | "ready"
+  | "error";
+
+export interface UpdateStatus {
+  state: UpdateState;
+  /** `app.getVersion()`, for the reason `AppInfo.version` is. */
+  currentVersion: string;
+  kind: InstallKind;
+  /** Whether this kind of install can update itself at all. */
+  inApp: boolean;
+  /** The release on offer; `null` when there is none, or before a check. */
+  latest: UpdateRelease | null;
+  /** While `downloading`. `percent` runs 0 to 100. */
+  progress: { percent: number; transferred: number; total: number } | null;
+  /** When the last check finished, in epoch milliseconds. */
+  checkedAt: number | null;
+  /** Main's own sentence for `error`, not translated -- `McpStatus.message`'s rule. */
+  message: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +659,7 @@ export interface PickFileResponse {
  * every other `Failure.message`, and the renderer does not have to keep three
  * near-identical strings in step with a dialog it cannot see.
  */
-export type DiscardIntent = "new" | "open" | "close";
+export type DiscardIntent = "new" | "open" | "close" | "update";
 
 export interface ConfirmDiscardRequest {
   intent: DiscardIntent;
@@ -2065,7 +2150,24 @@ export interface BgptApi {
   onMenuUndo(listener: () => void): () => void;
   onMenuRedo(listener: () => void): () => void;
   onMenuAbout(listener: () => void): () => void;
+  onMenuCheckUpdates(listener: () => void): () => void;
 
   /** Name, version and runtime. Asked once, when the About box is opened. */
   getAppInfo(): Promise<AppInfo>;
+
+  /** What the updater knows right now. Never a network request. */
+  getUpdateStatus(): Promise<UpdateStatus>;
+  /** Asks GitHub, and answers with the resulting status -- failures included. */
+  checkForUpdates(): Promise<UpdateStatus>;
+  /**
+   * Downloads the release on offer, resolving once it is ready or has failed.
+   * The progress in between arrives through `onUpdateStatusChanged`.
+   */
+  downloadUpdate(): Promise<UpdateStatus>;
+  /**
+   * Restarts into the downloaded update. `false` when it did not go ahead:
+   * nothing was ready, or the unsaved-work prompt was declined.
+   */
+  installUpdate(): Promise<boolean>;
+  onUpdateStatusChanged(listener: (status: UpdateStatus) => void): () => void;
 }
