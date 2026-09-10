@@ -2294,9 +2294,13 @@ downloads, the version is a statement to a person rather than a function of the
 commit log, and `semantic-release` would additionally have to get its computed
 number into `package.json` before electron-builder reads it — meaning a commit
 back into a protected branch, or a repo whose version is permanently a lie and
-whose local builds disagree with CI. The conventional commits already in use
-still pay for themselves through `gh release create --generate-notes`, which
-costs no dependency and writes nothing.
+whose local builds disagree with CI. The notes come from `gh release create
+--generate-notes`, which costs no dependency and writes nothing, and they are
+the **titles of the pull requests** merged since the previous tag rather than
+the commit subjects: `v1.0.0`'s notes are one line per PR, #1 to #3, with not
+one subject among them. So a PR title is a release note word for word, and the
+conventional commits pay for themselves through `/release-version` instead,
+which classifies the bump by them and groups each PR's body by them.
 
 **And that refusal has a twin on the pull request, because the place it fired
 was after the merge.** `build.yml` asks whether the tag exists at the moment it
@@ -2350,6 +2354,24 @@ into `master`, since on `develop` alone it changes only what the next
 `-dev.<n>` prerelease is called. It creates no tag, pushes nothing, touches
 nothing under `.github/`, and writes no changelog — each of those is written
 into the skill because each is what somebody would add.
+
+**And it opens the two pull requests, with `gh`, one yes at a time.** The
+feature branch into `develop`, then `develop` into `master` once the first is
+merged and `develop`'s `package.json` carries the new number — read from the
+file rather than by commit, because a rebase-merge gives the bump a new SHA.
+Each is shown in the chat, title and body, and created only after an explicit
+yes, because opening a PR is public. The body is the list of changes since the
+last stable tag and nothing else — grouped by prefix, oldest first, the
+`chore(release)` commits left out, in English and without emoji — and the title
+is written to stand alone, because it is the line the release notes will carry.
+
+**Pushing and merging stay with the user.** Before any `gh pr create` the skill
+requires the remote branch to equal `HEAD`, and passes `--head` explicitly:
+without it `gh` pushes a branch it cannot find, and its own help says even
+`--dry-run` *«may still push git changes»*. It recommends a merge commit on
+both hops, and #4 is why: rebase-merged, it gave `develop` thirteen commits
+under new SHAs that the feature branch still carried, and clearing them took a
+rebase.
 
 **Two Windows targets emit a `.exe`, so neither may use `win.artifactName`.**
 `nsis` and `portable` would resolve one shared name to one path and the second
