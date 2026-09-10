@@ -39,7 +39,9 @@ Invoke-Npm run build
 
 if ($Package) {
     Write-Step "Packaging for $Package"
-    Invoke-Npm exec -- electron-builder "--$Package"
+    # `--publish never`, as in the package:* scripts: publishing is the release
+    # job's alone, whatever token this environment happens to hold.
+    Invoke-Npm exec -- electron-builder "--$Package" --publish never
     Write-Host ''
     Write-Host "Done. Installer(s) written to $(Join-Path $script:RepoRoot 'release')" -ForegroundColor Green
 }

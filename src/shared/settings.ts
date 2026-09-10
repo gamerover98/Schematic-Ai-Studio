@@ -7,6 +7,8 @@
  * renderer only ever learns whether one exists (`ProviderKeyStatus`).
  */
 
+import { isPrereleaseVersion } from "./app_version.js";
+
 export const PROVIDERS = [
   "OpenAI",
   "Google Gemini",
@@ -706,6 +708,56 @@ export const DEFAULT_EDITING_SETTINGS: EditingSettings = {
 export const VOID_OPACITY = { min: 0.05, max: 1 } as const;
 
 /**
+ * Whether the app looks for a newer build of itself, and which builds count.
+ *
+ * A bag of its own for the reason `editing` is not `preview`: these are not
+ * about what is drawn, and main has to honour them -- it is the one that
+ * reaches the network.
+ */
+export interface UpdateSettings {
+  /**
+   * One request to GitHub a few seconds after launch, and nothing more:
+   * nothing is downloaded until somebody presses Download.
+   *
+   * On by default, which is why `coerceUpdates` reads it as `!== false`: no
+   * settings file written before this existed carries the key, and reading
+   * its absence as off would mean nobody who already has the app ever hears
+   * of the next one.
+   */
+  checkOnStartup: boolean;
+  /**
+   * Whether `-dev.N` prereleases are offered, or `null` for "never chosen".
+   *
+   * `null` follows the build that is running: a development build keeps
+   * being offered development builds, a stable one stable releases. The
+   * first explicit choice replaces it for good -- and that is the difference
+   * from `THEMES`, where "follow the system" is a stored value precisely
+   * because it is a choice somebody goes back to. Nobody chooses to follow
+   * the build; it is only what happens until they have chosen, so "never
+   * asked" is exactly the state worth storing.
+   *
+   * Read through `effectiveIncludeDevBuilds`, never directly.
+   */
+  includeDevBuilds: boolean | null;
+}
+
+export const DEFAULT_UPDATE_SETTINGS: UpdateSettings = {
+  checkOnStartup: true,
+  includeDevBuilds: null,
+};
+
+/**
+ * What the development-builds checkbox means right now.
+ *
+ * In `shared/` because the renderer draws the checkbox from it and main
+ * filters the release list by it, and two answers to one question are how a
+ * box comes to be ticked over a check that ignores it.
+ */
+export function effectiveIncludeDevBuilds(updates: UpdateSettings, runningVersion: string): boolean {
+  return updates.includeDevBuilds ?? isPrereleaseVersion(runningVersion);
+}
+
+/**
  * What empty space is made of, normalised. `""` is air.
  *
  * Every spelling of air heals to `""`, and that is load-bearing rather than
@@ -822,6 +874,7 @@ export interface Settings {
   ui: UiSettings;
   mcp: McpSettings;
   editing: EditingSettings;
+  updates: UpdateSettings;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -852,6 +905,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ui: { ...DEFAULT_UI_SETTINGS },
   mcp: { ...DEFAULT_MCP_SETTINGS },
   editing: { ...DEFAULT_EDITING_SETTINGS },
+  updates: { ...DEFAULT_UPDATE_SETTINGS },
 };
 
 /**

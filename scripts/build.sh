@@ -56,7 +56,9 @@ run_npm run build
 
 if [ -n "$PACKAGE_TARGET" ]; then
   write_step "Packaging for $PACKAGE_TARGET"
-  run_npm exec -- electron-builder "--$PACKAGE_TARGET"
+  # `--publish never`, as in the package:* scripts: publishing is the release
+  # job's alone, whatever token this environment happens to hold.
+  run_npm exec -- electron-builder "--$PACKAGE_TARGET" --publish never
   printf '\n%sDone. Installer(s) written to %s/release%s\n' "$C_OK" "$REPO_ROOT" "$C_OFF"
 else
   printf '\n%sDone. Bundles written to %s/out%s\n' "$C_OK" "$REPO_ROOT" "$C_OFF"

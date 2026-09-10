@@ -96,6 +96,7 @@ import {
   coerceSettings,
   coerceHotbar,
   coerceUi,
+  coerceUpdates,
 } from "../src/main/services/settings_coerce.js";
 import { discardPrompt } from "../src/main/services/discard_prompt.js";
 import {
@@ -149,8 +150,28 @@ import {
   type McpSettings,
   type Settings,
   type UiSettings,
+  DEFAULT_UPDATE_SETTINGS,
+  effectiveIncludeDevBuilds,
+  type UpdateSettings,
 } from "../src/shared/settings.js";
 import { MC_VERSIONS, eraOf, resolveVersionName } from "../src/shared/mc_versions.js";
+import {
+  compareVersions,
+  isPrereleaseVersion,
+  parseVersion,
+  releaseDownloadBase,
+  releasePageUrl,
+  UPDATE_REPOSITORY,
+} from "../src/shared/app_version.js";
+import {
+  installableFrom,
+  installKind,
+  NSIS_UNINSTALLER,
+  parseReleases,
+  pickUpdate,
+  toUpdateRelease,
+  updatesInApp,
+} from "../src/main/services/update_core.js";
 
 /**
  * Mirrors `services/resources.ts`'s `defaultResourcePackPath()` without pulling
@@ -1021,8 +1042,9 @@ console.log("\n--- discard prompt ---");
   equal("new says what it will do", discardPrompt("new", "a").confirmLabel, "Discard and create");
   equal("open says what it will do", discardPrompt("open", "a").confirmLabel, "Discard and open");
   equal("close says what it will do", discardPrompt("close", "a").confirmLabel, "Discard and close");
+  equal("update says what it will do", discardPrompt("update", "a").confirmLabel, "Discard and update");
 
-  for (const intent of ["new", "open", "close"] as const) {
+  for (const intent of ["new", "open", "close", "update"] as const) {
     const prompt = discardPrompt(intent, "a.schem");
     check(
       `${intent}: the button is never a bare OK`,
@@ -1160,6 +1182,13 @@ console.log("\n--- application menu ---");
   equal("...and with a document", at(menuModel(open), "Help")?.label, "Help");
   equal("About works with nothing open", at(helpMenu(empty), "About Schematic AI Studio")?.enabled, true);
   equal("...and names the app", helpMenu(open)[0]?.label, `About ${APP_NAME}`);
+  // About's rules for About's reasons: about the app, not a document.
+  equal(
+    "Check for Updates works with nothing open",
+    at(helpMenu(empty), "Check for Updates…")?.enabled,
+    true,
+  );
+  equal("...and claims no key", at(helpMenu(empty), "Check for Updates…")?.accelerator, undefined);
 
   /*
    * And no accelerator on it, stated because it looks like an omission.
@@ -1746,6 +1775,26 @@ console.log("\n--- settings coercion ---");
 
   equal("every editing field survives a round-trip", coerceEditing(editing), editing);
 
+  // Both the opposite of their default -- `null` is the second one's -- so a
+  // `coerceUpdates` that dropped either could not round-trip.
+  const updates = {
+    checkOnStartup: false,
+    includeDevBuilds: true,
+  } satisfies UpdateSettings;
+
+  equal("every updates field survives a round-trip", coerceUpdates(updates), updates);
+
+  /*
+   * Absent has to read as *on* for the startup check and as "never chosen"
+   * for development builds. No settings file written before the updater has
+   * an `updates` block, and reading it as off would mean nobody who already
+   * has the app ever hears of the next one.
+   */
+  equal("a settings file with no updates block gets the defaults", coerceUpdates(undefined), DEFAULT_UPDATE_SETTINGS);
+  equal("...and only an explicit false stops the startup check", coerceUpdates({ checkOnStartup: "no" }).checkOnStartup, true);
+  equal("a development choice that is not a boolean is no choice", coerceUpdates({ includeDevBuilds: "yes" }).includeDevBuilds, null);
+  equal("...while an explicit false is kept, not healed to null", coerceUpdates({ includeDevBuilds: false }).includeDevBuilds, false);
+
   /*
    * Absent has to read as *on*, not as off.
    *
@@ -1830,6 +1879,7 @@ console.log("\n--- settings coercion ---");
     ui,
     mcp,
     editing,
+    updates,
   } satisfies Settings;
 
   equal("every settings field survives a round-trip", coerceSettings(settings), settings);
@@ -2835,6 +2885,174 @@ console.log("\n--- the picture a copy leaves behind ---");
     String(held.chunks.length),
   );
   closeDocument();
+}
+
+// --- updates: which release is offered, and what this copy can do with it ---
+console.log("\n--- updates ---");
+{
+  /*
+   * The ordering the release list is read with, and the one place a wrong
+   * answer would offer somebody an older build. `dev.10` after `dev.9` is the
+   * case a string compare gets wrong; a prerelease before its own release is
+   * the one `git tag --sort` gets wrong -- CLAUDE.md records that trap for the
+   * release skill, and this is the same trap met from the app's side.
+   */
+  equal("a prerelease comes before its release", compareVersions("1.0.0-dev.5", "1.0.0"), -1);
+  equal("dev.10 is newer than dev.9", compareVersions("1.0.0-dev.10", "1.0.0-dev.9"), 1);
+  equal("the next version's prerelease is newer than this release", compareVersions("1.0.1-dev.1", "1.0.0"), 1);
+  equal("a tag's v is accepted", compareVersions("v1.2.3", "1.2.3"), 0);
+  equal("a numeric identifier sorts before a word", compareVersions("1.0.0-1", "1.0.0-dev"), -1);
+  equal("of two agreeing lists, the longer is newer", compareVersions("1.0.0-dev.1.1", "1.0.0-dev.1"), 1);
+  equal("anything else is not a version", compareVersions("latest", "1.0.0"), null);
+  equal("...nor is half of one", parseVersion("1.0"), null);
+  check("a -dev build is a prerelease", isPrereleaseVersion("1.0.1-dev.7"));
+  check("...and a release is not", !isPrereleaseVersion("1.0.1"));
+
+  /*
+   * The real list as GitHub returned it on 2026-09-10, shuffled: GitHub orders
+   * by creation date and the choice must not depend on that. v1.0.0 was
+   * published after v1.0.0-dev.5 and before v1.0.1-dev.7, and only it is
+   * given the update metadata here -- the others predate it.
+   */
+  const asset = (name: string) => ({ name });
+  const releases = parseReleases([
+    { tag_name: "v1.0.0-dev.4", prerelease: true, draft: false, published_at: "2026-09-02T14:21:36Z", assets: [] },
+    {
+      tag_name: "v1.0.1-dev.7",
+      prerelease: true,
+      draft: false,
+      published_at: "2026-09-09T10:49:08Z",
+      assets: [asset("SchematicAIStudio-1.0.1-dev.7-setup-x64.exe")],
+    },
+    {
+      tag_name: "v1.0.0",
+      prerelease: false,
+      draft: false,
+      published_at: "2026-09-07T13:39:02Z",
+      assets: [asset("latest.yml"), asset("latest-linux.yml")],
+    },
+    { tag_name: "v1.0.0-dev.5", prerelease: true, draft: false, published_at: "2026-09-07T10:05:18Z", assets: [] },
+    { tag_name: "v1.0.0-dev.3", prerelease: true, draft: false, published_at: "2026-08-31T15:31:09Z", assets: [] },
+    // Never offered: a draft, a tag that is not a version, and an entry of no shape at all.
+    { tag_name: "v9.9.9", prerelease: false, draft: true, assets: [] },
+    { tag_name: "nightly", prerelease: true, draft: false, assets: [] },
+    "not a release",
+  ]);
+  equal("a tag that is not a version, or no release at all, is dropped", releases.length, 6);
+  equal("an answer that is not a list is no releases", parseReleases({ message: "Not Found" }).length, 0);
+
+  const tagFor = (current: string, includeDevBuilds: boolean): string | null =>
+    pickUpdate(releases, current, includeDevBuilds)?.tag ?? null;
+  equal("a stable build, development builds off: nothing newer", tagFor("1.0.0", false), null);
+  equal("...and on: the newest development build", tagFor("1.0.0", true), "v1.0.1-dev.7");
+  equal("a development build, off: the stable release it led to", tagFor("1.0.0-dev.5", false), "v1.0.0");
+  equal("...and on: the newest by version, not the newest published", tagFor("1.0.0-dev.3", true), "v1.0.1-dev.7");
+  equal("off on the newest development build: never back to an older stable", tagFor("1.0.1-dev.7", false), null);
+  equal("a draft is never offered, however new", tagFor("1.0.1-dev.7", true), null);
+
+  /*
+   * A development build by either mark, because they are written in different
+   * places -- the flag by `gh release create --prerelease`, the suffix by `npm
+   * version` on the runner -- and somebody who opted out must not be offered
+   * one because only one of them was set.
+   */
+  const unflagged = parseReleases([{ tag_name: "v2.0.0-dev.1", prerelease: false, draft: false, assets: [] }]);
+  equal("a -dev tag without the prerelease flag is still a development build", pickUpdate(unflagged, "1.0.0", false), null);
+
+  equal(
+    "the setting nobody chose follows a development build",
+    effectiveIncludeDevBuilds(DEFAULT_UPDATE_SETTINGS, "1.0.1-dev.7"),
+    true,
+  );
+  equal("...and a stable one", effectiveIncludeDevBuilds(DEFAULT_UPDATE_SETTINGS, "1.0.1"), false);
+  equal(
+    "an explicit choice wins over the build",
+    effectiveIncludeDevBuilds({ checkOnStartup: true, includeDevBuilds: false }, "1.0.1-dev.7"),
+    false,
+  );
+
+  const installed = { platform: "win32", isPackaged: true, env: {}, hasUninstaller: true };
+  equal("the setup's copy is nsis", installKind(installed), "nsis");
+  equal(
+    "the portable build says so through its launcher",
+    installKind({ ...installed, env: { PORTABLE_EXECUTABLE_FILE: "C:/x.exe" } }),
+    "portable",
+  );
+  equal("win-unpacked started by hand is not an install", installKind({ ...installed, hasUninstaller: false }), "other");
+  equal(
+    "an AppImage says so through its runtime",
+    installKind({ ...installed, platform: "linux", env: { APPIMAGE: "/x.AppImage" } }),
+    "appimage",
+  );
+  equal("...and an extracted one is not an AppImage", installKind({ ...installed, platform: "linux" }), "other");
+  equal("macOS is its own", installKind({ ...installed, platform: "darwin" }), "mac");
+  equal("a development run is that before anything else", installKind({ ...installed, isPackaged: false }), "unpackaged");
+  check(
+    "only the setup and the AppImage replace themselves",
+    updatesInApp("nsis") &&
+      updatesInApp("appimage") &&
+      !updatesInApp("portable") &&
+      !updatesInApp("mac") &&
+      !updatesInApp("other") &&
+      !updatesInApp("unpackaged"),
+  );
+
+  const stable = releases.find((release) => release.tag === "v1.0.0")!;
+  const dev7 = releases.find((release) => release.tag === "v1.0.1-dev.7")!;
+  check("a release with latest.yml installs on the setup's copy", installableFrom(stable, "nsis"));
+  check("...and one with latest-linux.yml on an AppImage", installableFrom(stable, "appimage"));
+  check(
+    "a release published without the metadata installs nowhere",
+    !installableFrom(dev7, "nsis") && !installableFrom(dev7, "appimage"),
+  );
+  check("the portable build installs from nothing", !installableFrom(stable, "portable"));
+
+  /*
+   * The page is built, never taken from the API's `html_url`: what the
+   * renderer opens in the browser is a URL this code wrote.
+   */
+  const offered = toUpdateRelease(dev7, "nsis");
+  equal(
+    "the page is built from the repository and the tag",
+    offered.pageUrl,
+    "https://github.com/gamerover98/Schematic-Ai-Studio/releases/tag/v1.0.1-dev.7",
+  );
+  equal("...and says it is a development build", offered.prerelease, true);
+  equal(
+    "the feed is that one release's download directory",
+    releaseDownloadBase("v1.0.0"),
+    "https://github.com/gamerover98/Schematic-Ai-Studio/releases/download/v1.0.0",
+  );
+  equal(
+    "a tag is escaped rather than trusted",
+    releasePageUrl("v1/../x"),
+    "https://github.com/gamerover98/Schematic-Ai-Studio/releases/tag/v1%2F..%2Fx",
+  );
+
+  /*
+   * Three pairs with nothing linking them but this: `electron-builder.yml`
+   * cannot import a constant. The repository it writes into
+   * `app-update.yml`, the product name the NSIS uninstaller is named after,
+   * and the flag that keeps a `-dev` build's metadata called `latest.yml`.
+   */
+  const builderYml = readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "electron-builder.yml"),
+    "utf8",
+  );
+  equal(
+    "electron-builder publishes to the repository the app reads",
+    [/^\s+owner:\s*(\S+)\s*$/m.exec(builderYml)?.[1], /^\s+repo:\s*(\S+)\s*$/m.exec(builderYml)?.[1]],
+    [UPDATE_REPOSITORY.owner, UPDATE_REPOSITORY.repo],
+  );
+  equal(
+    "...names the uninstaller the app looks for",
+    `Uninstall ${/^productName:\s*(.+?)\s*$/m.exec(builderYml)?.[1]}.exe`,
+    NSIS_UNINSTALLER,
+  );
+  check(
+    "...and writes latest.yml for every release, dev or not",
+    /^detectUpdateChannel:\s*false\s*$/m.test(builderYml),
+  );
 }
 
 console.log("\n--- ipc channels ---");

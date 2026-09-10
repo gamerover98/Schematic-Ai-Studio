@@ -105,13 +105,26 @@ jobs:
         include:
           - os: windows-latest
             platform: win
-            artifacts: release/*.exe
+            # The installer and the portable build, and what an installed copy
+            # updates itself from: `latest.yml` names the installer and its
+            # sha512, the `.blockmap` makes the next download differential.
+            # Named rather than `release/*.yml`, which would also take
+            # `builder-debug.yml` -- written on both runners, so the two would
+            # collide under `merge-multiple`.
+            artifacts: |
+              release/*.exe
+              release/*.exe.blockmap
+              release/latest.yml
           # Pinned rather than ubuntu-latest: electron-builder 25.1.8 predates
           # `latest` moving to 24.04, and an older glibc also widens the set of
           # distributions the result runs on.
           - os: ubuntu-22.04
             platform: linux
-            artifacts: release/*.AppImage
+            # The AppImage carries its own blockmap, so the metadata is all it
+            # needs beside it.
+            artifacts: |
+              release/*.AppImage
+              release/latest-linux.yml
 
     steps:
       - uses: actions/checkout@v5
@@ -150,11 +163,15 @@ jobs:
       # electron-builder publishes by itself when it finds one, which would race
       # the publish job below and produce a half-populated release. Publishing
       # is that job's business alone.
+      #
+      # One did come back, under this very comment, and nothing noticed -- so
+      # the `package:*` scripts also pass `--publish never`, and the rule holds
+      # whatever this environment says. The update metadata is written either
+      # way.
       - name: Package
         shell: bash
         env:
           BUILD_NUMBER: ${{ needs.version.outputs.build_number }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run package:${{ matrix.platform }}
 
       - uses: actions/upload-artifact@v6
@@ -186,6 +203,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # What an installed copy updates itself from. `if-no-files-found: error`
+      # in the package job fires only when a pattern list matched nothing at
+      # all, so one missing metadata file would pass it -- and the release would
+      # go out looking complete while no installed copy could update from it.
+      - name: Check the update metadata is there
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in latest.yml latest-linux.yml; do
+            if [ ! -f "dist/$file" ]; then
+              echo "::error::dist/$file is missing. Installed copies read it to update themselves -- check the artifact lists of the package job."
+              exit 1
+            fi
+          done
 
       # The `gh` CLI is preinstalled on every runner, so this needs no
       # third-party action -- one less dependency to pin and to trust.

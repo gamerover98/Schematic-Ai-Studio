@@ -62,6 +62,7 @@ export const en = {
   "settings.textures": "Textures & colours",
   "settings.providers": "Providers",
   "settings.mcp": "MCP server",
+  "settings.updates": "Updates",
 
   // The MCP server. Main's own failure wording is not translated — it arrives
   // already phrased, like every other `Failure.message` — so there is no key
@@ -116,6 +117,55 @@ export const en = {
   "mcp.bindAddress": "Listen on",
   "mcp.bindAddressHint":
     "127.0.0.1 is this machine only. 0.0.0.0 is every network interface, which puts the editor on your network — the token is what stands between it and anyone who can route to you, so it cannot be turned off there. This is an address, not a range.",
+
+  // Updates. Main's failure wording arrives already phrased, like the MCP
+  // server's, so "GitHub is refusing anonymous requests…" has no key here.
+  "updates.title": "Updates",
+  "updates.check": "Check for updates",
+  "updates.keywords": "update upgrade new version release download install",
+  "updates.installed": "Installed version",
+  "updates.installedValue": "{version} · {kind}",
+  "updates.kind.nsis": "installed with the setup",
+  "updates.kind.appimage": "AppImage",
+  "updates.kind.portable": "portable",
+  "updates.kind.mac": "macOS",
+  "updates.kind.unpackaged": "development run",
+  "updates.kind.other": "unpacked build",
+  "updates.checkOnStartup": "Check for updates at startup",
+  "updates.checkOnStartupHint":
+    "One request to api.github.com a few seconds after launch — GitHub sees your address and this version, nothing else. Nothing is downloaded until you ask.",
+  "updates.includeDev": "Include development builds (-dev.N)",
+  "updates.includeDevHint":
+    "Development builds are prereleases made from every change on the develop branch: newer, and less tested. Off, only stable releases are offered, and a development build waits for the stable release that follows it.",
+  "updates.status": "Status",
+  "updates.state.idle": "Not checked yet",
+  "updates.state.checking": "Checking…",
+  "updates.state.upToDate": "Up to date",
+  "updates.state.available": "Version {version} is available",
+  "updates.state.availableDev": "Development build {version} is available",
+  "updates.state.downloading": "Downloading… {percent}%",
+  "updates.state.ready": "Version {version} is ready to install",
+  "updates.state.error": "The check did not complete",
+  "updates.checkedAt": "Last checked {time}",
+  "updates.readyHint": "It also installs by itself the next time the app is closed.",
+  "updates.manual.portable":
+    "The portable build does not replace itself. Download the new one from its release page.",
+  "updates.manual.mac": "On macOS the update is downloaded from its release page.",
+  "updates.manual.unpackaged":
+    "This is a development run, so there is nothing to install over. The check still works.",
+  "updates.manual.other":
+    "This copy was not installed with the setup, so it does not replace itself. Download the new one from its release page.",
+  "updates.manual.metadata":
+    "This release was published without update information, so it has to be downloaded from its page.",
+  "updates.checkNow": "Check now",
+  "updates.download": "Download",
+  "updates.install": "Restart and install",
+  "updates.openPage": "Open download page",
+  "updates.notes": "Release notes",
+  "updates.indicator.available": "Update {version}",
+  "updates.indicator.downloading": "Updating {percent}%",
+  "updates.indicator.ready": "Restart to update",
+
   "settings.theme": "Theme",
   "settings.theme.system": "Match the system",
   "settings.theme.light": "Light",

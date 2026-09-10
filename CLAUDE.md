@@ -2280,7 +2280,12 @@ answer instead: two rebuilds of one release *should* be identical.
 **Nothing publishes except the publish job.** electron-builder publishes on its
 own when it finds a `GH_TOKEN`, so the packaging step deliberately has none in
 its environment; otherwise it races the job that creates the release and leaves
-it half filled.
+it half filled. **And every `electron-builder` call passes `--publish never`** —
+the four `package*` npm scripts and both `scripts/build.*` — because the token
+did come back once: `01c1968` put `GH_TOKEN` into that step's `env`, directly
+under the comment saying there was none, and nothing noticed. The flag makes
+the rule hold whatever the environment says, and costs nothing: the update
+metadata is written either way.
 
 **A `master` build fails if its tag already exists.** Forgetting the bump is the
 ordinary mistake and its silent form is a second release replacing the first
@@ -2360,6 +2365,80 @@ is a plain string with no email, and raises `authorEmailIsMissed` — failing th
 field, which is the only reason it is unaffected. Re-enabling is exactly two
 lines: the target back in the list, and `maintainer: name <email>` under
 `linux:`.
+
+**The app updates itself from the releases, and the release job is what makes
+that possible.** electron-builder always wrote `latest.yml`, the installer's
+`.blockmap` and `resources/app-update.yml`; the releases simply never carried
+the first two, because `upload-artifact` named `*.exe` and `*.AppImage` and
+nothing else. So no release up to `v1.0.1-dev.7` can be updated from, and the
+first build carrying the updater has to be installed by hand. The artifact
+lists now name the metadata files explicitly — `release/` also holds
+`builder-debug.yml`, written on both runners and colliding under
+`merge-multiple` — and the publish job refuses to create a release without
+`latest.yml` and `latest-linux.yml`, because `if-no-files-found: error` fires
+only when a pattern list matched *nothing*, which one missing file is not.
+
+**Which release is offered is the app's decision, never electron-updater's.**
+`services/updates.ts` reads `GET /repos/…/releases` with `net.fetch` — the
+system proxy, like the rest of the app's traffic — and `update_core.ts`'s
+`pickUpdate` takes the newest *by version*, not the newest published (merging
+`develop` into `master` publishes `v1.0.0` after `v1.0.1-dev.1`), strictly newer
+than `app.getVersion()`, with prereleases only when the development-builds
+setting allows them. electron-updater is then pointed at that one release's
+download directory as a `generic` feed and does only what it is good at: read
+`latest.yml`, verify the sha512, download differentially against the running
+release's `.blockmap`, install. Its own GitHub provider would choose by
+*channel*, and `dev` is not a channel it knows — the setting would have been a
+second rule beside that one. **`detectUpdateChannel: false`** is the other half:
+without it a `-dev` build writes `dev.yml`, and the app would have to know about
+channels after all.
+
+**The setup and the AppImage update themselves, and nothing else does.**
+`installKind` says which copy this is: `PORTABLE_EXECUTABLE_FILE` for the
+portable build, `APPIMAGE` for an AppImage, and for the setup the uninstaller
+beside `process.execPath` — which is what tells an installed copy from
+`win-unpacked` started by hand, over which an installer would put a second copy
+somewhere else. The portable build is sent to the release page by decision,
+not by limitation; macOS is not built; a development run can check but has
+nothing to install over. A release without the metadata turns Download into
+"Open download page" rather than into a button that can only fail.
+
+**Never install over unsaved work.** The NSIS installer that `quitAndInstall`
+starts closes the app, and ends it if it will not go — while the window's close
+handler refuses to close over a dirty document and asks. Left to that, the app
+would be killed with the question on screen. So `installUpdate` asks *first*,
+with the same `discardPrompt` (`"update"`), records the answer in
+`services/quit_guard.ts` where the close handler reads it, and only then calls
+`quitAndInstall`. A module of its own because `index.ts` and `updates.ts`
+would otherwise import each other.
+
+**The page the renderer opens is a URL this code built**, from
+`UPDATE_REPOSITORY` and the tag — never the API's `html_url`. It reaches the
+system browser through `setWindowOpenHandler`, like About's links; the
+renderer's CSP stays `connect-src 'none'`, all of the network being main's.
+
+**`includeDevBuilds` is `boolean | null`, and the null is the point.** It
+follows the running build, so a `-dev` copy keeps being offered `-dev` builds
+and a stable one stable releases, until the first explicit choice replaces it
+for good. `THEMES` stores "system" as a value because following the OS is a
+choice somebody returns to; nobody chooses to follow the build, it is only what
+happens until they have chosen. Always read it through
+`effectiveIncludeDevBuilds`. `checkOnStartup` is `!== false`, for `autoGrow`'s
+reason.
+
+**electron-updater is pinned to `6.3.9` exactly, and moves with
+electron-builder.** It is the release built on the same `builder-util-runtime`
+(9.2.10) as electron-builder 25.1.8, which writes the metadata it reads: a newer
+one brings a second copy of the runtime and a reader newer than the writer.
+Import it as `import electronUpdater from "electron-updater"`: it is CommonJS
+and defines `autoUpdater` as a getter, which Node's ESM loader cannot see as a
+named export — the named form fails when the packaged app starts, not when it
+builds.
+
+Three things in `electron-builder.yml` have nothing linking them to the code
+but `tests/services.ts`: the `publish` repository against `UPDATE_REPOSITORY`,
+`productName` against `NSIS_UNINSTALLER`, and `detectUpdateChannel: false`
+against `updateMetadataFile`.
 
 **In flight, Ctrl belongs to the camera, and only main can honour that.** With
 the pointer locked the keyboard is flying: Ctrl is the sprint modifier and WASD
