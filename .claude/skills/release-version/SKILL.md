@@ -1,6 +1,6 @@
 ---
 name: release-version
-description: Decide and apply the version bump in package.json before a release. Use when preparing a merge into master, when the Version check on a pull request is red, when a master build failed because its tag already exists, or when asked which of patch, minor and major this release should be.
+description: Decide and apply the version bump in package.json before a release, then prepare and open the two pull requests that carry it to master, with gh. Use when preparing a merge into master, when the Version check on a pull request is red, when a master build failed because its tag already exists, when asked which of patch, minor and major this release should be, or when asked to open the pull request for a release.
 ---
 
 # Bumping the version
@@ -8,15 +8,17 @@ description: Decide and apply the version bump in package.json before a release.
 Everything about a release here is automatic except one number.
 `.github/workflows/build.yml` decides what the build is called, packages it for
 Windows and Linux, creates the tag against the commit it actually built, and
-publishes the release with notes generated from the commit subjects. The one
-thing it does not do is choose the number, and that is deliberate: for an app
-somebody downloads, **the version is a statement to a person rather than a
-function of the commit log**, which is the argument `CLAUDE.md` uses to reject
-`semantic-release` and which has not moved.
+publishes the release with notes generated from the **titles of the pull
+requests** merged since the last tag. The one thing it does not do is choose
+the number, and that is deliberate: for an app somebody downloads, **the
+version is a statement to a person rather than a function of the commit log**,
+which is the argument `CLAUDE.md` uses to reject `semantic-release` and which
+has not moved.
 
 So this skill's job is not to automate the decision. It is to put the evidence
 in front of whoever makes it, then carry out the one command without the two
-mistakes that command invites.
+mistakes that command invites — and then to open the pull requests that take
+the number to `master`, one confirmed step at a time.
 
 ## The shape of it
 
@@ -42,6 +44,9 @@ and the reason that was rejected is the reason this stops short of it. The
 classification below is a strong default and it is not an authority: a fix that
 changes what a saved file looks like is a bigger release than a `feat` that
 adds a menu item, and only a person can say so.
+
+The same rule reaches the pull requests: **each one is shown, title and body,
+and opened only after an explicit yes.** Opening a PR is public.
 
 ## Doing it
 
@@ -102,13 +107,121 @@ adds a menu item, and only a person can say so.
    commit.
 
 7. **Say the two things the CI cannot.** The release notes are
-   `--generate-notes` over the commit *subjects*, so a badly written subject is
-   a badly written release note and this is the last moment to notice. And the
-   bump has to be on the branch that will be merged into `master` — on
-   `develop` alone it changes only what the next `-dev.<n>` prerelease is
-   called.
+   `--generate-notes` over the **pull request titles** merged since the
+   previous tag — not the commit subjects: `v1.0.0`'s notes are one line per
+   PR, #1 to #3, with not one subject among them. So the titles written in
+   step 9 are the release notes word for word, and this is the last moment to
+   get them right. And the bump has to be on the branch that will be merged
+   into `master` — on `develop` alone it changes only what the next
+   `-dev.<n>` prerelease is called.
 
 8. **Commit only when asked**, as everywhere in this repo, and never push.
+
+9. **Open the pull requests.** Only once the bump is committed; if it is not,
+   stop and say so. The guide around these steps is written in the language of
+   the conversation; every title and body is in **English**.
+
+   **Check first, all read-only:**
+
+   ```bash
+   gh auth status
+   git fetch origin
+   branch=$(git rev-parse --abbrev-ref HEAD)
+   [ "$(git rev-parse "origin/$branch" 2>/dev/null)" = "$(git rev-parse HEAD)" ] || echo "not pushed"
+   git cherry origin/develop HEAD            # a '-' line is a duplicate
+   gh pr list --head "$branch" --base develop --state open --json number,url
+   ```
+
+   - **The remote branch must equal `HEAD`**, or stop. The push is the
+     user's: give them `git push -u origin <branch>`, or
+     `git push --force-with-lease origin <branch>` when the remote is not an
+     ancestor of `HEAD` — which is what a rebase leaves behind.
+   - **A `-` line from `git cherry` is a commit `develop` already has under
+     another SHA.** Recommend `git rebase origin/develop` before opening
+     anything; the PR would otherwise carry every one of them again.
+   - **An open PR for the same head and base already exists?** Show it and
+     open nothing.
+
+   **The body is the list of changes and nothing else.** Built from the same
+   range as step 2, grouped by prefix, oldest first, prefix stripped, release
+   bumps left out:
+
+   ```bash
+   body="<scratchpad>/pr-body.md"
+   list() { git log --reverse --format='%s' "$last..HEAD" | grep -Ev '^chore\(release\)'; }
+   strip() { sed -E 's/^[a-z]+(\([^)]*\))?!?: //; s/^/- /'; }
+   {
+     f=$(list | grep -E '^feat(\(|!|:)' | strip)
+     x=$(list | grep -E '^fix(\(|!|:)' | strip)
+     o=$(list | grep -Ev '^(feat|fix)(\(|!|:)' | strip)
+     [ -n "$f" ] && printf '### Features\n\n%s\n\n' "$f"
+     [ -n "$x" ] && printf '### Fixes\n\n%s\n\n' "$x"
+     [ -n "$o" ] && printf '### Other\n\n%s\n' "$o"
+   } > "$body"
+   ```
+
+   `--reverse` is what makes it read in the order the work happened. The
+   `chore(release)` filter is what keeps a bump that never shipped — `1.0.1`
+   under a `1.1.0` release — out of a list somebody reads as history. An empty
+   section is omitted rather than printed as a heading with nothing under it.
+
+   **No introduction, no verification section, no footer, no emoji** — the
+   standard "Generated with Claude Code" line included, because the user asked
+   for the list alone. Check the file rather than trusting the subjects:
+
+   ```bash
+   python -c "import sys,unicodedata; t=open(sys.argv[1],encoding='utf-8').read(); print(sum(unicodedata.category(c)=='So' for c in t))" "$body"
+   ```
+
+   `grep -P` with a range of high code points fails outright here rather than
+   answering, which is why this is Python.
+
+   **The title stands on its own**, in English and without emoji, because it
+   is the line the release notes will carry. The first PR's is a sentence
+   summing up the list, in the style of #1, #2 and #4 ("Twelve rendering
+   faults, a version gate, and 1.0.1"); the second's is
+   `Release <version>: <summary>`.
+
+   **PR 1 — the feature branch into `develop`.** Show the title and the body
+   in the chat, ask, and only on a yes:
+
+   ```bash
+   gh pr create --base develop --head "$branch" --title "$title" --body-file "$body"
+   ```
+
+   **`--head` is always explicit, and the remote check above always runs
+   first.** Without `--head`, `gh` pushes a branch it cannot find on the
+   remote — its own help says `--dry-run` *"may still push git changes"* — and
+   pushing is the one thing this skill must not do. `gh pr create --dry-run`
+   with the same arguments is the safe way to see what would be sent.
+
+   **PR 2 — `develop` into `master`.** Only once PR 1 is merged and
+   `develop` carries the new number, read from the file rather than by commit,
+   because a rebase-merge gives the bump a different SHA:
+
+   ```bash
+   git fetch origin
+   git show origin/develop:package.json | python -c "import sys,json; print(json.load(sys.stdin)['version'])"
+   ```
+
+   If it is not the new number yet, say so and stop: `/release-version` is run
+   again after the merge. Otherwise the same three checks, the same show-and-ask,
+   and `gh pr create --base master --head develop ...`. Then
+   `gh pr checks <n>`: the `Version` job is the gate from `version.yml` and has
+   to be green.
+
+   **Merging is the user's**, and the guide says how and why:
+
+   ```bash
+   gh pr merge <n> --merge
+   ```
+
+   A **merge commit**, on both. #4 was rebase-merged, which gave `develop`
+   thirteen commits under new SHAs that the feature branch still carried, and
+   it took a rebase to clear them; #3 took `develop` into `master` as a merge
+   commit, and that is the release `v1.0.0` points at. After the merge into
+   `develop` the CI publishes a `-dev.<n>` prerelease; after the merge into
+   `master` it tags `v<version>` and publishes the release.
 
 ## What this must not do
 
@@ -116,7 +229,13 @@ Written down because each is what somebody would add:
 
 - **no tag**, for the reason in step 6;
 - **no push**, and no `gh release create` — publishing is the workflow's, and
-  it is the only thing holding a token;
+  it is the only thing holding a token. A branch that is not on the remote
+  stops step 9; it is not pushed to make step 9 work;
+- **no pull request without a yes**, one yes per pull request. The first
+  being approved does not approve the second;
+- **no merge.** `gh pr merge` is the step that publishes a release, and it is
+  the user's;
+- **no second pull request for the same head and base**; show the open one;
 - **nothing under `.github/`.** If the gate is wrong, that is a change to make
   deliberately and not a step in a bump;
 - **no `CHANGELOG.md`**, for the reason in *The shape of it*;
@@ -139,3 +258,6 @@ Written down because each is what somebody would add:
   Windows file version as `major.minor.patch.<n>`; it is set on `develop` and
   deliberately empty on `master`, where `x.y.z.0` is the deterministic answer.
   Nothing here touches it.
+- **The repository allows all three merge methods** (`gh repo view --json
+  mergeCommitAllowed,rebaseMergeAllowed,squashMergeAllowed`), so `--merge` is
+  never refused; recommending it is a choice, not a constraint.
