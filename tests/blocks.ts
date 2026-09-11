@@ -47,7 +47,7 @@ import { buildAtlas } from "../src/main/pipeline/atlas.js";
 import { atlasAnimations } from "../src/main/services/preview.js";
 import type { BakedFace, PaletteEntry, StructureData } from "../src/main/pipeline/types.js";
 import { paletteEntryCacheKey, paletteEntryIsAir } from "../src/main/pipeline/types.js";
-import { connectedState } from "../src/shared/block_connections.js";
+import { connectedState, COPPER_CHESTS } from "../src/shared/block_connections.js";
 import {
   describeProperty,
   documentedProperties,
@@ -1099,6 +1099,12 @@ if (pack === null) {
     [block("chest", { facing: "north", type: "left" }), "minecraft:entity/chest/normal_left"],
     [block("chest", { facing: "north", type: "right" }), "minecraft:entity/chest/normal_right"],
     [block("trapped_chest", { type: "single" }), "minecraft:entity/chest/trapped"],
+    // A waxed copper chest wears its stage's sheet, halved like any other.
+    [block("copper_chest", { type: "single" }), "minecraft:entity/chest/copper"],
+    [
+      block("waxed_weathered_copper_chest", { facing: "north", type: "left" }),
+      "minecraft:entity/chest/copper_weathered_left",
+    ],
     [block("oak_wall_sign", { facing: "north" }), "minecraft:block/oak_sign"],
     [block("oak_hanging_sign", {}), "minecraft:block/oak_hanging_sign"],
     // The lit face is a different texture, and nothing used to ask for it: a
@@ -5871,6 +5877,13 @@ console.log("\n--- the state a placed block starts in ---");
   const chest = placementState("minecraft:chest", onFloor(1, 0));
   equal("a chest still turns its front to you", chest.facing, "west");
   equal("...and knows it is not half of a double one", chest.type, "single");
+  // The copper chests are chests, and all eight used to land facing north
+  // whichever way they were placed: they were in no table.
+  equal(
+    "every copper chest turns its front to you as well",
+    COPPER_CHESTS.filter((name) => placementState(`minecraft:${name}`, onFloor(1, 0)).facing !== "west"),
+    [],
+  );
 
   const stairs = placementState("minecraft:oak_stairs", onFloor(1, 0));
   equal("stairs gain their shape", stairs.shape, "straight");
@@ -6859,6 +6872,24 @@ console.log("\n--- neighbour-derived state ---");
       .type,
     "single",
   );
+
+  /*
+   * Copper chests pair with their own stage, waxed or not. The game pairs any
+   * two and rewrites the more oxidised half, and this pass changes no ids --
+   * so two stages side by side stay two single chests rather than one drawn in
+   * two colours.
+   */
+  const pairs = (a: string, b: string): string | undefined =>
+    connectedState(self(a, { facing: "north" }), { east: thin(b, { facing: "north" }) }).type;
+  equal("two copper chests of one stage pair", pairs("exposed_copper_chest", "exposed_copper_chest"), "left");
+  equal(
+    "...and so do a waxed and an unwaxed one of it",
+    pairs("waxed_exposed_copper_chest", "exposed_copper_chest"),
+    "left",
+  );
+  equal("...but not two stages", pairs("copper_chest", "exposed_copper_chest"), "single");
+  equal("...nor a copper chest and a wooden one", pairs("copper_chest", "chest"), "single");
+  equal("...and a trapped chest still pairs with neither", pairs("trapped_chest", "chest"), "single");
 
   // Rails: flat shapes only, which is the whole visible difference.
   equal("a lone rail lies north-south", connectedState(self("rail"), {}).shape, "north_south");

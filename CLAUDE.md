@@ -3213,6 +3213,14 @@ at once unless a tip is waiting for it. A build script or an agent tool writes
 the registry's `tip`, and two of those meeting stay two tips, as `/setblock`
 leaves them in the game.
 
+**Copper chests pair with their own stage, waxing ignored.** The game pairs any
+two and gives the pair the least oxidised stage, which rewrites one half into a
+different block; this pass changes properties and never an id, so it pairs only
+the ones that already agree. `chestKind` strips `waxed_`, because waxing changes
+no texture. Two stages side by side stay two single chests rather than a double
+one drawn in two colours — chosen by the user with the game's answer in front of
+them. `COPPER_CHESTS` is one list for this and for the placement.
+
 **`EditRequest.setState` is the one caller that derives nothing, and without it
 the feature would not exist.** The inspector sends its block-state edit down the
 same channel as a placement, so a hand-typed `north=false` would be re-derived
@@ -5676,6 +5684,11 @@ the side of a block hangs one off it. Vanilla then flips it when the side it
 would grow from has nothing to hold it; that half is deliberately not here,
 because this app does not redirect a placement on physical grounds.
 `VERTICAL_FROM_LOOK` is the table.
+
+**The copper chests turn their front to you, and all eight used to face
+north.** They were in no placement table. `FRONT_TO_PLAYER` spreads
+`COPPER_CHESTS` from `block_connections.ts` rather than listing eight names a
+second time.
 
 **A trapdoor is the wall-mounted rule with a second property, and answered
 neither half of it.** `orientPlacement` returned `half` alone, so every

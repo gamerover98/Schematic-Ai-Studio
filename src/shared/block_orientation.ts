@@ -31,6 +31,7 @@
  * and not about the click. It belongs to whoever holds the voxels.
  */
 
+import { COPPER_CHESTS } from "./block_connections.js";
 import { defaultStateFor, hasProperty, legalValuesFor } from "./block_states.js";
 
 /** A face of a cell, named as Minecraft names its directions. */
@@ -157,6 +158,13 @@ const FRONT_TO_PLAYER: ReadonlySet<string> = new Set([
    * placing the small dripleaf"* -- so it is one line and not a branch.
    */
   "small_dripleaf",
+  /*
+   * The copper chests are chests, and turn their front to you as one does. They
+   * were in no table, so all eight landed on the registry's `facing=north`
+   * whichever way they were placed. The list is `block_connections.ts`' own,
+   * which is where they pair.
+   */
+  ...COPPER_CHESTS,
 ]);
 
 /** The same, for the ones whose `facing` also takes `up` and `down`. */

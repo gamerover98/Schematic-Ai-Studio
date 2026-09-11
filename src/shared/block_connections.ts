@@ -111,7 +111,29 @@ const isWall = (name: string): boolean => name.endsWith("_wall");
 const isPane = (name: string): boolean => name.endsWith("_pane") || name === "iron_bars";
 const isStairs = (name: string): boolean => name.endsWith("_stairs");
 const isRail = (name: string): boolean => name === "rail" || name.endsWith("_rail");
-const isChest = (name: string): boolean => name === "chest" || name === "trapped_chest";
+/**
+ * The eight copper chests: four oxidation stages and their waxed mirrors.
+ *
+ * Exported because `block_orientation.ts` turns them to face the player from
+ * this same list -- two copies of eight names is how one of them comes to miss
+ * the ninth. They were in neither place, so a copper chest landed facing north
+ * whichever way it was placed and never became half of a double one.
+ */
+export const COPPER_CHESTS: readonly string[] = [
+  "copper_chest",
+  "exposed_copper_chest",
+  "weathered_copper_chest",
+  "oxidized_copper_chest",
+  "waxed_copper_chest",
+  "waxed_exposed_copper_chest",
+  "waxed_weathered_copper_chest",
+  "waxed_oxidized_copper_chest",
+];
+
+const COPPER_CHEST_NAMES: ReadonlySet<string> = new Set(COPPER_CHESTS);
+
+const isChest = (name: string): boolean =>
+  name === "chest" || name === "trapped_chest" || COPPER_CHEST_NAMES.has(name);
 
 /**
  * Whether two fences are the same *kind*.
@@ -293,6 +315,21 @@ function railShape(self: string, neighbours: Neighbours): string {
 }
 
 /**
+ * What a chest pairs with: its own kind, where waxing does not count.
+ *
+ * In the game two copper chests pair whatever their stages, and the pair takes
+ * the least oxidised one -- which means rewriting one half into a different
+ * block. This pass changes properties and never an id, so it pairs the ones
+ * that already agree. Waxing changes no texture, so a waxed half beside an
+ * unwaxed one of the same stage is one chest to look at; two different stages
+ * side by side stay two single chests rather than a double one drawn in two
+ * colours.
+ */
+function chestKind(name: string): string {
+  return name.startsWith("waxed_") ? name.slice("waxed_".length) : name;
+}
+
+/**
  * A chest's half of a double chest.
  *
  * The convention is `ChestBlock.getConnectedDirection`'s: a `left` chest has
@@ -319,7 +356,7 @@ function chestType(
     const side = neighbours[face] ?? null;
     return (
       side !== null &&
-      side.name === self.name &&
+      chestKind(side.name) === chestKind(self.name) &&
       (side.properties.facing ?? "north") === facing
     );
   };
