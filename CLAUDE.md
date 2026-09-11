@@ -3156,7 +3156,7 @@ decided by the neighbours, which is a question about the document and not about
 the click" — and that was right about where it belongs, not about whether it
 gets an answer. Fences, walls, panes and bars, a gate's `in_wall`, stairs
 corners, rail shapes, double chests, redstone wire, chorus plant, vine, mushroom
-blocks and `snowy` all now get one.
+blocks, `snowy` and pointed dripstone's `thickness` all now get one.
 
 The rules are pure and know nothing about documents; `main/domain/connect.ts` is
 the other half — which cells to ask. Four things about it are load-bearing:
@@ -3187,6 +3187,31 @@ walks three tables, and it cannot differ between two cells holding the same
 entry. A 100-block fence line is **3 ms**. There is deliberately no size cap: a
 threshold would be a second answer to the same question, which is the fault this
 pass exists to remove.
+
+**A pointed dripstone's `thickness` is a window of three cells, not a chain.**
+Vanilla's `calculateDripstoneThickness` asks about the block in front and,
+through that block's own thickness, about the one in front of that — so
+transcribed as written it needs the neighbour corrected first, and this pass is
+**one sweep, not a fixed point**: a column two long would come out right and one
+three long would not. The block in front is a tip exactly when the block two in
+front is not dripstone pointing the same way, so `dripstoneThickness` reads
+behind, in front and two in front and gets the settled answer directly.
+
+Two in front is two cells up or down, past a face, so `Neighbours` grew `up_up`
+and `down_down` and `connect.ts`'s `AROUND` grew `(0, ±2, 0)` — in the **same
+list**, the redstone diagonals' rule, because a tip added to the end of a column
+moves the block two up it from `frustum` to `base`. `tests/session.ts` builds
+that column for real; without the two offsets the top stays `frustum` and every
+block-level check still passes. What they cost is not measurable: on the
+120x20x120 fence fill, the worst case this pass has, four runs averaged 1.10 s
+with them and 1.13 s without, which is the noise between runs.
+
+`tip_merge` keeps vanilla's merge flag: two tips pointing at each other merge
+when either already says `tip_merge`. A block placed by hand is born with it —
+vanilla's `merge = !isSecondaryUseActive()` — and the pass turns it into `tip`
+at once unless a tip is waiting for it. A build script or an agent tool writes
+the registry's `tip`, and two of those meeting stay two tips, as `/setblock`
+leaves them in the game.
 
 **`EditRequest.setState` is the one caller that derives nothing, and without it
 the feature would not exist.** The inspector sends its block-state edit down the
@@ -4825,6 +4850,12 @@ knowing:
   reachable only from the inspector, and a cell holding it draws nothing and
   cannot be clicked. Placing both halves at once is the double-plant family's
   job in `TWO_PART`, and is still not done.
+- **Pointed dripstone is `block/cross`, and was a 6x16x6 column wearing the
+  upward tip in every state.** `pointed_dripstone.json` states the two rescaled
+  planes of `cross.json` exactly; the ten states differ only in the texture,
+  `pointed_dripstone_<up|down>_<thickness>`, and the `down` files are drawn
+  pointing down, so nothing turns. `candidatesForName` builds the name from the
+  state and falls back to the birth state for a value no file has.
 - **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
   one member.** Every other fence in the game parents `block/fence_post` and
   `block/fence_side` and paints them with a plank tile, so its UVs derive
@@ -5631,6 +5662,15 @@ every hopper landed on the registry default `down` with its spout hanging in
 mid-air beside whatever it was meant to feed. `facing` is the clicked face
 reversed, with the one exception the game states outright: there is no
 upward-facing hopper, so a click on a floor gives `down`.
+
+**Pointed dripstone points away from where you look, vertically.** Its placement
+is vanilla's `getNearestLookingVerticalDirection()` reversed: look up at a
+ceiling and it hangs as a stalactite, look down — or straight ahead — and it
+stands as a stalagmite. It is the camera, not the clicked face, so looking up at
+the side of a block hangs one off it. Vanilla then flips it when the side it
+would grow from has nothing to hold it; that half is deliberately not here,
+because this app does not redirect a placement on physical grounds.
+`VERTICAL_FROM_LOOK` is the table.
 
 **A trapdoor is the wall-mounted rule with a second property, and answered
 neither half of it.** `orientPlacement` returned `half` alone, so every

@@ -2163,6 +2163,135 @@ if (pack === null) {
   );
 }
 
+// --- pointed dripstone is a cross wearing one texture per state --------------
+console.log("\n--- pointed dripstone is a cross wearing one texture per state ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `pointed_dripstone.json` is `cross.json`'s geometry exactly, and the ten
+   * states differ only in the file. It was a 6x16x6 column wearing
+   * `pointed_dripstone_up_tip` whatever its state said.
+   */
+  const wrong: string[] = [];
+  for (const vertical_direction of ["up", "down"]) {
+    for (const thickness of ["tip_merge", "tip", "frustum", "middle", "base"]) {
+      const entry = block("pointed_dripstone", { vertical_direction, thickness });
+      const key = (await baker.bakeBlockstate(entry)).textureKey;
+      const want = `minecraft:block/pointed_dripstone_${vertical_direction}_${thickness}`;
+      if (key !== want) wrong.push(`${vertical_direction}/${thickness} -> ${key}`);
+      if (shapeFor(entry).kind !== "cross") wrong.push(`${vertical_direction}/${thickness} is not a cross`);
+    }
+  }
+  equal("all ten states wear their own texture on vanilla's cross", wrong, []);
+  equal(
+    "a bare one is the upward tip, the registry's birth state",
+    (await baker.bakeBlockstate(block("pointed_dripstone", {}))).textureKey,
+    "minecraft:block/pointed_dripstone_up_tip",
+  );
+  equal(
+    "...and a thickness no file has falls back to the tip, not the hashed cube",
+    (await baker.bakeBlockstate(block("pointed_dripstone", { vertical_direction: "down", thickness: "huge" })))
+      .textureKey,
+    "minecraft:block/pointed_dripstone_down_tip",
+  );
+  check("it culls nothing", !occludesNeighbours(block("pointed_dripstone", {})));
+}
+
+// --- pointed dripstone points where you look, and its column decides the rest -
+console.log("\n--- pointed dripstone points where you look, and its column decides the rest ---");
+{
+  const look = (
+    x: number,
+    y: number,
+    z: number,
+    against: PlacementLook["against"],
+  ): PlacementLook => ({ direction: { x, y, z }, against, cursorY: 0.5, run: null });
+  const placed = (at: PlacementLook): Record<string, string> =>
+    orientPlacement("minecraft:pointed_dripstone", at);
+
+  equal("looking up at a ceiling hangs it down", placed(look(0, 0.9, -0.4, "down")).vertical_direction, "down");
+  equal("looking down at a floor stands it up", placed(look(0, -0.9, -0.4, "up")).vertical_direction, "up");
+  equal("...and so does looking straight ahead", placed(look(0, 0, -1, "south")).vertical_direction, "up");
+  equal(
+    "it is the camera and not the face: looking up at a wall hangs one off it",
+    placed(look(0, 0.3, -1, "south")).vertical_direction,
+    "down",
+  );
+  equal("a hand-placed one arrives meaning to merge", placed(look(0, -1, 0, "up")).thickness, "tip_merge");
+
+  /*
+   * The thickness is a window of three cells along the column: behind, in
+   * front, and two in front. A stalactite points down, so "in front" is below.
+   */
+  type Drip = { name: string; properties: Record<string, string>; solid: boolean };
+  const drip = (vertical_direction: string, thickness = "tip"): Drip => ({
+    name: "pointed_dripstone",
+    properties: { vertical_direction, thickness },
+    solid: false,
+  });
+  const stone: Drip = { name: "stone", properties: {}, solid: true };
+  const thicknessOf = (self: Drip, around: Parameters<typeof connectedState>[1]): string | undefined =>
+    connectedState(self, around).thickness;
+
+  equal("a lone one is a tip", thicknessOf(drip("down"), { up: stone }), "tip");
+  equal(
+    "the top of a two-long stalactite is its frustum",
+    thicknessOf(drip("down"), { up: stone, down: drip("down") }),
+    "frustum",
+  );
+  equal(
+    "the top of a three-long one is its base",
+    thicknessOf(drip("down"), { up: stone, down: drip("down"), down_down: drip("down") }),
+    "base",
+  );
+  equal(
+    "...and the one under the base is the frustum",
+    thicknessOf(drip("down"), { up: drip("down"), down: drip("down") }),
+    "frustum",
+  );
+  equal(
+    "inside a longer column it is the middle",
+    thicknessOf(drip("down"), { up: drip("down"), down: drip("down"), down_down: drip("down") }),
+    "middle",
+  );
+  equal(
+    "a stalagmite reads the same column the other way up",
+    thicknessOf(drip("up"), { down: stone, up: drip("up"), up_up: drip("up") }),
+    "base",
+  );
+  equal(
+    "two tips that meet stay tips when neither means to merge",
+    thicknessOf(drip("down"), { down: drip("up") }),
+    "tip",
+  );
+  equal(
+    "...and merge when this one does",
+    thicknessOf(drip("down", "tip_merge"), { down: drip("up") }),
+    "tip_merge",
+  );
+  equal(
+    "...or when the one it meets already has",
+    thicknessOf(drip("down"), { down: drip("up", "tip_merge") }),
+    "tip_merge",
+  );
+  equal(
+    "one meaning to merge with nothing to meet is a plain tip",
+    thicknessOf(drip("down", "tip_merge"), { up: stone }),
+    "tip",
+  );
+  equal(
+    "the block over a merged pair is its frustum",
+    thicknessOf(drip("down"), { down: drip("down"), down_down: drip("up") }),
+    "frustum",
+  );
+  equal(
+    "only its own column counts",
+    thicknessOf(drip("down"), { up: stone, north: drip("down"), down_up: drip("down") }),
+    "tip",
+  );
+}
+
 console.log("\n--- seagrass is four planes in a hash ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");

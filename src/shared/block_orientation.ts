@@ -326,6 +326,22 @@ const GROWS_FROM_CLICKED: ReadonlySet<string> = new Set([
 const GROWS_FROM_CLICKED_SUFFIXES = ["_lightning_rod"] as const;
 
 /**
+ * Blocks that point up or down according to where the camera is looking.
+ *
+ * Pointed dripstone's placement is `getNearestLookingVerticalDirection()`
+ * reversed: look up at a ceiling and it hangs down as a stalactite, look down
+ * at a floor -- or straight ahead -- and it stands up as a stalagmite. It is the
+ * camera and not the clicked face, so it can be hung upside down off the side
+ * of a block by looking up at it.
+ *
+ * Vanilla then flips it when the side it would grow from has nothing to hold
+ * it, and refuses it when neither side does. That half is deliberately not
+ * here: this app does not redirect or refuse a placement on physical grounds,
+ * redstone dust being the one stated exception.
+ */
+const VERTICAL_FROM_LOOK: ReadonlySet<string> = new Set(["pointed_dripstone"]);
+
+/**
  * Blocks carrying `face` (floor/wall/ceiling) alongside a horizontal `facing`.
  *
  * Worth stating even though `block_shapes.ts` draws a button lying on the
@@ -516,6 +532,18 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return { facing: OPPOSITE[nearestFace(look.direction)] };
   }
 
+  if (VERTICAL_FROM_LOOK.has(name)) {
+    /*
+     * `tip_merge` is not a claim about the neighbours, which a placement cannot
+     * see. It is vanilla's `merge = !isSecondaryUseActive()`: the intention a
+     * block placed by hand arrives with. `connectedState` turns it into `tip`
+     * at once unless a tip pointing the other way is waiting for it -- which is
+     * the wiki's "placing a pointed dripstone between a stalagmite and
+     * stalactite without sneaking connects them".
+     */
+    return { vertical_direction: look.direction.y > 0 ? "down" : "up", thickness: "tip_merge" };
+  }
+
   /*
    * Still below the wall-mounted arm, and no longer *because* of it: the
    * registry keeps every wall variant out of here on its own. It stays here
@@ -617,5 +645,6 @@ export const ORIENTED_BLOCK_NAMES: readonly string[] = [
   ...FACE_AND_FACING,
   ...POINTS_INTO_CLICKED,
   ...GROWS_FROM_CLICKED,
+  ...VERTICAL_FROM_LOOK,
   ...SPUN_LEGACY,
 ];

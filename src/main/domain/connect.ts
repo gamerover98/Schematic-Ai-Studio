@@ -91,9 +91,8 @@ const OFFSETS: ReadonlyArray<readonly [NeighbourKey, number, number, number]> = 
 /**
  * The eight cells above and below the four horizontal neighbours.
  *
- * Redstone's alone: a wire runs up the side of the block next door and down
- * onto a step, so its answer depends on two cells that are not faces of it.
- * Nothing else here looks past a face.
+ * Redstone's: a wire runs up the side of the block next door and down onto a
+ * step, so its answer depends on two cells that are not faces of it.
  *
  * They are in the **same list** as the six rather than beside it, and that is
  * the part that matters: phase one uses this array to decide which cells an
@@ -112,7 +111,20 @@ const DIAGONALS: ReadonlyArray<readonly [NeighbourKey, number, number, number]> 
   ];
 });
 
-const AROUND = [...OFFSETS, ...DIAGONALS];
+/**
+ * The cells two above and two below, which are pointed dripstone's.
+ *
+ * Its `thickness` depends on the block two along its column -- a tip added to
+ * the end of a column moves the block two up it from `frustum` to `base` -- so
+ * the pass reads them, and for `DIAGONALS`' reason they are in the same list:
+ * the cells a rule reads are the cells to revisit when one of them moves.
+ */
+const COLUMN: ReadonlyArray<readonly [NeighbourKey, number, number, number]> = [
+  ["up_up", 0, 2, 0],
+  ["down_down", 0, -2, 0],
+];
+
+const AROUND = [...OFFSETS, ...DIAGONALS, ...COLUMN];
 
 function bareName(entry: PaletteEntry): string {
   return entry.namespacedName.replace(/^minecraft:/, "");

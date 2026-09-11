@@ -61,13 +61,14 @@ export interface NeighbourBlock {
 }
 
 /**
- * A cell to ask about: one of the six faces, or the cell above or below one
- * of the four horizontal ones.
+ * A cell to ask about: one of the six faces, the cell above or below one of
+ * the four horizontal ones, or the cell two above or two below.
  *
- * The eight diagonals are redstone's alone and are the whole of what lets a
- * wire run up and down a step. Nothing else here looks past a face, and a
- * caller that does not fill them simply gets `undefined`, which reads as air
- * -- the same answer as before they existed.
+ * The eight diagonals are redstone's and are the whole of what lets a wire run
+ * up and down a step; `up_up` and `down_down` are pointed dripstone's, whose
+ * `thickness` depends on the block two along its column. A caller that does
+ * not fill them simply gets `undefined`, which reads as air -- the same answer
+ * as before they existed.
  */
 export type NeighbourKey = Face | `${string}_up` | `${string}_down`;
 
@@ -410,6 +411,59 @@ function redstoneSide(neighbours: Neighbours, direction: Face, roofed: boolean):
   return connectsToDust(below, direction) ? "side" : "none";
 }
 
+/**
+ * A pointed dripstone's `thickness`, which is where it stands in its column.
+ *
+ * `PointedDripstoneBlock.calculateDripstoneThickness` asks about the block in
+ * front of it -- the way it points -- and, through that block's own thickness,
+ * about the one in front of that. Transcribed as that chain it needs the
+ * neighbour corrected before this one, and `deriveConnections` is one sweep,
+ * not a fixed point: whichever order it took, a column two long would come out
+ * right and one three long would not.
+ *
+ * So it is read as the answer the chain settles on, which is a window of three
+ * cells and nothing else. The block in front is a *tip* exactly when the block
+ * two in front is not dripstone pointing the same way, so:
+ *
+ * 1. in front, dripstone pointing back at this one: `tip_merge` if either of
+ *    the two already says so, else `tip` -- vanilla's merge flag, kept the way
+ *    its `updateShape` keeps it;
+ * 2. in front, anything but dripstone pointing the same way: `tip`;
+ * 3. two in front, dripstone pointing the same way: `middle` if the block
+ *    behind is too, else `base`;
+ * 4. otherwise `frustum`.
+ *
+ * The cells two above and two below are why `Neighbours` carries `up_up` and
+ * `down_down`, and why `connect.ts` revisits them after an edit: a tip added to
+ * the end of a column moves the block two up it from `frustum` to `base`.
+ */
+function dripstoneThickness(
+  self: { readonly properties: Readonly<Record<string, string>> },
+  neighbours: Neighbours,
+): string {
+  const tip: Face = self.properties.vertical_direction === "down" ? "down" : "up";
+  const back: Face = tip === "down" ? "up" : "down";
+  const pointing = (
+    block: NeighbourBlock | null | undefined,
+    direction: Face,
+  ): block is NeighbourBlock =>
+    block != null &&
+    block.name === "pointed_dripstone" &&
+    (block.properties.vertical_direction === "down" ? "down" : "up") === direction;
+
+  const ahead = neighbours[tip];
+  if (pointing(ahead, back)) {
+    const merged =
+      self.properties.thickness === "tip_merge" || ahead.properties.thickness === "tip_merge";
+    return merged ? "tip_merge" : "tip";
+  }
+  if (!pointing(ahead, tip)) return "tip";
+  if (pointing(neighbours[tip === "down" ? "down_down" : "up_up"], tip)) {
+    return pointing(neighbours[back], tip) ? "middle" : "base";
+  }
+  return "frustum";
+}
+
 const MUSHROOM_BLOCKS: ReadonlySet<string> = new Set([
   "brown_mushroom_block",
   "red_mushroom_block",
@@ -525,6 +579,11 @@ export function connectedState(
     return out;
   }
 
+  if (name === "pointed_dripstone") {
+    put("thickness", dripstoneThickness(block, neighbours));
+    return out;
+  }
+
   // `snowy` is the only neighbour-derived state on an ordinary cube, and it
   // reads upward rather than sideways.
   if (hasProperty(name, "snowy")) {
@@ -556,6 +615,7 @@ export function isNeighbourDependent(name: string): boolean {
     name === "redstone_wire" ||
     name === "chorus_plant" ||
     name === "vine" ||
+    name === "pointed_dripstone" ||
     MUSHROOM_BLOCKS.has(name) ||
     hasProperty(name, "snowy")
   );

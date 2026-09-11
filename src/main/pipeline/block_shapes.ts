@@ -4262,8 +4262,9 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   wildflowers: flowerbed,
   leaf_litter: flowerbed,
 
-  // The nether's dripstone: same silhouette, same reasoning as its overworld
-  // twin -- a narrow column is the reach a neighbour needs to know about.
+  // A narrow column is the reach a neighbour needs to know about. Written as a
+  // copy of the pointed dripstone's column, which has since become the cross
+  // vanilla draws; this one's model has not been looked up.
   sulfur_spike: () => boxes([5, 0, 5, 11, 16, 11]),
 
   /*
@@ -4308,9 +4309,6 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   // and the other not -- and this pair very nearly was.
   decorated_pot: () => boxes([1, 0, 1, 15, 16, 15]),
   sniffer_egg: () => boxes([1, 0, 1, 15, 16, 15]),
-  // Tapered in vanilla, and a taper is a stack of boxes this does not build.
-  // A narrow column is the shape's *reach*, which is what a neighbour needs.
-  pointed_dripstone: () => boxes([5, 0, 5, 11, 16, 11]),
   /*
    * The two bare pre-Flattening names. `SUFFIX_SHAPES` keys `_sign` and
    * `_wall_sign`, and neither matches a name that *is* those words -- so
@@ -4399,6 +4397,13 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "golden_dandelion",
   "pale_hanging_moss",
   "resin_clump",
+  /*
+   * Pointed dripstone is `block/cross` exactly -- `pointed_dripstone.json`
+   * states the same two rescaled planes -- and its ten states differ only in the
+   * texture, which `model_baker.ts` picks from `vertical_direction` and
+   * `thickness`. It was a 6x16x6 column wearing the upward tip on every face.
+   */
+  "pointed_dripstone",
   /*
    * Crops and fungi that arrived with the registry. `_stem` is emphatically not
    * a suffix rule here -- `crimson_stem` is a log and a full cube -- so the two
