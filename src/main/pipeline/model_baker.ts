@@ -86,6 +86,18 @@ export interface SpecialFaceRule {
   readonly top?: readonly string[];
   readonly side?: readonly string[];
   readonly bottom?: readonly string[];
+  /**
+   * What every face **but the one it points at** wears when the block points
+   * up or down, for the blocks vanilla draws with a second model there.
+   *
+   * `dispenser_vertical.json` is the only shape of this in the game: it is
+   * `orientable_vertical`, whose floor and four walls are all `#side`, and it
+   * sets `side` to `furnace_top` -- a different picture from the one the
+   * horizontal model puts on those same faces. A candidate list cannot say
+   * that, because it is a *property* choosing the texture, which is the
+   * campfire's lesson one table along.
+   */
+  readonly vertical?: readonly string[];
 }
 
 /**
@@ -438,6 +450,46 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
    * sides of the block. `block_shapes.ts` names it per box.
    */
   hopper: { top: ["hopper_top"], side: ["hopper_outside"], bottom: ["hopper_outside"] },
+
+  /*
+   * An end portal frame stands on end stone, and it is the one block with a
+   * `facing` whose floor vanilla names outright rather than deriving:
+   * `end_portal_frame.json` writes `bottom: block/end_stone`. Without the row
+   * the flat-face rule below would give it its own lid, which is the wrong
+   * picture arrived at by a rule that is right everywhere else -- and a rule
+   * consults this table first, which is what makes an exception cost one line.
+   */
+  end_portal_frame: { bottom: ["end_stone"] },
+
+  /*
+   * **A dispenser's and a dropper's side and top textures are the
+   * furnace's**, and no naming rule could ever guess that:
+   * `dispenser_side.png` and `dispenser_top.png` are files vanilla has never
+   * had. `dispenser.json` and `dropper.json` say it outright -- `side:
+   * block/furnace_side`, `top: block/furnace_top` -- and only the front is
+   * the block's own.
+   *
+   * So `dispenser_front` was the one name of the six that resolved, and the
+   * fallback in `cubeFaceTextures` painted it on the other five: the block
+   * wearing its own face on its back, its sides, its lid and its floor.
+   * Reported as exactly that, and it is `hopper_side` one block along.
+   *
+   * `bottom` is the top texture rather than a bottom of its own, because
+   * `orientable.json` is `orientable_with_bottom` with `bottom` set to
+   * `#top`. That is the furnace's underside too, which was wearing the fire.
+   */
+  dispenser: {
+    top: ["furnace_top"],
+    side: ["furnace_side"],
+    bottom: ["furnace_top"],
+    vertical: ["furnace_top"],
+  },
+  dropper: {
+    top: ["furnace_top"],
+    side: ["furnace_side"],
+    bottom: ["furnace_top"],
+    vertical: ["furnace_top"],
+  },
   fire: { top: ["fire_0"], side: ["fire_0"], bottom: ["fire_0"] },
   soul_fire: { top: ["soul_fire_0"], side: ["soul_fire_0"], bottom: ["soul_fire_0"] },
 
@@ -1736,27 +1788,52 @@ export class ModelBaker {
       }
     }
 
-    // inventory.tsv row `PaletteEntry.properties consumer`: "axis" is a
-    // known key read out of the generic property bag (values "x"/"y"/"z").
+    /*
+     * A pillar wears its end on **both** ends, and the standing one did not.
+     *
+     * inventory.tsv row `PaletteEntry.properties consumer`: "axis" is a known
+     * key read out of the generic property bag (values "x"/"y"/"z"). What it
+     * means is `cube_column`, whose `down` and `up` are both `#end` -- so a
+     * lying log puts the end texture on east *and* west, or on north *and*
+     * south, and the two arms below have always said so.
+     *
+     * The standing arm wrote `faces.down` back unchanged, which is whatever
+     * the generic list resolved for a `down` face: `_bottom`, `_down`,
+     * `_lower` and `_end`, none of which is a file vanilla has ever had for a
+     * log. So the list ran to the bare name and **every log in the game stood
+     * on its own bark**, with its growth rings on the lid alone.
+     *
+     * Measured over every id the app offers that carries an `axis`: **59 of
+     * 59** cube-shaped ones resolved a `down` identical to their side, which
+     * is to say not one of them had an underside of its own to lose. The other
+     * eleven -- the ten chains and `nether_portal` -- are not cubes and take
+     * their textures per box.
+     *
+     * `axis` is the guard, and it is the difference between this and the
+     * change it looks like. Offering `_top` for a `down` face outright is a
+     * rule across all 1197 ids that the `cube_top` family contradicts: a
+     * jukebox's floor really is `jukebox_side`. A jukebox has no `axis` and is
+     * not touched, exactly as the `facing` guard one function down leaves it
+     * alone.
+     */
     const axis = entry.properties.axis;
     if (axis === "x" || axis === "y" || axis === "z") {
-      const topKey = faces.up;
-      const bottomKey = faces.down;
+      const endKey = faces.up;
       const sideKey = faces.north;
       if (axis === "x") {
-        faces.east = topKey;
-        faces.west = topKey;
+        faces.east = endKey;
+        faces.west = endKey;
         faces.up = sideKey;
         faces.down = sideKey;
       } else if (axis === "z") {
-        faces.north = topKey;
-        faces.south = topKey;
+        faces.north = endKey;
+        faces.south = endKey;
         faces.up = sideKey;
         faces.down = sideKey;
       } else {
         // axis === "y"
-        faces.up = topKey;
-        faces.down = bottomKey;
+        faces.up = endKey;
+        faces.down = endKey;
       }
     }
 
@@ -1956,6 +2033,28 @@ export class ModelBaker {
     }
 
     /*
+     * A lightning rod carrying a strike wears `lightning_rod_on` -- **the
+     * plain one, whatever the oxidation**, which is what every stage's
+     * blockstate says: `exposed_lightning_rod.json` sends `powered=true` to
+     * `block/lightning_rod_on` exactly as the unweathered one does.
+     *
+     * `powered` moves not one coordinate, which is why it is here rather than
+     * in the shape function -- the swap is of the whole block, `lit`'s case
+     * and not the campfire's.
+     *
+     * The bare name behind it is not decoration. Vanilla ships that texture
+     * and the bundled pack does not override it, and this app reads only the
+     * pack; a single name with `resolveBoxTexture`'s silent fallback would
+     * come to the same answer here and would be invisible to
+     * `tests/blocks.ts`, which asks a candidate *list* to resolve something.
+     * So a powered rod comes out looking unpowered rather than like nothing,
+     * and a pack that ships the file gets the right picture with no change.
+     */
+    if (normalized.endsWith("lightning_rod") && flagOf(entry, "powered")) {
+      return ["lightning_rod_on", normalized];
+    }
+
+    /*
      * The face a block *points* is drawn from its own texture, and there was no
      * rule for it at all -- so every furnace, dispenser and dropper in the game
      * wore `furnace_side` on all four sides, including the one with the fire in
@@ -1971,34 +2070,88 @@ export class ModelBaker {
      * `_front_on` first when the block is lit, which is the difference between
      * a lit furnace and a cold one -- and `lighting.ts` already treats them as
      * different blocks.
+     *
+     * **Both arms are a prefix rather than an answer**, and that is the half
+     * that was missing. Written as three candidates that stopped there, a
+     * dropper's back asked for `dropper_back` and `dropper_side` -- neither of
+     * which vanilla has -- and then gave up, short of the rule that knows what
+     * a dropper's sides are. Falling through costs nothing anywhere else: what
+     * follows offers `_side` and the bare name in the same order these did.
      */
     const facing = entry.properties.facing;
     if (facing !== undefined) {
       const lit = entry.properties.lit === "true";
+      const vertical = facing === "up" || facing === "down";
       if (face === facing) {
         return [
           ...(lit ? [`${normalized}_front_on`] : []),
+          /*
+           * A block that points up or down may be drawn from a second model
+           * with a front of its own -- `dispenser_front_vertical`. Derived
+           * rather than tabulated, so the pack decides which blocks have one:
+           * the dispenser and the dropper are the only two that ship it, and
+           * for everything else this candidate simply misses.
+           */
+          ...(vertical ? [`${normalized}_front_vertical`] : []),
           `${normalized}_front`,
-          `${normalized}_side`,
-          normalized,
+          ...ModelBaker.plainCandidates(entry, normalized, face),
         ];
       }
+      /*
+       * The vertical model's own sides, which are not the horizontal model's
+       * and are not confined to the face opposite the front:
+       * `orientable_vertical` puts `#side` on the floor and all four walls.
+       */
+      const turned = SPECIAL_FACE_RULES[normalized]?.vertical;
+      if (vertical && turned !== undefined) {
+        return [...turned];
+      }
       if (face === OPPOSITE_FACE[facing]) {
-        return [`${normalized}_back`, `${normalized}_side`, normalized];
+        return [`${normalized}_back`, ...ModelBaker.plainCandidates(entry, normalized, face)];
       }
     }
+    return ModelBaker.plainCandidates(entry, normalized, face);
+  }
 
-    // Two-block-tall plants and doors carry their half in a property and split
-    // their texture accordingly. Without this a peony draws its flowering top
-    // on both halves, because the generic `_top` candidate wins for every face.
+  /** What one name offers for one face, once the block's *front* is settled. */
+  private static plainCandidates(
+    entry: PaletteEntry,
+    normalized: string,
+    face: string,
+  ): string[] {
+    /*
+     * Two-block-tall plants and doors carry their half in a property and split
+     * their texture accordingly. Without this a peony draws its flowering top
+     * on both halves, because the generic `_top` candidate wins for every face.
+     *
+     * **It is a prefix, and it used to be an answer**, which is the `facing`
+     * arms' fault two functions up, in another property. The list stopped at
+     * the bare name, so a block with none of the three -- `small_dripleaf` is
+     * one: its textures are `_top`, `_side`, `_stem_top` and `_stem_bottom`,
+     * and there is no `small_dripleaf.png` -- resolved *nothing at all* on
+     * every face and went to the hashed-colour cube, geometry and all, because
+     * `bakeFallback` throws the shape away when no face resolves.
+     *
+     * Falling through costs nothing, and the bare name is deliberately left in
+     * the prefix rather than moved to the end of the generic list, so that
+     * every block this already answered for keeps the answer it had.
+     */
     const half = entry.properties.half;
-    if (half === "upper") {
-      return [`${normalized}_top`, `${normalized}_upper`, normalized];
-    }
-    if (half === "lower") {
-      return [`${normalized}_bottom`, `${normalized}_lower`, normalized];
-    }
+    const halfFirst =
+      half === "upper"
+        ? [`${normalized}_top`, `${normalized}_upper`, normalized]
+        : half === "lower"
+          ? [`${normalized}_bottom`, `${normalized}_lower`, normalized]
+          : [];
+    return [...halfFirst, ...ModelBaker.unhalvedCandidates(entry, normalized, face)];
+  }
 
+  /** The rest of the list, once the block's half has had its say. */
+  private static unhalvedCandidates(
+    entry: PaletteEntry,
+    normalized: string,
+    face: string,
+  ): string[] {
     const rules = SPECIAL_FACE_RULES[normalized];
     if (rules) {
       if (face === "up" && rules.top) {
@@ -2012,6 +2165,29 @@ export class ModelBaker {
       }
     }
 
+    /*
+     * **A block that points somewhere never wears its front on a flat face**,
+     * and that is what the two extra candidates below are.
+     *
+     * Every template vanilla builds one of these from puts `#top`, `#bottom`
+     * or `#side` on the lid and the floor -- `orientable` is
+     * `orientable_with_bottom` with `bottom` set to `#top`, and the command
+     * blocks and the observer state `#side` and `#top` outright. None of them
+     * ever puts `#front` there. But `<name>_top` is not offered for a `down`
+     * face and `<name>_side` is offered for neither, so a furnace, a
+     * blast furnace, an observer and the three command blocks resolved
+     * nothing at all on those faces and took the fallback -- which is the
+     * first face that *did* resolve, and for a block whose front is the only
+     * texture named after it, that is the front. So the underside of every
+     * furnace in the game was wearing the fire.
+     *
+     * Guarded on the block pointing somewhere rather than added to the list
+     * outright, which is the difference between a rule and a guess. A jukebox
+     * is `cube_top` and its floor really is `jukebox_side`; a log is
+     * `cube_column` and its end really is `#end`. Neither has a `facing`, and
+     * neither is touched.
+     */
+    const points = entry.properties.facing !== undefined;
     let candidates: string[];
     if (face === "up") {
       candidates = [
@@ -2019,6 +2195,7 @@ export class ModelBaker {
         `${normalized}_up`,
         `${normalized}_upper`,
         `${normalized}_end`,
+        ...(points ? [`${normalized}_side`] : []),
         `${normalized}_face`,
         normalized,
       ];
@@ -2028,6 +2205,7 @@ export class ModelBaker {
         `${normalized}_down`,
         `${normalized}_lower`,
         `${normalized}_end`,
+        ...(points ? [`${normalized}_top`, `${normalized}_side`] : []),
         `${normalized}_face`,
         normalized,
       ];

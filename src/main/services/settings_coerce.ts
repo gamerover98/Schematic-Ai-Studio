@@ -35,6 +35,7 @@ import {
   type Settings,
   type Theme,
   type UiSettings,
+  type UpdateSettings,
   PANEL_SIZE,
   bindAddressRefusal,
 } from "../../shared/settings.js";
@@ -268,5 +269,24 @@ export function coerceSettings(raw: unknown): Settings {
     ui,
     mcp,
     editing,
+    updates: coerceUpdates(source.updates),
+  };
+}
+
+/**
+ * Named field by field, like `ui`, `mcp` and `editing`.
+ *
+ * `checkOnStartup` is `!== false` for `autoGrow`'s reason: every settings file
+ * written before the updater has no `updates` block, and reading that as off
+ * would mean nobody who already has the app hears of the next one.
+ * `includeDevBuilds` keeps only a real boolean -- anything else is "never
+ * chosen", which follows the running build (`effectiveIncludeDevBuilds`).
+ */
+export function coerceUpdates(raw: unknown): UpdateSettings {
+  const source = (raw ?? {}) as Partial<UpdateSettings>;
+  return {
+    checkOnStartup: source.checkOnStartup !== false,
+    includeDevBuilds:
+      typeof source.includeDevBuilds === "boolean" ? source.includeDevBuilds : null,
   };
 }

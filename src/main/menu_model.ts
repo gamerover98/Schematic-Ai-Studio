@@ -31,7 +31,8 @@ export type MenuCommand =
   | "close"
   | "undo"
   | "redo"
-  | "about";
+  | "about"
+  | "checkUpdates";
 
 export interface MenuItemModel {
   /** Absent for a separator or a plain container. */
@@ -258,7 +259,16 @@ export function menuModel(state: MenuState): MenuItemModel[] {
    */
   menus.push({
     label: "Help",
-    submenu: [{ command: "about", label: `About ${APP_NAME}`, enabled: true }],
+    submenu: [
+      { command: "about", label: `About ${APP_NAME}`, enabled: true },
+      /*
+       * About's rules, for About's reasons: it is about the app rather than a
+       * document, so it is live with nothing open, and it claims no key.
+       * Below About rather than above it, which keeps the app's name the first
+       * row -- the one somebody opening Help is looking for.
+       */
+      { command: "checkUpdates", label: "Check for Updates…", enabled: true },
+    ],
   });
 
   /*

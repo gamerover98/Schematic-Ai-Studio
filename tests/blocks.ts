@@ -231,6 +231,55 @@ function facePaintsSomething(face: BakedFace): boolean {
   return false;
 }
 
+/**
+ * The fraction of the window a face samples that is opaque.
+ *
+ * `facePaintsSomething` above asks whether there is *anything* there, which is
+ * the right question for a block that came out invisible. It is too weak for a
+ * window transcribed onto the wrong patch of a sheet that has art all over it:
+ * a bamboo fence post reading the wrong four columns of `bamboo_fence.png` is
+ * 40.6% opaque, which passes both that check and every uv check in this file
+ * while drawing a post six tenths made of holes.
+ *
+ * Rounded rather than floored/ceiled at the edges: these windows land on texel
+ * boundaries exactly, and a half-texel of slop either side would put a
+ * transparent margin into a rect that is genuinely solid.
+ */
+function faceOpacity(face: BakedFace): number {
+  const image = baker.textures[face.textureKey];
+  if (image === undefined) return 1;
+  const us = [face.uvs[0], face.uvs[2], face.uvs[4], face.uvs[6]];
+  const vs = [face.uvs[1], face.uvs[3], face.uvs[5], face.uvs[7]];
+  const span = (values: number[], size: number): [number, number] => {
+    const lo = Math.max(0, Math.round(Math.min(...values) * size));
+    const hi = Math.min(size, Math.round(Math.max(...values) * size));
+    return [lo, Math.max(lo + 1, hi)];
+  };
+  const [x0, x1] = span(us, image.width);
+  const [y0, y1] = span(vs, image.height);
+  let opaque = 0;
+  let total = 0;
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      total += 1;
+      if (image.data[(y * image.width + x) * 4 + 3] > 0) opaque += 1;
+    }
+  }
+  return total === 0 ? 1 : opaque / total;
+}
+
+/** North, east, south, west: one quarter-turn apart, in that order. */
+const WIRE_SIDES = ["north", "east", "south", "west"] as const;
+const WIRE_OFF: Record<string, string> = {
+  north: "false",
+  east: "false",
+  south: "false",
+  west: "false",
+  attached: "false",
+  disarmed: "false",
+  powered: "false",
+};
+
 // --- texture orientation ----------------------------------------------------
 //
 // The defect: `_UNIT_UVS` put V=0 at the world *bottom* of a face, but glTF
@@ -1107,28 +1156,42 @@ if (pack === null) {
   const offTile: string[] = [];
   const invisible: string[] = [];
   const backwards: string[] = [];
+  let walked = 0;
   for (const id of ids) {
-    const entry: PaletteEntry = { namespacedName: id, properties: {} };
     // Air is every empty cell in the document and is never drawn; it has no
     // texture by definition, so it would fail this on a technicality.
-    if (paletteEntryIsAir(entry)) continue;
-    const baked = await baker.bakeBlockstate(entry);
-    if (baked.textureKey === paletteEntryCacheKey(entry)) {
-      unresolved.push(id.replace("minecraft:", ""));
-    }
-    const all: BakedFace[] = [...Object.values(baked.faces), ...baked.extraFaces];
-    if (all.some((f) => [...f.uvs].some((n) => n < -1e-6 || n > 1 + 1e-6))) {
-      offTile.push(id.replace("minecraft:", ""));
-    }
-    if (all.length > 0 && !all.some(facePaintsSomething)) {
-      invisible.push(id.replace("minecraft:", ""));
-    }
-    if (!all.every(windingAgrees)) {
-      backwards.push(id.replace("minecraft:", ""));
+    if (paletteEntryIsAir({ namespacedName: id, properties: {} })) continue;
+    /*
+     * Bare **and** at the state the game would place it in, and those are two
+     * different questions: only the second can see a fault that lives in a
+     * *property*.
+     *
+     * `small_dripleaf` is the proof. Bare, it resolved `small_dripleaf_top`
+     * through the generic `_top` candidate and passed every clause below. At
+     * its own default `half=lower` -- which is what `defaultStateFor` writes,
+     * so what every placed one carries -- the `half` arm offered `_bottom`,
+     * `_lower` and the bare name, the pack has none of the three, and the
+     * block came out as the hashed-colour cube, **geometry and all**, because
+     * `bakeFallback` throws the shape away when no face resolves.
+     */
+    const bags: Array<Record<string, string>> = [{}];
+    const asPlaced = defaultStateFor(id) ?? {};
+    if (Object.keys(asPlaced).length > 0) bags.push(asPlaced);
+    for (const properties of bags) {
+      const entry: PaletteEntry = { namespacedName: id, properties };
+      walked += 1;
+      const placed = Object.keys(entry.properties).length > 0 ? " (as placed)" : "";
+      const label = id.replace("minecraft:", "") + placed;
+      const baked = await baker.bakeBlockstate(entry);
+      if (baked.textureKey === paletteEntryCacheKey(entry)) unresolved.push(label);
+      const all: BakedFace[] = [...Object.values(baked.faces), ...baked.extraFaces];
+      if (all.some((f) => [...f.uvs].some((n) => n < -1e-6 || n > 1 + 1e-6))) offTile.push(label);
+      if (all.length > 0 && !all.some(facePaintsSomething)) invisible.push(label);
+      if (!all.every(windingAgrees)) backwards.push(label);
     }
   }
   check(
-    `all ${ids.length} offered ids resolve a real texture`,
+    `all ${ids.length} offered ids resolve a real texture, bare and as placed (${walked} states)`,
     unresolved.length === 0,
     unresolved.length === 0
       ? undefined
@@ -1466,6 +1529,1448 @@ if (pack === null) {
     "a waxed oxidized bulb borrows the unwaxed lit texture",
     await keysOf("waxed_oxidized_copper_bulb", { lit: "true", powered: "true" }),
     "minecraft:block/oxidized_copper_bulb_lit_powered",
+  );
+}
+
+console.log("\n--- a dispenser is not made of its own front ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `dispenser_side.png` and `dispenser_top.png` are files vanilla has never
+   * had -- `dispenser.json` names `block/furnace_side` and `block/furnace_top`
+   * outright -- so `dispenser_front` was the one name of the six that resolved,
+   * and `cubeFaceTextures`' fallback painted it on the other five. The block
+   * wore its own face on its back, its sides, its lid and its floor. Reported
+   * as exactly that, and it is `hopper_side` one block along.
+   *
+   * Stated as the whole six-face map rather than as "the sides changed",
+   * because the fault was a face resolving *nothing* and being handed a
+   * neighbour's answer: a check naming one face would pass with the next one
+   * still guessed.
+   */
+  const facesOf = async (name: string, facing: string): Promise<Record<string, string>> => {
+    const state = await baker.bakeBlockstate(
+      block(name, { ...defaultStateFor(`minecraft:${name}`), facing }),
+    );
+    return Object.fromEntries(
+      Object.entries(state.faces).map(([face, drawn]) => [face, drawn?.textureKey ?? "-"]),
+    );
+  };
+  const T = (key: string): string => `minecraft:block/${key}`;
+
+  for (const name of ["dispenser", "dropper"]) {
+    const north = await facesOf(name, "north");
+    equal(`a ${name} facing north wears its own front there`, north.north, T(`${name}_front`));
+    equal(
+      `...and the furnace sides on the other three`,
+      [north.south, north.east, north.west],
+      [T("furnace_side"), T("furnace_side"), T("furnace_side")],
+    );
+    /*
+     * Both flat faces, and the underside is the half that would be left out:
+     * `orientable.json` is `orientable_with_bottom` with `bottom` set to
+     * `#top`, so the lid is what this family shows underneath as well.
+     */
+    equal(
+      `...and the furnace lid above and below`,
+      [north.up, north.down],
+      [T("furnace_top"), T("furnace_top")],
+    );
+
+    /*
+     * Pointing up or down is a **different model**, and not only in the front:
+     * `dispenser_vertical.json` is `orientable_vertical`, whose floor and four
+     * walls are all `#side`, and it sets `side` to `furnace_top`. So one
+     * standing on end has the furnace lid all round it -- which no candidate
+     * list could say, because a property is choosing the texture.
+     */
+    for (const facing of ["up", "down"]) {
+      const turned = await facesOf(name, facing);
+      equal(
+        `a ${name} facing ${facing} wears the vertical front`,
+        turned[facing],
+        T(`${name}_front_vertical`),
+      );
+      equal(
+        `...and the furnace lid on the other five, not the furnace side`,
+        Object.entries(turned)
+          .filter(([face]) => face !== facing)
+          .map(([, key]) => key),
+        Array(5).fill(T("furnace_top")),
+      );
+    }
+  }
+
+  /*
+   * A dropper has no `dropper_back`, and the arm that asks for one used to stop
+   * there -- three candidates, none of which the pack has, and no way through
+   * to the rule that knows what a dropper is made of. So the face opposite the
+   * front is what says that arm is a prefix rather than an answer.
+   */
+  equal(
+    `the face opposite a dropper front is a side, not a guess`,
+    (await facesOf("dropper", "north")).south,
+    T("furnace_side"),
+  );
+  /*
+   * The observer is what that arm exists for, and is the control: it does ship
+   * an `observer_back`, so falling through must not have cost it.
+   */
+  equal(
+    `...while an observer, which has one, still wears it`,
+    (await facesOf("observer", "north")).south,
+    T("observer_back"),
+  );
+}
+
+console.log("\n--- a block that points somewhere keeps its front on one face ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * The walk that turns the report above into a finite list.
+   *
+   * Every template vanilla builds a pointing block from puts `#top`, `#bottom`
+   * or `#side` on the lid and the floor, and not one of them ever puts
+   * `#front` there. But `<name>_top` was not offered for a `down` face and
+   * `<name>_side` was offered for neither, so those faces resolved nothing and
+   * took `cubeFaceTextures`' fallback -- the first face that *did* resolve,
+   * which on a block whose front is the only texture named after it is the
+   * front. **The underside of every furnace in the game was wearing the fire.**
+   *
+   * Stated over every cube-shaped id at every one of its facings rather than
+   * as six named blocks, because the whole point is that nobody could have
+   * listed them: the answer was plausible, so nothing looked broken.
+   */
+  const listPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "block_id_list.txt",
+  );
+  const FLAT_AND_SIDE = ["north", "south", "west", "east", "up", "down"] as const;
+  const stray: string[] = [];
+  let walked = 0;
+  for (const id of parseBlockList(readFileSync(listPath, "utf8"))) {
+    const base = defaultStateFor(id) ?? {};
+    for (const facing of legalValuesFor(id, "facing") ?? []) {
+      const entry: PaletteEntry = { namespacedName: id, properties: { ...base, facing } };
+      if (shapeFor(entry).kind !== "cube") continue;
+      walked += 1;
+      const baked = await baker.bakeBlockstate(entry);
+      for (const face of FLAT_AND_SIDE) {
+        if (face === facing) continue;
+        const key = baked.faces[face]?.textureKey ?? "";
+        if (/_front(_|$)/.test(key)) stray.push(`${id} facing=${facing} ${face}=${key}`);
+      }
+    }
+  }
+  /*
+   * A floor rather than a count: this number *falls* as blocks are given real
+   * shapes -- the eight lightning rods took 48 states out of it the day they
+   * stopped being cubes -- so pinning it would be a check that has to be
+   * edited by every fix. What it is for is the walk finding nothing at all.
+   */
+  check("there are pointing cubes to walk", walked > 100, String(walked));
+  equal(`no face but the front wears one (${walked} states)`, stray, []);
+
+  const keyUnder = async (name: string): Promise<string> => {
+    const baked = await baker.bakeBlockstate(
+      block(name, defaultStateFor(`minecraft:${name}`) ?? {}),
+    );
+    return baked.faces.down?.textureKey ?? "-";
+  };
+
+  /*
+   * The three shapes of correct answer, one named block each, because no
+   * single rule produces all three and a walk that only counted would not say
+   * which of them had moved.
+   */
+  equal("a furnace shows its lid underneath", await keyUnder("furnace"), "minecraft:block/furnace_top");
+  equal(
+    "...a command block shows its side there instead",
+    await keyUnder("command_block"),
+    "minecraft:block/command_block_side",
+  );
+  equal(
+    "...and an end portal frame stands on end stone, which is a row of its own",
+    await keyUnder("end_portal_frame"),
+    "minecraft:block/end_stone",
+  );
+
+  /*
+   * The control, and the reason the rule is guarded on the block pointing
+   * somewhere at all: a jukebox is `cube_top`, its floor really is
+   * `jukebox_side`, and it has no `facing`. Offered outright, `_top` would
+   * have taken that face and nothing anywhere would have failed.
+   */
+  equal(
+    "a jukebox, which points nowhere, keeps its side underneath",
+    await keyUnder("jukebox"),
+    "minecraft:block/jukebox_side",
+  );
+}
+
+console.log("\n--- a tripwire is a wire, not a cube ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was a full opaque cube. `tripwire.png` is 11.2% opaque -- a thin
+   * diagonal line and nothing else -- so the cube wore an almost empty picture
+   * on all six faces, and because `occludesNeighbours` answers from the shape
+   * it sealed its own cell and `coversFace` called a length of string sturdy
+   * ground. The amethyst bud's fault in a redstone block.
+   *
+   * Vanilla writes it as elements with `from` and `to` equal on **y**, so four
+   * of the six faces have no area and `boxFaces` drops them: two quads per
+   * segment, exactly as a rail is two.
+   */
+  const wireOf = async (props: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block("tripwire", { ...WIRE_OFF, ...props }));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+
+  const sealed: string[] = [];
+  for (let mask = 0; mask < 16; mask += 1) {
+    for (const attached of ["false", "true"]) {
+      const props: Record<string, string> = { ...WIRE_OFF, attached };
+      WIRE_SIDES.forEach((side, i) => {
+        if ((mask & (1 << i)) !== 0) props[side] = "true";
+      });
+      const entry: PaletteEntry = { namespacedName: "minecraft:tripwire", properties: props };
+      if (shapeFor(entry).kind !== "boxes") sealed.push(`${mask}/${attached} is a cube`);
+      if (occludesNeighbours(entry)) sealed.push(`${mask}/${attached} seals its cell`);
+      if ((["up", "down", "north", "south", "west", "east"] as const).some((f) => coversFace(entry, f))) {
+        sealed.push(`${mask}/${attached} is sturdy ground`);
+      }
+    }
+  }
+  equal("no state of it is a solid block", sealed, []);
+
+  /*
+   * How much wire there is, per model. These are the five vanilla files, and
+   * the counts are what says a rotation picked the right one: `n` is three
+   * segments and `ne` is four, so a wire with one connection and a wire with
+   * two adjacent ones cannot be confused.
+   */
+  equal("nothing connected is a full north-south run", (await wireOf({})).length, 8);
+  equal("...one connection is three quarters of one", (await wireOf({ north: "true" })).length, 6);
+  equal(
+    "...two opposite is the full run again",
+    (await wireOf({ north: "true", south: "true" })).length,
+    8,
+  );
+  equal(
+    "...two adjacent is two half-runs",
+    (await wireOf({ north: "true", east: "true" })).length,
+    8,
+  );
+  equal(
+    "...three is a run and a half",
+    (await wireOf({ north: "true", south: "true", east: "true" })).length,
+    12,
+  );
+  equal(
+    "...and four is a cross",
+    (await wireOf({ north: "true", south: "true", east: "true", west: "true" })).length,
+    16,
+  );
+
+  /*
+   * And where it lies, which is what the rotation decides. Stated on all four
+   * quadrants for a lone connection, because a half-turn error leaves the
+   * north-south pair right and only the sideways ones wrong.
+   */
+  const extent = (faces: BakedFace[], axis: number): string => {
+    const values = faces.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3 + axis] * 16));
+    return `${Math.min(...values).toFixed(2)}..${Math.max(...values).toFixed(2)}`;
+  };
+  equal("a wire hanging free runs the length of its cell", extent(await wireOf({}), 2), "0.00..16.00");
+  equal(
+    "...and is half a unit wide",
+    extent(await wireOf({}), 0),
+    "7.75..8.25",
+  );
+  equal(
+    "a wire tied to the north runs from that wall to z = 12",
+    extent(await wireOf({ north: "true" }), 2),
+    "0.00..12.00",
+  );
+  equal(
+    "...tied to the east, from that wall back to x = 4",
+    extent(await wireOf({ east: "true" }), 0),
+    "4.00..16.00",
+  );
+  equal(
+    "...tied to the south, to z = 4",
+    extent(await wireOf({ south: "true" }), 2),
+    "4.00..16.00",
+  );
+  equal(
+    "...and tied to the west, to x = 12",
+    extent(await wireOf({ west: "true" }), 0),
+    "0.00..12.00",
+  );
+  /*
+   * A corner: each arm stops at the middle, which is the difference between
+   * `ne` and two lone connections and the only thing that makes a right angle
+   * of string look like one.
+   */
+  const corner = await wireOf({ north: "true", east: "true" });
+  equal("a corner's north arm stops at the middle", extent(corner, 2), "0.00..8.25");
+  equal("...and its east arm starts there", extent(corner, 0), "7.75..16.00");
+
+  /*
+   * ...and the other three corners, and all four three-armed states, because
+   * each is a *different* rotation of one model and nothing above can see
+   * which. Verified by sabotage: putting the three-arm turn off by one quarter
+   * failed nothing at all until these were written.
+   *
+   * Read as a pair of extents, which is what says both which model was chosen
+   * and how far round it went: an arm that runs the whole way is a crossing
+   * pair, and one that stops at 8.25 or starts at 7.75 is a half.
+   */
+  const box = async (props: Record<string, string>): Promise<string> => {
+    const faces = await wireOf(props);
+    return `x ${extent(faces, 0)} z ${extent(faces, 2)}`;
+  };
+  /*
+   * A pair on one axis runs straight through, and the east-west one has to be
+   * turned to do it. Left unturned it draws a north-south wire, which is a
+   * whole quarter wrong and failed nothing until this line existed.
+   */
+  equal(
+    "a pair on the north-south axis runs that way",
+    await box({ north: "true", south: "true" }),
+    "x 7.75..8.25 z 0.00..16.00",
+  );
+  equal(
+    "...and a pair on the east-west axis runs across it",
+    await box({ east: "true", west: "true" }),
+    "x 0.00..16.00 z 7.75..8.25",
+  );
+
+  equal(
+    "a corner facing south-east",
+    await box({ south: "true", east: "true" }),
+    "x 7.75..16.00 z 7.75..16.00",
+  );
+  equal(
+    "...south-west",
+    await box({ south: "true", west: "true" }),
+    "x 0.00..8.25 z 7.75..16.00",
+  );
+  equal(
+    "...and north-west",
+    await box({ north: "true", west: "true" }),
+    "x 0.00..8.25 z 0.00..8.25",
+  );
+  equal(
+    "a tee open to the east",
+    await box({ north: "true", south: "true", east: "true" }),
+    "x 7.75..16.00 z 0.00..16.00",
+  );
+  equal(
+    "...to the west",
+    await box({ north: "true", south: "true", west: "true" }),
+    "x 0.00..8.25 z 0.00..16.00",
+  );
+  equal(
+    "...to the north",
+    await box({ east: "true", west: "true", north: "true" }),
+    "x 0.00..16.00 z 0.00..8.25",
+  );
+  equal(
+    "...and to the south",
+    await box({ east: "true", west: "true", south: "true" }),
+    "x 0.00..16.00 z 7.75..16.00",
+  );
+
+  /*
+   * Every quad lies at `y = 1.5`, which is the whole of what "off the floor"
+   * means and is why a wire does not z-fight with the block under it.
+   */
+  const offFloor: string[] = [];
+  for (let mask = 0; mask < 16; mask += 1) {
+    const props: Record<string, string> = {};
+    WIRE_SIDES.forEach((side, i) => {
+      if ((mask & (1 << i)) !== 0) props[side] = "true";
+    });
+    for (const face of await wireOf(props)) {
+      for (let i = 0; i < 4; i += 1) {
+        if (Math.abs(face.positions[i * 3 + 1] * 16 - 1.5) > 1e-6) offFloor.push(String(mask));
+      }
+    }
+  }
+  equal("every quad lies a unit and a half off the floor", offFloor, []);
+
+  /*
+   * The magnification, which is vanilla's and is why a "one texel per world
+   * unit" check would be the wrong check here: the window is 16x2 on a quad
+   * four long and half a unit wide, so the string is blown up **four-fold on
+   * both axes** and repeats four times along a full run.
+   */
+  const magnifications = new Set<string>();
+  for (const face of await wireOf({ north: "true", south: "true", east: "true", west: "true" })) {
+    const at = (i: number): number[] => [0, 1, 2].map((a) => face.positions[i * 3 + a] * 16);
+    const edge = (i: number, j: number): number =>
+      Math.hypot(...[0, 1, 2].map((a) => at(i)[a] - at(j)[a]));
+    const window = (i: number, j: number): number =>
+      Math.hypot(
+        (face.uvs[i * 2] - face.uvs[j * 2]) * 16,
+        (face.uvs[i * 2 + 1] - face.uvs[j * 2 + 1]) * 16,
+      );
+    for (const [i, j] of [
+      [0, 1],
+      [0, 3],
+    ]) {
+      magnifications.add((window(i, j) / edge(i, j)).toFixed(3));
+    }
+  }
+  equal("the string is magnified four-fold, on both axes and every quad", [...magnifications], [
+    "4.000",
+  ]);
+
+  /*
+   * `attached` moves the window two rows down the sheet and not one
+   * coordinate; `disarmed` and `powered` move nothing at all, because the
+   * blockstate keys on neither. Stated as geometry-equal and texels-different,
+   * which is the only shape of check that can tell those two apart.
+   */
+  const loose = await wireOf({ north: "true" });
+  const taut = await wireOf({ north: "true", attached: "true" });
+  const armed = await wireOf({ north: "true", disarmed: "true", powered: "true" });
+  const positions = (faces: BakedFace[]): string => faces.map((f) => [...f.positions].join()).join("|");
+  const texels = (faces: BakedFace[]): string => faces.map((f) => [...f.uvs].join()).join("|");
+  check("pulling a wire taut moves no coordinate", positions(loose) === positions(taut));
+  check("...but does move the texels", texels(loose) !== texels(taut));
+  check("disarming or powering one moves neither", positions(loose) === positions(armed) && texels(loose) === texels(armed));
+
+  const empty: string[] = [];
+  for (const attached of ["false", "true"]) {
+    for (const face of await wireOf({ north: "true", east: "true", attached })) {
+      if (!facePaintsSomething(face)) empty.push(attached);
+    }
+  }
+  equal("and every quad has string on it", empty, []);
+}
+
+console.log("\n--- a small dripleaf is leaves on a crossed stem ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was in `CROSS_BLOCKS` and it was a **placeholder**, which is two faults
+   * with one cause. The pack has `small_dripleaf_top`, `_side`, `_stem_top`
+   * and `_stem_bottom` and no `small_dripleaf.png`, so at `half=lower` -- what
+   * `defaultStateFor` writes, so what every placed one carries -- not a single
+   * candidate resolved and `bakeFallback` threw the shape away with them: a
+   * solid lump in an arbitrary colour where a plant should be.
+   *
+   * The walk above could not see it because it baked bare, where the generic
+   * `_top` candidate answers. It bakes both now.
+   */
+  const dripleaf = async (props: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block("small_dripleaf", props));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const hashed = async (props: Record<string, string>): Promise<boolean> => {
+    const entry: PaletteEntry = { namespacedName: "minecraft:small_dripleaf", properties: props };
+    return (await baker.bakeBlockstate(entry)).textureKey === paletteEntryCacheKey(entry);
+  };
+
+  const placeholders: string[] = [];
+  for (const facing of ["north", "east", "south", "west"] as const) {
+    for (const half of ["lower", "upper"] as const) {
+      const props = { facing, half };
+      if (await hashed(props)) placeholders.push(`${facing}/${half}`);
+      if (shapeFor(block("small_dripleaf", props)).kind !== "boxes") {
+        placeholders.push(`${facing}/${half} is not boxes`);
+      }
+    }
+  }
+  equal("no state of it is a placeholder", placeholders, []);
+
+  /*
+   * Three paper-thin leaf plates with a one-unit rim under each, and two stem
+   * quads crossed at 45 degrees: 3x2 + 3x4 + 2x2. The rims' tops are
+   * coincident with the plate standing on them and their undersides are not
+   * stated in vanilla, which is what `omit` carries -- and what the count of
+   * upward faces says out loud.
+   */
+  const upper = await dripleaf({ facing: "north", half: "upper" });
+  equal("the upper half is three plates, three rims and a crossed stem", upper.length, 22);
+  equal(
+    "...with one upward face per plate, and none on a rim",
+    upper.filter((f) => f.normal[1] > 0.99).length,
+    3,
+  );
+  equal("the lower half is the stem alone", (await dripleaf({ half: "lower" })).length, 4);
+  equal(
+    "...and it is a different texture from the top's stem",
+    [...new Set((await dripleaf({ half: "lower" })).map((f) => f.textureKey))],
+    ["minecraft:block/small_dripleaf_stem_bottom"],
+  );
+
+  /*
+   * `facing` turns the model, and the plates are what shows it: they sit in an
+   * L in plan, so the overall bounding box is 1..15 whichever way it points
+   * and only a *part* of the model can say the turn happened. Four quadrants,
+   * because a half-turn error leaves north and south right.
+   */
+  const topPlateCentre = async (facing: string): Promise<number[]> => {
+    const faces = await dripleaf({ facing, half: "upper" });
+    const ups = faces.filter((f) => f.normal[1] > 0.99);
+    const highest = ups.reduce((a, b) => (a.positions[1] > b.positions[1] ? a : b));
+    return [0, 2].map(
+      (axis) =>
+        +(
+          ([0, 1, 2, 3].reduce((sum, i) => sum + highest.positions[i * 3 + axis], 0) / 4) *
+          16
+        ).toFixed(2),
+    );
+  };
+  equal("the top leaf sits north-west facing north", await topPlateCentre("north"), [4.5, 11.5]);
+  equal("...and turns a quarter to the east", await topPlateCentre("east"), [4.5, 4.5]);
+  equal("...a half to the south", await topPlateCentre("south"), [11.5, 4.5]);
+  equal("...and three quarters to the west", await topPlateCentre("west"), [11.5, 11.5]);
+
+  /*
+   * And the placement, which arrived with the model rather than before it: for
+   * as long as all four facings drew the same hashed cube, deriving `facing`
+   * bought exactly nothing. The wiki states it in the same words as the rest
+   * of `FRONT_TO_PLAYER` -- "the opposite from the direction the player faces
+   * while placing the small dripleaf" -- so it is stated here as the
+   * *opposite* of a look, which is the half that would be silently backwards.
+   */
+  const looking = (x: number, z: number): PlacementLook => ({
+    direction: { x, y: 0, z },
+    against: "up",
+    cursorY: 0.5,
+    run: null,
+  });
+  equal(
+    "a dripleaf placed by someone looking north faces back at them",
+    orientPlacement("minecraft:small_dripleaf", looking(0, -1)).facing,
+    "south",
+  );
+  equal(
+    "...and one placed looking east faces west",
+    orientPlacement("minecraft:small_dripleaf", looking(1, 0)).facing,
+    "west",
+  );
+}
+
+console.log("\n--- seagrass is four planes in a hash ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `tall_seagrass` had no shape at all, so it was a **solid opaque cube** two
+   * blocks high wearing a texture half made of water -- the amethyst bud's
+   * fault in a plant. `occludesNeighbours` answers from the shape and
+   * `lighting.ts` floods from that predicate, so a bed of it sealed every cell
+   * it stood in and put the seabed underneath in the dark, and `coversFace`
+   * called it sturdy ground.
+   *
+   * `seagrass` was a `cross`, which is the right kind of wrong -- see-through,
+   * culling nothing -- and still the wrong model. It is here because it is not
+   * a related block: `seagrass.json`, `tall_seagrass_bottom.json` and
+   * `tall_seagrass_top.json` are three names for one `template_seagrass`.
+   */
+  const grassFaces = async (name: string, props: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block(name, props));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const states: ReadonlyArray<readonly [string, Record<string, string>]> = [
+    ["seagrass", {}],
+    ["tall_seagrass", { half: "lower" }],
+    ["tall_seagrass", { half: "upper" }],
+  ];
+
+  for (const [name, props] of states) {
+    const label = `${name}${props.half ? `[half=${props.half}]` : ""}`;
+    const entry: PaletteEntry = { namespacedName: `minecraft:${name}`, properties: props };
+    check(`${label} is boxes, not a cube`, shapeFor(entry).kind === "boxes");
+    check(`...${label} seals nothing`, !occludesNeighbours(entry));
+    check(
+      `...${label} is not sturdy ground`,
+      !(["north", "south", "west", "east", "up", "down"] as const).some((f) => coversFace(entry, f)),
+    );
+    // Four planes, two faces each: a plane's other four collapse to a line and
+    // `boxFaces` drops them.
+    equal(`...${label} is four planes`, (await grassFaces(name, props)).length, 8);
+  }
+
+  /*
+   * Where the planes stand, which is the whole of what "a hash and not a
+   * cross" means: two across the north-south axis and two across the
+   * east-west, each spanning its cell whole. A cross is two diagonals through
+   * the middle and would put no face on any of these four planes.
+   */
+  const planes = (faces: BakedFace[], axis: number): number[] =>
+    [
+      ...new Set(
+        faces
+          .filter((f) => Math.abs(f.normal[axis]) > 0.99)
+          .map((f) => Math.round(f.positions[axis] * 16)),
+      ),
+    ].sort((a, b) => a - b);
+  const bare = await grassFaces("seagrass", {});
+  equal("the north-south planes stand at z = 4 and z = 12", planes(bare, 2), [4, 12]);
+  equal("...the east-west ones at x = 4 and x = 12", planes(bare, 0), [4, 12]);
+  const spans = bare.every((f) => {
+    const at = (i: number): number[] => [0, 1, 2].map((a) => f.positions[i * 3 + a] * 16);
+    return Math.abs(Math.hypot(...[0, 1, 2].map((a) => at(0)[a] - at(1)[a])) - 16) < 1e-6;
+  });
+  check("...and every one of them spans its cell", spans);
+
+  /*
+   * One texel per world unit, which here is also the argument for stating no
+   * `uv` at all: every plane spans 0..16 on both of its own axes, so the
+   * derived window already is vanilla's `[0, 0, 16, 16]`. `amethystBud`'s rule
+   * for `amethystBud`'s reason.
+   */
+  const offSquare: string[] = [];
+  for (const [name, props] of states) {
+    for (const face of await grassFaces(name, props)) {
+      const at = (i: number): number[] => [0, 1, 2].map((a) => face.positions[i * 3 + a] * 16);
+      const edge = (i: number, j: number): number =>
+        Math.hypot(...[0, 1, 2].map((a) => at(i)[a] - at(j)[a]));
+      const window = (i: number, j: number): number =>
+        Math.hypot(
+          (face.uvs[i * 2] - face.uvs[j * 2]) * 16,
+          (face.uvs[i * 2 + 1] - face.uvs[j * 2 + 1]) * 16,
+        );
+      for (const [i, j] of [
+        [0, 1],
+        [0, 3],
+      ]) {
+        if (Math.abs(window(i, j) / edge(i, j) - 1) > 0.005) offSquare.push(name);
+      }
+    }
+  }
+  equal("every plane wears one texel per unit", offSquare, []);
+
+  /*
+   * And `half`, which splits the texture and not one coordinate. Checked as
+   * two different keys rather than by name, because the fault it guards
+   * against is one texture on both halves -- a tall plant drawing its tip
+   * twice, which is what `plainCandidates`' `half` arm exists to prevent.
+   */
+  const keyOf = async (props: Record<string, string>): Promise<string> =>
+    (await baker.bakeBlockstate(block("tall_seagrass", props))).textureKey;
+  equal(
+    "the lower half wears the root texture",
+    await keyOf({ half: "lower" }),
+    "minecraft:block/tall_seagrass_bottom",
+  );
+  equal(
+    "...and the upper half a different one",
+    await keyOf({ half: "upper" }),
+    "minecraft:block/tall_seagrass_top",
+  );
+
+  /*
+   * The control, and the reason `seagrass` is not a suffix rule: kelp grows in
+   * the same water and really is `block/cross`, both `kelp.json` and
+   * `kelp_plant.json`.
+   */
+  check("kelp is still a cross", shapeFor(block("kelp")).kind === "cross");
+}
+
+console.log("\n--- a bamboo fence is a custom fence ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was reaching `["_fence", fence]` in `SUFFIX_SHAPES`, which is right for
+   * every other fence in the game and wrong for this one: `bamboo_fence`
+   * parents `block/custom_fence_post` and the four `custom_fence_side_<dir>`
+   * models, and those wear a **sheet** rather than a plank tile.
+   *
+   * So the fault was the lantern's, on a block that looked like it had none --
+   * a post full of holes still reads as a fence. The two halves are checked
+   * apart, because only the first of them is visible from the geometry.
+   */
+  const fenceStates = (conns: readonly string[]): Record<string, string> =>
+    Object.fromEntries(
+      (["north", "east", "south", "west"] as const).map((d) => [
+        d,
+        conns.includes(d) ? "true" : "false",
+      ]),
+    );
+  const fenceFaces = async (id: string, conns: readonly string[]): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block(id, fenceStates(conns)));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+
+  /*
+   * A custom fence's rails run three units *into* the post -- `z = 9` against
+   * an ordinary fence's `z = 7` -- and vanilla omits the face that ends up
+   * buried, which is the whole of the difference in the counts: five faces per
+   * rail here against six there.
+   */
+  equal("a bare post is six faces", (await fenceFaces("bamboo_fence", [])).length, 6);
+  equal(
+    "...one connection adds two rails of five faces",
+    (await fenceFaces("bamboo_fence", ["north"])).length,
+    16,
+  );
+  equal(
+    "...and an ordinary fence's rails keep the sixth",
+    (await fenceFaces("oak_fence", ["north"])).length,
+    18,
+  );
+
+  /*
+   * One texel per world unit on every face of all sixteen connection states.
+   *
+   * That is the only shape of check that can see a window transcribed at the
+   * wrong size or missing a `rotation`: the pixels named would still be inside
+   * the tile and the geometry would still be vanilla's, and the picture would
+   * be laid across the face sideways or squashed. It is the lever's check, and
+   * it holds here because every window vanilla states for this model is
+   * exactly the size of the face it goes on.
+   */
+  const stretched: string[] = [];
+  const holed: string[] = [];
+  for (let mask = 0; mask < 16; mask += 1) {
+    const conns = (["north", "east", "south", "west"] as const).filter(
+      (_, i) => (mask & (1 << i)) !== 0,
+    );
+    for (const face of await fenceFaces("bamboo_fence", conns)) {
+      const at = (i: number): number[] => [0, 1, 2].map((a) => face.positions[i * 3 + a] * 16);
+      const edge = (i: number, j: number): number =>
+        Math.hypot(...[0, 1, 2].map((a) => at(i)[a] - at(j)[a]));
+      const window = (i: number, j: number): number =>
+        Math.hypot(
+          (face.uvs[i * 2] - face.uvs[j * 2]) * 16,
+          (face.uvs[i * 2 + 1] - face.uvs[j * 2 + 1]) * 16,
+        );
+      for (const [i, j] of [
+        [0, 1],
+        [0, 3],
+      ]) {
+        if (Math.abs(window(i, j) / Math.max(1e-6, edge(i, j)) - 1) > 0.005) {
+          stretched.push(`${conns.join("+") || "bare"} ${face.textureKey}`);
+        }
+      }
+      /*
+       * **Wholly** opaque, not merely "paints something", and that is the only
+       * clause that can see the fault this commit is about.
+       *
+       * Deleting the post's windows leaves the derived ones, which are four
+       * wide by sixteen tall on a sixteen-unit face -- one texel per unit, and
+       * 40.6% opaque. So the stretch clause passes, `facePaintsSomething`
+       * passes because a fifth of a post is still some pixels, the geometry is
+       * untouched and the uvs are inside the tile. Verified by doing exactly
+       * that: with the windows removed nothing else in this file failed.
+       *
+       * A bamboo fence has no holes in it. That is a sentence about the block,
+       * and it happens to be the sentence the sheet enforces.
+       */
+      const opaque = faceOpacity(face);
+      if (opaque < 1) holed.push(`${conns.join("+") || "bare"} ${opaque.toFixed(3)}`);
+    }
+  }
+  equal("every face of all sixteen states is one texel per unit", stretched, []);
+  equal("...and every one of them is drawn on solid pixels", holed, []);
+
+  /*
+   * And the half the geometry cannot show: **where on the sheet** each window
+   * looks. Read in pixels, because that is what was wrong -- the box was
+   * always the right size and it was always reading the wrong patch.
+   */
+  const sheet = baker.textures["minecraft:block/bamboo_fence"];
+  const opacity = (u0: number, v0: number, u1: number, v1: number): number => {
+    const sx = sheet.width / 16;
+    const sy = sheet.height / 16;
+    let opaque = 0;
+    let total = 0;
+    for (let y = Math.round(v0 * sy); y < Math.round(v1 * sy); y += 1) {
+      for (let x = Math.round(u0 * sx); x < Math.round(u1 * sx); x += 1) {
+        total += 1;
+        if (sheet.data[(y * sheet.width + x) * 4 + 3] > 0) opaque += 1;
+      }
+    }
+    return total === 0 ? 0 : opaque / total;
+  };
+  check("the post's flank is stated at u 0..4 and is solid there", opacity(0, 0, 4, 16) === 1);
+  check(
+    "...where the window derived from its box would have been six tenths holes",
+    Math.abs(opacity(6, 0, 10, 16) - 0.406) < 0.005,
+    opacity(6, 0, 10, 16).toFixed(3),
+  );
+  check("the post's lid is stated at [4, 0, 8, 4] and is solid there", opacity(4, 0, 8, 4) === 1);
+  check(
+    "...where its own footprint would have been three quarters holes",
+    Math.abs(opacity(6, 6, 10, 10) - 0.25) < 0.005,
+    opacity(6, 6, 10, 10).toFixed(3),
+  );
+
+  /*
+   * The four side models are transcribed one at a time rather than turned, and
+   * this is the measurement that says they have to be. Vanilla writes north's
+   * end cap `rotation: 180`, east's and south's with none, and west's window
+   * reversed -- three different pictures of one 2x3 patch, and only if that
+   * patch is symmetric would deriving three of them from the fourth be
+   * invisible. It is not.
+   */
+  const capDiffers = (mirror: boolean): number => {
+    const sx = sheet.width / 16;
+    const sy = sheet.height / 16;
+    let differ = 0;
+    for (let y = Math.round(4 * sy); y < Math.round(7 * sy); y += 1) {
+      for (let x = Math.round(13 * sx); x < Math.round(15 * sx); x += 1) {
+        const rx = Math.round(13 * sx) + (Math.round(15 * sx) - 1 - x);
+        const ry = mirror ? y : Math.round(4 * sy) + (Math.round(7 * sy) - 1 - y);
+        const a = (y * sheet.width + x) * 4;
+        const b = (ry * sheet.width + rx) * 4;
+        for (let k = 0; k < 4; k += 1) {
+          if (sheet.data[a + k] !== sheet.data[b + k]) {
+            differ += 1;
+            break;
+          }
+        }
+      }
+    }
+    return differ;
+  };
+  check("the rail's end cap is not its own half-turn", capDiffers(false) === 72, String(capDiffers(false)));
+  check("...nor its own mirror", capDiffers(true) === 72, String(capDiffers(true)));
+
+  /*
+   * The control. Every other fence is a plank tile and derives its windows
+   * correctly, so a rule that reached them would be a regression with nothing
+   * else to catch it.
+   */
+  const oak = await fenceFaces("oak_fence", ["north", "east", "south", "west"]);
+  equal("an oak fence is untouched", oak.length, 54);
+  equal(
+    "...and still wears its planks",
+    [...new Set(oak.map((f) => f.textureKey))],
+    ["minecraft:block/oak_planks"],
+  );
+}
+
+console.log("\n--- a pillar wears its end on both ends ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `cube_column` writes `down: #end` beside `up: #end`, and the two *lying*
+   * arms of `cubeFaceTextures` had always said so -- east **and** west for
+   * `axis=x`, north **and** south for `axis=z`. The standing arm handed
+   * `faces.down` straight back, and what the generic list resolves for a
+   * `down` face is `_bottom`, `_down`, `_lower` and `_end`, not one of which
+   * vanilla ships for a log. So the list ran on to the bare name and **every
+   * log in the game stood on its own bark**, with its growth rings on the lid
+   * alone.
+   *
+   * Walked over every id carrying an `axis` rather than written out as the
+   * wood families, because the fault was uniform and the membership is the
+   * part nobody would have got right: 59 blocks, with `deepslate`, `basalt`,
+   * `bamboo_block`, `hay_block`, `bone_block`, the three froglights,
+   * `muddy_mangrove_roots` and `creaking_heart` in it beside the logs.
+   *
+   * Stated as an equality between the two ends rather than against a list of
+   * texture names: a name list is a second copy of the pack, and this is one
+   * sentence about what a pillar *is*.
+   */
+  const listPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "block_id_list.txt",
+  );
+  const ALONG: Readonly<Record<string, readonly [string, string, readonly string[]]>> = {
+    x: ["east", "west", ["up", "down", "north", "south"]],
+    y: ["up", "down", ["north", "south", "east", "west"]],
+    z: ["north", "south", ["up", "down", "east", "west"]],
+  };
+  const mismatched: string[] = [];
+  const undifferentiated: string[] = [];
+  let pillars = 0;
+  for (const id of parseBlockList(readFileSync(listPath, "utf8"))) {
+    for (const axis of legalValuesFor(id, "axis") ?? []) {
+      const entry: PaletteEntry = {
+        namespacedName: id,
+        properties: { ...(defaultStateFor(id) ?? {}), axis },
+      };
+      // The ten chains and everything else with an `axis` and a real shape
+      // take their textures per box; only a cube reads this map.
+      if (shapeFor(entry).kind !== "cube") continue;
+      pillars += 1;
+      const baked = await baker.bakeBlockstate(entry);
+      const key = (face: string): string => baked.faces[face]?.textureKey ?? "-";
+      const [near, far, flanks] = ALONG[axis];
+      const short = id.replace("minecraft:", "");
+      if (key(near) !== key(far)) {
+        mismatched.push(`${short}[axis=${axis}] ${near}=${key(near)} ${far}=${key(far)}`);
+      }
+      for (const flank of flanks) {
+        if (key(flank) !== key(flanks[0])) {
+          mismatched.push(`${short}[axis=${axis}] ${flank}=${key(flank)}`);
+        }
+      }
+      if (key(near) === key(flanks[0])) undifferentiated.push(`${short}[axis=${axis}]`);
+    }
+  }
+  check("there are pillars to walk", pillars > 100, String(pillars));
+  equal(`both ends of a pillar wear one texture (${pillars} states)`, mismatched, []);
+  /*
+   * ...and it is not the flank's, which is the clause that would go on passing
+   * if the two ends were made equal by giving them both the side.
+   *
+   * `nether_portal` is the one exception and is named rather than filtered:
+   * its `axis` is `x|z` and its model is not `cube_column` at all but two
+   * planes, so it has one texture and reaches this walk only because nothing
+   * has given it a shape. A remainder, not a pillar.
+   */
+  equal("...and it is a texture of its own", undifferentiated, [
+    "nether_portal[axis=x]",
+    "nether_portal[axis=z]",
+  ]);
+
+  const faceKey = async (name: string, axis: string, face: string): Promise<string> => {
+    const baked = await baker.bakeBlockstate(
+      block(name, { ...(defaultStateFor(`minecraft:${name}`) ?? {}), axis }),
+    );
+    return baked.faces[face]?.textureKey ?? "-";
+  };
+  equal(
+    "a standing log shows its rings underneath",
+    await faceKey("oak_log", "y", "down"),
+    "minecraft:block/oak_log_top",
+  );
+  /*
+   * The control, and the reason this is one line rather than a rewrite: the
+   * lying arms were right the whole time, which is what made the standing one
+   * look deliberate.
+   */
+  equal(
+    "...and a lying one still shows its bark on the lid",
+    await faceKey("oak_log", "x", "up"),
+    "minecraft:block/oak_log",
+  );
+  equal(
+    "...with the rings on the end it actually points at",
+    await faceKey("oak_log", "x", "east"),
+    "minecraft:block/oak_log_top",
+  );
+  /*
+   * And the guard. A jukebox is `cube_top`, whose `down` really is `#side`,
+   * and it carries no `axis` -- so offering `_top` for a `down` face outright,
+   * which is the change this one looks like, would have taken its floor with
+   * nothing anywhere failing.
+   */
+  equal(
+    "a jukebox, which is no pillar, keeps its side underneath",
+    (await baker.bakeBlockstate(block("jukebox", defaultStateFor("minecraft:jukebox") ?? {}))).faces
+      .down?.textureKey,
+    "minecraft:block/jukebox_side",
+  );
+}
+
+console.log("\n--- a lever is a switch, not a plate ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was `againstWall(e, 3)`: a 16x16x3 plate over a whole face of the cell,
+   * with `face` never read at all -- so a lever on the floor or the ceiling was
+   * drawn flat against a wall, and the plate, lying exactly on the cell
+   * boundary, made `coversFace` answer true and took the face off the block the
+   * lever was screwed to.
+   *
+   * Transcribed from `lever.json` / `lever_on.json` and the blockstate: a 6x3x8
+   * cobblestone base and a 2x10x2 handle tilted 45 degrees through where it
+   * meets the base, turned by `face` and then by `facing`.
+   */
+  const LEVER_FACES = ["north", "south", "west", "east", "up", "down"] as const;
+  const at = (f: BakedFace, i: number): number[] =>
+    [f.positions[i * 3], f.positions[i * 3 + 1], f.positions[i * 3 + 2]].map((n) => n * 16);
+  const uAt = (f: BakedFace, i: number): number => f.uvs[i * 2] * 16;
+  const vAt = (f: BakedFace, i: number): number => f.uvs[i * 2 + 1] * 16;
+  const mean = (points: number[][], axis: number): number =>
+    points.reduce((sum, p) => sum + p[axis], 0) / points.length;
+
+  const partsOf = async (
+    face: string,
+    facing: string,
+    powered: string,
+  ): Promise<{ handle: BakedFace[]; base: BakedFace[] }> => {
+    const baked = await baker.bakeBlockstate(block("lever", { face, facing, powered }));
+    const all = [...Object.values(baked.faces), ...baked.extraFaces];
+    return {
+      handle: all.filter((f) => f.textureKey.endsWith("/lever")),
+      base: all.filter((f) => f.textureKey.endsWith("/cobblestone")),
+    };
+  };
+
+  /*
+   * The walk over all 24 states, which is three properties multiplied out:
+   * three faces, four facings, two powers. Four things are asked of each, and
+   * the second and third are what a hand-rotated model gets wrong.
+   */
+  const counts: string[] = [];
+  const stretched: string[] = [];
+  const offStrip: string[] = [];
+  const backwards: string[] = [];
+  for (const face of ["floor", "wall", "ceiling"]) {
+    for (const facing of ["north", "east", "south", "west"]) {
+      for (const powered of ["false", "true"]) {
+        const where = `${face}/${facing}/${powered}`;
+        const { handle, base } = await partsOf(face, facing, powered);
+        // Six faces of base and five of handle: vanilla omits the handle's
+        // `down`, which is buried in the base, and so does this.
+        if (handle.length !== 5 || base.length !== 6) {
+          counts.push(`${where} faces ${handle.length}+${base.length}`);
+          continue;
+        }
+        const centre = [0, 1, 2].map((axis) =>
+          mean(
+            base.flatMap((f) => [0, 1, 2, 3].map((i) => at(f, i))),
+            axis,
+          ),
+        );
+        const fromBase = (p: number[]): number =>
+          Math.hypot(p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]);
+        for (const f of [...handle, ...base]) {
+          /*
+           * **One texel per world unit, on every face.** This is what catches a
+           * missing `uvRotation`: the window still names the right pixels and
+           * lays them across the face sideways, which is the anvil's fault and
+           * is exactly what the `x: 90` of a wall lever produces if the turn is
+           * left out. Nothing else here can see it -- the UVs stay inside the
+           * tile and the geometry is untouched.
+           */
+          const edge = (i: number, j: number): number =>
+            Math.hypot(...[0, 1, 2].map((axis) => at(f, i)[axis] - at(f, j)[axis]));
+          const window = (i: number, j: number): number =>
+            Math.hypot(uAt(f, i) - uAt(f, j), vAt(f, i) - vAt(f, j));
+          for (const [i, j] of [
+            [0, 1],
+            [0, 3],
+          ]) {
+            const density = window(i, j) / Math.max(1e-6, edge(i, j));
+            if (Math.abs(density - 1) > 0.02) {
+              stretched.push(`${where} ${f.textureKey.split("/").pop()} ${density.toFixed(2)}x`);
+            }
+          }
+        }
+        for (const f of handle) {
+          /*
+           * All 320 opaque texels of `lever.png` are in `u 7..9, v 6..16`, so a
+           * window that wandered would draw nothing -- the chain's fault.
+           */
+          for (const i of [0, 1, 2, 3]) {
+            if (uAt(f, i) < 6.99 || uAt(f, i) > 9.01 || vAt(f, i) < 5.99 || vAt(f, i) > 16.01) {
+              offStrip.push(`${where} at ${uAt(f, i)}/${vAt(f, i)}`);
+            }
+          }
+          /*
+           * And the strip has a right way up: its first two rows are the cap,
+           * mean luminance 119 against 72 at the foot. The 2x2 end cap has every
+           * corner at the free end, so only the four long faces have an end to
+           * get backwards.
+           */
+          const cap = [0, 1, 2, 3].reduce((a, b) => (vAt(f, b) < vAt(f, a) ? b : a));
+          const foot = [0, 1, 2, 3].reduce((a, b) => (vAt(f, b) > vAt(f, a) ? b : a));
+          if (vAt(f, foot) - vAt(f, cap) > 5 && fromBase(at(f, cap)) <= fromBase(at(f, foot))) {
+            backwards.push(where);
+          }
+        }
+      }
+    }
+  }
+  equal("all 24 states draw six faces of base and five of handle", counts, []);
+  equal("...every one of them at one texel per unit", stretched, []);
+  equal("...every handle face over the art rather than the empty tile", offStrip, []);
+  equal("...and none with the strip laid end for end", backwards, []);
+
+  /*
+   * Where the base sits is the whole of what `face` decides, and it was read
+   * nowhere. On a wall it lands **opposite** `facing`, which is
+   * `WALL_MOUNTED`'s rule seen from the geometry: the thing points out of the
+   * wall it is screwed to.
+   */
+  const baseCentre = async (face: string, facing: string): Promise<number[]> => {
+    const { base } = await partsOf(face, facing, "false");
+    const points = base.flatMap((f) => [0, 1, 2, 3].map((i) => at(f, i)));
+    return [0, 1, 2].map((axis) => +mean(points, axis).toFixed(1));
+  };
+  equal("a floor lever's base is on the floor", await baseCentre("floor", "north"), [8, 1.5, 8]);
+  equal("a ceiling lever's base is on the ceiling", await baseCentre("ceiling", "north"), [8, 14.5, 8]);
+  equal("a wall lever facing north is screwed to the south wall", await baseCentre("wall", "north"), [8, 8, 14.5]);
+  equal("...and one facing east to the west wall", await baseCentre("wall", "east"), [1.5, 8, 8]);
+
+  /*
+   * The half that reads backwards. `powered=false` selects the model called
+   * **`lever_on`**, which is the one that leans `+45`, and the wiki settles the
+   * appearance: "when placed on the side of blocks, down is on and up is off".
+   * So an unpowered wall lever has its handle up. Written as the two heights
+   * rather than as a difference, because "they differ" passes with the pair
+   * swapped.
+   */
+  const handleHeight = async (powered: string): Promise<number> => {
+    const { handle } = await partsOf("wall", "north", powered);
+    return Math.round(mean(handle.flatMap((f) => [0, 1, 2, 3].map((i) => at(f, i))), 1));
+  };
+  equal("an unpowered wall lever has its handle up", await handleHeight("false"), 12);
+  equal("...and a powered one has it down", await handleHeight("true"), 4);
+
+  /*
+   * And it is not a cube any more, which is the fault nobody would have
+   * reported: a 16x16x3 plate lies exactly on the cell boundary, so
+   * `coversFace` said yes and the lever deleted the face of the block behind
+   * it.
+   */
+  const lever = block("lever", defaultStateFor("minecraft:lever") ?? {});
+  check("a lever is boxes rather than a cube", shapeFor(lever).kind === "boxes");
+  check("...it does not occlude", !occludesNeighbours(lever));
+  equal(
+    "...and it covers no face of its cell",
+    LEVER_FACES.filter((face) => coversFace(lever, face)),
+    [],
+  );
+}
+
+console.log("\n--- the sculk sensors and the shrieker ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * All three were full opaque cubes, and every one of them is half a block
+   * tall with something standing on it. Four faults, of which the silhouette
+   * is only the first: `sculk_sensor_side.png` is 50% transparent because only
+   * its lower half is the block, so a full cube drew the flank at twice its
+   * height with the top half empty; `occludesNeighbours` answered true, so a
+   * sensor sealed its own cell and `lighting.ts` put a corridor of them in the
+   * dark; the calibrated one wore its own lid on all six faces, because it
+   * borrows `sculk_sensor_side` and `sculk_sensor_bottom` from the plain
+   * sensor and no candidate list can guess that; and the tendrils, the
+   * amethyst and the shrieker's bowl were not drawn at all.
+   */
+  const sculk = async (name: string, extra: Record<string, string> = {}): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(
+      block(name, { ...defaultStateFor(`minecraft:${name}`), ...extra }),
+    );
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const shortKey = (f: BakedFace): string => f.textureKey.split("/").pop() ?? "?";
+  /** The multiset of textures a bake produced, optionally with one renamed. */
+  const tally = (faces: BakedFace[], swap?: readonly [string, string]): string =>
+    faces
+      .map((f) => (swap !== undefined && shortKey(f) === swap[0] ? swap[1] : shortKey(f)))
+      .sort()
+      .join(" ");
+  const corner = (f: BakedFace, i: number): number[] =>
+    [f.positions[i * 3], f.positions[i * 3 + 1], f.positions[i * 3 + 2]].map((n) => n * 16);
+  const highest = (faces: BakedFace[]): number =>
+    Math.max(...faces.flatMap((f) => [0, 1, 2, 3].map((i) => corner(f, i)[1])));
+
+  /*
+   * The counts are the model said as arithmetic: six faces of body and two per
+   * tendril plane, plus two per amethyst plane on the calibrated one. The
+   * shrieker's is the one worth spelling out -- six of slab, five of rim (its
+   * underside is the bowl's floor and is omitted), and five inward planes,
+   * each of which would emit two faces here where vanilla states one.
+   */
+  equal("a sculk sensor is a slab and four tendrils", (await sculk("sculk_sensor")).length, 6 + 4 * 2);
+  equal(
+    "...the calibrated one adds a crossed amethyst",
+    (await sculk("calibrated_sculk_sensor")).length,
+    6 + 4 * 2 + 2 * 2,
+  );
+  equal(
+    "...and the shrieker is a slab, a rim, and the inside of the rim",
+    (await sculk("sculk_shrieker")).length,
+    6 + 5 + 5,
+  );
+
+  /*
+   * Half a block, which is the whole silhouette. The amethyst is the one part
+   * that leaves the cell, four units above it, exactly as vanilla draws it.
+   */
+  const sensor = await sculk("sculk_sensor");
+  equal("a sensor's slab stops at half height", highest(sensor.filter((f) => !shortKey(f).includes("tendril"))), 8);
+  equal("...and its tendrils at the top of the cell", highest(sensor), 16);
+  equal("a shrieker's rim stops a unit short of the top", highest(await sculk("sculk_shrieker")), 15);
+  equal("the amethyst stands above the block", highest(await sculk("calibrated_sculk_sensor")), 20);
+
+  /*
+   * The calibrated sensor borrows two textures from the plain one, which is
+   * the dispenser's fault one block along, and its input side is the face
+   * **opposite** `facing`: `facing=north` selects the unrotated model, whose
+   * `#calibrated_side` is on the south.
+   */
+  const inputSideOf = async (facing: string): Promise<string> => {
+    const faces = await sculk("calibrated_sculk_sensor", { facing });
+    const input = faces.find((f) => shortKey(f) === "calibrated_sculk_sensor_input_side");
+    const n = input?.normal ?? [0, 0, 0];
+    if (Math.abs(n[0]) > 0.5) return n[0] > 0 ? "east" : "west";
+    return n[2] > 0 ? "south" : "north";
+  };
+  equal("a calibrated sensor facing north takes its input from the south", await inputSideOf("north"), "south");
+  equal("...and one facing east from the west", await inputSideOf("east"), "west");
+  const borrowed = tally(await sculk("calibrated_sculk_sensor"));
+  check(
+    "...while its flank and its floor are the plain sensor's own textures",
+    borrowed.includes("sculk_sensor_side") && borrowed.includes("sculk_sensor_bottom"),
+    borrowed,
+  );
+
+  /*
+   * `sculk_sensor_phase` chooses the tendril texture and nothing else --
+   * `active` and `cooldown` are one model in vanilla and `inactive` the other.
+   * Stated as the whole multiset rather than as "the tendrils changed",
+   * because a rule that also moved a coordinate would pass the narrower check.
+   */
+  for (const phase of ["active", "cooldown"]) {
+    equal(
+      `sculk_sensor_phase=${phase} lights the tendrils, and moves nothing else`,
+      tally(await sculk("sculk_sensor", { sculk_sensor_phase: phase })),
+      tally(await sculk("sculk_sensor", { sculk_sensor_phase: "inactive" }), [
+        "sculk_sensor_tendril_inactive",
+        "sculk_sensor_tendril_active",
+      ]),
+    );
+  }
+  equal(
+    "can_summon changes the shrieker's throat, also alone",
+    tally(await sculk("sculk_shrieker", { can_summon: "true" })),
+    tally(await sculk("sculk_shrieker", { can_summon: "false" }), [
+      "sculk_shrieker_inner_top",
+      "sculk_shrieker_can_summon_inner_top",
+    ]),
+  );
+  /*
+   * And the two that move nothing, which look like omissions and are the
+   * finding: `power` has sixteen values and no model in any of them, and a
+   * shrieking shrieker is an animation and a particle -- `signal_fire`'s
+   * answer.
+   */
+  equal(
+    "power moves nothing on a sensor",
+    tally(await sculk("sculk_sensor", { power: "15" })),
+    tally(await sculk("sculk_sensor", { power: "0" })),
+  );
+  equal(
+    "...and shrieking moves nothing on a shrieker",
+    tally(await sculk("sculk_shrieker", { shrieking: "true" })),
+    tally(await sculk("sculk_shrieker", { shrieking: "false" })),
+  );
+
+  /*
+   * **One texel per world unit, except the amethyst.** That exception is the
+   * check rather than a hole in it: vanilla writes the two amethyst planes
+   * 0..16 with `rescale: true`, which this file has no notion of, so they are
+   * written already rescaled -- and a 45-degree rescale is exactly `sqrt(2)`,
+   * so the picture comes out stretched along the plane by that and nothing
+   * else. Written at any other width the number moves.
+   */
+  const stretched: string[] = [];
+  const blank: string[] = [];
+  for (const [name, extra] of [
+    ["sculk_sensor", { sculk_sensor_phase: "active" }],
+    ["calibrated_sculk_sensor", { facing: "south" }],
+    ["sculk_shrieker", { can_summon: "true" }],
+  ] as Array<[string, Record<string, string>]>) {
+    for (const f of await sculk(name, extra)) {
+      const edge = (i: number, j: number): number =>
+        Math.hypot(...[0, 1, 2].map((axis) => corner(f, i)[axis] - corner(f, j)[axis]));
+      const window = (i: number, j: number): number =>
+        Math.hypot((f.uvs[i * 2] - f.uvs[j * 2]) * 16, (f.uvs[i * 2 + 1] - f.uvs[j * 2 + 1]) * 16);
+      const want = shortKey(f).endsWith("_amethyst") ? [Math.SQRT1_2, 1] : [1, 1];
+      for (const [k, [i, j]] of ([[0, 1] as const, [0, 3] as const]).entries()) {
+        const density = window(i, j) / Math.max(1e-6, edge(i, j));
+        if (Math.abs(density - want[k]) > 0.005) {
+          stretched.push(`${name} ${shortKey(f)} ${density.toFixed(3)}`);
+        }
+      }
+      if (!facePaintsSomething(f)) blank.push(`${name} ${shortKey(f)}`);
+    }
+  }
+  equal("every face at one texel per unit, the amethyst at 1/sqrt(2)", stretched, []);
+  equal("...and every one of them over art rather than an empty part of its tile", blank, []);
+
+  /*
+   * None of the three is a cube any more. The floor is still covered, because
+   * the slab really does reach it and vanilla writes `cullface: down` there;
+   * everything else is not, which is what stops a sensor sealing its own cell.
+   */
+  for (const name of ["sculk_sensor", "calibrated_sculk_sensor", "sculk_shrieker"]) {
+    const entry = block(name, defaultStateFor(`minecraft:${name}`) ?? {});
+    check(`a ${name} is boxes rather than a cube`, shapeFor(entry).kind === "boxes");
+    check(`...and it does not seal its own cell`, !occludesNeighbours(entry));
+    equal(
+      `...covering its floor and no other face`,
+      (["north", "south", "west", "east", "up", "down"] as const).filter((f) => coversFace(entry, f)),
+      ["down"],
+    );
+  }
+}
+
+console.log("\n--- a lightning rod points where it was clicked ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * All eight were full opaque cubes -- the plain rod, the three oxidation
+   * stages, and the four waxed mirrors -- which is the end rod's fault word for
+   * word on the block beside it in the same file. `lightning_rod.png` is 15.6%
+   * opaque with its art in `u 0..4, v 0..16`, a quarter of the tile, so the
+   * cube wore a mostly transparent picture on all six faces and sealed its own
+   * cell into the bargain.
+   *
+   * Walked over the id list rather than named, because eight is exactly the
+   * size of list that goes stale: the copper golem update turned one rod into
+   * eight, and it is the same multiplication the `axis` walk found eleven
+   * missing names in.
+   */
+  const rodIds = [
+    ...parseBlockList(
+      readFileSync(
+        path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "block_id_list.txt"),
+        "utf8",
+      ),
+    ),
+  ].filter((id) => id.endsWith("lightning_rod"));
+  check("there are eight lightning rods to walk", rodIds.length === 8, String(rodIds.length));
+
+  const cornerAt = (f: BakedFace, i: number): number[] =>
+    [f.positions[i * 3], f.positions[i * 3 + 1], f.positions[i * 3 + 2]].map((n) => n * 16);
+  const rodFaces = async (id: string, extra: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate({
+      namespacedName: id,
+      properties: { ...defaultStateFor(id), ...extra },
+    });
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+
+  const wrong: string[] = [];
+  for (const id of rodIds) {
+    const entry: PaletteEntry = { namespacedName: id, properties: defaultStateFor(id) ?? {} };
+    if (shapeFor(entry).kind !== "boxes") wrong.push(`${id} is ${shapeFor(entry).kind}`);
+    if (occludesNeighbours(entry)) wrong.push(`${id} occludes`);
+    for (const face of ["north", "south", "west", "east", "up", "down"] as const) {
+      if (coversFace(entry, face)) wrong.push(`${id} covers ${face}`);
+    }
+    // Six faces of head and five of shaft: vanilla omits the shaft's `up`,
+    // which is where the head is standing.
+    const faces = await rodFaces(id, {});
+    if (faces.length !== 6 + 5) wrong.push(`${id} has ${faces.length} faces`);
+    for (const f of faces) {
+      if (!facePaintsSomething(f)) wrong.push(`${id} draws nothing on one face`);
+      const edge = (i: number, j: number): number =>
+        Math.hypot(...[0, 1, 2].map((axis) => cornerAt(f, i)[axis] - cornerAt(f, j)[axis]));
+      const window = (i: number, j: number): number =>
+        Math.hypot((f.uvs[i * 2] - f.uvs[j * 2]) * 16, (f.uvs[i * 2 + 1] - f.uvs[j * 2 + 1]) * 16);
+      for (const [i, j] of [
+        [0, 1],
+        [0, 3],
+      ]) {
+        if (Math.abs(window(i, j) / Math.max(1e-6, edge(i, j)) - 1) > 0.005) {
+          wrong.push(`${id} stretched`);
+        }
+      }
+    }
+  }
+  equal("all eight are a rod, drawn over their own art, sealing nothing", wrong, []);
+
+  /*
+   * Where the head ends up is the whole of what `facing` decides, and it is
+   * the half a single rotation could get backwards: the six variants are
+   * `end_rod.json`'s exactly, so `ROD_TURN` serves both, and east and west are
+   * restated there as one turn about z where vanilla writes an x and a y.
+   */
+  const headCentre = async (facing: string): Promise<number[]> => {
+    const faces = await rodFaces("minecraft:lightning_rod", { facing });
+    const head = faces.filter(
+      (f) =>
+        Math.abs(
+          Math.hypot(...[0, 1, 2].map((a) => cornerAt(f, 0)[a] - cornerAt(f, 1)[a])) - 4,
+        ) < 0.01 &&
+        Math.abs(
+          Math.hypot(...[0, 1, 2].map((a) => cornerAt(f, 0)[a] - cornerAt(f, 3)[a])) - 4,
+        ) < 0.01,
+    );
+    const points = head.flatMap((f) => [0, 1, 2, 3].map((i) => cornerAt(f, i)));
+    return [0, 1, 2].map((axis) => +(points.reduce((sum, p) => sum + p[axis], 0) / points.length).toFixed(1));
+  };
+  for (const [facing, centre] of [
+    ["up", [8, 14, 8]],
+    ["down", [8, 2, 8]],
+    ["north", [8, 8, 2]],
+    ["south", [8, 8, 14]],
+    ["east", [14, 8, 8]],
+    ["west", [2, 8, 8]],
+  ] as Array<[string, number[]]>) {
+    equal(`a rod facing ${facing} puts its head that way`, await headCentre(facing), centre);
+  }
+
+  /*
+   * The placement, which was the other half of the report. Vanilla is
+   * `setValue(FACING, context.getClickedFace())` and nothing else, and every
+   * one of the eight was landing on the registry's `facing=up` however it was
+   * placed. Asked of a **waxed oxidised** rod, because that is the spelling a
+   * hand-written list of eight forgets.
+   */
+  const placed = (against: PlacementLook["against"], direction: PlacementLook["direction"]): string =>
+    String(
+      orientPlacement("minecraft:waxed_oxidized_lightning_rod", {
+        direction,
+        against,
+        cursorY: 0.5,
+        run: null,
+      }).facing,
+    );
+  const NORTHWARD = { x: 0, y: 0, z: -1 };
+  for (const face of ["up", "down", "north", "south", "east", "west"] as const) {
+    equal(`a rod clicked onto a ${face} face points ${face}`, placed(face, NORTHWARD), face);
+  }
+  /*
+   * And the camera, which comes in exactly where a trapdoor's does: only when
+   * there is no face to read -- the build grid, or a cell in mid-air. The rod
+   * then points back at the viewer, which is `WALL_MOUNTED`'s fallback with
+   * two more directions.
+   */
+  equal("with no face to read, a rod points back at the camera", placed(null, NORTHWARD), "south");
+  equal("...and stands up when the camera is looking down", placed(null, { x: 0, y: -1, z: 0 }), "up");
+
+  /*
+   * `powered` swaps the whole block's texture in vanilla -- and to the *plain*
+   * `lightning_rod_on` whatever the oxidation, which is what every stage's
+   * blockstate says.
+   *
+   * **This is the weaker kind of check and that is worth saying.** The rule
+   * cannot be seen from a bake here: vanilla ships that texture, the bundled
+   * pack does not override it, and this app reads only the pack -- so with or
+   * without the rule a powered rod comes out wearing its own unpowered
+   * texture, which is `resolveBoxTexture`'s fallback doing its job. Deleting
+   * the rule failed nothing at all, which is why it is read out of the source
+   * instead, `closeAllConnections`' idiom for `closeAllConnections`' reason.
+   *
+   * The trailing bare name is read too, and it is the load-bearing half: a
+   * one-name list would leave the plain rod resolving nothing whatever, and a
+   * request may carry its own `resourcePackPath`.
+   */
+  const bakerSource = readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "pipeline", "model_baker.ts"),
+    "utf8",
+  );
+  check(
+    "a powered rod is sent to lightning_rod_on, with its own name behind it",
+    /endsWith\("lightning_rod"\) && flagOf\(entry, "powered"\)[\s\S]{0,80}?return \["lightning_rod_on", normalized\]/.test(
+      bakerSource,
+    ),
+  );
+  equal(
+    "waterlogging one moves nothing",
+    (await rodFaces("minecraft:lightning_rod", { waterlogged: "true" })).length,
+    (await rodFaces("minecraft:lightning_rod", { waterlogged: "false" })).length,
   );
 }
 

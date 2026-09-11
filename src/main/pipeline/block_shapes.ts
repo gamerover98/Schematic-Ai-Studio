@@ -391,6 +391,134 @@ function fence(entry: PaletteEntry): BlockShape {
   return boxes(...list);
 }
 
+/**
+ * `bamboo_fence`: vanilla's **custom fence**, which is a family of one.
+ *
+ * Every other fence in the game parents `block/fence_post` and
+ * `block/fence_side` and paints them with a plank tile, so its UVs are
+ * derivable and `fence` above is right. `bamboo_fence` parents
+ * `block/custom_fence_post` and the four `custom_fence_side_<dir>` models
+ * instead, and those carry a **sheet**: `bamboo_fence.png` is one texture with
+ * the post's flank, the post's lid, the rail's long side, the rail's end cap
+ * and the rail's lid each in their own patch of it.
+ *
+ * So the derived window sampled the wrong part of the sheet, and measurably so:
+ * the post's four flanks want `u 0..4, v 0..16`, which is **100% opaque**,
+ * and were reading `u 6..10, v 0..16`, which is **40.6%** -- a post six tenths
+ * made of holes. Its lid wants `[4, 0, 8, 4]`, 100%, and was reading 25%. That
+ * is the lantern's fault on a block that looked like it had none, because a
+ * fence post full of gaps still reads as a fence.
+ *
+ * The geometry differs too, by three units nobody would report: a custom
+ * fence's rails run to `z = 9`, three deep inside the post, where an ordinary
+ * fence's stop at `z = 7`. Vanilla states them that way and omits the face
+ * that ends up buried, which is what `omit` carries here.
+ *
+ * **The four side models are transcribed one at a time rather than turned**,
+ * and that is a finding rather than laziness. They are hand-authored in
+ * vanilla and are *not* y-rotations of one another: north's end cap is stated
+ * `rotation: 180` where east's and south's have none, and west's is written
+ * `[15, 4, 13, 7]`, reversed, which is a mirror. On this pack's sheet that
+ * cap patch differs from its own half-turn in **72 of 96 texels** and from its
+ * own mirror in the same 72, so the three spellings are three different
+ * pictures and deriving any of them from another would be visible.
+ */
+const CUSTOM_FENCE_POST: ShapeBox = {
+  box: [6, 0, 6, 10, 16, 10],
+  uv: {
+    up: [4, 0, 8, 4],
+    down: [4, 0, 8, 4],
+    north: [0, 0, 4, 16],
+    south: [0, 0, 4, 16],
+    west: [0, 0, 4, 16],
+    east: [0, 0, 4, 16],
+  },
+};
+
+/**
+ * One connection's pair of rails, as `[x0, z0, x1, z1]` in plan plus the
+ * windows that ride on it. The two rails of a connection are the same box at
+ * two heights -- 12..15 and 6..9 -- exactly as vanilla writes them.
+ */
+interface CustomFenceArm {
+  readonly plan: readonly [number, number, number, number];
+  readonly uv: Readonly<Record<string, UvWindow>>;
+  readonly uvRotation?: Readonly<Record<string, number>>;
+  /** The face buried in the post, which vanilla does not state. */
+  readonly omit: readonly string[];
+}
+
+const CUSTOM_FENCE_ARMS: Readonly<Record<string, CustomFenceArm>> = {
+  north: {
+    plan: [7, 0, 9, 9],
+    uv: {
+      north: [13, 4, 15, 7],
+      east: [4, 4, 13, 7],
+      west: [4, 4, 13, 7],
+      up: [13, 7, 15, 16],
+      down: [13, 7, 15, 16],
+    },
+    uvRotation: { north: 180 },
+    omit: ["south"],
+  },
+  east: {
+    plan: [7, 7, 16, 9],
+    uv: {
+      north: [4, 4, 13, 7],
+      east: [13, 4, 15, 7],
+      south: [4, 4, 13, 7],
+      up: [13, 7, 15, 16],
+      down: [13, 7, 15, 16],
+    },
+    uvRotation: { up: 270, down: 90 },
+    omit: ["west"],
+  },
+  south: {
+    plan: [7, 7, 9, 16],
+    uv: {
+      east: [4, 4, 13, 7],
+      south: [13, 4, 15, 7],
+      west: [4, 4, 13, 7],
+      up: [13, 7, 15, 16],
+      down: [13, 7, 15, 16],
+    },
+    omit: ["north"],
+  },
+  west: {
+    plan: [0, 7, 9, 9],
+    uv: {
+      north: [4, 4, 13, 7],
+      south: [4, 4, 13, 7],
+      west: [15, 4, 13, 7],
+      up: [13, 7, 15, 16],
+      down: [13, 7, 15, 16],
+    },
+    uvRotation: { up: 270, down: 90 },
+    omit: ["east"],
+  },
+};
+
+function customFence(entry: PaletteEntry): BlockShape {
+  const parts: ShapeBox[] = [CUSTOM_FENCE_POST];
+  for (const direction of ["north", "east", "south", "west"] as const) {
+    if (entry.properties[direction] !== "true") continue;
+    const arm = CUSTOM_FENCE_ARMS[direction];
+    const [x0, z0, x1, z1] = arm.plan;
+    for (const [y0, y1] of [
+      [12, 15],
+      [6, 9],
+    ] as const) {
+      parts.push({
+        box: [x0, y0, z0, x1, y1, z1],
+        uv: arm.uv,
+        uvRotation: arm.uvRotation,
+        omit: arm.omit,
+      });
+    }
+  }
+  return boxes(...parts);
+}
+
 /** `wall_post` + `wall_side` / `wall_side_tall`, connections are none|low|tall. */
 function wall(entry: PaletteEntry): BlockShape {
   const list: Box[] = [];
@@ -1448,6 +1576,13 @@ const SUFFIX_SHAPES: ReadonlyArray<readonly [string, (entry: PaletteEntry) => Bl
    */
   ["_chain", chain],
   /*
+   * `_lightning_rod` is `_chain`'s arrangement for `_chain`'s reason: the
+   * copper golem update gave the rod the three oxidation stages and their
+   * waxed mirrors, so seven ids join the bare one, and a stage added
+   * tomorrow needs no edit here.
+   */
+  ["_lightning_rod", lightningRod],
+  /*
    * `_bars` and `_lantern` are families now, not one block each: the copper
    * golem update added bars and a lantern in four oxidation stages plus their
    * waxed mirrors, twenty ids that all arrived as full opaque cubes.
@@ -1985,21 +2120,431 @@ const END_ROD: readonly ShapeBox[] = [
 ];
 
 /**
- * Where the rod points, as **one** rotation each.
+ * A lever: a cobblestone base and a handle tilted 45 degrees off it, from
+ * `lever.json` and `lever_on.json`.
  *
- * `end_rod.json`'s blockstate spells east and west as an x turn *and* a y turn,
- * and a `ShapeBox` carries one rotation rather than a pair -- so those two are
+ * It was `againstWall(e, 3)` -- the ladder's shape with a thickness -- which is
+ * a 16x16x3 plate covering a whole face of the cell, and that is three faults
+ * rather than one:
+ *
+ * - the silhouette is a plate where the block is a switch;
+ * - **`face` was not read at all**, so a lever on the floor or on the ceiling
+ *   was drawn flat against a wall;
+ * - a plate lying exactly on the cell boundary makes `coversFace` answer true,
+ *   so a lever **deleted the face of the block it was screwed to**.
+ *
+ * ## Eight positions became twelve, and that is the era's doing
+ *
+ * 1.8 to 1.12.2 spelled the lever's position *and* its direction as one
+ * metadata nibble, and `legacy_blocks.json` still holds it: `0` is the ceiling
+ * facing north, `1..4` are the four walls, `5` and `6` are the floor facing
+ * east and north, `7` is the ceiling facing east, and `+8` is powered. So the
+ * pre-Flattening block has **eight** positions where the flat one has twelve:
+ * a lever on the floor or on the ceiling could only lie north-south or
+ * east-west, and `south` and `west` there are what 1.13 added.
+ *
+ * All sixteen values already map onto `face`, `facing` and `powered`, so a
+ * 1.12 schematic arrives here with all three set. Only the drawing was ever
+ * wrong, and it was wrong in both eras for the same reason.
+ *
+ * ## The two elements
+ *
+ * A 6x3x8 cobblestone base at `[5, -0.02, 4]`..`[11, 2.98, 12]` -- the two
+ * hundredths are vanilla's own, holding the base off the surface it sits on --
+ * and a 2x10x2 handle at `[7, 1, 7]`..`[9, 11, 9]`, tilted about x through
+ * `[8, 1, 8]`, which is where it meets the base. The handle's `down` face is
+ * omitted, as vanilla omits it: it is buried in the base.
+ *
+ * **The windows are not optional.** All 320 opaque texels of `lever.png` are
+ * in `u 7..9, v 6..16`, so UVs derived from the box would address an empty
+ * corner of the tile and the handle would draw *nothing at all* -- the chain's
+ * fault on a smaller strip. The strip is not symmetric end to end either: its
+ * first two rows are the cap and are measurably brighter, mean luminance 119
+ * against 72 at the foot, so laid the wrong way round it is visible.
+ *
+ * ## Which way it leans, which is the part that reads backwards
+ *
+ * `powered=false` selects the model called **`lever_on`**, and `powered=true`
+ * the one called `lever`. That is not a transcription slip: it is what
+ * `blockstates/lever.json` has said in every release from 1.13 to 1.21.9, and
+ * it is the model *names* that are misleading rather than the mapping. The
+ * appearance settles it -- the wiki's "when placed on the side of blocks, down
+ * is on and up is off" -- so an unpowered wall lever has its handle **up**,
+ * and the angle that produces that is `lever_on.json`'s `+45`.
+ *
+ * ## Three positions written out
+ *
+ * The blockstate turns the one model with `x`, which `rotateShapeBox` knows
+ * nothing about. That is `ROD_TURN`'s problem, except that there the parts
+ * carry no rotation of their own and here the handle does -- and a `ShapeBox`
+ * holds one. So the `x` is applied by hand and the tilt is left as the
+ * residual, which puts the pivot where the handle meets the base each time:
+ * `[8, 1, 8]` on the floor, `[8, 8, 15]` on a wall, `[8, 15, 8]` on the
+ * ceiling. The face names travel with it -- `x: 90` sends up to north, north
+ * to down, south to up and down to south -- so the windows are the same six
+ * numbers under permuted keys rather than six new ones.
+ *
+ * The `y` is `rotateShapeBox`'s, from `facing`, and the model is
+ * **north-authored**: `face=floor,facing=north` is the variant with no `y` at
+ * all. A wall lever's base therefore comes out on the side *opposite* its
+ * `facing`, which is `WALL_MOUNTED`'s rule seen from the geometry -- the thing
+ * points out of the wall it is screwed to.
+ */
+const LEVER_BASE = "cobblestone";
+
+/** `x: 0`: vanilla's own face names and windows, unmoved. */
+function leverFloor(angle: number): ShapeBox[] {
+  return [
+    {
+      box: [5, -0.02, 4, 11, 2.98, 12],
+      texture: LEVER_BASE,
+      uv: {
+        down: [5, 4, 11, 12],
+        up: [5, 4, 11, 12],
+        north: [5, 0, 11, 3],
+        south: [5, 0, 11, 3],
+        west: [4, 0, 12, 3],
+        east: [4, 0, 12, 3],
+      },
+    },
+    {
+      box: [7, 1, 7, 9, 11, 9],
+      rotation: { origin: [8, 1, 8], axis: "x", angle },
+      uv: {
+        up: [7, 6, 9, 8],
+        north: [7, 6, 9, 16],
+        south: [7, 6, 9, 16],
+        west: [7, 6, 9, 16],
+        east: [7, 6, 9, 16],
+      },
+      omit: ["down"],
+    },
+  ];
+}
+
+/** `x: 90`: up becomes north, north becomes down, south becomes up. */
+function leverWall(angle: number): ShapeBox[] {
+  return [
+    {
+      box: [5, 4, 13.02, 11, 12, 16.02],
+      texture: LEVER_BASE,
+      uv: {
+        south: [5, 4, 11, 12],
+        north: [5, 4, 11, 12],
+        down: [5, 0, 11, 3],
+        up: [5, 0, 11, 3],
+        west: [4, 0, 12, 3],
+        east: [4, 0, 12, 3],
+      },
+      uvRotation: { west: 90, east: 270 },
+    },
+    {
+      box: [7, 7, 5, 9, 9, 15],
+      rotation: { origin: [8, 8, 15], axis: "x", angle },
+      uv: {
+        north: [7, 6, 9, 8],
+        down: [7, 6, 9, 16],
+        up: [7, 6, 9, 16],
+        west: [7, 6, 9, 16],
+        east: [7, 6, 9, 16],
+      },
+      uvRotation: { down: 180, west: 90, east: 270 },
+      omit: ["south"],
+    },
+  ];
+}
+
+/** `x: 180`: the model over, so up and down swap and so do north and south. */
+function leverCeiling(angle: number): ShapeBox[] {
+  return [
+    {
+      box: [5, 13.02, 4, 11, 16.02, 12],
+      texture: LEVER_BASE,
+      uv: {
+        up: [5, 4, 11, 12],
+        down: [5, 4, 11, 12],
+        south: [5, 0, 11, 3],
+        north: [5, 0, 11, 3],
+        west: [4, 0, 12, 3],
+        east: [4, 0, 12, 3],
+      },
+    },
+    {
+      box: [7, 5, 7, 9, 15, 9],
+      rotation: { origin: [8, 15, 8], axis: "x", angle },
+      uv: {
+        down: [7, 6, 9, 8],
+        south: [7, 6, 9, 16],
+        north: [7, 6, 9, 16],
+        west: [7, 6, 9, 16],
+        east: [7, 6, 9, 16],
+      },
+      uvRotation: { south: 180, north: 180, west: 180, east: 180 },
+      omit: ["up"],
+    },
+  ];
+}
+
+function lever(entry: PaletteEntry): BlockShape {
+  /*
+   * `wall` and not `floor`, for `amethystBud`'s reason: it is the registry's
+   * default and the walk over every offered id bakes with an empty property
+   * bag, so the wrong default here would put the commonest lever in the game
+   * on the wrong branch and every whole-registry check would be judging a
+   * picture nobody sees.
+   */
+  const face = entry.properties.face ?? "wall";
+  const angle = entry.properties.powered === "true" ? -45 : 45;
+  const parts =
+    face === "floor" ? leverFloor(angle) : face === "ceiling" ? leverCeiling(angle) : leverWall(angle);
+  return transform(parts, northFacingSteps(entry), false);
+}
+
+/**
+ * The three sculk sensors and the shrieker: `sculk_sensor.json`,
+ * `calibrated_sculk_sensor.json` and `template_sculk_shrieker.json`.
+ *
+ * All three were full opaque cubes, and every one of them is **half a block
+ * tall with something standing on it**. What that cost is four separate
+ * things, and only the first is the silhouette:
+ *
+ * - **`sculk_sensor_side.png` is 50% transparent, and that is the block being
+ *   8 high.** Only the bottom half of the tile is the sensor's flank; vanilla
+ *   says so with `uv: [0, 8, 16, 16]`. Stretched over a full cube by
+ *   coordinate-derived UVs, every sensor in the game drew its side twice as
+ *   tall and half of it was empty;
+ * - **`occludesNeighbours` answered true**, so a sensor sealed its own cell.
+ *   `lighting.ts` floods from that predicate, which is the amethyst bud's
+ *   fault in a redstone block: a corridor of sensors lit itself out. It also
+ *   deleted the face of whatever stood on top, the sensor's lid being opaque
+ *   while the block under it is only half there;
+ * - **the calibrated one wore its own lid on all six faces.** It ships three
+ *   textures -- `_amethyst`, `_input_side`, `_top` -- and borrows
+ *   `sculk_sensor_side` and `sculk_sensor_bottom` from the plain sensor, which
+ *   no candidate list can guess. So `calibrated_sculk_sensor_top` was the one
+ *   name that resolved and `cubeFaceTextures`' fallback painted it on the
+ *   other five: the dispenser's fault, one block along;
+ * - **and the tendrils, the amethyst and the shrieker's bowl were simply not
+ *   there.** They are what these blocks look like.
+ *
+ * ## What each property does, and what it does not
+ *
+ * `sculk_sensor_phase` chooses the **tendril texture and nothing else**:
+ * `active` and `cooldown` share one model and `inactive` has the other, and
+ * the difference between the two files is one line. `can_summon` chooses the
+ * shrieker's `inner_top` the same way -- one texture, no coordinate.
+ *
+ * `power` moves nothing at all, on either sensor, and neither does
+ * `shrieking`: a shrieking shrieker is an animation and a particle, which is
+ * `signal_fire`'s answer. `waterlogged` is the generic one.
+ *
+ * ## The pieces
+ *
+ * The body is the same 16x8x16 slab on all three, and the tendrils are the
+ * same four planes -- zero thickness, 8 by 8, each turned 45 degrees about its
+ * own corner, reaching a unit outside the cell on x and up to the top of it.
+ * Their windows are `[4, 8, 12, 16]` one way and `[12, 8, 4, 16]` the other,
+ * and the reversal is vanilla's own: a window with `u0 > u1` is a mirror,
+ * which is how one plane wears the picture from both sides.
+ *
+ * **Only the tendrils and the amethyst state a window**, and the absence
+ * elsewhere is deliberate rather than an omission -- `amethystBud`'s rule.
+ * Vanilla writes `[0, 8, 16, 16]` on the slab's flanks and `[1, 1, 15, 8]` on
+ * the rim's, and both are exactly what this file derives from the box: the
+ * flank of an 8-tall block *is* the lower half of its tile, which is why that
+ * texture is half transparent. Measured over all 102 faces of the three blocks
+ * at every facing, stating them changes not one uv. What would have to be kept
+ * correct is a copy of the coordinates.
+ *
+ * The calibrated sensor adds two crossed amethyst planes and an input side.
+ * They carry `rescale: true`, which this file has no notion of, so they are
+ * written **already rescaled** -- `pottedPlant`'s idiom. A 45-degree turn
+ * rescales by `sqrt(2)`, so vanilla's 0..16 becomes `8 +/- 8 * sqrt(2)` here
+ * and lands corner to corner of the cell, which is where a rescaled cross ends
+ * up and where the amethyst has to be.
+ *
+ * The shrieker is a bowl, and that needs the five inward planes vanilla
+ * states: `sculk_shrieker_top.png` is 16.5% opaque with a hole clean through
+ * the middle, so what you see through it is the rim's inside and the
+ * `inner_top` on the floor of the slab below. Each of those planes carries one
+ * face in vanilla and would emit two here -- coincident with the rim's own,
+ * which is a flickering seam -- so each `omit`s the outward one.
+ */
+const SCULK_TENDRILS: readonly ShapeBox[] = [
+  {
+    box: [-1, 8, 3, 7, 16, 3],
+    rotation: { origin: [3, 12, 3], axis: "y", angle: 45 },
+    uv: { north: [4, 8, 12, 16], south: [12, 8, 4, 16] },
+  },
+  {
+    box: [9, 8, 3, 17, 16, 3],
+    rotation: { origin: [13, 12, 3], axis: "y", angle: -45 },
+    uv: { north: [12, 8, 4, 16], south: [4, 8, 12, 16] },
+  },
+  {
+    box: [9, 8, 13, 17, 16, 13],
+    rotation: { origin: [13, 12, 13], axis: "y", angle: 45 },
+    uv: { north: [12, 8, 4, 16], south: [4, 8, 12, 16] },
+  },
+  {
+    box: [-1, 8, 13, 7, 16, 13],
+    rotation: { origin: [3, 12, 13], axis: "y", angle: -45 },
+    uv: { north: [4, 8, 12, 16], south: [12, 8, 4, 16] },
+  },
+];
+
+/** `active` and `cooldown` are one model; only the tendril texture moves. */
+function sculkTendrils(entry: PaletteEntry): ShapeBox[] {
+  const phase = entry.properties.sculk_sensor_phase;
+  const texture =
+    phase === "active" || phase === "cooldown"
+      ? "sculk_sensor_tendril_active"
+      : "sculk_sensor_tendril_inactive";
+  return SCULK_TENDRILS.map((part) => ({ ...part, texture }));
+}
+
+function sensorBody(textures: Readonly<Record<string, string>>): ShapeBox {
+  return { box: [0, 0, 0, 16, 8, 16], textures };
+}
+
+function sculkSensor(entry: PaletteEntry): BlockShape {
+  return boxes(
+    sensorBody({
+      up: "sculk_sensor_top",
+      down: "sculk_sensor_bottom",
+      north: "sculk_sensor_side",
+      east: "sculk_sensor_side",
+      south: "sculk_sensor_side",
+      west: "sculk_sensor_side",
+    }),
+    ...sculkTendrils(entry),
+  );
+}
+
+/** Vanilla's `rescale: true` on a 45-degree turn is a factor of `sqrt(2)`. */
+const AMETHYST_REACH = 8 * Math.SQRT2;
+const AMETHYST_SPIN: BoxRotation = { origin: [8, 9, 8], axis: "y", angle: 45 };
+
+const CALIBRATED_AMETHYST: readonly ShapeBox[] = [
+  {
+    box: [8, 8, 8 - AMETHYST_REACH, 8, 20, 8 + AMETHYST_REACH],
+    rotation: AMETHYST_SPIN,
+    texture: "calibrated_sculk_sensor_amethyst",
+    uv: { east: [0, 4, 16, 16], west: [0, 4, 16, 16] },
+  },
+  {
+    box: [8 - AMETHYST_REACH, 8, 8, 8 + AMETHYST_REACH, 20, 8],
+    rotation: AMETHYST_SPIN,
+    texture: "calibrated_sculk_sensor_amethyst",
+    uv: { north: [0, 4, 16, 16], south: [0, 4, 16, 16] },
+  },
+];
+
+function calibratedSculkSensor(entry: PaletteEntry): BlockShape {
+  /*
+   * North-authored -- `facing=north` is the variant with no `y` -- and the
+   * amethyst input is the face **opposite** `facing`, which is what the model
+   * says: the unrotated one wears `#calibrated_side` on its south.
+   */
+  return transform(
+    [
+      sensorBody({
+        up: "calibrated_sculk_sensor_top",
+        down: "sculk_sensor_bottom",
+        north: "sculk_sensor_side",
+        east: "sculk_sensor_side",
+        south: "calibrated_sculk_sensor_input_side",
+        west: "sculk_sensor_side",
+      }),
+      ...sculkTendrils(entry),
+      ...CALIBRATED_AMETHYST,
+    ],
+    northFacingSteps(entry),
+    false,
+  );
+}
+
+/** The rim's inside, one face each: the outward one is the rim's own. */
+const SHRIEKER_BOWL: readonly ShapeBox[] = [
+  {
+    box: [1, 14.98, 1, 15, 14.98, 15],
+    texture: "sculk_shrieker_top",
+    omit: ["up"],
+  },
+  {
+    box: [1, 8, 14.98, 15, 15, 14.98],
+    texture: "sculk_shrieker_side",
+    omit: ["south"],
+  },
+  {
+    box: [1, 8, 1.02, 15, 15, 1.02],
+    texture: "sculk_shrieker_side",
+    omit: ["north"],
+  },
+  {
+    box: [14.98, 8, 1, 14.98, 15, 15],
+    texture: "sculk_shrieker_side",
+    omit: ["east"],
+  },
+  {
+    box: [1.02, 8, 1, 1.02, 15, 15],
+    texture: "sculk_shrieker_side",
+    omit: ["west"],
+  },
+];
+
+function sculkShrieker(entry: PaletteEntry): BlockShape {
+  const inner =
+    entry.properties.can_summon === "true"
+      ? "sculk_shrieker_can_summon_inner_top"
+      : "sculk_shrieker_inner_top";
+  return boxes(
+    sensorBody({
+      up: inner,
+      down: "sculk_shrieker_bottom",
+      north: "sculk_shrieker_side",
+      east: "sculk_shrieker_side",
+      south: "sculk_shrieker_side",
+      west: "sculk_shrieker_side",
+    }),
+    {
+      box: [1, 8, 1, 15, 15, 15],
+      textures: {
+        up: "sculk_shrieker_top",
+        north: "sculk_shrieker_side",
+        east: "sculk_shrieker_side",
+        south: "sculk_shrieker_side",
+        west: "sculk_shrieker_side",
+      },
+      // Coincident with the slab's lid, which is the `inner_top` you see
+      // through the hole.
+      omit: ["down"],
+    },
+    ...SHRIEKER_BOWL,
+  );
+}
+
+/**
+ * Where a rod points, as **one** rotation each -- and it is one table for both
+ * rods, because `end_rod.json` and `lightning_rod.json` have byte-for-byte the
+ * same six variants.
+ *
+ * That blockstate spells east and west as an x turn *and* a y turn, and a
+ * `ShapeBox` carries one rotation rather than a pair -- so those two are
  * restated as a single turn about z, which lands the rod on the same axis. The
  * difference between the two spellings is a roll about the rod's own length,
- * and that is **unobservable here**: all four of the rod's side faces wear the
- * identical window `[0, 0, 2, 15]`, as do the base's. The same argument the
- * bell's body rests on, for the same reason.
+ * and that is **unobservable on either block**: all four side faces of an end
+ * rod wear the identical window `[0, 0, 2, 15]`, as do its base's, and all four
+ * of a lightning rod's shaft wear `[0, 4, 2, 16]`, as do its head's. The two
+ * windows that would show a roll -- the head's lid and the shaft's foot -- are
+ * on the ends, where a roll moves nothing. The same argument the bell's body
+ * rests on, for the same reason.
  *
  * Vanilla's `x` turns the opposite way from `tiltFace`'s, which is why north is
  * -90 and not +90. Getting that backwards points every rod at the block behind
  * the one it grew from.
  */
-const END_ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
+const ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
   up: undefined,
   down: { origin: [8, 8, 8], axis: "x", angle: 180 },
   north: { origin: [8, 8, 8], axis: "x", angle: -90 },
@@ -2008,9 +2553,61 @@ const END_ROD_TURN: Readonly<Record<string, BoxRotation | undefined>> = {
   west: { origin: [8, 8, 8], axis: "z", angle: 90 },
 };
 
+function pointedRod(parts: readonly ShapeBox[], entry: PaletteEntry): BlockShape {
+  const turn = ROD_TURN[entry.properties.facing ?? "up"];
+  return boxes(...(turn === undefined ? parts : parts.map((part) => ({ ...part, rotation: turn }))));
+}
+
 function endRod(entry: PaletteEntry): BlockShape {
-  const turn = END_ROD_TURN[entry.properties.facing ?? "up"];
-  return boxes(...(turn === undefined ? END_ROD : END_ROD.map((part) => ({ ...part, rotation: turn }))));
+  return pointedRod(END_ROD, entry);
+}
+
+/**
+ * A lightning rod: a 4x4x4 head on a 2x12x2 shaft, `template_lightning_rod`.
+ *
+ * All **eight** of them were full opaque cubes -- the plain one and the three
+ * oxidation stages, each with a waxed mirror -- and this is the end rod's fault
+ * word for word, on the block next to it in the same file. `lightning_rod.png`
+ * is 15.6% opaque with its art in `u 0..4, v 0..16`, a quarter of the tile, so
+ * the cube wore a mostly transparent picture on all six faces and sealed its
+ * own cell into the bargain.
+ *
+ * The windows are the template's verbatim, the head's lid included: `[4, 4, 0,
+ * 0]` is reversed on both axes, which is a half turn, and vanilla means it.
+ * The shaft has no `up` face because the head is standing on it.
+ *
+ * **`powered` swaps the texture and moves not one coordinate**, which is why it
+ * is in `candidatesForName` beside `lit` rather than here: vanilla points every
+ * oxidation stage at the same `lightning_rod_on`, so the swap is of the whole
+ * block and there is nothing per-face about it.
+ */
+const LIGHTNING_ROD: readonly ShapeBox[] = [
+  {
+    box: [6, 12, 6, 10, 16, 10],
+    uv: {
+      north: [0, 0, 4, 4],
+      south: [0, 0, 4, 4],
+      west: [0, 0, 4, 4],
+      east: [0, 0, 4, 4],
+      down: [0, 0, 4, 4],
+      up: [4, 4, 0, 0],
+    },
+  },
+  {
+    box: [7, 0, 7, 9, 12, 9],
+    uv: {
+      north: [0, 4, 2, 16],
+      south: [0, 4, 2, 16],
+      west: [0, 4, 2, 16],
+      east: [0, 4, 2, 16],
+      down: [0, 4, 2, 6],
+    },
+    omit: ["up"],
+  },
+];
+
+function lightningRod(entry: PaletteEntry): BlockShape {
+  return pointedRod(LIGHTNING_ROD, entry);
 }
 
 /**
@@ -3123,6 +3720,275 @@ function pistonHead(): BlockShape {
   );
 }
 
+/**
+ * `template_seagrass`: four upright planes in a hash, and not a cross.
+ *
+ * Two across the north-south axis at `z = 4` and `z = 12`, two across the
+ * east-west at `x = 4` and `x = 12`, each spanning its cell whole. That is a
+ * denser, squarer silhouette than `block/cross`, which is two diagonals, and
+ * it is what makes a seabed of the stuff read as a meadow rather than as a
+ * scattering of Xs.
+ *
+ * `tall_seagrass` had no shape at all, so it was a **solid opaque cube** two
+ * blocks high wearing a texture half made of water. That is the amethyst bud's
+ * fault in a plant: `occludesNeighbours` answers from the shape and
+ * `lighting.ts` floods from that predicate, so a bed of it sealed every cell
+ * it stood in and put the seabed underneath in the dark.
+ *
+ * `seagrass` was a `cross`, which is the right *kind* of wrong -- see-through,
+ * culling nothing -- and still the wrong model. It comes along here because it
+ * is not a related block, it is the identical file: `seagrass.json`,
+ * `tall_seagrass_bottom.json` and `tall_seagrass_top.json` are three names for
+ * `template_seagrass` with three textures.
+ *
+ * **No `uv` window is stated, and that is deliberate**, which is
+ * `amethystBud`'s rule for `amethystBud`'s reason: every plane spans 0..16 on
+ * both of its own axes, so the derived window already *is* vanilla's
+ * `[0, 0, 16, 16]`. Stating them would be a copy of the coordinates to keep
+ * correct.
+ *
+ * The `half` splits the texture and not one coordinate -- `tall_seagrass_top`
+ * against `tall_seagrass_bottom` -- and `plainCandidates` has read that
+ * property since the two-tall flowers needed it.
+ */
+const SEAGRASS_PLANES: readonly ShapeBox[] = [
+  { box: [0, 0, 4, 16, 16, 4] },
+  { box: [0, 0, 12, 16, 16, 12] },
+  { box: [4, 0, 0, 4, 16, 16] },
+  { box: [12, 0, 0, 12, 16, 16] },
+];
+
+const seagrass = (): BlockShape => boxes(...SEAGRASS_PLANES);
+
+/**
+ * A small dripleaf: three leaf plates on a crossed stem, `small_dripleaf_top`
+ * and `small_dripleaf_bottom`.
+ *
+ * It was in `CROSS_BLOCKS` and it was **a placeholder**, which is two faults
+ * with one cause. The pack has `small_dripleaf_top`, `_side`, `_stem_top` and
+ * `_stem_bottom` and no `small_dripleaf.png` at all, so with `half=lower` --
+ * which is what `defaultStateFor` writes and therefore what every placed one
+ * carries -- not a single candidate resolved, and `bakeFallback` throws the
+ * *shape* away when no face resolves. So the block came out as the hashed
+ * colour cube: a solid lump in an arbitrary colour where a plant should be.
+ *
+ * The model is nothing like a cross either. Three paper-thin leaf plates,
+ * 7x7, at `y = 3`, `8.02` and `12.02`, each with a one-unit rim underneath it,
+ * and two stem quads crossed at ±45°. The two hundredths are vanilla's and are
+ * left exactly as written: they hold the upper plates off the rims they stand
+ * on, which is the same job the lever base's `-0.02` does.
+ *
+ * The rims state only their four sides in vanilla. Their tops are coincident
+ * with the plate above -- same footprint, same height -- so drawing one is a
+ * flickering seam, and their undersides vanilla simply does not draw.
+ *
+ * **The windows are vanilla's and are not one texel per world unit**, which is
+ * worth saying because every other transcription in this file is: the stem's
+ * `[4, 0, 12, 14]` is eight texels wide on a seven-wide quad, and the rims'
+ * `[0, 0, 8, 1]` is eight on seven as well. Vanilla stretches them by 8/7 and
+ * copying the numbers is the rule.
+ */
+const DRIPLEAF_TILT: readonly [BoxRotation, BoxRotation] = [
+  { origin: [8, 8, 8], axis: "y", angle: 45 },
+  { origin: [8, 8, 8], axis: "y", angle: -45 },
+];
+
+const DRIPLEAF_RIM: Readonly<Record<string, UvWindow>> = {
+  north: [0, 0, 8, 1],
+  south: [0, 0, 8, 1],
+  west: [0, 0, 8, 1],
+  east: [0, 0, 8, 1],
+};
+
+const SMALL_DRIPLEAF_TOP: readonly ShapeBox[] = [
+  {
+    box: [8, 3, 8, 15, 3, 15],
+    texture: "small_dripleaf_top",
+    uv: { down: [8, 0, 0, 8], up: [8, 8, 0, 0] },
+  },
+  {
+    box: [1, 8.02, 1, 8, 8.02, 8],
+    texture: "small_dripleaf_top",
+    uv: { down: [0, 8, 8, 0], up: [0, 0, 8, 8] },
+  },
+  {
+    box: [1, 12.02, 8, 8, 12.02, 15],
+    texture: "small_dripleaf_top",
+    uv: { down: [8, 0, 0, 8], up: [0, 0, 8, 8] },
+    uvRotation: { down: 270, up: 270 },
+  },
+  {
+    box: [8, 2, 8, 15, 3, 15],
+    texture: "small_dripleaf_side",
+    uv: DRIPLEAF_RIM,
+    omit: ["up", "down"],
+  },
+  {
+    box: [1, 7.02, 1, 8, 8.02, 8],
+    texture: "small_dripleaf_side",
+    uv: DRIPLEAF_RIM,
+    omit: ["up", "down"],
+  },
+  {
+    box: [1, 11.02, 8, 8, 12.02, 15],
+    texture: "small_dripleaf_side",
+    uv: DRIPLEAF_RIM,
+    omit: ["up", "down"],
+  },
+  {
+    box: [4.5, 0, 8, 11.5, 14, 8],
+    rotation: DRIPLEAF_TILT[0],
+    texture: "small_dripleaf_stem_top",
+    uv: { north: [4, 0, 12, 14], south: [4, 0, 12, 14] },
+  },
+  {
+    box: [4.5, 0, 8, 11.5, 14, 8],
+    rotation: DRIPLEAF_TILT[1],
+    texture: "small_dripleaf_stem_top",
+    uv: { north: [4, 0, 12, 14], south: [4, 0, 12, 14] },
+  },
+];
+
+/** The lower half is the stem alone, and a taller one: `[5, 0, 12, 16]`. */
+const SMALL_DRIPLEAF_BOTTOM: readonly ShapeBox[] = [
+  {
+    box: [4.5, 0, 8, 11.5, 16, 8],
+    rotation: DRIPLEAF_TILT[0],
+    texture: "small_dripleaf_stem_bottom",
+    uv: { north: [5, 0, 12, 16], south: [5, 0, 12, 16] },
+  },
+  {
+    box: [4.5, 0, 8, 11.5, 16, 8],
+    rotation: DRIPLEAF_TILT[1],
+    texture: "small_dripleaf_stem_bottom",
+    uv: { north: [5, 0, 12, 16], south: [5, 0, 12, 16] },
+  },
+];
+
+/**
+ * **Only an explicit `lower` gets the stem alone**, which is the cauldron's
+ * rule for the cauldron's reason. The walk over every offered id bakes with an
+ * empty property bag and the inventory tile *is* that bake, so a bare stalk
+ * there would look exactly like the bug this fixes. Nothing is lost by it: a
+ * dripleaf out of a file carries its half, and so does one placed here, because
+ * `defaultStateFor` writes `half=lower`.
+ */
+function smallDripleaf(entry: PaletteEntry): BlockShape {
+  const parts = entry.properties.half === "lower" ? SMALL_DRIPLEAF_BOTTOM : SMALL_DRIPLEAF_TOP;
+  return transform(parts, northFacingSteps(entry), false);
+}
+
+/**
+ * A tripwire: a flat ribbon of string lying **1.5 units off the floor**, and it
+ * was a full opaque cube.
+ *
+ * `tripwire.png` is 11.2% opaque -- a thin diagonal line and nothing else --
+ * so the cube wore an almost empty picture on all six faces, and, because
+ * `occludesNeighbours` answers from the shape, it sealed its own cell and made
+ * `coversFace` call a length of string sturdy ground. A corridor of trip wires
+ * put itself in the dark, which is the amethyst bud's fault in a redstone
+ * block.
+ *
+ * Vanilla writes it as elements with `from` and `to` equal on **y**, so four
+ * of the six faces have no area and `boxFaces` drops them: two quads per
+ * segment, up and down, exactly as a rail is two.
+ *
+ * **It is segments of four rather than one long ribbon, and that is the
+ * texture rather than the geometry.** Each segment carries the whole `0..16`
+ * of its window, so the string repeats four times along a full run. The window
+ * is 16x2 on a quad 4 long and half a unit wide, which is a uniform four-fold
+ * magnification -- vanilla's, and the reason a "one texel per world unit"
+ * check would be the wrong check here.
+ *
+ * `attached` moves the window down two rows, `[4..6]` to `[6..8]`, and moves
+ * not one coordinate. `disarmed` and `powered` move nothing at all: the
+ * blockstate keys only on `attached` and the four directions, which is
+ * `signal_fire`'s answer -- what they change is behaviour and particles, and
+ * this file may not invent geometry for either.
+ */
+const TRIPWIRE_HEIGHT = 1.5;
+/** The two rows of the sheet, loose and pulled taut. */
+const TRIPWIRE_BANDS: Readonly<Record<string, readonly [number, number]>> = {
+  loose: [4, 6],
+  attached: [6, 8],
+};
+
+function tripwireSegment(
+  axis: "ns" | "ew",
+  from: number,
+  band: readonly [number, number],
+): ShapeBox {
+  const [v0, v1] = band;
+  if (axis === "ns") {
+    return {
+      box: [7.75, TRIPWIRE_HEIGHT, from, 8.25, TRIPWIRE_HEIGHT, from + 4],
+      uv: { up: [0, v0, 16, v1], down: [16, v0, 0, v1] },
+      uvRotation: { up: 90, down: 90 },
+    };
+  }
+  return {
+    box: [from, TRIPWIRE_HEIGHT, 7.75, from + 4, TRIPWIRE_HEIGHT, 8.25],
+    uv: { up: [0, v0, 16, v1], down: [0, v1, 16, v0] },
+  };
+}
+
+/**
+ * The five models the blockstate picks between, as the near edges of their
+ * segments. Transcribed rather than derived, because they are not a rule: a
+ * lone connection runs three quarters of the way across (`n`), a pair of them
+ * on one axis runs the whole way (`ns`), and an arm that meets a crossing one
+ * stops at the middle (`ne`, `nse`).
+ */
+const TRIPWIRE_MODELS: Readonly<
+  Record<string, { readonly ns: readonly number[]; readonly ew: readonly number[] }>
+> = {
+  n: { ns: [0, 4, 8], ew: [] },
+  ns: { ns: [0, 4, 8, 12], ew: [] },
+  ne: { ns: [0, 4], ew: [8, 12] },
+  nse: { ns: [0, 4, 8, 12], ew: [8, 12] },
+  nsew: { ns: [0, 4, 8, 12], ew: [0, 4, 8, 12] },
+};
+
+/**
+ * Which model, and how far round, for one set of connections.
+ *
+ * This is `blockstates/tripwire.json`'s own thirty-two rows derived rather than
+ * copied out, and every arm of it is checked against them: nothing connected
+ * takes `ns`, so a wire with no neighbours lies north-south, which is what the
+ * game draws.
+ */
+function tripwireVariant(entry: PaletteEntry): { model: string; steps: number } {
+  const on = TRIPWIRE_DIRECTIONS.map((face) => entry.properties[face] === "true");
+  const count = on.filter(Boolean).length;
+  if (count === 4) return { model: "nsew", steps: 0 };
+  if (count === 0) return { model: "ns", steps: 0 };
+  if (count === 1) return { model: "n", steps: on.indexOf(true) };
+  if (count === 3) return { model: "nse", steps: (on.indexOf(false) + 1) % 4 };
+  // Two: either the pair is opposite, and the wire runs straight through, or
+  // it is a corner and `ne` is turned so its north arm lands on the first of
+  // the two that are adjacent going clockwise.
+  if (on[0] === on[2]) return { model: "ns", steps: on[0] ? 0 : 1 };
+  const corner = [0, 1, 2, 3].find((i) => on[i] && on[(i + 1) % 4]) ?? 0;
+  return { model: "ne", steps: corner };
+}
+
+/** North, east, south, west -- one `rotateBoxY` step apart, in that order. */
+const TRIPWIRE_DIRECTIONS = ["north", "east", "south", "west"] as const;
+
+function tripwire(entry: PaletteEntry): BlockShape {
+  const band = TRIPWIRE_BANDS[entry.properties.attached === "true" ? "attached" : "loose"];
+  const { model, steps } = tripwireVariant(entry);
+  const runs = TRIPWIRE_MODELS[model];
+  return transform(
+    [
+      ...runs.ns.map((from) => tripwireSegment("ns", from, band)),
+      ...runs.ew.map((from) => tripwireSegment("ew", from, band)),
+    ],
+    steps,
+    false,
+  );
+}
+
 /** Exact block names, taking precedence over the suffix table. */
 const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>> = {
   /*
@@ -3172,7 +4038,15 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   // Flat against the face they sit on. As cubes they hid the block underneath,
   // which for a rail means the track is invisible and the ground is too.
   rail,
-  lever: (e) => againstWall(e, 3),
+  lever,
+
+  // Half a block tall with something standing on it: tendrils, an amethyst
+  // cross, a bowl. As cubes they sealed their own cell and drew a side texture
+  // that is half transparent over twice the height it belongs on.
+  sculk_sensor: sculkSensor,
+  calibrated_sculk_sensor: calibratedSculkSensor,
+  sculk_shrieker: sculkShrieker,
+  tripwire: tripwire,
   tripwire_hook: (e) => againstWall(e, 3),
   glow_lichen: (e) => againstWall(e, 1),
 
@@ -3181,6 +4055,14 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   cactus: () => boxes([1, 0, 1, 15, 16, 15]),
   scaffolding: () => boxes([0, 14, 0, 16, 16, 16]),
   bamboo: () => boxes([6.5, 0, 6.5, 9.5, 16, 9.5]),
+  /*
+   * Ahead of the `_fence` suffix, which is where it had been landing: a
+   * bamboo fence is vanilla's `custom_fence`, a different model on a
+   * different kind of texture. It is the only one in the game, so an exact
+   * name rather than a suffix -- and `bamboo_fence_gate` is deliberately
+   * not here, being `template_custom_fence_gate`, a second transcription.
+   */
+  bamboo_fence: customFence,
   kelp: () => ({ kind: "cross" }),
   kelp_plant: () => ({ kind: "cross" }),
   sea_pickle: () => boxes([6, 0, 6, 10, 6, 10]),
@@ -3223,6 +4105,9 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   cauldron,
   hopper,
   end_rod: endRod,
+  // The bare name; `_lightning_rod` in SUFFIX_SHAPES carries the three
+  // oxidation stages and their four waxed mirrors.
+  lightning_rod: lightningRod,
   chain,
   bell,
   conduit: () => boxes([5, 5, 5, 11, 11, 11]),
@@ -3254,6 +4139,12 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   dragon_egg: () => boxes([1, 0, 1, 15, 16, 15]),
   turtle_egg: () => boxes([5, 0, 5, 11, 7, 11]),
   chorus_flower: () => boxes([2, 2, 2, 14, 14, 14]),
+  // `template_seagrass` for all three of its names. Kelp is **not** one of
+  // them: `kelp.json` and `kelp_plant.json` really are `block/cross`.
+  seagrass: seagrass,
+  tall_seagrass: seagrass,
+
+  small_dripleaf: smallDripleaf,
   big_dripleaf: () => boxes([0, 11, 0, 16, 15, 16]),
   big_dripleaf_stem: () => boxes([5, 0, 5, 11, 16, 11]),
 
@@ -3315,7 +4206,6 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "fern",
   "large_fern",
   "dead_bush",
-  "seagrass",
   "sugar_cane",
   "wheat",
   "carrots",
@@ -3379,7 +4269,6 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "warped_fungus",
   "mangrove_propagule",
   "hanging_roots",
-  "small_dripleaf",
   "melon_stem",
   "pumpkin_stem",
   "attached_melon_stem",

@@ -2280,7 +2280,12 @@ answer instead: two rebuilds of one release *should* be identical.
 **Nothing publishes except the publish job.** electron-builder publishes on its
 own when it finds a `GH_TOKEN`, so the packaging step deliberately has none in
 its environment; otherwise it races the job that creates the release and leaves
-it half filled.
+it half filled. **And every `electron-builder` call passes `--publish never`** —
+the four `package*` npm scripts and both `scripts/build.*` — because the token
+did come back once: `01c1968` put `GH_TOKEN` into that step's `env`, directly
+under the comment saying there was none, and nothing noticed. The flag makes
+the rule hold whatever the environment says, and costs nothing: the update
+metadata is written either way.
 
 **A `master` build fails if its tag already exists.** Forgetting the bump is the
 ordinary mistake and its silent form is a second release replacing the first
@@ -2289,9 +2294,84 @@ downloads, the version is a statement to a person rather than a function of the
 commit log, and `semantic-release` would additionally have to get its computed
 number into `package.json` before electron-builder reads it — meaning a commit
 back into a protected branch, or a repo whose version is permanently a lie and
-whose local builds disagree with CI. The conventional commits already in use
-still pay for themselves through `gh release create --generate-notes`, which
-costs no dependency and writes nothing.
+whose local builds disagree with CI. The notes come from `gh release create
+--generate-notes`, which costs no dependency and writes nothing, and they are
+the **titles of the pull requests** merged since the previous tag rather than
+the commit subjects: `v1.0.0`'s notes are one line per PR, #1 to #3, with not
+one subject among them. So a PR title is a release note word for word, and the
+conventional commits pay for themselves through `/release-version` instead,
+which classifies the bump by them and groups each PR's body by them.
+
+**And that refusal has a twin on the pull request, because the place it fired
+was after the merge.** `build.yml` asks whether the tag exists at the moment it
+is about to publish, by which time `master` has already taken the merge: the
+release build is red and the only way out is a bump commit pushed straight onto
+a protected branch. `.github/workflows/version.yml` asks the same one-line
+question on every pull request into `master`, so the answer arrives while there
+is still a branch to fix it on.
+
+**Two copies of one rule, and both stay.** That is normally the arrangement
+this file refuses, and the argument is that these cannot drift — it is one
+question with one answer — while they cover different roads: `build.yml` is the
+backstop for everything that does not arrive through a pull request, which is
+`workflow_dispatch` and a direct push to `master`, and the gate is the early
+copy. Deleting the one in `build.yml` would leave a release publishable twice
+from a manual dispatch.
+
+**`fetch-depth: 0` is the whole of whether either of them is a check.** Shallow,
+there are no tags to read, `git rev-parse` finds nothing, and the guard passes
+in silence over a version that is already published — verified by doing it, on
+a `--depth 1` clone of this repo, where the identical snippet answers *«will
+release v1.0.0»* with `v1.0.0` sitting in the tag list. It is the one line to
+sabotage when checking that either guard still guards.
+
+Nothing under `tests/` reads YAML, so neither has an automated check behind it,
+and that is the honest arrangement rather than a gap: the gate **is** the test,
+and it runs on every pull request into `master`.
+
+**`/release-version` is the half a machine must not decide, and it stops short
+of deciding it.** The skill finds the last stable tag, reads the commits since,
+classifies them by their conventional prefix and *proposes* patch, minor or
+major **with the commits that justify it** — then asks. Choosing silently is
+`semantic-release` under another name, which the paragraph above rejects for
+reasons that have not moved; the classification is a strong default and not an
+authority, because a `fix` that changes what a saved file looks like is a
+bigger release than a `feat` that adds a menu item and only a person can say
+so.
+
+**Its one trap is the tag sort.** `git tag --sort=-v:refname` puts
+`v1.0.0-dev.5` **above** `v1.0.0` unless `versionsort.suffix` is configured —
+the opposite of what semver says — so the prereleases are filtered out before
+the newest is taken. Without that filter the "last release" is a dev build of
+the release you are standing on, and every commit since it disappears from the
+classification.
+
+What it does mechanically is one command and the two mistakes that command
+invites: **`--no-git-tag-version`**, because bare `npm version` also tags and
+the tag belongs to the publish job, which pins it to the commit that was
+actually built; and the reminder that the bump has to be on the branch going
+into `master`, since on `develop` alone it changes only what the next
+`-dev.<n>` prerelease is called. It creates no tag, pushes nothing, touches
+nothing under `.github/`, and writes no changelog — each of those is written
+into the skill because each is what somebody would add.
+
+**And it opens the two pull requests, with `gh`, one yes at a time.** The
+feature branch into `develop`, then `develop` into `master` once the first is
+merged and `develop`'s `package.json` carries the new number — read from the
+file rather than by commit, because a rebase-merge gives the bump a new SHA.
+Each is shown in the chat, title and body, and created only after an explicit
+yes, because opening a PR is public. The body is the list of changes since the
+last stable tag and nothing else — grouped by prefix, oldest first, the
+`chore(release)` commits left out, in English and without emoji — and the title
+is written to stand alone, because it is the line the release notes will carry.
+
+**Pushing and merging stay with the user.** Before any `gh pr create` the skill
+requires the remote branch to equal `HEAD`, and passes `--head` explicitly:
+without it `gh` pushes a branch it cannot find, and its own help says even
+`--dry-run` *«may still push git changes»*. It recommends a merge commit on
+both hops, and #4 is why: rebase-merged, it gave `develop` thirteen commits
+under new SHAs that the feature branch still carried, and clearing them took a
+rebase.
 
 **Two Windows targets emit a `.exe`, so neither may use `win.artifactName`.**
 `nsis` and `portable` would resolve one shared name to one path and the second
@@ -2307,6 +2387,80 @@ is a plain string with no email, and raises `authorEmailIsMissed` — failing th
 field, which is the only reason it is unaffected. Re-enabling is exactly two
 lines: the target back in the list, and `maintainer: name <email>` under
 `linux:`.
+
+**The app updates itself from the releases, and the release job is what makes
+that possible.** electron-builder always wrote `latest.yml`, the installer's
+`.blockmap` and `resources/app-update.yml`; the releases simply never carried
+the first two, because `upload-artifact` named `*.exe` and `*.AppImage` and
+nothing else. So no release up to `v1.0.1-dev.7` can be updated from, and the
+first build carrying the updater has to be installed by hand. The artifact
+lists now name the metadata files explicitly — `release/` also holds
+`builder-debug.yml`, written on both runners and colliding under
+`merge-multiple` — and the publish job refuses to create a release without
+`latest.yml` and `latest-linux.yml`, because `if-no-files-found: error` fires
+only when a pattern list matched *nothing*, which one missing file is not.
+
+**Which release is offered is the app's decision, never electron-updater's.**
+`services/updates.ts` reads `GET /repos/…/releases` with `net.fetch` — the
+system proxy, like the rest of the app's traffic — and `update_core.ts`'s
+`pickUpdate` takes the newest *by version*, not the newest published (merging
+`develop` into `master` publishes `v1.0.0` after `v1.0.1-dev.1`), strictly newer
+than `app.getVersion()`, with prereleases only when the development-builds
+setting allows them. electron-updater is then pointed at that one release's
+download directory as a `generic` feed and does only what it is good at: read
+`latest.yml`, verify the sha512, download differentially against the running
+release's `.blockmap`, install. Its own GitHub provider would choose by
+*channel*, and `dev` is not a channel it knows — the setting would have been a
+second rule beside that one. **`detectUpdateChannel: false`** is the other half:
+without it a `-dev` build writes `dev.yml`, and the app would have to know about
+channels after all.
+
+**The setup and the AppImage update themselves, and nothing else does.**
+`installKind` says which copy this is: `PORTABLE_EXECUTABLE_FILE` for the
+portable build, `APPIMAGE` for an AppImage, and for the setup the uninstaller
+beside `process.execPath` — which is what tells an installed copy from
+`win-unpacked` started by hand, over which an installer would put a second copy
+somewhere else. The portable build is sent to the release page by decision,
+not by limitation; macOS is not built; a development run can check but has
+nothing to install over. A release without the metadata turns Download into
+"Open download page" rather than into a button that can only fail.
+
+**Never install over unsaved work.** The NSIS installer that `quitAndInstall`
+starts closes the app, and ends it if it will not go — while the window's close
+handler refuses to close over a dirty document and asks. Left to that, the app
+would be killed with the question on screen. So `installUpdate` asks *first*,
+with the same `discardPrompt` (`"update"`), records the answer in
+`services/quit_guard.ts` where the close handler reads it, and only then calls
+`quitAndInstall`. A module of its own because `index.ts` and `updates.ts`
+would otherwise import each other.
+
+**The page the renderer opens is a URL this code built**, from
+`UPDATE_REPOSITORY` and the tag — never the API's `html_url`. It reaches the
+system browser through `setWindowOpenHandler`, like About's links; the
+renderer's CSP stays `connect-src 'none'`, all of the network being main's.
+
+**`includeDevBuilds` is `boolean | null`, and the null is the point.** It
+follows the running build, so a `-dev` copy keeps being offered `-dev` builds
+and a stable one stable releases, until the first explicit choice replaces it
+for good. `THEMES` stores "system" as a value because following the OS is a
+choice somebody returns to; nobody chooses to follow the build, it is only what
+happens until they have chosen. Always read it through
+`effectiveIncludeDevBuilds`. `checkOnStartup` is `!== false`, for `autoGrow`'s
+reason.
+
+**electron-updater is pinned to `6.3.9` exactly, and moves with
+electron-builder.** It is the release built on the same `builder-util-runtime`
+(9.2.10) as electron-builder 25.1.8, which writes the metadata it reads: a newer
+one brings a second copy of the runtime and a reader newer than the writer.
+Import it as `import electronUpdater from "electron-updater"`: it is CommonJS
+and defines `autoUpdater` as a getter, which Node's ESM loader cannot see as a
+named export — the named form fails when the packaged app starts, not when it
+builds.
+
+Three things in `electron-builder.yml` have nothing linking them to the code
+but `tests/services.ts`: the `publish` repository against `UPDATE_REPOSITORY`,
+`productName` against `NSIS_UNINSTALLER`, and `detectUpdateChannel: false`
+against `updateMetadataFile`.
 
 **In flight, Ctrl belongs to the camera, and only main can honour that.** With
 the pointer locked the keyboard is flying: Ctrl is the sprint modifier and WASD
@@ -4284,6 +4438,49 @@ knowing:
   reason and never reported — which is the argument for the check over the fix.
   `some` rather than `every`, because a chest's hidden faces and a plane's back
   are legitimately blank.
+- **All eight lightning rods were cubes, and it is the end rod's fault on the
+  block beside it in the same file.** `lightning_rod.png` is 15.6% opaque with
+  its art in `u 0..4, v 0..16`, a quarter of the tile, so a full cube wore a
+  mostly transparent picture on all six faces — and sealed its own cell, since
+  `occludesNeighbours` answers from the shape. Eight, because the copper golem
+  update gave the rod the three oxidation stages and their four waxed mirrors:
+  `_lightning_rod` is one `SUFFIX_SHAPES` entry, `_chain`'s arrangement for
+  `_chain`'s reason, and a stage added tomorrow needs no edit.
+
+  The model is a 4x4x4 head on a 2x12x2 shaft. The shaft has no `up` face
+  because the head stands on it, and the head's lid states `[4, 4, 0, 0]` —
+  reversed on both axes, which is a half turn, and vanilla means it.
+
+  **The six variants are `end_rod.json`'s byte for byte**, so `ROD_TURN` is one
+  table for both rods rather than two copies of the same six rotations. East
+  and west are restated there as a single turn about z where vanilla writes an
+  x *and* a y, and the difference between the two spellings is a roll about the
+  rod's own length — unobservable on either block, because all four side faces
+  of each wear the identical window and the two that would show a roll are on
+  the ends, where a roll moves nothing.
+
+  **The placement was the other half of the report, and vanilla's rule is one
+  line**: `setValue(FACING, context.getClickedFace())`. Every one of the eight
+  was landing on the registry's `facing=up` however it was placed, because the
+  rod was in none of `block_orientation.ts`' tables. It is `GROWS_FROM_CLICKED`
+  now — the amethyst bud's rule exactly — so the camera comes in where a
+  trapdoor's does and nowhere else: only when there is no face to read, which
+  is the build grid or a cell in mid-air, and there the rod points back at the
+  viewer.
+
+  **`powered` swaps the whole block's texture and moves no coordinate**, to the
+  *plain* `lightning_rod_on` whatever the oxidation — which is what every
+  stage's blockstate says. So it lives in `candidatesForName` beside `lit`
+  rather than in a shape function, and the bare name behind it is load-bearing:
+  vanilla ships that texture, the bundled pack does not override it, and a
+  one-name list would leave the plain rod resolving nothing at all.
+
+  That last rule is checked by **reading the source**, which is the weaker kind
+  and is worth saying. Deleting it fails no bake here — with or without it a
+  powered rod comes out wearing its own unpowered texture, which is
+  `resolveBoxTexture`'s fallback working — so it is `closeAllConnections`'
+  idiom for `closeAllConnections`' reason. What makes the rule worth having
+  anyway is that a request may carry its own `resourcePackPath`.
 - **The candle's flame is this file's one deliberate invention, and it is
   labelled.** No vanilla model has one: `candle_one_candle_lit.json` is the
   same `template_candle` with `all: block/candle_lit`, and the two textures
@@ -4383,6 +4580,268 @@ knowing:
   and the funnel's underside rather than to a side of the block. The hopper is
   also the one of the five whose UVs were right and whose *geometry* was the
   whole fault: the rim as a solid lump, with no bowl, funnel or spout.
+- **A dispenser and a dropper are made of a *furnace*, and that is the whole
+  fault.** `dispenser.json` and `dropper.json` name `block/furnace_side` and
+  `block/furnace_top` outright, and `dispenser_side.png` and
+  `dispenser_top.png` are files vanilla has never had. So `dispenser_front` was
+  the one name of the six that resolved, and `cubeFaceTextures`' fallback —
+  which gives a face that resolved nothing whatever the first face that did
+  resolve came back with — painted it on the other five. The block wore its
+  own face on its back, its sides, its lid and its floor. Reported as exactly
+  that, and it is `hopper_side` one block along.
+
+  That fallback is `bakeFallback` one level down, and worse in the same way:
+  the answer it gives is not missing, it is *plausible*. Nothing anywhere
+  reports it, and the walk that fails on any block reaching the hashed-colour
+  cube cannot see it, because a texture did resolve.
+
+  Three things follow, and none of them is the row in the table:
+
+  - **the underside is the lid.** `orientable.json` is
+    `orientable_with_bottom` with `bottom` set to `#top`, so `bottom` in the
+    rule is the top texture rather than a bottom of its own;
+  - **pointing up or down is a different model, and not only in the front.**
+    `dispenser_vertical.json` is `orientable_vertical`, whose floor *and all
+    four walls* are `#side`, and it sets `side` to `furnace_top`. So one
+    standing on end has the furnace's lid all round it rather than its side —
+    a property choosing the texture, which a candidate list cannot do. That is
+    the campfire's lesson one table along, and `SpecialFaceRule.vertical` is
+    where it lives. The front itself needs no table: `_front_vertical` is
+    offered when the facing is vertical and the pack decides who has one,
+    which is these two and nothing else;
+  - **the `facing` arms are a prefix and used to be an answer.** `[_back,
+    _side, normalized]` stopped there, and a dropper has none of those three,
+    so its back face never reached the rule that knows what a dropper is made
+    of. Falling through costs nothing anywhere else — what follows offers
+    `_side` and the bare name in the same order those did — and the observer
+    is the control, because it really does ship an `observer_back`.
+- **A block that points somewhere never wears its front on a flat face, and
+  the underside of every furnace in the game was wearing the fire.** Every
+  template vanilla builds one of these from puts `#top`, `#bottom` or `#side`
+  on the lid and the floor, and not one of them ever puts `#front` there:
+  `orientable` is `orientable_with_bottom` with `bottom` set to `#top`,
+  `template_command_block` writes `down: #side, up: #side`, and the observer
+  writes `#top` on both. But `<name>_top` was not offered for a `down` face and
+  `<name>_side` was offered for neither, so those faces resolved nothing and
+  took the fallback above — the first face that *did* resolve, which on a block
+  whose front is the only texture named after it is the front.
+
+  **It is guarded on the block having a `facing`, which is the difference
+  between a rule and a guess.** A jukebox is `cube_top` and its floor really is
+  `jukebox_side`; a log is `cube_column` and its ends really are `#end`.
+  Neither points anywhere and neither is touched — offered outright, `_top` on
+  a `down` face would have taken the jukebox's floor with nothing anywhere
+  failing.
+
+  `end_portal_frame` is the one member of the set vanilla does not derive: its
+  floor is `end_stone`, written out in the model. It costs one line, because a
+  `SPECIAL_FACE_RULES` row is consulted before the generic list.
+
+  **26 of 745 answers move**, over every cube-shaped id at every one of its
+  facings: the furnace and the blast furnace, the observer, the chiseled
+  bookshelf, the three command blocks and the end portal frame.
+
+  What was deliberately left is the blocks that point **nowhere**. Half of that
+  remainder is the bullet below; the other half stands: a crafting table, a
+  cartography table and a fletching table each stand on their own wood's
+  planks, which is a name nothing here could derive, and reaching it means
+  offering `_top` for a `down` face outright — a change across all 1197 ids
+  that the `cube_top` family disagrees with, so it is still a commit of its
+  own, like `<name>_sides`.
+- **A pillar wears its end on both ends, and the standing one stood on its own
+  bark.** `cube_column` writes `down: #end` beside `up: #end`, and the two
+  *lying* arms of `cubeFaceTextures` had always said so — the end texture on
+  east **and** west for `axis=x`, north **and** south for `axis=z`. The
+  standing arm handed `faces.down` straight back, and what the generic list
+  resolves for a `down` face is `_bottom`, `_down`, `_lower` and `_end`, not
+  one of which vanilla ships for a log. So the list ran on to the bare name and
+  every log in the game had its growth rings on the lid alone.
+
+  **59 of 59.** Measured over every id the app offers that carries an `axis`
+  and bakes as a cube: not one of them resolved a `down` of its own, so there
+  was no underside anywhere to lose by writing the end there. The other eleven
+  — the ten chains and `nether_portal` — are not cubes, or not columns, and
+  take their textures per box.
+
+  **`axis` is the guard, and it is the whole difference between this and the
+  change it looks like.** A jukebox is `cube_top`, its floor really is
+  `jukebox_side`, and it carries no `axis`: offering `_top` for a `down` face
+  outright would have taken that floor with nothing anywhere failing. It is the
+  `facing` guard one bullet up, on the other property, and it leaves the
+  crafting tables exactly where the paragraph above left them.
+
+  The membership is the part nobody would have written out by hand —
+  `deepslate`, `basalt`, `bamboo_block`, `hay_block`, `bone_block`, the three
+  froglights, `muddy_mangrove_roots` and `creaking_heart` are all in it beside
+  the logs — so `tests/blocks.ts` states it as a walk, and as an *equality
+  between the two ends* rather than against a list of texture names: a name
+  list would be a second copy of the pack, where this is one sentence about
+  what a pillar is. Beside it, that the end is not the flank's texture, which
+  is the clause that would go on passing if the two ends were made equal by
+  giving them both the side.
+- **A tripwire is a ribbon of string a unit and a half off the floor, and it
+  was a full opaque cube.** `tripwire.png` is 11.2% opaque — a thin diagonal
+  line and nothing else — so the cube wore an almost empty picture on all six
+  faces, and, `occludesNeighbours` answering from the shape, it sealed its own
+  cell and `coversFace` called a length of string sturdy ground. A corridor of
+  them put itself in the dark: the amethyst bud's fault in a redstone block.
+
+  Vanilla writes it as elements with `from` and `to` equal on **y**, so four of
+  the six faces have no area and `boxFaces` drops them — two quads a segment,
+  exactly as a rail is two.
+
+  **It is segments of four rather than one long ribbon, and that is the texture
+  rather than the geometry.** Each segment carries the whole `0..16` of its
+  window, so the string repeats four times along a full run, and the window is
+  16x2 on a quad four long and half a unit wide: a uniform **four-fold**
+  magnification. That is why a "one texel per world unit" check would be the
+  wrong check here, and why the check written instead is that the four-fold
+  holds on both axes of every quad.
+
+  **Five models and a quarter-turn, and the five are not a rule.** A lone
+  connection runs three quarters of the way across, a pair on one axis runs the
+  whole way, and an arm that meets a crossing one stops at the middle. So the
+  models are transcribed and only the *choice* between them is derived, from
+  the same five booleans `blockstates/tripwire.json` keys its thirty-two rows
+  on — and the derivation was checked against those rows: **all 32 states
+  reproduce vanilla's own geometry exactly**, model and `y` together, compared
+  element by element against the fetched files.
+
+  Which is what the rotations needed, because they are where this hides. Three
+  of them failed **nothing at all** when they were first sabotaged: the
+  three-armed turn off by one quarter, the corner turned the other way, and the
+  east-west pair left unturned. The extents of every corner, every tee and both
+  axis pairs are stated by name now.
+
+  `attached` moves the window two rows down the sheet and not one coordinate.
+  `disarmed` and `powered` move **nothing** — the blockstate keys on neither,
+  which is `signal_fire`'s answer: what they change is behaviour and particles,
+  and this file may not invent geometry for either.
+
+  Two things are deliberately left. **The connections are not derived**, so a
+  placed wire is unconnected and lies north-south, which is what the game draws
+  for an isolated one; `block_connections.ts` dispatches on fence, wall and
+  pane and has never had a wire arm. And `tripwire_hook` is still
+  `againstWall(e, 3)`, which is the lever's fault on the block that pulls this
+  one taut.
+- **A small dripleaf was a placeholder, and the walk that exists to catch that
+  could not see it.** The pack ships `small_dripleaf_top`, `_side`, `_stem_top`
+  and `_stem_bottom` and no `small_dripleaf.png` at all. At `half=lower` —
+  which is what `defaultStateFor` writes, so what **every placed one carries**
+  — the `half` arm of `plainCandidates` offered `_bottom`, `_lower` and the
+  bare name, the pack has none of the three, and `bakeFallback` throws the
+  *shape* away when no face resolves. So it came out as the hashed-colour cube:
+  a solid lump in an arbitrary colour where a plant should be.
+
+  **The `half` arm was an answer and is now a prefix**, which is the `facing`
+  arms' fault of the dispenser commit, one property along. Falling through
+  costs nothing and the bare name is deliberately left in the prefix rather
+  than moved to the end of the generic list, so every block the arm already
+  answered for keeps its answer: measured over all **232** `half` states of
+  every offered id, **exactly one moves** — this block, from the hashed cube to
+  `small_dripleaf_side`.
+
+  **And the walk bakes each id twice now, bare and as the game would place
+  it.** That is the hole this fell through: bare, `small_dripleaf` resolves
+  `small_dripleaf_top` through the generic `_top` candidate and passes all four
+  clauses, and the fault lives entirely in a *property*. 1197 ids, 1960 states,
+  and all four clauses were already clean at the second bag — so it cost
+  nothing to add and would have named this block on the day it was written.
+
+  The model is nothing like the `cross` it was listed as: three paper-thin leaf
+  plates at `y = 3`, `8.02` and `12.02`, a one-unit rim under each, and two stem
+  quads crossed at ±45°. The two hundredths are vanilla's, doing the lever
+  base's job of holding a part off the one below it. A rim states only its four
+  sides — its top is coincident with the plate standing on it, and vanilla
+  simply does not draw its underside.
+
+  **Its windows are not one texel per world unit, and that is vanilla**: the
+  stem's `[4, 0, 12, 14]` is eight texels across a seven-wide quad and the
+  rims' `[0, 0, 8, 1]` is eight across seven. Copying the numbers is the rule,
+  here as everywhere.
+
+  `facing` is derived at the click in the same commit, for `amethystBud`'s
+  reason: while all four facings drew the same cube it bought nothing, and the
+  moment the model turns, not deriving it is half the block coming out wrong.
+  It is `FRONT_TO_PLAYER`, and the wiki says so in that table's own words —
+  *«the opposite from the direction the player faces while placing the small
+  dripleaf»*.
+
+  **What is deliberately left is that placing one places a single half.** In
+  the game a dripleaf, a tall fern, a sunflower and tall seagrass are all
+  `DoublePlantBlock` and go in as two cells; `TWO_PART` in `services/session.ts`
+  knows only `_bed` and `_door`, both by suffix. The membership is derivable —
+  a `half` whose legal values are `lower|upper` rather than `top|bottom` is
+  exactly that family, doors included — so it is a real piece of work in
+  `session.ts` rather than a line here, and it is a family of ten rather than
+  this one block.
+- **Seagrass is four planes in a hash, and tall seagrass was a solid cube.**
+  `template_seagrass` states two planes across the north-south axis at `z = 4`
+  and `z = 12` and two across the east-west at `x = 4` and `x = 12`, each
+  spanning its cell whole — a denser, squarer silhouette than `block/cross`,
+  which is two diagonals, and what makes a seabed of it read as a meadow.
+
+  `tall_seagrass` was in no shape table at all, so it was a cube: **opaque**,
+  two blocks high, wearing a texture 51.5% made of water. That is the amethyst
+  bud's fault in a plant — `occludesNeighbours` answers from the shape and
+  `lighting.ts` floods from that predicate, so a bed of it sealed every cell it
+  stood in and put the seabed underneath in the dark, while `coversFace` called
+  it sturdy ground.
+
+  `seagrass` comes along with it, and not as a related block: `seagrass.json`,
+  `tall_seagrass_bottom.json` and `tall_seagrass_top.json` are **three names
+  for one model**. It was a `cross`, which is the right kind of wrong —
+  see-through, culling nothing — and still not what vanilla draws. **Kelp is
+  the control**: `kelp.json` and `kelp_plant.json` really are `block/cross`, so
+  this is an exact-name rule and not a rule about things that grow in water.
+
+  **No `uv` window is stated, and that is deliberate**, which is `amethystBud`'s
+  rule for its reason: every plane spans 0..16 on both of its own axes, so the
+  derived window already *is* vanilla's `[0, 0, 16, 16]`, and stating it would
+  be a copy of the coordinates to keep correct. `half` splits the texture and
+  not one coordinate, and `plainCandidates` has read that property since the
+  two-tall flowers needed it.
+- **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
+  one member.** Every other fence in the game parents `block/fence_post` and
+  `block/fence_side` and paints them with a plank tile, so its UVs derive
+  correctly and `fence` is right for all of them. `bamboo_fence` parents
+  `block/custom_fence_post` and the four `custom_fence_side_<dir>` models, and
+  those wear a **sheet**: `bamboo_fence.png` carries the post's flank, the
+  post's lid, the rail's long side, the rail's end cap and the rail's lid each
+  in its own patch.
+
+  So it is the lantern's fault on a block that looked like it had none — a post
+  full of holes still reads as a fence. Measured on the shipped pack: the
+  flanks want `u 0..4, v 0..16`, which is **100% opaque**, and were reading
+  `u 6..10`, which is **40.6%**; the lid wants `[4, 0, 8, 4]`, 100%, and was
+  reading its own footprint, **25%**. A post six tenths made of holes, and a
+  lid three quarters.
+
+  The geometry differs too, by three units nobody would have reported: a custom
+  fence's rails run to `z = 9`, three deep inside the post, where an ordinary
+  fence's stop at `z = 7`. Vanilla omits the face that ends up buried, which is
+  why a rail here is five faces and an ordinary fence's is six.
+
+  **The four side models are transcribed one at a time rather than turned, and
+  that is a finding rather than laziness.** They are hand-authored in vanilla
+  and are not y-rotations of one another: north's end cap is stated `rotation:
+  180` where east's and south's have none, and west's window is written
+  `[15, 4, 13, 7]`, reversed, which is a mirror. On this pack that 2x3 patch
+  differs from its own half-turn in **72 of 96 texels** and from its own mirror
+  in the same 72, so the three spellings are three different pictures.
+
+  **The check that catches this is opacity, not `facePaintsSomething`.**
+  Deleting the post's windows leaves the derived ones, which are four wide by
+  sixteen tall on a sixteen-unit face: one texel per unit, inside the tile,
+  vanilla geometry, and 40.6% opaque — so every check in `tests/blocks.ts`
+  passed with them gone, which was verified by removing them. `faceOpacity`
+  requires every face of all sixteen connection states to be **wholly** opaque,
+  which is a sentence about the block: a bamboo fence has no holes in it.
+
+  `bamboo_fence_gate` is **deliberately not done**, and it is the same fault one
+  block along: `template_custom_fence_gate` is eight hand-authored elements on
+  its own 75%-opaque sheet, `bamboo_fence_gate.png`. A second transcription, so
+  a second commit.
 - **A rail's `shape` was decoded, derived and rotated -- and drawn by
   nobody.** It comes out of `legacy_blocks.json` and out of a `.schem`, it is
   derived from the neighbours by `block_connections.ts`, and it turns with
@@ -4579,6 +5038,126 @@ knowing:
   omission.** It changes the height of the smoke column, which is a particle and
   part of no model. Giving it a shape would be inventing, which is the one thing
   this file is not allowed to do.
+- **The two sculk sensors and the shrieker were cubes, and all three are half
+  a block tall with something standing on them.** Four faults, of which the
+  silhouette is only the first:
+
+  - **`sculk_sensor_side.png` is 50% transparent, and that is the block being
+    8 high.** Only the lower half of the tile is the sensor's flank — vanilla
+    says so with `uv: [0, 8, 16, 16]` — so stretched over a full cube every
+    sensor in the game drew its side at twice its height with the top half
+    empty;
+  - **`occludesNeighbours` answered true**, so a sensor sealed its own cell.
+    `lighting.ts` floods from that predicate, which is the amethyst bud's fault
+    in a redstone block: a corridor of sensors put itself in the dark. It also
+    took the face off whatever stood on top, the sensor's lid being opaque
+    while the block under it is only half there;
+  - **the calibrated one wore its own lid on all six faces.** It ships three
+    textures — `_amethyst`, `_input_side`, `_top` — and borrows
+    `sculk_sensor_side` and `sculk_sensor_bottom` from the plain sensor, which
+    no candidate list can guess. So `calibrated_sculk_sensor_top` was the one
+    name that resolved and the fallback painted it on the other five: the
+    dispenser's fault, one block along;
+  - **and the tendrils, the amethyst and the shrieker's bowl were not drawn at
+    all**, which is what these blocks look like.
+
+  **What each property does is smaller than it looks.** `sculk_sensor_phase`
+  chooses the tendril *texture* and nothing else — `active` and `cooldown`
+  share one model and `inactive` has the other, and the two files differ by one
+  line. `can_summon` chooses the shrieker's `inner_top` the same way. `power`
+  moves nothing in any of its sixteen values, and neither does `shrieking`: a
+  shrieking shrieker is an animation and a particle, which is `signal_fire`'s
+  answer. The calibrated sensor's `facing` turns the model, and its amethyst
+  input is the face **opposite** it — `facing=north` selects the unrotated
+  model, whose `#calibrated_side` is on the south.
+
+  **The shrieker is a bowl, and that is why vanilla states five inward planes.**
+  `sculk_shrieker_top.png` is 16.5% opaque with a hole clean through the middle,
+  so what you see through it is the rim's inside and the `inner_top` on the
+  floor of the slab below. Each of those planes carries one face in vanilla and
+  would emit two here — coincident with the rim's own, which is a flickering
+  seam — so each `omit`s the outward one.
+
+  **The amethyst is the one place a window is load-bearing, and it is the
+  check.** Vanilla writes the two crossed planes 0..16 with `rescale: true`,
+  which this file has no notion of, so they are written already rescaled —
+  `pottedPlant`'s idiom. A 45° rescale is exactly `sqrt(2)`, so the planes run
+  `8 ± 8·sqrt(2)` before the turn and land corner to corner of the cell, and the
+  picture comes out stretched along them by `1/sqrt(2)` and by nothing else.
+  `tests/blocks.ts` asks for one texel per world unit on every face **except**
+  the amethyst, and for exactly `1/sqrt(2)` there: written at any other width
+  that number moves.
+
+  **Everything else states no window, and that is `amethystBud`'s rule rather
+  than an omission.** Vanilla's `[0, 8, 16, 16]` on the slab's flanks and
+  `[1, 1, 15, 8]` on the rim's are precisely what this file derives from the
+  box — the flank of an 8-tall block *is* the lower half of its tile, which is
+  why that texture is half transparent. Measured over all 102 faces of the
+  three blocks at every facing, stating them changes not one uv; what they
+  would add is a copy of the coordinates to keep correct.
+
+  `calibrated_sculk_sensor` was also missing from `lighting.ts`, at the light
+  level 1 the plain sensor already had. A hand-written table's ordinary
+  failure, and the same shape as the eleven blocks the `axis` walk recovered.
+- **A lever was a plate the size of a wall, and `face` was read nowhere.** It
+  had `againstWall(e, 3)` — the ladder's shape with a thickness — which is
+  three faults at once: the silhouette is a plate where the block is a switch;
+  a lever on the floor or on the ceiling was drawn flat against a wall, because
+  nothing looked at `face` at all; and a 16x16x3 plate lies exactly on the cell
+  boundary, so `coversFace` answered true and **the lever deleted the face of
+  the block it was screwed to**.
+
+  Vanilla is two elements: a 6x3x8 cobblestone base at `[5, -0.02, 4]`, whose
+  two hundredths hold it off the surface it sits on, and a 2x10x2 handle at
+  `[7, 1, 7]`..`[9, 11, 9]` tilted 45° about x through `[8, 1, 8]`, which is
+  where it meets the base. The handle's `down` face is omitted, as vanilla
+  omits it: it is buried in the base.
+
+  **Eight positions became twelve at the Flattening**, which is the era's doing
+  and is why `face` exists. 1.8 to 1.12.2 spelled the lever's position *and*
+  its direction as one metadata nibble, and `legacy_blocks.json` still holds
+  it: `0` is the ceiling facing north, `1..4` are the four walls, `5` and `6`
+  are the floor facing east and north, `7` is the ceiling facing east, and `+8`
+  is powered. So a pre-Flattening lever on the floor or the ceiling could only
+  lie north–south or east–west, and `south` and `west` there are what 1.13
+  added. All sixteen values already map onto `face`, `facing` and `powered`, so
+  a 1.12 schematic arrives with all three set — only the drawing was ever
+  wrong, and it was wrong in both eras for the same reason.
+
+  **`powered=false` selects the model called `lever_on`.** That reads backwards
+  and is not a transcription slip: it is what `blockstates/lever.json` has said
+  in every release from 1.13 to 1.21.9, and it is the model *names* that
+  mislead. The appearance settles which is which — the wiki's «when placed on
+  the side of blocks, down is on and up is off» — so an unpowered wall lever
+  has its handle **up**, and the angle that produces that is `lever_on.json`'s
+  `+45`.
+
+  **The three `face` values are written out**, because the blockstate turns the
+  one model with `x` and `rotateShapeBox` knows only `y`. That is
+  `ROD_TURN`'s problem with one extra turn of the screw: there the parts
+  carry no rotation of their own, and here the handle does, and a `ShapeBox`
+  holds one. So the `x` is applied by hand and the tilt stays as the residual,
+  which lands the pivot where the handle meets the base each time — `[8, 1, 8]`
+  on the floor, `[8, 8, 15]` on a wall, `[8, 15, 8]` on the ceiling. The face
+  names travel with it, `x: 90` sending up to north, north to down, south to up
+  and down to south, so the windows are the same six numbers under permuted
+  keys rather than six new ones.
+
+  **The windows are not optional and the turns are not cosmetic.** All 320
+  opaque texels of `lever.png` are in `u 7..9, v 6..16`, so UVs derived from
+  the box would address an empty corner of the tile and the handle would draw
+  nothing at all — the chain's fault on a smaller strip. And a window that
+  survives the hand-applied `x` still arrives a quarter turn out on the faces
+  whose normal did not move: the wall's `west: 90, east: 270` is the anvil's
+  pair, for the anvil's reason, on both the handle and the base.
+
+  What `tests/blocks.ts` states is **one texel per world unit on every face of
+  all 24 states**, which is the only check that can see a missing `uvRotation`:
+  the window still names the right pixels and lays them across the face
+  sideways, with the UVs inside the tile and the geometry untouched. Beside it,
+  that the strip is not laid end for end — its first two rows are the cap, mean
+  luminance 119 against 72 at the foot, so a half turn is visible — and where
+  the base sits for each `face`, which is the property that was read nowhere.
 - **An amethyst bud was a cube, and the cube sealed the geode.** All four --
   the three buds and the cluster -- fell through every table to `CUBE`, so a
   pointed crystal was drawn as a solid block wearing its own sprite on six

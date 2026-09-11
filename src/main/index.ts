@@ -20,6 +20,8 @@ import { currentSession } from "./services/session.js";
 import { discardPrompt } from "./services/discard_prompt.js";
 import { appIconPath } from "./services/resources.js";
 import { stopMcpServer } from "./mcp/server.js";
+import { quitConfirmed } from "./services/quit_guard.js";
+import { scheduleStartupCheck } from "./services/updates.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -74,7 +76,9 @@ function createWindow(): void {
    */
   let closing = false;
   mainWindow.on("close", (event) => {
-    if (closing) return;
+    // Or already answered, by an update install that asked before it quit --
+    // asking again would hold the window open under the installer.
+    if (closing || quitConfirmed()) return;
     const session = currentSession();
     if (session === null || !isDirty(session.history)) return;
 
@@ -131,6 +135,11 @@ app.whenReady().then(() => {
    * document change -- see `refreshShell`.
    */
   installMenu(() => mainWindow);
+  /*
+   * One look at GitHub a few seconds in, if the setting allows it. After the
+   * window, so the check never competes with the first paint.
+   */
+  scheduleStartupCheck();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

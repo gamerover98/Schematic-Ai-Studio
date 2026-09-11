@@ -29,6 +29,7 @@
     SHADER_MODES,
     SHADOW_QUALITIES,
     THEMES,
+    effectiveIncludeDevBuilds,
     type KeyStorageStatus,
     type Language,
     type PreviewSettings,
@@ -36,10 +37,11 @@
     type Provider,
     type Settings,
     type Theme,
+    type UpdateSettings,
   } from "../../../shared/settings.js";
   import ApiKeysSection from "./ApiKeysSection.svelte";
   import { t, tn } from "./i18n.svelte.js";
-  import type { McpActivity, McpStatus } from "../../../shared/ipc.js";
+  import type { McpActivity, McpStatus, UpdateStatus } from "../../../shared/ipc.js";
   import { dotColor, dotFor, maskToken } from "./mcp_status.js";
 import {
   bindAddressRefusal,
@@ -56,7 +58,8 @@ import {
     | "quality"
     | "textures"
     | "providers"
-    | "mcp";
+    | "mcp"
+    | "updates";
 
   interface Props {
     open: boolean;
@@ -107,6 +110,17 @@ import {
     onmcpenabled: (enabled: boolean) => void;
     onmcpregenerate: () => void;
     onpickmcproot: () => void;
+    /**
+     * The updater, from main -- what it found and what it is doing -- and the
+     * four things the pane can ask of it. Main's rather than the settings'
+     * for the MCP status's reason: the settings are what was asked for, this
+     * is what happened.
+     */
+    updateStatus: UpdateStatus | null;
+    onupdateschange: (patch: Partial<UpdateSettings>) => void;
+    oncheckupdates: () => void;
+    ondownloadupdate: () => void;
+    oninstallupdate: () => void;
   }
 
   const {
@@ -135,6 +149,11 @@ import {
     onmcpenabled,
     onmcpregenerate,
     onpickmcproot,
+    updateStatus,
+    onupdateschange,
+    oncheckupdates,
+    ondownloadupdate,
+    oninstallupdate,
   }: Props = $props();
 
   /**
@@ -218,6 +237,70 @@ import {
   const onLoopback = $derived(isLoopbackAddress(settings.mcp.bindAddress));
 
   /*
+   * The development-builds box, drawn from what it means right now rather than
+   * from the stored value: on a `-dev` build that nobody has touched it is
+   * ticked, because that is what the check does. The first change writes a
+   * real boolean, and from then on the box means what it says.
+   */
+  const includeDevBuilds = $derived(
+    effectiveIncludeDevBuilds(settings.updates, updateStatus?.currentVersion ?? ""),
+  );
+  const updateBusy = $derived(
+    updateStatus?.state === "checking" || updateStatus?.state === "downloading",
+  );
+
+  /*
+   * Download only where this copy can replace itself *and* the release
+   * carries what it needs to. Everywhere else the same row offers the page:
+   * a button that can only fail is worse than a link that works.
+   */
+  const canDownload = $derived(
+    updateStatus !== null &&
+      updateStatus.inApp &&
+      updateStatus.latest !== null &&
+      updateStatus.latest.installable &&
+      (updateStatus.state === "available" || updateStatus.state === "error"),
+  );
+
+  const updateLabel = $derived.by(() => {
+    const status = updateStatus;
+    switch (status?.state) {
+      case "checking":
+        return t("updates.state.checking");
+      case "upToDate":
+        return t("updates.state.upToDate");
+      case "available":
+        return t(
+          status.latest?.prerelease ? "updates.state.availableDev" : "updates.state.available",
+          { version: status.latest?.version ?? "" },
+        );
+      case "downloading":
+        return t("updates.state.downloading", {
+          percent: String(Math.round(status.progress?.percent ?? 0)),
+        });
+      case "ready":
+        return t("updates.state.ready", { version: status.latest?.version ?? "" });
+      // Main's own sentence, which is the one that says what went wrong.
+      case "error":
+        return status.message ?? t("updates.state.error");
+      default:
+        return t("updates.state.idle");
+    }
+  });
+
+  /*
+   * Why this copy offers a page rather than a download, in words -- and only
+   * while there is a release on offer, since with nothing to install there is
+   * nothing to explain.
+   */
+  const manualReason = $derived.by(() => {
+    const status = updateStatus;
+    if (status === null || status.latest === null) return null;
+    if (!status.inApp) return t(`updates.manual.${status.kind}`);
+    return status.latest.installable ? null : t("updates.manual.metadata");
+  });
+
+  /*
    * The state in words.
    *
    * An error carries main's own message, which is not translated -- it arrives
@@ -255,6 +338,7 @@ import {
     { id: "textures", key: "settings.textures" },
     { id: "providers", key: "settings.providers" },
     { id: "mcp", key: "settings.mcp" },
+    { id: "updates", key: "settings.updates" },
   ];
 
   let category = $state<Category>("appearance");
@@ -1059,6 +1143,83 @@ import {
               </ul>
             {/if}
           </div>
+        {:else if category === "updates"}
+          <div class="field">
+            <span class="label">{t("updates.installed")}</span>
+            <p class="state">
+              {updateStatus === null
+                ? "—"
+                : t("updates.installedValue", {
+                    version: updateStatus.currentVersion,
+                    kind: t(`updates.kind.${updateStatus.kind}`),
+                  })}
+            </p>
+          </div>
+
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={settings.updates.checkOnStartup}
+              onchange={(event) => onupdateschange({ checkOnStartup: event.currentTarget.checked })}
+            />
+            {t("updates.checkOnStartup")}
+          </label>
+          <p class="hint">{t("updates.checkOnStartupHint")}</p>
+
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={includeDevBuilds}
+              disabled={updateBusy}
+              onchange={(event) =>
+                onupdateschange({ includeDevBuilds: event.currentTarget.checked })}
+            />
+            {t("updates.includeDev")}
+          </label>
+          <p class="hint">{t("updates.includeDevHint")}</p>
+
+          <div class="field">
+            <span class="label">{t("updates.status")}</span>
+            <p class="state">{updateLabel}</p>
+            {#if updateStatus?.state === "downloading"}
+              <progress class="download" max="100" value={updateStatus.progress?.percent ?? 0}
+              ></progress>
+            {/if}
+            {#if manualReason !== null}
+              <p class="hint">{manualReason}</p>
+            {/if}
+            {#if updateStatus?.state === "ready"}
+              <p class="hint">{t("updates.readyHint")}</p>
+            {/if}
+            {#if updateStatus?.checkedAt}
+              <p class="hint">
+                {t("updates.checkedAt", { time: new Date(updateStatus.checkedAt).toLocaleString() })}
+              </p>
+            {/if}
+          </div>
+
+          <div class="pick-row update-actions">
+            <button onclick={oncheckupdates} disabled={updateBusy || updateStatus?.state === "ready"}>
+              {t("updates.checkNow")}
+            </button>
+            {#if canDownload}
+              <button onclick={ondownloadupdate}>{t("updates.download")}</button>
+            {/if}
+            {#if updateStatus?.state === "ready"}
+              <button onclick={oninstallupdate}>{t("updates.install")}</button>
+            {/if}
+            <!--
+              One link, to the release page, named for what it is for here: the
+              download itself where this copy cannot install, the notes where
+              it can. It reaches the system browser through
+              `setWindowOpenHandler`, like About's links.
+            -->
+            {#if updateStatus?.latest}
+              <a href={updateStatus.latest.pageUrl} target="_blank" rel="noreferrer">
+                {manualReason !== null ? t("updates.openPage") : t("updates.notes")}
+              </a>
+            {/if}
+          </div>
         {:else}
           <ApiKeysSection {settings} {keyStatus} {onchange} {onsavekey} {onclearkey} {onrevealpath} />
         {/if}
@@ -1268,6 +1429,21 @@ import {
     margin: 0;
     color: var(--text);
     font-size: 14px;
+  }
+
+  .update-actions {
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+
+  .update-actions a {
+    font-size: 12px;
+  }
+
+  progress.download {
+    width: 100%;
+    margin-top: 8px;
   }
 
   .rebuilds {

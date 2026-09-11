@@ -1,0 +1,58 @@
+# The forgotten-bump guard, on the pull request rather than after the merge.
+#
+# `build.yml` already refuses to publish over a tag that exists, and that
+# refusal fires in the wrong place: by then the merge into master has happened,
+# the release build is red, and the only way out is a bump commit pushed
+# straight onto a protected branch. Same question, asked one step earlier.
+#
+# This is deliberately a second copy of that check, and both stay. They cannot
+# drift -- it is a one-line question with one answer -- and they cover different
+# roads: `build.yml` is the backstop for everything that does not arrive through
+# a pull request (`workflow_dispatch`, and a direct push to master), and this is
+# the early copy. Deleting the one in `build.yml` would leave a release
+# publishable twice from a manual dispatch.
+name: Version
+
+on:
+  # master only. A pull request into develop is not a release and has no
+  # version to bump -- develop's number is stamped on the runner as
+  # `-dev.<run_number>` and never travels back into the repo.
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# `version-`, distinct from `build-` and `checks-`. This workflow is not
+# reusable, so the deadlock `checks.yml` documents cannot reach it; three
+# distinct prefixes are the convention here and cost a word.
+concurrency:
+  group: version-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bumped:
+    name: The version is not already released
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Load-bearing, for the reason build.yml states of its own copy:
+          # shallow, there are no tags to read, and the guard silently guards
+          # nothing. It is the one way this check stops being a check, so it is
+          # also the one line to sabotage when verifying it.
+          fetch-depth: 0
+
+      - name: Check the tag is free
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::v$version is already released. Run 'npm version patch|minor|major' on this branch before merging -- as it stands the master build would refuse to publish over the release already out under that number."
+            exit 1
+          fi
+
+          echo "### will release \`v$version\`" >> "$GITHUB_STEP_SUMMARY"
