@@ -1872,6 +1872,14 @@ console.log("\n--- what this schematic may hold ---");
       pasted.blocks.includes("minecraft:oak_stairs"),
       pasted.blocks.join(" "),
     );
+    // ...and a space is the underscore every block name is spelled with.
+    const spaced = (await callTool("list_blocks", { contains: "jungle hanging sign" }, rich()))
+      .result as { blocks: string[] };
+    check(
+      "a space in the query reads as an underscore",
+      spaced.blocks.includes("minecraft:jungle_hanging_sign"),
+      spaced.blocks.join(" "),
+    );
 
     /*
      * Two numbers, and they are different questions. `ROW_LIMIT`'s rule in the

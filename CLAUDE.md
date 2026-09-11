@@ -452,6 +452,14 @@ a failure names which letter; the check it replaced compared against
 `b.includes(q)` on the full id, which did not merely miss the fault, it stated
 it as the requirement.
 
+**And a space is an underscore, in every search that names a block.** No block
+name contains a space, so `oak slab` in the creative inventory found nothing at
+all while `oak_slab` found the slab — the spelling a person types first was the
+one guaranteed to fail. `blockQuery` in `shared/block_query.ts` is the one
+reading of a query now: trimmed, lowercased, the namespace stripped, and a run
+of whitespace one underscore. The picker, the inventory and `list_blocks` all
+ask it, which also made the namespace strip one copy where it had been two.
+
 **`blockRegistry` is `$state.raw`, and the line below it says why.** Plain
 `$state` on an array is a deep proxy, so reading it inside a `$derived`
 registers a signal per entry. It sat next to `legacyIndex`, which had been

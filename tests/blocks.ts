@@ -7272,6 +7272,17 @@ console.log("\n--- the block picker's search ---");
     searchBlocks(registry, "  stone  ")[0],
     "minecraft:stone",
   );
+
+  /*
+   * **A space is an underscore.** No block name has a space in it, so
+   * `oak slab` found nothing at all while `oak_slab` found the slab: the
+   * spelling a person types first was the one guaranteed to fail.
+   */
+  const slab = searchBlocks(registry, "oak_slab");
+  check("the slab is there to find", slab.includes("minecraft:oak_slab"), slab.join(" "));
+  equal("a space searches as an underscore", searchBlocks(registry, "oak slab"), slab);
+  equal("...a run of them as one", searchBlocks(registry, "  Oak   Slab "), slab);
+  equal("...and after a pasted namespace too", searchBlocks(registry, "minecraft:oak slab"), slab);
 }
 
 // ---------------------------------------------------------------------------

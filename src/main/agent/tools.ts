@@ -98,6 +98,7 @@ import {
   propertiesOf,
 } from "../../shared/block_states.js";
 import { describeProperty } from "../../shared/block_properties.js";
+import { blockQuery } from "../../shared/block_query.js";
 
 /**
  * The model names a turn or a reflection with two optional fields rather than a
@@ -706,15 +707,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     async run(context, args: { contains?: string; limit?: number }, id) {
       /*
-       * Stripped from the *query*, not matched against the id.
-       *
-       * `block_search.ts` had this exact bug and CLAUDE.md tells the story: every
-       * block here is `minecraft:something`, so matching the namespaced id makes
-       * every letter of `minecraft:` return the entire registry -- measured at
-       * 1197 for `a`, `m`, `e`, `c`, `r` and `t` each. One place decides, and the
-       * namespace cannot come back as a way of matching everything.
+       * The picker's own reading of a query, so the two cannot disagree: the
+       * namespace stripped from the query rather than matched against the id --
+       * `block_search.ts` had that bug, and every letter of `minecraft:` returned
+       * the whole registry -- and a space read as the underscore every block
+       * name is spelled with.
        */
-      const query = String(args?.contains ?? "").trim().toLowerCase().replace(/^minecraft:/, "");
+      const query = blockQuery(String(args?.contains ?? ""));
 
       const placeable = await placeableNames(context);
       const matches = [...placeable]
