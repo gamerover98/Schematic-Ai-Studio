@@ -4398,6 +4398,18 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "pale_hanging_moss",
   "resin_clump",
   /*
+   * The nether's vines were full opaque cubes. `weeping_vines`, `twisting_vines`
+   * and their `_plant` stems are all `block/cross` wearing their own name, which
+   * already resolved -- so the texture was right and the shape put it on six
+   * faces of a solid block. As cubes they sealed their cell, `lighting.ts`
+   * flooding from `occludesNeighbours`, and a fence beside one reached out to it
+   * as though it were stone. `age` moves nothing in any of them.
+   */
+  "weeping_vines",
+  "weeping_vines_plant",
+  "twisting_vines",
+  "twisting_vines_plant",
+  /*
    * Pointed dripstone is `block/cross` exactly -- `pointed_dripstone.json`
    * states the same two rescaled planes -- and its ten states differ only in the
    * texture, which `model_baker.ts` picks from `vertical_direction` and

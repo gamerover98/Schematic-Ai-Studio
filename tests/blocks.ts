@@ -2292,6 +2292,26 @@ console.log("\n--- pointed dripstone points where you look, and its column decid
   );
 }
 
+// --- the nether's vines are crosses -------------------------------------------
+console.log("\n--- the nether's vines are crosses ---");
+{
+  /*
+   * Full opaque cubes, which sealed their cell and let a fence connect to
+   * them. All four are `block/cross` wearing their own name.
+   */
+  const vines = ["weeping_vines", "weeping_vines_plant", "twisting_vines", "twisting_vines_plant"];
+  equal("all four are vanilla's cross", vines.filter((n) => shapeFor(block(n, {})).kind !== "cross"), []);
+  equal("...and none of them seals its cell", vines.filter((n) => occludesNeighbours(block(n, {}))), []);
+  if (pack !== null) {
+    const worn: string[] = [];
+    for (const n of vines) {
+      const key = (await baker.bakeBlockstate(block(n, {}))).textureKey;
+      if (key !== `minecraft:block/${n}`) worn.push(`${n} -> ${key}`);
+    }
+    equal("...each wearing its own texture", worn, []);
+  }
+}
+
 console.log("\n--- seagrass is four planes in a hash ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");
@@ -5976,6 +5996,8 @@ console.log("\n--- nothing is a cube by accident ---");
     "cocoa",
     "torchflower_crop",
     "pitcher_crop",
+    "weeping_vines",
+    "twisting_vines_plant",
     "chain",
     "potted_poppy",
     "white_carpet",

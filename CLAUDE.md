@@ -4856,6 +4856,11 @@ knowing:
   `pointed_dripstone_<up|down>_<thickness>`, and the `down` files are drawn
   pointing down, so nothing turns. `candidatesForName` builds the name from the
   state and falls back to the birth state for a value no file has.
+- **The nether's vines were full opaque cubes.** `weeping_vines`,
+  `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
+  name, which resolved all along — the texture was right, and the shape put it
+  on six faces of a solid block that sealed its cell and let a fence connect to
+  it. They are in `CROSS_BLOCKS` beside `cave_vines`.
 - **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
   one member.** Every other fence in the game parents `block/fence_post` and
   `block/fence_side` and paints them with a plank tile, so its UVs derive
