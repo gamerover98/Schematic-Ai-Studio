@@ -4809,6 +4809,22 @@ knowing:
   be a copy of the coordinates to keep correct. `half` splits the texture and
   not one coordinate, and `plainCandidates` has read that property since the
   two-tall flowers needed it.
+- **A pitcher crop is a pod with leaves, and was a cube with `age` read
+  nowhere.** Every stage came out as the same solid block wearing
+  `pitcher_crop_bottom` — `_top` on the upper half — on all six faces.
+  `pitcherCrop` transcribes the ten models: a pod sunk one unit into the block
+  under it, `[5,-1,5]..[11,3,11]` at stage 0 and `[3,-1,3]..[13,5,13]` after,
+  and from stage 1 two 16-wide planes turned 45 degrees **without** `rescale`,
+  so unlike `block/cross` they stop short of the corners. At stages 1 and 2 they
+  stand on the pod and reach `y = 21`, five units into the cell above.
+
+  The windows are vanilla's and are not optional: a box starting at `y = -1` and
+  a plane ending at `y = 21` both derive UVs off their tile. The upper half at
+  stages 0 to 2 has no elements in vanilla and is `boxes()` here — a state the
+  game never produces, since the upper half exists from stage 3, so it is
+  reachable only from the inspector, and a cell holding it draws nothing and
+  cannot be clicked. Placing both halves at once is the double-plant family's
+  job in `TWO_PART`, and is still not done.
 - **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
   one member.** Every other fence in the game parents `block/fence_post` and
   `block/fence_side` and paints them with a plank tile, so its UVs derive

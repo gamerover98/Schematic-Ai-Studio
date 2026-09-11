@@ -1536,7 +1536,7 @@ export class ModelBaker {
     }
 
     if (shape.kind !== "boxes") {
-      // `invisible` is handled before textures are ever resolved; reaching
+      // Unreachable while the union is `cube`, `cross` and `boxes`; reaching
       // here would mean a new shape kind was added without a branch.
       return { faces: {}, extraFaces: [], textureKey: primaryKey, isFullCube: false };
     }

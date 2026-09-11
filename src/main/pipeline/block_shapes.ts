@@ -2991,6 +2991,144 @@ function amethystBud(entry: PaletteEntry): BlockShape {
 }
 
 /**
+ * A pitcher crop, from `blockstates/pitcher_crop.json` and its ten models.
+ *
+ * It was a **cube**, and `age` was read nowhere: every growth stage came out as
+ * the same solid block wearing `pitcher_crop_bottom` -- `_top` on the upper
+ * half -- on all six faces, sealing its cell besides. What vanilla draws is a
+ * pod sunk one unit into the ground and, from the first stage on, leaves
+ * rising out of it.
+ *
+ * Every number below is the model's own:
+ *
+ * - **the pod** is `[5,-1,5]..[11,3,11]` at stage 0 and `[3,-1,3]..[13,5,13]`
+ *   after it, and wears the three `pitcher_crop_{side,top,bottom}` textures
+ *   through stated windows. Stated because they are not optional: a box that
+ *   starts at `y = -1` derives a window off the bottom of its tile;
+ * - **the leaves** are 16-wide planes turned 45 degrees about the vertical
+ *   *without* `rescale`, so unlike `block/cross` they stop short of the
+ *   corners. At stages 1 and 2 they stand on the pod, `y = 5..21`, reaching
+ *   five units into the cell above -- which is empty at those stages, because
+ *   the upper half only exists from stage 3;
+ * - **the upper half at stages 0 to 2 has no elements**, and neither does this.
+ *   The game never produces that state; only an edit in the inspector can, and
+ *   a cell holding it draws nothing and cannot be clicked, like any model with
+ *   no geometry.
+ *
+ * Which plane takes which diagonal is immaterial -- `amethystBud`'s argument,
+ * both wear one texture through one window -- and the angles are copied
+ * verbatim anyway: `+45` and `-45` on the same plane at stages 1 and 3, `+45`
+ * on two perpendicular planes at stages 2 and 4.
+ *
+ * With no properties it is the lower half at stage 0, which is the registry's
+ * birth state and what the walk over every offered id bakes.
+ */
+const PITCHER_LEAF_UV: Readonly<Record<string, UvWindow>> = {
+  north: [0, 0, 16, 16],
+  south: [0, 0, 16, 16],
+  west: [0, 0, 16, 16],
+  east: [0, 0, 16, 16],
+};
+
+const PITCHER_POD_TEXTURES: Readonly<Record<string, string>> = {
+  north: "pitcher_crop_side",
+  south: "pitcher_crop_side",
+  west: "pitcher_crop_side",
+  east: "pitcher_crop_side",
+  up: "pitcher_crop_top",
+  down: "pitcher_crop_bottom",
+};
+
+/** Stage 0: the seed pod, six across and four tall. */
+const PITCHER_SEED: ShapeBox = {
+  box: [5, -1, 5, 11, 3, 11],
+  textures: PITCHER_POD_TEXTURES,
+  uv: {
+    north: [3, 10, 9, 14],
+    east: [3, 10, 9, 14],
+    south: [3, 10, 9, 14],
+    west: [3, 10, 9, 14],
+    up: [5, 5, 11, 11],
+    down: [5, 5, 11, 11],
+  },
+};
+
+/** Stages 1 to 4: the same pod grown to ten across and six tall. */
+const PITCHER_POD: ShapeBox = {
+  box: [3, -1, 3, 13, 5, 13],
+  textures: PITCHER_POD_TEXTURES,
+  uv: {
+    north: [3, 10, 13, 16],
+    east: [3, 10, 13, 16],
+    south: [3, 10, 13, 16],
+    west: [3, 10, 13, 16],
+    up: [3, 3, 13, 13],
+    down: [3, 3, 13, 13],
+  },
+};
+
+/** A plane of leaves across `z = 8`, from `y0` to `y1`. */
+const acrossZ = (y0: number, y1: number): Box => [0, y0, 8, 16, y1, 8];
+/** The same across `x = 8`. */
+const acrossX = (y0: number, y1: number): Box => [8, y0, 0, 8, y1, 16];
+
+function pitcherLeaf(box: Box, angle: number, originY: number, texture: string): ShapeBox {
+  return { box, rotation: { origin: [8, originY, 8], axis: "y", angle }, texture, uv: PITCHER_LEAF_UV };
+}
+
+function pitcherCrop(entry: PaletteEntry): BlockShape {
+  const raw = Number(entry.properties.age ?? "0");
+  const age = Number.isFinite(raw) ? Math.min(4, Math.max(0, Math.trunc(raw))) : 0;
+
+  if (entry.properties.half === "upper") {
+    const leaves = `pitcher_crop_top_stage_${age}`;
+    if (age === 3) {
+      return boxes(
+        pitcherLeaf(acrossZ(0, 16), 45, 16, leaves),
+        pitcherLeaf(acrossZ(0, 16), -45, 16, leaves),
+      );
+    }
+    if (age === 4) {
+      return boxes(
+        pitcherLeaf(acrossX(0, 16), 45, 0, leaves),
+        pitcherLeaf(acrossZ(0, 16), 45, 0, leaves),
+      );
+    }
+    return boxes();
+  }
+
+  const leaves = `pitcher_crop_bottom_stage_${age}`;
+  switch (age) {
+    case 1:
+      return boxes(
+        pitcherLeaf(acrossZ(5, 21), 45, 5, leaves),
+        pitcherLeaf(acrossZ(5, 21), -45, 5, leaves),
+        PITCHER_POD,
+      );
+    case 2:
+      return boxes(
+        pitcherLeaf(acrossZ(5, 21), 45, 6, leaves),
+        pitcherLeaf(acrossX(5, 21), 45, 6, leaves),
+        PITCHER_POD,
+      );
+    case 3:
+      return boxes(
+        pitcherLeaf(acrossZ(0, 16), 45, 0, leaves),
+        pitcherLeaf(acrossZ(0, 16), -45, 0, leaves),
+        PITCHER_POD,
+      );
+    case 4:
+      return boxes(
+        pitcherLeaf(acrossX(0, 16), 45, 0, leaves),
+        pitcherLeaf(acrossZ(0, 16), 45, 0, leaves),
+        PITCHER_POD,
+      );
+    default:
+      return boxes(PITCHER_SEED);
+  }
+}
+
+/**
  * A lectern, from `lectern.json`: a base, a post, and the sloping desk.
  *
  * It was two boxes of the three, and the missing one is the whole block --
@@ -4145,6 +4283,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   tall_seagrass: seagrass,
 
   small_dripleaf: smallDripleaf,
+  pitcher_crop: pitcherCrop,
   big_dripleaf: () => boxes([0, 11, 0, 16, 15, 16]),
   big_dripleaf_stem: () => boxes([5, 0, 5, 11, 16, 11]),
 
