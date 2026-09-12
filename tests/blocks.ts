@@ -47,7 +47,7 @@ import { buildAtlas } from "../src/main/pipeline/atlas.js";
 import { atlasAnimations } from "../src/main/services/preview.js";
 import type { BakedFace, PaletteEntry, StructureData } from "../src/main/pipeline/types.js";
 import { paletteEntryCacheKey, paletteEntryIsAir } from "../src/main/pipeline/types.js";
-import { connectedState } from "../src/shared/block_connections.js";
+import { connectedState, COPPER_CHESTS } from "../src/shared/block_connections.js";
 import {
   describeProperty,
   documentedProperties,
@@ -1099,6 +1099,12 @@ if (pack === null) {
     [block("chest", { facing: "north", type: "left" }), "minecraft:entity/chest/normal_left"],
     [block("chest", { facing: "north", type: "right" }), "minecraft:entity/chest/normal_right"],
     [block("trapped_chest", { type: "single" }), "minecraft:entity/chest/trapped"],
+    // A waxed copper chest wears its stage's sheet, halved like any other.
+    [block("copper_chest", { type: "single" }), "minecraft:entity/chest/copper"],
+    [
+      block("waxed_weathered_copper_chest", { facing: "north", type: "left" }),
+      "minecraft:entity/chest/copper_weathered_left",
+    ],
     [block("oak_wall_sign", { facing: "north" }), "minecraft:block/oak_sign"],
     [block("oak_hanging_sign", {}), "minecraft:block/oak_hanging_sign"],
     // The lit face is a different texture, and nothing used to ask for it: a
@@ -2060,6 +2066,256 @@ if (pack === null) {
     orientPlacement("minecraft:small_dripleaf", looking(1, 0)).facing,
     "west",
   );
+}
+
+// --- a pitcher crop is a pod with leaves, by stage ---------------------------
+console.log("\n--- a pitcher crop is a pod with leaves, by stage ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was a cube with `age` read nowhere, so every stage was the same solid
+   * block. Transcribed from `pitcher_crop_{bottom,top}_stage_{0..4}`: a pod
+   * sunk one unit into the ground, and from stage 1 two planes of leaves that
+   * are 16 wide and turned 45 degrees without `rescale`.
+   */
+  const pitcher = async (props: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block("pitcher_crop", props));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const keyOf = (f: BakedFace): string => f.textureKey.replace(/^minecraft:block\//, "");
+  const corner = (f: BakedFace, i: number): number[] =>
+    [0, 1, 2].map((axis) => f.positions[i * 3 + axis] * 16);
+  const extent = (faces: BakedFace[], axis: number): [number, number] => {
+    const all = faces.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3 + axis] * 16));
+    return [+Math.min(...all).toFixed(2), +Math.max(...all).toFixed(2)];
+  };
+
+  const counts: Record<string, number> = {};
+  const keys: Record<string, string[]> = {};
+  const hashedStates: string[] = [];
+  const offTile: string[] = [];
+  const stretched: string[] = [];
+  for (const half of ["lower", "upper"] as const) {
+    for (const age of ["0", "1", "2", "3", "4"]) {
+      const state = `${half}/${age}`;
+      const entry = block("pitcher_crop", { half, age });
+      const baked = await baker.bakeBlockstate(entry);
+      if (baked.textureKey === paletteEntryCacheKey(entry)) hashedStates.push(state);
+      const faces = [...Object.values(baked.faces), ...baked.extraFaces];
+      counts[state] = faces.length;
+      keys[state] = [...new Set(faces.map(keyOf))].sort();
+      for (const f of faces) {
+        if ([...f.uvs].some((u) => u < -1e-6 || u > 1 + 1e-6)) offTile.push(`${state} ${keyOf(f)}`);
+        const edge = (i: number, j: number): number =>
+          Math.hypot(...[0, 1, 2].map((axis) => corner(f, i)[axis] - corner(f, j)[axis]));
+        const window = (i: number, j: number): number =>
+          Math.hypot((f.uvs[i * 2] - f.uvs[j * 2]) * 16, (f.uvs[i * 2 + 1] - f.uvs[j * 2 + 1]) * 16);
+        for (const [i, j] of [[0, 1], [0, 3]] as const) {
+          const density = window(i, j) / Math.max(1e-6, edge(i, j));
+          if (Math.abs(density - 1) > 0.005) stretched.push(`${state} ${keyOf(f)} ${density.toFixed(3)}`);
+        }
+      }
+    }
+  }
+  equal("no state of it is the hashed cube", hashedStates, []);
+  equal("...every window stays inside its tile", offTile, []);
+  equal("...and every face is at one texel per unit", stretched, []);
+
+  /*
+   * A pod of six faces, then two planes of two faces each on top of it; the
+   * upper half is empty until stage 3, because vanilla's model for it has no
+   * elements until the plant is tall enough to have one.
+   */
+  equal("the pod alone, then the pod and a cross of leaves; the top empty until stage 3", counts, {
+    "lower/0": 6,
+    "lower/1": 10,
+    "lower/2": 10,
+    "lower/3": 10,
+    "lower/4": 10,
+    "upper/0": 0,
+    "upper/1": 0,
+    "upper/2": 0,
+    "upper/3": 4,
+    "upper/4": 4,
+  });
+  equal("the pod wears its three textures", keys["lower/0"], [
+    "pitcher_crop_bottom",
+    "pitcher_crop_side",
+    "pitcher_crop_top",
+  ]);
+  equal("...and each stage's leaves their own", keys["lower/2"], [
+    "pitcher_crop_bottom",
+    "pitcher_crop_bottom_stage_2",
+    "pitcher_crop_side",
+    "pitcher_crop_top",
+  ]);
+  equal("...up to the flower on the upper half", keys["upper/4"], ["pitcher_crop_top_stage_4"]);
+
+  equal(
+    "stage 1's pod is sunk one unit and its leaves reach five into the cell above",
+    extent(await pitcher({ half: "lower", age: "1" }), 1),
+    [-1, 21],
+  );
+  equal(
+    "...while stage 3's stop at the top of their own cell",
+    extent(await pitcher({ half: "lower", age: "3" }), 1),
+    [-1, 16],
+  );
+  equal("with no properties it is the seed, the registry's birth state", (await pitcher({})).length, 6);
+  check(
+    "it no longer seals its cell",
+    !occludesNeighbours(block("pitcher_crop", { half: "lower", age: "4" })),
+  );
+}
+
+// --- pointed dripstone is a cross wearing one texture per state --------------
+console.log("\n--- pointed dripstone is a cross wearing one texture per state ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `pointed_dripstone.json` is `cross.json`'s geometry exactly, and the ten
+   * states differ only in the file. It was a 6x16x6 column wearing
+   * `pointed_dripstone_up_tip` whatever its state said.
+   */
+  const wrong: string[] = [];
+  for (const vertical_direction of ["up", "down"]) {
+    for (const thickness of ["tip_merge", "tip", "frustum", "middle", "base"]) {
+      const entry = block("pointed_dripstone", { vertical_direction, thickness });
+      const key = (await baker.bakeBlockstate(entry)).textureKey;
+      const want = `minecraft:block/pointed_dripstone_${vertical_direction}_${thickness}`;
+      if (key !== want) wrong.push(`${vertical_direction}/${thickness} -> ${key}`);
+      if (shapeFor(entry).kind !== "cross") wrong.push(`${vertical_direction}/${thickness} is not a cross`);
+    }
+  }
+  equal("all ten states wear their own texture on vanilla's cross", wrong, []);
+  equal(
+    "a bare one is the upward tip, the registry's birth state",
+    (await baker.bakeBlockstate(block("pointed_dripstone", {}))).textureKey,
+    "minecraft:block/pointed_dripstone_up_tip",
+  );
+  equal(
+    "...and a thickness no file has falls back to the tip, not the hashed cube",
+    (await baker.bakeBlockstate(block("pointed_dripstone", { vertical_direction: "down", thickness: "huge" })))
+      .textureKey,
+    "minecraft:block/pointed_dripstone_down_tip",
+  );
+  check("it culls nothing", !occludesNeighbours(block("pointed_dripstone", {})));
+}
+
+// --- pointed dripstone points where you look, and its column decides the rest -
+console.log("\n--- pointed dripstone points where you look, and its column decides the rest ---");
+{
+  const look = (
+    x: number,
+    y: number,
+    z: number,
+    against: PlacementLook["against"],
+  ): PlacementLook => ({ direction: { x, y, z }, against, cursorY: 0.5, run: null });
+  const placed = (at: PlacementLook): Record<string, string> =>
+    orientPlacement("minecraft:pointed_dripstone", at);
+
+  equal("looking up at a ceiling hangs it down", placed(look(0, 0.9, -0.4, "down")).vertical_direction, "down");
+  equal("looking down at a floor stands it up", placed(look(0, -0.9, -0.4, "up")).vertical_direction, "up");
+  equal("...and so does looking straight ahead", placed(look(0, 0, -1, "south")).vertical_direction, "up");
+  equal(
+    "it is the camera and not the face: looking up at a wall hangs one off it",
+    placed(look(0, 0.3, -1, "south")).vertical_direction,
+    "down",
+  );
+  equal("a hand-placed one arrives meaning to merge", placed(look(0, -1, 0, "up")).thickness, "tip_merge");
+
+  /*
+   * The thickness is a window of three cells along the column: behind, in
+   * front, and two in front. A stalactite points down, so "in front" is below.
+   */
+  type Drip = { name: string; properties: Record<string, string>; solid: boolean };
+  const drip = (vertical_direction: string, thickness = "tip"): Drip => ({
+    name: "pointed_dripstone",
+    properties: { vertical_direction, thickness },
+    solid: false,
+  });
+  const stone: Drip = { name: "stone", properties: {}, solid: true };
+  const thicknessOf = (self: Drip, around: Parameters<typeof connectedState>[1]): string | undefined =>
+    connectedState(self, around).thickness;
+
+  equal("a lone one is a tip", thicknessOf(drip("down"), { up: stone }), "tip");
+  equal(
+    "the top of a two-long stalactite is its frustum",
+    thicknessOf(drip("down"), { up: stone, down: drip("down") }),
+    "frustum",
+  );
+  equal(
+    "the top of a three-long one is its base",
+    thicknessOf(drip("down"), { up: stone, down: drip("down"), down_down: drip("down") }),
+    "base",
+  );
+  equal(
+    "...and the one under the base is the frustum",
+    thicknessOf(drip("down"), { up: drip("down"), down: drip("down") }),
+    "frustum",
+  );
+  equal(
+    "inside a longer column it is the middle",
+    thicknessOf(drip("down"), { up: drip("down"), down: drip("down"), down_down: drip("down") }),
+    "middle",
+  );
+  equal(
+    "a stalagmite reads the same column the other way up",
+    thicknessOf(drip("up"), { down: stone, up: drip("up"), up_up: drip("up") }),
+    "base",
+  );
+  equal(
+    "two tips that meet stay tips when neither means to merge",
+    thicknessOf(drip("down"), { down: drip("up") }),
+    "tip",
+  );
+  equal(
+    "...and merge when this one does",
+    thicknessOf(drip("down", "tip_merge"), { down: drip("up") }),
+    "tip_merge",
+  );
+  equal(
+    "...or when the one it meets already has",
+    thicknessOf(drip("down"), { down: drip("up", "tip_merge") }),
+    "tip_merge",
+  );
+  equal(
+    "one meaning to merge with nothing to meet is a plain tip",
+    thicknessOf(drip("down", "tip_merge"), { up: stone }),
+    "tip",
+  );
+  equal(
+    "the block over a merged pair is its frustum",
+    thicknessOf(drip("down"), { down: drip("down"), down_down: drip("up") }),
+    "frustum",
+  );
+  equal(
+    "only its own column counts",
+    thicknessOf(drip("down"), { up: stone, north: drip("down"), down_up: drip("down") }),
+    "tip",
+  );
+}
+
+// --- the nether's vines are crosses -------------------------------------------
+console.log("\n--- the nether's vines are crosses ---");
+{
+  /*
+   * Full opaque cubes, which sealed their cell and let a fence connect to
+   * them. All four are `block/cross` wearing their own name.
+   */
+  const vines = ["weeping_vines", "weeping_vines_plant", "twisting_vines", "twisting_vines_plant"];
+  equal("all four are vanilla's cross", vines.filter((n) => shapeFor(block(n, {})).kind !== "cross"), []);
+  equal("...and none of them seals its cell", vines.filter((n) => occludesNeighbours(block(n, {}))), []);
+  if (pack !== null) {
+    const worn: string[] = [];
+    for (const n of vines) {
+      const key = (await baker.bakeBlockstate(block(n, {}))).textureKey;
+      if (key !== `minecraft:block/${n}`) worn.push(`${n} -> ${key}`);
+    }
+    equal("...each wearing its own texture", worn, []);
+  }
 }
 
 console.log("\n--- seagrass is four planes in a hash ---");
@@ -5621,6 +5877,13 @@ console.log("\n--- the state a placed block starts in ---");
   const chest = placementState("minecraft:chest", onFloor(1, 0));
   equal("a chest still turns its front to you", chest.facing, "west");
   equal("...and knows it is not half of a double one", chest.type, "single");
+  // The copper chests are chests, and all eight used to land facing north
+  // whichever way they were placed: they were in no table.
+  equal(
+    "every copper chest turns its front to you as well",
+    COPPER_CHESTS.filter((name) => placementState(`minecraft:${name}`, onFloor(1, 0)).facing !== "west"),
+    [],
+  );
 
   const stairs = placementState("minecraft:oak_stairs", onFloor(1, 0));
   equal("stairs gain their shape", stairs.shape, "straight");
@@ -5745,6 +6008,9 @@ console.log("\n--- nothing is a cube by accident ---");
     "piston_head",
     "cocoa",
     "torchflower_crop",
+    "pitcher_crop",
+    "weeping_vines",
+    "twisting_vines_plant",
     "chain",
     "potted_poppy",
     "white_carpet",
@@ -6607,6 +6873,24 @@ console.log("\n--- neighbour-derived state ---");
     "single",
   );
 
+  /*
+   * Copper chests pair with their own stage, waxed or not. The game pairs any
+   * two and rewrites the more oxidised half, and this pass changes no ids --
+   * so two stages side by side stay two single chests rather than one drawn in
+   * two colours.
+   */
+  const pairs = (a: string, b: string): string | undefined =>
+    connectedState(self(a, { facing: "north" }), { east: thin(b, { facing: "north" }) }).type;
+  equal("two copper chests of one stage pair", pairs("exposed_copper_chest", "exposed_copper_chest"), "left");
+  equal(
+    "...and so do a waxed and an unwaxed one of it",
+    pairs("waxed_exposed_copper_chest", "exposed_copper_chest"),
+    "left",
+  );
+  equal("...but not two stages", pairs("copper_chest", "exposed_copper_chest"), "single");
+  equal("...nor a copper chest and a wooden one", pairs("copper_chest", "chest"), "single");
+  equal("...and a trapped chest still pairs with neither", pairs("trapped_chest", "chest"), "single");
+
   // Rails: flat shapes only, which is the whole visible difference.
   equal("a lone rail lies north-south", connectedState(self("rail"), {}).shape, "north_south");
   equal(
@@ -7272,6 +7556,17 @@ console.log("\n--- the block picker's search ---");
     searchBlocks(registry, "  stone  ")[0],
     "minecraft:stone",
   );
+
+  /*
+   * **A space is an underscore.** No block name has a space in it, so
+   * `oak slab` found nothing at all while `oak_slab` found the slab: the
+   * spelling a person types first was the one guaranteed to fail.
+   */
+  const slab = searchBlocks(registry, "oak_slab");
+  check("the slab is there to find", slab.includes("minecraft:oak_slab"), slab.join(" "));
+  equal("a space searches as an underscore", searchBlocks(registry, "oak slab"), slab);
+  equal("...a run of them as one", searchBlocks(registry, "  Oak   Slab "), slab);
+  equal("...and after a pasted namespace too", searchBlocks(registry, "minecraft:oak slab"), slab);
 }
 
 // ---------------------------------------------------------------------------

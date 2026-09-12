@@ -452,6 +452,14 @@ a failure names which letter; the check it replaced compared against
 `b.includes(q)` on the full id, which did not merely miss the fault, it stated
 it as the requirement.
 
+**And a space is an underscore, in every search that names a block.** No block
+name contains a space, so `oak slab` in the creative inventory found nothing at
+all while `oak_slab` found the slab — the spelling a person types first was the
+one guaranteed to fail. `blockQuery` in `shared/block_query.ts` is the one
+reading of a query now: trimmed, lowercased, the namespace stripped, and a run
+of whitespace one underscore. The picker, the inventory and `list_blocks` all
+ask it, which also made the namespace strip one copy where it had been two.
+
 **`blockRegistry` is `$state.raw`, and the line below it says why.** Plain
 `$state` on an array is a deep proxy, so reading it inside a `$derived`
 registers a signal per entry. It sat next to `legacyIndex`, which had been
@@ -3148,7 +3156,7 @@ decided by the neighbours, which is a question about the document and not about
 the click" — and that was right about where it belongs, not about whether it
 gets an answer. Fences, walls, panes and bars, a gate's `in_wall`, stairs
 corners, rail shapes, double chests, redstone wire, chorus plant, vine, mushroom
-blocks and `snowy` all now get one.
+blocks, `snowy` and pointed dripstone's `thickness` all now get one.
 
 The rules are pure and know nothing about documents; `main/domain/connect.ts` is
 the other half — which cells to ask. Four things about it are load-bearing:
@@ -3179,6 +3187,39 @@ walks three tables, and it cannot differ between two cells holding the same
 entry. A 100-block fence line is **3 ms**. There is deliberately no size cap: a
 threshold would be a second answer to the same question, which is the fault this
 pass exists to remove.
+
+**A pointed dripstone's `thickness` is a window of three cells, not a chain.**
+Vanilla's `calculateDripstoneThickness` asks about the block in front and,
+through that block's own thickness, about the one in front of that — so
+transcribed as written it needs the neighbour corrected first, and this pass is
+**one sweep, not a fixed point**: a column two long would come out right and one
+three long would not. The block in front is a tip exactly when the block two in
+front is not dripstone pointing the same way, so `dripstoneThickness` reads
+behind, in front and two in front and gets the settled answer directly.
+
+Two in front is two cells up or down, past a face, so `Neighbours` grew `up_up`
+and `down_down` and `connect.ts`'s `AROUND` grew `(0, ±2, 0)` — in the **same
+list**, the redstone diagonals' rule, because a tip added to the end of a column
+moves the block two up it from `frustum` to `base`. `tests/session.ts` builds
+that column for real; without the two offsets the top stays `frustum` and every
+block-level check still passes. What they cost is not measurable: on the
+120x20x120 fence fill, the worst case this pass has, four runs averaged 1.10 s
+with them and 1.13 s without, which is the noise between runs.
+
+`tip_merge` keeps vanilla's merge flag: two tips pointing at each other merge
+when either already says `tip_merge`. A block placed by hand is born with it —
+vanilla's `merge = !isSecondaryUseActive()` — and the pass turns it into `tip`
+at once unless a tip is waiting for it. A build script or an agent tool writes
+the registry's `tip`, and two of those meeting stay two tips, as `/setblock`
+leaves them in the game.
+
+**Copper chests pair with their own stage, waxing ignored.** The game pairs any
+two and gives the pair the least oxidised stage, which rewrites one half into a
+different block; this pass changes properties and never an id, so it pairs only
+the ones that already agree. `chestKind` strips `waxed_`, because waxing changes
+no texture. Two stages side by side stay two single chests rather than a double
+one drawn in two colours — chosen by the user with the game's answer in front of
+them. `COPPER_CHESTS` is one list for this and for the placement.
 
 **`EditRequest.setState` is the one caller that derives nothing, and without it
 the feature would not exist.** The inspector sends its block-state edit down the
@@ -4801,6 +4842,33 @@ knowing:
   be a copy of the coordinates to keep correct. `half` splits the texture and
   not one coordinate, and `plainCandidates` has read that property since the
   two-tall flowers needed it.
+- **A pitcher crop is a pod with leaves, and was a cube with `age` read
+  nowhere.** Every stage came out as the same solid block wearing
+  `pitcher_crop_bottom` — `_top` on the upper half — on all six faces.
+  `pitcherCrop` transcribes the ten models: a pod sunk one unit into the block
+  under it, `[5,-1,5]..[11,3,11]` at stage 0 and `[3,-1,3]..[13,5,13]` after,
+  and from stage 1 two 16-wide planes turned 45 degrees **without** `rescale`,
+  so unlike `block/cross` they stop short of the corners. At stages 1 and 2 they
+  stand on the pod and reach `y = 21`, five units into the cell above.
+
+  The windows are vanilla's and are not optional: a box starting at `y = -1` and
+  a plane ending at `y = 21` both derive UVs off their tile. The upper half at
+  stages 0 to 2 has no elements in vanilla and is `boxes()` here — a state the
+  game never produces, since the upper half exists from stage 3, so it is
+  reachable only from the inspector, and a cell holding it draws nothing and
+  cannot be clicked. Placing both halves at once is the double-plant family's
+  job in `TWO_PART`, and is still not done.
+- **Pointed dripstone is `block/cross`, and was a 6x16x6 column wearing the
+  upward tip in every state.** `pointed_dripstone.json` states the two rescaled
+  planes of `cross.json` exactly; the ten states differ only in the texture,
+  `pointed_dripstone_<up|down>_<thickness>`, and the `down` files are drawn
+  pointing down, so nothing turns. `candidatesForName` builds the name from the
+  state and falls back to the birth state for a value no file has.
+- **The nether's vines were full opaque cubes.** `weeping_vines`,
+  `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
+  name, which resolved all along — the texture was right, and the shape put it
+  on six faces of a solid block that sealed its cell and let a fence connect to
+  it. They are in `CROSS_BLOCKS` beside `cave_vines`.
 - **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
   one member.** Every other fence in the game parents `block/fence_post` and
   `block/fence_side` and paints them with a plank tile, so its UVs derive
@@ -5607,6 +5675,20 @@ every hopper landed on the registry default `down` with its spout hanging in
 mid-air beside whatever it was meant to feed. `facing` is the clicked face
 reversed, with the one exception the game states outright: there is no
 upward-facing hopper, so a click on a floor gives `down`.
+
+**Pointed dripstone points away from where you look, vertically.** Its placement
+is vanilla's `getNearestLookingVerticalDirection()` reversed: look up at a
+ceiling and it hangs as a stalactite, look down — or straight ahead — and it
+stands as a stalagmite. It is the camera, not the clicked face, so looking up at
+the side of a block hangs one off it. Vanilla then flips it when the side it
+would grow from has nothing to hold it; that half is deliberately not here,
+because this app does not redirect a placement on physical grounds.
+`VERTICAL_FROM_LOOK` is the table.
+
+**The copper chests turn their front to you, and all eight used to face
+north.** They were in no placement table. `FRONT_TO_PLAYER` spreads
+`COPPER_CHESTS` from `block_connections.ts` rather than listing eight names a
+second time.
 
 **A trapdoor is the wall-mounted rule with a second property, and answered
 neither half of it.** `orientPlacement` returned `half` alone, so every

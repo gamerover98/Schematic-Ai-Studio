@@ -391,11 +391,6 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
     side: ["suspicious_gravel_0"],
     bottom: ["suspicious_gravel_0"],
   },
-  pointed_dripstone: {
-    top: ["pointed_dripstone_up_tip"],
-    side: ["pointed_dripstone_up_tip"],
-    bottom: ["pointed_dripstone_up_tip"],
-  },
   sniffer_egg: {
     top: ["sniffer_egg_not_cracked_top"],
     side: ["sniffer_egg_not_cracked_north"],
@@ -1536,7 +1531,7 @@ export class ModelBaker {
     }
 
     if (shape.kind !== "boxes") {
-      // `invisible` is handled before textures are ever resolved; reaching
+      // Unreachable while the union is `cube`, `cross` and `boxes`; reaching
       // here would mean a new shape kind was added without a branch.
       return { faces: {}, extraFaces: [], textureKey: primaryKey, isFullCube: false };
     }
@@ -2003,6 +1998,26 @@ export class ModelBaker {
     if (normalized === "pitcher_plant") {
       const half = entry.properties.half === "upper" ? "top" : "bottom";
       return [`pitcher_crop_${half}_stage_4`, `pitcher_crop_${half}`];
+    }
+
+    /*
+     * Pointed dripstone wears one texture per state, and all ten are files.
+     *
+     * The model is `block/cross` for every one of them, so the whole visible
+     * difference between a stalactite's tip and a stalagmite's base is which of
+     * `pointed_dripstone_<up|down>_<tip|tip_merge|frustum|middle|base>` it
+     * wears -- and the `down` ones are drawn pointing down, which is why nothing
+     * here turns. It wore `pointed_dripstone_up_tip` whatever its state said.
+     *
+     * A value the registry does not have falls back to the birth state rather
+     * than composing a name no file has, which would reach the hashed cube.
+     */
+    if (normalized === "pointed_dripstone") {
+      const direction = entry.properties.vertical_direction === "down" ? "down" : "up";
+      const stated = entry.properties.thickness ?? "tip";
+      const legal = ["tip_merge", "tip", "frustum", "middle", "base"];
+      const thickness = legal.includes(stated) ? stated : "tip";
+      return [`pointed_dripstone_${direction}_${thickness}`];
     }
 
     /*

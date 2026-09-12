@@ -61,13 +61,14 @@ export interface NeighbourBlock {
 }
 
 /**
- * A cell to ask about: one of the six faces, or the cell above or below one
- * of the four horizontal ones.
+ * A cell to ask about: one of the six faces, the cell above or below one of
+ * the four horizontal ones, or the cell two above or two below.
  *
- * The eight diagonals are redstone's alone and are the whole of what lets a
- * wire run up and down a step. Nothing else here looks past a face, and a
- * caller that does not fill them simply gets `undefined`, which reads as air
- * -- the same answer as before they existed.
+ * The eight diagonals are redstone's and are the whole of what lets a wire run
+ * up and down a step; `up_up` and `down_down` are pointed dripstone's, whose
+ * `thickness` depends on the block two along its column. A caller that does
+ * not fill them simply gets `undefined`, which reads as air -- the same answer
+ * as before they existed.
  */
 export type NeighbourKey = Face | `${string}_up` | `${string}_down`;
 
@@ -110,7 +111,29 @@ const isWall = (name: string): boolean => name.endsWith("_wall");
 const isPane = (name: string): boolean => name.endsWith("_pane") || name === "iron_bars";
 const isStairs = (name: string): boolean => name.endsWith("_stairs");
 const isRail = (name: string): boolean => name === "rail" || name.endsWith("_rail");
-const isChest = (name: string): boolean => name === "chest" || name === "trapped_chest";
+/**
+ * The eight copper chests: four oxidation stages and their waxed mirrors.
+ *
+ * Exported because `block_orientation.ts` turns them to face the player from
+ * this same list -- two copies of eight names is how one of them comes to miss
+ * the ninth. They were in neither place, so a copper chest landed facing north
+ * whichever way it was placed and never became half of a double one.
+ */
+export const COPPER_CHESTS: readonly string[] = [
+  "copper_chest",
+  "exposed_copper_chest",
+  "weathered_copper_chest",
+  "oxidized_copper_chest",
+  "waxed_copper_chest",
+  "waxed_exposed_copper_chest",
+  "waxed_weathered_copper_chest",
+  "waxed_oxidized_copper_chest",
+];
+
+const COPPER_CHEST_NAMES: ReadonlySet<string> = new Set(COPPER_CHESTS);
+
+const isChest = (name: string): boolean =>
+  name === "chest" || name === "trapped_chest" || COPPER_CHEST_NAMES.has(name);
 
 /**
  * Whether two fences are the same *kind*.
@@ -292,6 +315,21 @@ function railShape(self: string, neighbours: Neighbours): string {
 }
 
 /**
+ * What a chest pairs with: its own kind, where waxing does not count.
+ *
+ * In the game two copper chests pair whatever their stages, and the pair takes
+ * the least oxidised one -- which means rewriting one half into a different
+ * block. This pass changes properties and never an id, so it pairs the ones
+ * that already agree. Waxing changes no texture, so a waxed half beside an
+ * unwaxed one of the same stage is one chest to look at; two different stages
+ * side by side stay two single chests rather than a double one drawn in two
+ * colours.
+ */
+function chestKind(name: string): string {
+  return name.startsWith("waxed_") ? name.slice("waxed_".length) : name;
+}
+
+/**
  * A chest's half of a double chest.
  *
  * The convention is `ChestBlock.getConnectedDirection`'s: a `left` chest has
@@ -318,7 +356,7 @@ function chestType(
     const side = neighbours[face] ?? null;
     return (
       side !== null &&
-      side.name === self.name &&
+      chestKind(side.name) === chestKind(self.name) &&
       (side.properties.facing ?? "north") === facing
     );
   };
@@ -408,6 +446,59 @@ function redstoneSide(neighbours: Neighbours, direction: Face, roofed: boolean):
   // -- a slab, a fence, air -- lets the wire drop a step.
   if (side !== null && side.solid) return "none";
   return connectsToDust(below, direction) ? "side" : "none";
+}
+
+/**
+ * A pointed dripstone's `thickness`, which is where it stands in its column.
+ *
+ * `PointedDripstoneBlock.calculateDripstoneThickness` asks about the block in
+ * front of it -- the way it points -- and, through that block's own thickness,
+ * about the one in front of that. Transcribed as that chain it needs the
+ * neighbour corrected before this one, and `deriveConnections` is one sweep,
+ * not a fixed point: whichever order it took, a column two long would come out
+ * right and one three long would not.
+ *
+ * So it is read as the answer the chain settles on, which is a window of three
+ * cells and nothing else. The block in front is a *tip* exactly when the block
+ * two in front is not dripstone pointing the same way, so:
+ *
+ * 1. in front, dripstone pointing back at this one: `tip_merge` if either of
+ *    the two already says so, else `tip` -- vanilla's merge flag, kept the way
+ *    its `updateShape` keeps it;
+ * 2. in front, anything but dripstone pointing the same way: `tip`;
+ * 3. two in front, dripstone pointing the same way: `middle` if the block
+ *    behind is too, else `base`;
+ * 4. otherwise `frustum`.
+ *
+ * The cells two above and two below are why `Neighbours` carries `up_up` and
+ * `down_down`, and why `connect.ts` revisits them after an edit: a tip added to
+ * the end of a column moves the block two up it from `frustum` to `base`.
+ */
+function dripstoneThickness(
+  self: { readonly properties: Readonly<Record<string, string>> },
+  neighbours: Neighbours,
+): string {
+  const tip: Face = self.properties.vertical_direction === "down" ? "down" : "up";
+  const back: Face = tip === "down" ? "up" : "down";
+  const pointing = (
+    block: NeighbourBlock | null | undefined,
+    direction: Face,
+  ): block is NeighbourBlock =>
+    block != null &&
+    block.name === "pointed_dripstone" &&
+    (block.properties.vertical_direction === "down" ? "down" : "up") === direction;
+
+  const ahead = neighbours[tip];
+  if (pointing(ahead, back)) {
+    const merged =
+      self.properties.thickness === "tip_merge" || ahead.properties.thickness === "tip_merge";
+    return merged ? "tip_merge" : "tip";
+  }
+  if (!pointing(ahead, tip)) return "tip";
+  if (pointing(neighbours[tip === "down" ? "down_down" : "up_up"], tip)) {
+    return pointing(neighbours[back], tip) ? "middle" : "base";
+  }
+  return "frustum";
 }
 
 const MUSHROOM_BLOCKS: ReadonlySet<string> = new Set([
@@ -525,6 +616,11 @@ export function connectedState(
     return out;
   }
 
+  if (name === "pointed_dripstone") {
+    put("thickness", dripstoneThickness(block, neighbours));
+    return out;
+  }
+
   // `snowy` is the only neighbour-derived state on an ordinary cube, and it
   // reads upward rather than sideways.
   if (hasProperty(name, "snowy")) {
@@ -556,6 +652,7 @@ export function isNeighbourDependent(name: string): boolean {
     name === "redstone_wire" ||
     name === "chorus_plant" ||
     name === "vine" ||
+    name === "pointed_dripstone" ||
     MUSHROOM_BLOCKS.has(name) ||
     hasProperty(name, "snowy")
   );

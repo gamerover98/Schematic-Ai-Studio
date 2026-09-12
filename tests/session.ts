@@ -3212,6 +3212,52 @@ console.log("\n--- redstone needs a floor ---");
   );
 }
 
+/*
+ * A pointed dripstone column, end to end: the rule, the cells it reads, and
+ * the cells the pass decides are stale.
+ *
+ * Its thickness depends on the block two along the column, so `connect.ts`
+ * gathers the cells two above and two below and has to revisit them after an
+ * edit. The block-level checks call `connectedState` with a map built by hand
+ * and cannot see that half: without it, the top of a column goes on saying
+ * `frustum` after a third block has made it the `base`.
+ */
+console.log("\n--- a pointed dripstone column ---");
+{
+  const session = newDocument({ width: 1, height: 6, length: 1 });
+  const put = (y: number, name: string, properties: Record<string, string>) =>
+    applyEdit(session, {
+      kind: "setBlock",
+      x: 0,
+      y,
+      z: 0,
+      block: { namespacedName: `minecraft:${name}`, properties },
+    });
+  const thickness = (y: number): string | undefined => getBlock(session.doc, 0, y, 0).properties.thickness;
+  // What a placement by hand carries: the direction from the camera, and the
+  // intention to merge.
+  const hanging = { vertical_direction: "down", thickness: "tip_merge" };
+  const standing = { vertical_direction: "up", thickness: "tip_merge" };
+
+  put(5, "stone", {});
+  put(4, "pointed_dripstone", hanging);
+  equal("one hanging from the ceiling is a tip", thickness(4), "tip");
+  put(3, "pointed_dripstone", hanging);
+  equal("a second under it makes the first its frustum", thickness(4), "frustum");
+  equal("...and is the tip itself", thickness(3), "tip");
+  put(2, "pointed_dripstone", hanging);
+  equal("a third reaches two up and makes the top the base", thickness(4), "base");
+  equal("...the one under it the frustum", thickness(3), "frustum");
+  equal("...and is the tip itself", thickness(2), "tip");
+
+  put(0, "pointed_dripstone", standing);
+  put(1, "pointed_dripstone", standing);
+  equal("a stalagmite rising to meet it merges", thickness(1), "tip_merge");
+  equal("...and so does the stalactite's tip", thickness(2), "tip_merge");
+  equal("...while the stalagmite's foot is its frustum", thickness(0), "frustum");
+  equal("...and the top of the stalactite is still the base", thickness(4), "base");
+}
+
 console.log("\n--- dimensions ---");
 {
   const at = (session: ReturnType<typeof newDocument>, x: number, y: number, z: number) =>
