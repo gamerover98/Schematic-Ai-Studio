@@ -6327,6 +6327,46 @@ if (pack === null) {
   );
   check("...where the beacon, the other box shape covering its whole cell, is not", !occludesNeighbours(block("beacon")));
 
+  /*
+   * A sunflower's upper half is a short cross with the flower on top, and it
+   * was only the cross: `sunflower_front` and `sunflower_back` were reachable
+   * from nothing, so the top half showed a stalk and no head.
+   */
+  const sunTop = await baker.bakeBlockstate(block("sunflower", { half: "upper" }));
+  const head = (key: string) => sunTop.extraFaces.filter((f) => f.textureKey === `minecraft:block/${key}`);
+  const front = head("sunflower_front");
+  const back = head("sunflower_back");
+  check(
+    "a sunflower's top half has its head, facing east and tilted up",
+    front.length === 1 && front[0].normal[0] > 0.9 && front[0].normal[1] > 0.3,
+    front.map((f) => f.normal.join(",")).join(" | "),
+  );
+  check(
+    "...with the back of the flower behind it",
+    back.length === 1 && back[0].normal[0] < -0.9 && back[0].normal[1] < -0.3,
+  );
+  check("...and the head is drawn, not a transparent patch", front.every(facePaintsSomething) && back.every(facePaintsSomething));
+  const stalk = head("sunflower_top");
+  check(
+    "...above a stalk of four planes reading the lower half of sunflower_top",
+    stalk.length === 4 &&
+      stalk.every((f) => {
+        const vs = [1, 3, 5, 7].map((i) => f.uvs[i] * 16);
+        return Math.abs(Math.min(...vs) - 8) < 1e-4 && Math.abs(Math.max(...vs) - 16) < 1e-4;
+      }),
+  );
+  const sunBottom = await baker.bakeBlockstate(block("sunflower", { half: "lower" }));
+  check(
+    "...while the lower half is still a plain cross of sunflower_bottom",
+    sunBottom.extraFaces.length === 4 &&
+      sunBottom.extraFaces.every((f) => f.textureKey === "minecraft:block/sunflower_bottom"),
+  );
+  const lilacTop = await baker.bakeBlockstate(block("lilac", { half: "upper" }));
+  check(
+    "...and a lilac, which has no head, is untouched",
+    lilacTop.extraFaces.length === 4 && lilacTop.extraFaces.every((f) => f.textureKey === "minecraft:block/lilac_top"),
+  );
+
   // A cross has no side to cover, and a rotated box is refused outright: a
   // tilted plane can pass through a face without covering it.
   check("a cross covers nothing", !coversFace(block("dandelion"), "down"));

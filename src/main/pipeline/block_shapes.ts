@@ -3140,6 +3140,55 @@ function pitcherLeaf(box: Box, angle: number, originY: number, texture: string):
   return { box, rotation: { origin: [8, originY, 8], axis: "y", angle }, texture, uv: PITCHER_LEAF_UV };
 }
 
+/**
+ * A sunflower's upper half is a short cross with the flower on top of it, and
+ * it was only the cross.
+ *
+ * `sunflower_bottom.json` really is `block/cross`, which is why the lower half
+ * was right. `sunflower_top.json` is not: two crossed planes eight units tall
+ * reading the lower half of `sunflower_top` -- the stem's last stretch -- and
+ * a third plane at `x = 9.6`, tilted 22.5 degrees about z, wearing
+ * `sunflower_front` on its east face and `sunflower_back` on its west. Drawn
+ * as a plain cross the head simply did not exist, which is the report: the
+ * upper half showed a stalk and no flower.
+ *
+ * All three carry `rescale: true`, so they are written already rescaled, the
+ * sculk sensor's idiom: `sqrt(2)` across the crossed planes and
+ * `1 / cos(22.5 degrees)` on the head's two axes that turn. The windows are
+ * vanilla's; the crossed planes' `[0, 8, 16, 16]` on an eight-unit plane is
+ * not something the box would derive.
+ */
+const SUNFLOWER_CROSS_REACH = 7.2 * Math.SQRT2;
+const SUNFLOWER_SPIN: BoxRotation = { origin: [8, 8, 8], axis: "y", angle: 45 };
+const SUNFLOWER_TILT_SCALE = 1 / Math.cos(Math.PI / 8);
+const sunflowerTilted = (n: number): number => 8 + (n - 8) * SUNFLOWER_TILT_SCALE;
+
+const SUNFLOWER_TOP: readonly ShapeBox[] = [
+  {
+    box: [8 - SUNFLOWER_CROSS_REACH, 0, 8, 8 + SUNFLOWER_CROSS_REACH, 8, 8],
+    rotation: SUNFLOWER_SPIN,
+    texture: "sunflower_top",
+    uv: { north: [0, 8, 16, 16], south: [0, 8, 16, 16] },
+  },
+  {
+    box: [8, 0, 8 - SUNFLOWER_CROSS_REACH, 8, 8, 8 + SUNFLOWER_CROSS_REACH],
+    rotation: SUNFLOWER_SPIN,
+    texture: "sunflower_top",
+    uv: { west: [0, 8, 16, 16], east: [0, 8, 16, 16] },
+  },
+  {
+    box: [sunflowerTilted(9.6), sunflowerTilted(-1), 1, sunflowerTilted(9.6), sunflowerTilted(15), 15],
+    rotation: { origin: [8, 8, 8], axis: "z", angle: 22.5 },
+    texture: "sunflower_front",
+    textures: { west: "sunflower_back", east: "sunflower_front" },
+    uv: { west: [0, 0, 16, 16], east: [0, 0, 16, 16] },
+  },
+];
+
+function sunflower(entry: PaletteEntry): BlockShape {
+  return entry.properties.half === "upper" ? boxes(...SUNFLOWER_TOP) : { kind: "cross" };
+}
+
 function pitcherCrop(entry: PaletteEntry): BlockShape {
   const raw = Number(entry.properties.age ?? "0");
   const age = Number.isFinite(raw) ? Math.min(4, Math.max(0, Math.trunc(raw))) : 0;
@@ -4433,6 +4482,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
 
   small_dripleaf: smallDripleaf,
   pitcher_crop: pitcherCrop,
+  sunflower,
   big_dripleaf: () => boxes([0, 11, 0, 16, 15, 16]),
   big_dripleaf_stem: () => boxes([5, 0, 5, 11, 16, 11]),
 
@@ -4509,7 +4559,6 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "lily_of_the_valley",
   "wither_rose",
   "torchflower",
-  "sunflower",
   "lilac",
   "rose_bush",
   "peony",

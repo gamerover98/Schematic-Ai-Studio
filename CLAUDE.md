@@ -4892,6 +4892,14 @@ knowing:
   blocking light and taking a fence; covering all six faces does not decide
   that, and the beacon -- glass, covering all six -- is why. It also turns
   its front to the player now, like a furnace.
+- **A sunflower's upper half is a cross with a flower on it, and it was only
+  the cross.** `sunflower_bottom.json` really is `block/cross`;
+  `sunflower_top.json` is two crossed planes eight units tall reading the
+  lower half of `sunflower_top`, plus a head at `x = 9.6` tilted 22.5 degrees
+  about z, `sunflower_front` on its east face and `sunflower_back` on its
+  west. As a plain cross the head did not exist. All three carry `rescale`,
+  so they are written already rescaled.
+
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it
