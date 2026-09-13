@@ -1263,6 +1263,70 @@ function cauldron(entry: PaletteEntry): BlockShape {
   return boxes(...CAULDRON_POT, ...(content === null ? [] : [content]));
 }
 
+// --- composter ----------------------------------------------------------------
+//
+// The cauldron's fault in wood. It was left a cube on the reasoning that "its
+// outer shell really is 16x16x16, only its inside is hollow" -- which is the
+// whole of the fault: a cube has no inside, so from above the rim there was a
+// lid of `composter_top` where vanilla shows a bin, and `level` had nowhere to
+// be drawn. `composter.json` (1.21.10) is a floor two units thick and four
+// walls two units thick; the blockstate is a multipart that adds one
+// `composter_contents<n>` model per level.
+
+const COMPOSTER_WALL: Readonly<Record<string, string>> = { up: "composter_top" };
+
+/**
+ * The bin, transcribed element for element. Vanilla states no `uv` anywhere
+ * in it, so the derived windows are its own. The faces it does not state are
+ * the `omit`s: the walls have no underside, the north and south walls no ends,
+ * and the floor no sides -- each is inside another box of the same bin.
+ */
+const COMPOSTER_BIN: readonly ShapeBox[] = [
+  {
+    box: [0, 0, 0, 16, 2, 16],
+    texture: "composter_bottom",
+    omit: ["north", "east", "south", "west"],
+  },
+  { box: [0, 0, 0, 2, 16, 16], texture: "composter_side", textures: COMPOSTER_WALL, omit: ["down"] },
+  { box: [14, 0, 0, 16, 16, 16], texture: "composter_side", textures: COMPOSTER_WALL, omit: ["down"] },
+  {
+    box: [2, 0, 0, 14, 16, 2],
+    texture: "composter_side",
+    textures: COMPOSTER_WALL,
+    omit: ["down", "east", "west"],
+  },
+  {
+    box: [2, 0, 14, 14, 16, 16],
+    texture: "composter_side",
+    textures: COMPOSTER_WALL,
+    omit: ["down", "east", "west"],
+  },
+];
+
+/**
+ * The compost's surface, or `null` for an empty bin.
+ *
+ * `composter_contents1..7` are boxes from the floor to `1 + 2 * level` with an
+ * `up` face and nothing else, so only that face is drawn here: 3 at level 1,
+ * 15 at level 7. `level=8` is `composter_contents_ready`, the same height as
+ * 7 wearing `composter_ready` -- bone meal waiting to be taken out.
+ */
+function composterContent(entry: PaletteEntry): ShapeBox | null {
+  const level = Math.trunc(Number(entry.properties.level));
+  if (!(level >= 1 && level <= 8)) return null;
+  const height = Math.min(15, 1 + 2 * level);
+  return {
+    box: [2, height, 2, 14, height, 14],
+    texture: level === 8 ? "composter_ready" : "composter_compost",
+    omit: ["down"],
+  };
+}
+
+function composter(entry: PaletteEntry): BlockShape {
+  const content = composterContent(entry);
+  return boxes(...COMPOSTER_BIN, ...(content === null ? [] : [content]));
+}
+
 // --- banners ------------------------------------------------------------------
 //
 // A banner has no block model: `blockstates/white_wall_banner.json` names
@@ -4232,8 +4296,9 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   sea_pickle: () => boxes([6, 0, 6, 10, 6, 10]),
   candle: candleShape,
 
-  // Workstations that are not full blocks. `composter` is left a cube on
-  // purpose: its outer shell really is 16x16x16, only its inside is hollow.
+  // Workstations that are not full blocks. The composter is one: its shell is
+  // 16x16x16, and the inside is what a cube cannot draw.
+  composter,
   stonecutter: () => boxes([0, 0, 0, 16, 9, 16]),
   grindstone,
   brewing_stand: brewingStand,

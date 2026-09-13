@@ -4873,6 +4873,14 @@ knowing:
   `side_chain` choose that plane's window on the sheet and move no coordinate.
   `side_chain` is read, not derived: pairing shelves is a neighbour rule and
   is not done.
+- **A composter was the cauldron's fault in wood.** It was left a cube on
+  purpose, "its outer shell really is 16x16x16", and that was the fault: a
+  cube has no inside, so from above the rim there was a lid where vanilla
+  shows a bin, and `level` had nowhere to be drawn. `composter.json` is a
+  two-unit floor and four two-unit walls; the multipart adds one surface per
+  level at `1 + 2 * level`, and `level=8` is the same height as 7 wearing
+  `composter_ready`. As boxes it no longer counts as solid, which is the
+  cauldron's arrangement too: light reaches in through the open top.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it

@@ -6209,6 +6209,55 @@ if (pack === null) {
   }
   equal("every shelf state has one solid belly at the back, in its own window", bellyFaults, []);
 
+  /*
+   * The composter was the cauldron's fault in wood: a cube, so there was no
+   * inside and `level` had nowhere to be. Vanilla is a two-unit floor, four
+   * two-unit walls, and one surface per level at 1 + 2 * level -- 15 and
+   * `composter_ready` at 8.
+   */
+  const span = (f: BakedFace, a: 0 | 1 | 2): [number, number] => {
+    const vs = [0, 3, 6, 9].map((i) => Math.round(f.positions[i + a] * 16 * 1000) / 1000);
+    return [Math.min(...vs), Math.max(...vs)];
+  };
+  const composterFaults: string[] = [];
+  for (let level = 0; level <= 8; level += 1) {
+    const baked = await baker.bakeBlockstate(block("composter", { level: String(level) }));
+    const contents = baked.extraFaces.filter(
+      (f) => f.textureKey === "minecraft:block/composter_compost" || f.textureKey === "minecraft:block/composter_ready",
+    );
+    if (level === 0) {
+      if (contents.length !== 0) composterFaults.push("level 0 has contents");
+      continue;
+    }
+    const expected = level === 8 ? "minecraft:block/composter_ready" : "minecraft:block/composter_compost";
+    const height = Math.min(15, 1 + 2 * level);
+    const ok =
+      contents.length === 1 &&
+      contents[0].textureKey === expected &&
+      contents[0].normal[1] === 1 &&
+      span(contents[0], 1)[0] === height &&
+      JSON.stringify([span(contents[0], 0), span(contents[0], 2)]) === JSON.stringify([[2, 14], [2, 14]]);
+    if (!ok) composterFaults.push(`level ${level}: ${contents.map((f) => `${f.textureKey}@${span(f, 1)}`).join(" ")}`);
+  }
+  equal("a composter's contents stand at vanilla's height for every level", composterFaults, []);
+  const bin = await baker.bakeBlockstate(block("composter", { level: "0" }));
+  check("a composter is not a cube", !bin.isFullCube);
+  check(
+    "...its inside is open: its floor is seen from above at y = 2",
+    bin.extraFaces.some(
+      (f) => f.normal[1] === 1 && f.textureKey === "minecraft:block/composter_bottom" && span(f, 1)[0] === 2,
+    ),
+  );
+  check(
+    "...and nothing closes it at the top between the walls",
+    !bin.extraFaces.some((f) => f.normal[1] === 1 && span(f, 1)[0] === 16 && span(f, 0)[0] < 2 && span(f, 0)[1] > 14),
+  );
+  check(
+    "...while its floor and four walls still cover their sides of the cell",
+    (["down", "north", "south", "east", "west"] as const).every((face) => coversFace(block("composter"), face)) &&
+      !coversFace(block("composter"), "up"),
+  );
+
   // A cross has no side to cover, and a rotated box is refused outright: a
   // tilted plane can pass through a face without covering it.
   check("a cross covers nothing", !coversFace(block("dandelion"), "down"));
