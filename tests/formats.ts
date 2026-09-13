@@ -145,7 +145,7 @@ import {
   parseLegacyId,
   resolveBlockInput,
 } from "../src/shared/legacy_ids.js";
-import { loadLegacyBlockTable } from "../src/main/pipeline/loader_formats.js";
+import { decodeSchematic, loadLegacyBlockTable } from "../src/main/pipeline/loader_formats.js";
 import { buildReverseLegacyTable } from "../src/main/services/writers.js";
 const LEGACY_BLOCKS = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -2403,6 +2403,39 @@ console.log("\n--- the tag the panel names is the tag the file uses ---");
   equal("a litematic has nowhere to keep an anchor", anchorLocation("litematic"), null);
   equal("...nor a world origin", originLocation("litematic"), null);
 }
+// --- a legacy double plant's top half ----------------------------------------
+/*
+ * Pre-Flattening, the bottom half of a `double_plant` (175) stores the type in
+ * 0..5 and the top half stores 0x8 plus a direction nothing reads. The table
+ * reads those low bits as a type, so a top written as 10 came back as tall
+ * grass whatever stood under it. The type is the bottom half's.
+ */
+console.log("\n--- a legacy double plant's top half ---");
+{
+  const table = await loadLegacyBlockTable(LEGACY_BLOCKS);
+  const short = (value: number) => ({ type: "short", value }) as never;
+  const bytes = (value: number[]) => ({ type: "byteArray", value }) as never;
+  // Three columns, two tall, YZX: bottoms at 0..2, tops at 3..5.
+  // A sunflower, a lilac, and a top with nothing under it.
+  const root = {
+    Width: short(3),
+    Height: short(2),
+    Length: short(1),
+    Materials: { type: "string", value: "Alpha" } as never,
+    Blocks: bytes([175, 175, 0, 175, 175, 175]),
+    Data: bytes([0, 1, 0, 10, 10, 10]),
+  } as unknown as NbtCompound;
+  const decoded = decodeSchematic(root, table);
+  const at = (i: number): string => paletteEntryCacheKey(decoded.palette[decoded.indices[i]]);
+  equal("a sunflower's top half is a sunflower's, whatever its direction bits say", at(3), "minecraft:sunflower[half=upper]");
+  equal("...and a lilac's is a lilac's", at(4), "minecraft:lilac[half=upper]");
+  equal("...where the bottom half is the one that says so", [at(0), at(1)], [
+    "minecraft:sunflower[half=lower]",
+    "minecraft:lilac[half=lower]",
+  ]);
+  equal("a top with no bottom under it keeps what the table says", at(5), "minecraft:tall_grass[half=upper]");
+}
+
 // --- the legacy id table, read both ways ------------------------------------
 /*
  * `shared/legacy_ids.ts` exists because three places now ask which `ID:DATA` a

@@ -4900,6 +4900,16 @@ knowing:
   west. As a plain cross the head did not exist. All three carry `rescale`,
   so they are written already rescaled.
 
+  **And in a legacy file the top half did not even say it was a sunflower.**
+  Pre-Flattening, `double_plant` (175) keeps the type in the bottom half's
+  `0..5`; the top half stores `0x8` and a direction nothing reads, which the
+  wiki lists as `8..11`. `legacy_blocks.json` reads those low bits as a type
+  anyway, so `175:10` is `tall_grass[half=upper]` and a sunflower, lilac,
+  rose bush or peony could come back wearing a tuft of grass. The table is
+  generated and stays as it is: `doublePlantTopKey` in `loader_formats.ts`
+  takes the type from the cell below, which the YZX walk has already
+  decoded. A top with no bottom under it keeps the table's answer. Writing
+  needs nothing: the game reads a top half's type from below as well.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it

@@ -666,6 +666,41 @@ function byteArrayOf(tag: NbtTag | undefined): Uint8Array | null {
   return Uint8Array.from(tag.value as ArrayLike<number>);
 }
 
+/** `double_plant`: sunflower, lilac, tall grass, large fern, rose bush, peony. */
+const LEGACY_DOUBLE_PLANT = 175;
+
+/**
+ * The table key for the upper half of a pre-Flattening double plant, which is
+ * the one legacy block whose metadata does not say what it is.
+ *
+ * The bottom half stores the type in `0..5`; the top half stores `0x8` and, in
+ * the low bits, a direction nothing uses -- the wiki's own table lists `8..11`
+ * as "Top (South/West/North/East)". `legacy_blocks.json` reads those low bits as a type anyway, so
+ * `175:10` comes back as `tall_grass[half=upper]` and every sunflower,
+ * lilac, rose bush and peony in a 1.12 schematic grew a tuft of grass for a
+ * top. The type is the bottom half's, one cell down, and the grid is YZX, so
+ * that is one layer back -- already decoded, because the walk goes up.
+ *
+ * A top with no bottom under it keeps whatever the table says, which is the
+ * old answer: there is nothing better to go on.
+ */
+function doublePlantTopKey(
+  id: number,
+  meta: number,
+  i: number,
+  layer: number,
+  blocks: Uint8Array,
+  addBlocks: Uint8Array | null,
+  data: Uint8Array | null,
+): string {
+  if (id !== LEGACY_DOUBLE_PLANT || (meta & 0x8) === 0 || i < layer) return `${id}:${meta}`;
+  const below = i - layer;
+  const belowId = (highNibble(addBlocks, below) << 8) | (blocks[below] & 0xff);
+  const belowMeta = data ? data[below] & 0x0f : 0;
+  if (belowId !== LEGACY_DOUBLE_PLANT || (belowMeta & 0x8) !== 0) return `${id}:${meta}`;
+  return `${id}:${belowMeta | 0x8}`;
+}
+
 function decodeMcEdit(payload: NbtCompound, table: LegacyBlockTable): DecodedSchematic {
   const width = requireNumberTag(payload.Width, "Width");
   const height = requireNumberTag(payload.Height, "Height");
@@ -688,6 +723,7 @@ function decodeMcEdit(payload: NbtCompound, table: LegacyBlockTable): DecodedSch
   const indices = new Int32Array(totalBlocks);
 
   const limit = Math.min(totalBlocks, blocks.length);
+  const layer = width * length;
   for (let i = 0; i < limit; i += 1) {
     const id = (highNibble(addBlocks, i) << 8) | (blocks[i] & 0xff);
     const meta = data ? data[i] & 0x0f : 0;
@@ -698,7 +734,8 @@ function decodeMcEdit(payload: NbtCompound, table: LegacyBlockTable): DecodedSch
     // Exact `id:meta` first; a metadata value the table does not enumerate
     // (an unused bit combination, or one that only affects a tile entity)
     // falls back to the base block rather than to air.
-    const state = table[`${id}:${meta}`] ?? table[`${id}:0`];
+    const key = doublePlantTopKey(id, meta, i, layer, blocks, addBlocks, data);
+    const state = table[key] ?? table[`${id}:${meta}`] ?? table[`${id}:0`];
     if (state === undefined) {
       unmapped.add(`${id}:${meta}`);
       continue;
