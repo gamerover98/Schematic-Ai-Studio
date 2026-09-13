@@ -2466,6 +2466,47 @@ console.log("\n--- what a trace costs on disk ---");
   check("the original is not modified", long.length === MAX_STORED_TRACE_TEXT * 3);
 }
 
+// --- saving is working on it -------------------------------------------------
+//
+// A schematic created and then saved -- from the window or over MCP -- never
+// reached the recents, because the only way onto that list was Open, and a
+// file you just made is a file you never opened. `rememberDocument` in
+// `menu.ts` is the one call now, and neither module can be imported here.
+console.log("\n--- saving is working on it ---");
+{
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main");
+  const handlers = readFileSync(path.join(root, "ipc", "handlers.ts"), "utf8");
+  const server = readFileSync(path.join(root, "mcp", "server.ts"), "utf8");
+  const between = (source: string, from: string, to: string): string => {
+    const at = source.indexOf(from);
+    if (at === -1) return "";
+    const end = source.indexOf(to, at + from.length);
+    return source.slice(at, end === -1 ? source.length : end);
+  };
+  const windowSave = between(handlers, "IPC.docSave", "ipcMain.handle(");
+  const windowOpen = between(handlers, "IPC.docOpen", "ipcMain.handle(");
+  const mcpSave = between(server, "save: async", "close:");
+  const mcpOpen = between(server, "open: async", "create: async");
+  check(
+    "a save from the window records the file in the recents",
+    windowSave.includes("rememberDocument(result.filePath)"),
+  );
+  check("...and so does a save over MCP", mcpSave.includes("rememberDocument(result.filePath)"));
+  check(
+    "...as opening does, on both roads",
+    windowOpen.includes("rememberDocument(filePath)") && mcpOpen.includes("rememberDocument(filePath)"),
+  );
+  // Half of it is how the two came apart: the app's list without the OS's, or
+  // the other way round. Nothing outside `menu.ts` may call either on its own.
+  const halves = readdirSync(root, { recursive: true, encoding: "utf8" })
+    .filter((file) => file.endsWith(".ts"))
+    .filter((file) => !["menu.ts", "settings-store.ts"].includes(path.basename(file)))
+    .filter((file) =>
+      /rememberRecentDocument\(|addRecentDocument\(/.test(readFileSync(path.join(root, file), "utf8")),
+    );
+  equal("nothing records only half of a recent document", halves, []);
+}
+
 // --- opening a document points the conversation at it -----------------------
 //
 // A conversation is stored under the *file path*, so every way of putting a

@@ -77,10 +77,9 @@ import {
   getMcpToken,
   getRecentDocuments,
   getSettings,
-  rememberRecentDocument,
   setMcpToken,
 } from "../services/settings-store.js";
-import { rememberInOsRecents } from "../menu.js";
+import { rememberDocument } from "../menu.js";
 import { type Lifecycle } from "./lifecycle.js";
 
 /** How many calls the activity log remembers. */
@@ -251,8 +250,7 @@ function lifecycleHost(): Lifecycle {
       // over MCP that skipped them would be missing from the recents and would
       // arrive without its conversation -- "recovering is opening", and so is
       // this.
-      await rememberRecentDocument(filePath);
-      rememberInOsRecents(filePath);
+      await rememberDocument(filePath);
       await adoptSubject(filePath);
       return session;
     },
@@ -281,6 +279,10 @@ function lifecycleHost(): Lifecycle {
         legacyBlocksPath: legacyBlocksPath(),
       });
       await adoptSubject(result.filePath);
+      // `create_document` then `save_document_as` is how a client makes a
+      // schematic, and a file it made was never opened: without this it never
+      // reached the recents. The window's own Save does the same.
+      await rememberDocument(result.filePath);
       return result;
     },
     close: closeDocument,

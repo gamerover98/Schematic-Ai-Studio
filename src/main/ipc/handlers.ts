@@ -212,7 +212,6 @@ import {
   getKeyStatus,
   getRecentDocuments,
   getSettings,
-  rememberRecentDocument,
   setApiKey,
   setSettings,
 } from "../services/settings-store.js";
@@ -248,7 +247,7 @@ import {
   useHotbarDirectory,
   writeHotbar,
 } from "../services/hotbars.js";
-import { refreshShell, rememberInOsRecents, setKeysToCamera } from "../menu.js";
+import { refreshShell, rememberDocument, setKeysToCamera } from "../menu.js";
 import { shellState, useWindow } from "../services/broadcast.js";
 import {
   mcpActivity,
@@ -1114,10 +1113,7 @@ ${report.stack}`),
       const session = await openDocument(filePath, { legacyBlocksPath: legacyBlocksPath() });
       // Only once it really opened. Recording the attempt would fill the list
       // with paths that fail every time they are clicked.
-      await rememberRecentDocument(filePath);
-      // The OS keeps its own list, and it is the only part of "what was I
-      // working on" that survives the app not being open.
-      rememberInOsRecents(filePath);
+      await rememberDocument(filePath);
       /*
        * Not an unconditional reset. A chat that built this file with nothing
        * open is *about* it, and this is the moment it gets opened -- clearing
@@ -1738,6 +1734,9 @@ ${report.stack}`),
        * document to where the document went.
        */
       await adoptSubject(result.filePath);
+      // A schematic made here and saved was never opened, so without this it
+      // never reached the recents at all.
+      await rememberDocument(result.filePath);
       /*
        * What this file is for, remembered beside the talking about it.
        *

@@ -26,7 +26,7 @@ import { IPC } from "../shared/ipc.js";
 import { menuModel, windowTitle, type MenuCommand, type MenuItemModel } from "./menu_model.js";
 import { isDirty } from "./domain/history.js";
 import { currentSession } from "./services/session.js";
-import { getRecentDocuments } from "./services/settings-store.js";
+import { getRecentDocuments, rememberRecentDocument } from "./services/settings-store.js";
 import path from "path";
 
 let window: (() => BrowserWindow | null) | null = null;
@@ -183,6 +183,21 @@ export function installMenu(getWindow: () => BrowserWindow | null): void {
   void refreshShell();
 }
 
-export function rememberInOsRecents(filePath: string): void {
+/**
+ * Records a schematic as one the user worked on: the app's own recents and the
+ * OS's jump list, together.
+ *
+ * Opening a file and saving one are both that, and for a long time only
+ * opening said so. A schematic created and then saved -- from the window or
+ * over MCP -- never appeared in the recents at all, because the only way onto
+ * the list was through Open, and a file you just made is a file you never
+ * opened. One function for all four callers is what keeps a fifth path from
+ * doing half of it, which is how the two halves came apart in the first place.
+ *
+ * Only after the act succeeded: a path recorded for an attempt fills the list
+ * with entries that fail every time they are clicked.
+ */
+export async function rememberDocument(filePath: string): Promise<void> {
+  await rememberRecentDocument(filePath);
   app.addRecentDocument(filePath);
 }

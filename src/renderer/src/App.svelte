@@ -1489,6 +1489,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const unsubscribeDocument = api().onDocumentChanged((state) => {
       docState = state;
       void refreshDocument();
+      /*
+       * An MCP client opening, saving or closing a schematic moves the recents
+       * too, and this window only ever reread them when it did those things
+       * itself -- so the start screen went on listing what it listed at launch.
+       */
+      void refreshRecents();
     });
     /*
      * The application menu, one subscription per verb.
@@ -2689,6 +2695,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * left to fall out of `docState = null`, because a stale selection or
    * inspection would be re-applied to whatever is opened next.
    */
+  /** Rereads the recents, which main owns; a failure keeps the list on screen. */
+  async function refreshRecents(): Promise<void> {
+    try {
+      recentDocuments = await api().listRecentDocuments();
+    } catch {
+      // The list already shown is a better answer than an empty one.
+    }
+  }
+
   async function closeDocument(): Promise<void> {
     if (!(await mayDiscard("close"))) return;
     busy = true;
@@ -3717,6 +3732,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         return;
       }
       docState = response.state;
+      // A schematic made here and then saved joins the recents on this save.
+      void refreshRecents();
       status = {
         tone: response.degraded.length > 0 || response.dropped.length > 0 ? "warn" : "ok",
         text: t("status.saved", { name: response.filePath.split(/[\\/]/).pop() ?? "" }),

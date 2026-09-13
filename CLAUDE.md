@@ -1015,6 +1015,17 @@ the obvious rule and it is wrong: a run that fails leaves its entry in the log
 and never enters the model's memory, so counting from the renderer drifts by one
 for every error above it.
 
+**Saving is working on a file too, and only opening said so.** The recents
+list was reachable through Open alone, so a schematic created and then saved
+-- from the window or over MCP -- never appeared in it: a file you just made
+is a file you never opened. `rememberDocument` in `menu.ts` is the one call
+now, the app's list and the OS jump list together, from both opens and both
+saves; `tests/services.ts` reads the four sites out of the source and refuses
+any other module recording half of it. The window rereads the list after its
+own save and on every `docChanged`, because it used to reread it only when it
+opened or closed something itself, and an MCP client doing either left the
+start screen as it was at launch.
+
 **A checkpoint is not cropped, and is keyed on `doc.revision`.** `saveSession`
 trims to content; a snapshot must not, for the same reason autosave must not —
 coming back would hand the user the build without the room they made to build

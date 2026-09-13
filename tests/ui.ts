@@ -3574,6 +3574,21 @@ console.log("\n--- a run of chains ---");
 }
 
 /*
+ * The recents are main's, and the window reread them only when it opened or
+ * closed something itself -- so a schematic saved here, or anything an MCP
+ * client opened, saved or closed, left the start screen listing what it
+ * listed at launch.
+ */
+console.log("\n--- the recents follow the document ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const listener = app.slice(app.indexOf("api().onDocumentChanged("), app.indexOf("const unsubscribeMenu"));
+  check("a document announced from main rereads the recents", listener.includes("refreshRecents()"));
+  const save = app.slice(app.indexOf("await api().saveDocument("), app.indexOf("t(\"task.saving\")"));
+  check("...and so does a save from this window", save.includes("refreshRecents()"));
+}
+
+/*
  * In flight, Ctrl belongs to the camera.
  *
  * One sentence, enforced in three places and runnable in none of them here:
