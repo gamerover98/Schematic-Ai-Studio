@@ -158,6 +158,9 @@ const FRONT_TO_PLAYER: ReadonlySet<string> = new Set([
    * placing the small dripleaf"* -- so it is one line and not a branch.
    */
   "small_dripleaf",
+  // Its slots are on the front, and the front faces the player who placed it:
+  // `getHorizontalDirection().getOpposite()`, like a furnace.
+  "chiseled_bookshelf",
   /*
    * The copper chests are chests, and turn their front to you as one does. They
    * were in no table, so all eight landed on the registry's `facing=north`

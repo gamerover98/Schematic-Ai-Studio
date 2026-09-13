@@ -3582,6 +3582,62 @@ function shelf(entry: PaletteEntry): BlockShape {
 }
 
 /**
+ * A chiseled bookshelf: a block whose front is six slots, each a book or a gap.
+ *
+ * It was a cube, and no texture is named after its front -- the slots are
+ * `chiseled_bookshelf_occupied` and `_empty`, each a sheet of all six -- so all
+ * four sides wore `chiseled_bookshelf_side`, and `facing` and the six
+ * `slot_<n>_occupied` were read nowhere.
+ *
+ * The blockstate is a multipart: `chiseled_bookshelf.json` is a full box with
+ * no `north` face, applied with `uvlock`, and every slot adds one plane at
+ * `z = 0` facing north, cut out of the occupied or the empty sheet. Slots
+ * run 0..2 along the top and 3..5 along the bottom, left to right as seen
+ * from in front -- which, looking south at a north face, is from `x = 16`
+ * down to `x = 0`.
+ *
+ * **The body is not turned, and that is the `uvlock`.** Its geometry is the
+ * whole cell whatever the facing, so turning it would change nothing but the
+ * picture on its top and bottom, and `uvlock` is vanilla saying that picture
+ * stays put. Only which side is open follows `facing`. The slot planes carry
+ * no `uvlock` and turn with the block.
+ */
+const BOOKSHELF_SLOTS: readonly (readonly [Box, UvWindow])[] = [
+  [[10, 8, 0, 16, 16, 0], [0, 0, 6, 8]],
+  [[5, 8, 0, 10, 16, 0], [6, 0, 11, 8]],
+  [[0, 8, 0, 5, 16, 0], [11, 0, 16, 8]],
+  [[10, 0, 0, 16, 8, 0], [0, 8, 6, 16]],
+  [[5, 0, 0, 10, 8, 0], [6, 8, 11, 16]],
+  [[0, 0, 0, 5, 8, 0], [11, 8, 16, 16]],
+];
+
+function chiseledBookshelf(entry: PaletteEntry): BlockShape {
+  const front = (["north", "east", "south", "west"] as const).find(
+    (face) => face === entry.properties.facing,
+  ) ?? "north";
+  const body: ShapeBox = {
+    box: [0, 0, 0, 16, 16, 16],
+    texture: "chiseled_bookshelf_side",
+    textures: { up: "chiseled_bookshelf_top", down: "chiseled_bookshelf_top" },
+    omit: [front],
+  };
+  const slots = transform(
+    BOOKSHELF_SLOTS.map(([box, window], slot): ShapeBox => ({
+      box,
+      texture:
+        entry.properties[`slot_${slot}_occupied`] === "true"
+          ? "chiseled_bookshelf_occupied"
+          : "chiseled_bookshelf_empty",
+      uv: { north: window },
+      omit: ["south"],
+    })),
+    northFacingSteps(entry),
+    false,
+  );
+  return boxes(body, ...(slots.kind === "boxes" ? slots.boxes : []));
+}
+
+/**
  * Azalea: a hollow shell of leaves with the bush hanging inside it.
  *
  * Drawn as a solid cube it lost the whole lower half of the block -- the report
@@ -4299,6 +4355,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   // Workstations that are not full blocks. The composter is one: its shell is
   // 16x16x16, and the inside is what a cube cannot draw.
   composter,
+  chiseled_bookshelf: chiseledBookshelf,
   stonecutter: () => boxes([0, 0, 0, 16, 9, 16]),
   grindstone,
   brewing_stand: brewingStand,
@@ -4691,8 +4748,21 @@ export function occludesNeighbours(entry: PaletteEntry): boolean {
   if (paletteEntryIsAir(entry)) {
     return false;
   }
+  if (SOLID_BOXES.has(baseName(entry))) return true;
   return shapeFor(entry).kind === "cube" && !isSeeThrough(entry);
 }
+
+/**
+ * Blocks drawn as boxes that are still solid blocks.
+ *
+ * A chiseled bookshelf is a full block with a front made of six planes, so it
+ * has to be `boxes` to be drawn and would stop being solid for being drawn --
+ * letting light through a wall of them and fences not attach. It is a name
+ * rather than "boxes that cover all six faces" because that geometry does not
+ * decide it: measured over every offered id, the one other shape that covers
+ * all six today is the beacon, which is glass and lets light through.
+ */
+const SOLID_BOXES: ReadonlySet<string> = new Set(["chiseled_bookshelf"]);
 
 /**
  * Blocks you can see through, so they must not occlude even though their

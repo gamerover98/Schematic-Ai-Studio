@@ -4881,6 +4881,17 @@ knowing:
   level at `1 + 2 * level`, and `level=8` is the same height as 7 wearing
   `composter_ready`. As boxes it no longer counts as solid, which is the
   cauldron's arrangement too: light reaches in through the open top.
+- **A chiseled bookshelf's front is six planes, and it was a cube wearing its
+  side on all four sides.** No texture is named after the front, so
+  `facing` and the six `slot_<n>_occupied` were read nowhere. The multipart
+  is a full box with no `north` face, applied with `uvlock`, plus one plane
+  per slot cut from `_occupied` or `_empty`. The body is deliberately not
+  turned: its geometry is the whole cell, so turning it would only turn the
+  picture on its top, and `uvlock` says it stays put. It is the one member of
+  `SOLID_BOXES`, because being drawn as boxes would otherwise stop it
+  blocking light and taking a fence; covering all six faces does not decide
+  that, and the beacon -- glass, covering all six -- is why. It also turns
+  its front to the player now, like a furnace.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it

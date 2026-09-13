@@ -5884,6 +5884,12 @@ console.log("\n--- the state a placed block starts in ---");
     COPPER_CHESTS.filter((name) => placementState(`minecraft:${name}`, onFloor(1, 0)).facing !== "west"),
     [],
   );
+  // A chiseled bookshelf's slots are on its front, and it landed facing north.
+  equal(
+    "a chiseled bookshelf turns its slots to you",
+    placementState("minecraft:chiseled_bookshelf", onFloor(1, 0)).facing,
+    "west",
+  );
 
   const stairs = placementState("minecraft:oak_stairs", onFloor(1, 0));
   equal("stairs gain their shape", stairs.shape, "straight");
@@ -6257,6 +6263,69 @@ if (pack === null) {
     (["down", "north", "south", "east", "west"] as const).every((face) => coversFace(block("composter"), face)) &&
       !coversFace(block("composter"), "up"),
   );
+
+  /*
+   * The chiseled bookshelf was a cube wearing its side on all four sides. Its
+   * front is six slot planes, 0..2 along the top and 3..5 along the bottom,
+   * left to right as seen from in front, each cut from the occupied or the
+   * empty sheet.
+   */
+  const bookshelfFaults: string[] = [];
+  // From in front: the viewer's left is the facing turned a quarter clockwise.
+  const leftOf: Record<string, [number, number]> = {
+    north: [1, 0],
+    east: [0, 1],
+    south: [-1, 0],
+    west: [0, -1],
+  };
+  for (const facing of ["north", "east", "south", "west"]) {
+    const n = opening[facing];
+    const empty = await baker.bakeBlockstate(block("chiseled_bookshelf", { facing }));
+    const front = empty.extraFaces.filter((f) => f.normal.every((c, i) => Math.abs(c - n[i]) < 1e-6));
+    if (front.length !== 6 || !front.every((f) => f.textureKey === "minecraft:block/chiseled_bookshelf_empty")) {
+      bookshelfFaults.push(`${facing}: front is ${front.map((f) => f.textureKey).join(",")}`);
+    }
+    const back = empty.extraFaces.filter((f) => f.normal.every((c, i) => Math.abs(c + n[i]) < 1e-6));
+    if (back.length !== 1 || back[0].textureKey !== "minecraft:block/chiseled_bookshelf_side") {
+      bookshelfFaults.push(`${facing}: back is ${back.map((f) => f.textureKey).join(",")}`);
+    }
+    for (let slot = 0; slot < 6; slot += 1) {
+      const baked = await baker.bakeBlockstate(
+        block("chiseled_bookshelf", { facing, [`slot_${slot}_occupied`]: "true" }),
+      );
+      const books = baked.extraFaces.filter((f) => f.textureKey === "minecraft:block/chiseled_bookshelf_occupied");
+      if (books.length !== 1) {
+        bookshelfFaults.push(`${facing} slot ${slot}: ${books.length} occupied faces`);
+        continue;
+      }
+      const f = books[0];
+      const [lx, lz] = leftOf[facing];
+      // How far towards the viewer's left the face's centre is, 0..16.
+      const cx = (span(f, 0)[0] + span(f, 0)[1]) / 2;
+      const cz = (span(f, 2)[0] + span(f, 2)[1]) / 2;
+      const along = lx !== 0 ? (lx > 0 ? cx : 16 - cx) : lz > 0 ? cz : 16 - cz;
+      const column = along > 10 ? 0 : along > 5 ? 1 : 2;
+      const row = span(f, 1)[0] === 8 ? 0 : 1;
+      if (row * 3 + column !== slot || f.normal.some((c, i) => Math.abs(c - n[i]) > 1e-6)) {
+        bookshelfFaults.push(`${facing} slot ${slot}: landed at row ${row} column ${column}`);
+      }
+      if (pack !== null && faceOpacity(f) < 1) bookshelfFaults.push(`${facing} slot ${slot}: holed`);
+    }
+  }
+  equal("every chiseled bookshelf slot is on the front, in its place, per facing", bookshelfFaults, []);
+  const tops = await Promise.all(
+    ["north", "east", "south", "west"].map(async (facing) => {
+      const b = await baker.bakeBlockstate(block("chiseled_bookshelf", { facing }));
+      const up = b.extraFaces.find((f) => f.normal[1] === 1);
+      return up === undefined ? "none" : Array.from(up.uvs).join(",");
+    }),
+  );
+  check("...and its top does not turn with it, which is vanilla's uvlock", new Set(tops).size === 1, tops.join(" | "));
+  check(
+    "...and it is still a solid block for the light and for fences",
+    occludesNeighbours(block("chiseled_bookshelf", { facing: "east" })),
+  );
+  check("...where the beacon, the other box shape covering its whole cell, is not", !occludesNeighbours(block("beacon")));
 
   // A cross has no side to cover, and a rotated box is refused outright: a
   // tilted plane can pass through a face without covering it.
