@@ -3487,8 +3487,34 @@ const SHELF_PARTS: readonly ShapeBox[] = [
   },
 ];
 
+/**
+ * The shelf's back wall, between the lips, and the half the body model lacks.
+ *
+ * `template_shelf_body` states no `north` face on its panel, so on its own the
+ * shelf is hollow: from the front there is nothing between the lips, and hung
+ * on a wall -- whose face towards the panel is rightly culled -- you look
+ * straight into the inside of that block. The blockstate is a multipart, and
+ * every state applies a second model: one plane at `z = 13`, `y 4..12`, north
+ * face only. `powered` and `side_chain` choose its window on the sheet and
+ * move not one coordinate.
+ */
+const SHELF_BACK_UV: Readonly<Record<string, UvWindow>> = {
+  unpowered: [0, 2, 8, 6],
+  unconnected: [8, 12, 16, 16],
+  left: [0, 8, 8, 12],
+  center: [0, 12, 8, 16],
+  right: [8, 8, 16, 12],
+};
+
 function shelf(entry: PaletteEntry): BlockShape {
-  return transform(SHELF_PARTS, northFacingSteps(entry), false);
+  const key =
+    entry.properties.powered !== "true" ? "unpowered" : entry.properties.side_chain ?? "unconnected";
+  const back: ShapeBox = {
+    box: [0, 4, 13, 16, 12, 13],
+    uv: { north: SHELF_BACK_UV[key] ?? SHELF_BACK_UV.unconnected },
+    omit: ["south"],
+  };
+  return transform([...SHELF_PARTS, back], northFacingSteps(entry), false);
 }
 
 /**

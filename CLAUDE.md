@@ -4864,6 +4864,15 @@ knowing:
   `pointed_dripstone_<up|down>_<thickness>`, and the `down` files are drawn
   pointing down, so nothing turns. `candidatesForName` builds the name from the
   state and falls back to the birth state for a value no file has.
+- **A shelf was hollow, and hung on a wall it was a window into the wall.**
+  `template_shelf_body` states no face on the inside of its panel; the
+  blockstate is a multipart and every state adds a second model, one plane at
+  `z = 13`, `y 4..12`, north face only. Without it there was nothing between
+  the lips, and the wall's face towards the panel is rightly culled, so what
+  showed through was the inside of the block behind. `powered` and
+  `side_chain` choose that plane's window on the sheet and move no coordinate.
+  `side_chain` is read, not derived: pairing shelves is a neighbour rule and
+  is not done.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it

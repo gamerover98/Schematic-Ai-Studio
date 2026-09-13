@@ -6152,6 +6152,63 @@ if (pack === null) {
     );
   }
 
+  /*
+   * And the belly the wall's culled face used to show through. The body model
+   * has no face on the inside of its panel; vanilla's multipart adds one plane
+   * at z = 13, y 4..12, whose window alone depends on `powered`/`side_chain`.
+   * Hung on a wall without it, the shelf was a window into the wall block.
+   */
+  const shelfStates: Array<[string, Record<string, string>, readonly number[]]> = [
+    ["bare", {}, [0, 2, 8, 6]],
+    ["unpowered", { powered: "false", side_chain: "left" }, [0, 2, 8, 6]],
+    ["unconnected", { powered: "true", side_chain: "unconnected" }, [8, 12, 16, 16]],
+    ["left", { powered: "true", side_chain: "left" }, [0, 8, 8, 12]],
+    ["center", { powered: "true", side_chain: "center" }, [0, 12, 8, 16]],
+    ["right", { powered: "true", side_chain: "right" }, [8, 8, 16, 12]],
+  ];
+  const opening: Record<string, [number, number, number]> = {
+    north: [0, 0, -1],
+    south: [0, 0, 1],
+    east: [1, 0, 0],
+    west: [-1, 0, 0],
+  };
+  const bellyFaults: string[] = [];
+  for (const facing of ["north", "south", "east", "west"]) {
+    for (const [label, props, window] of shelfStates) {
+      const baked = await baker.bakeBlockstate(block("oak_shelf", { facing, ...props }));
+      const n = opening[facing];
+      // The plane 3 units in from the back, i.e. 5/16 from the centre towards the back.
+      const bellies = baked.extraFaces.filter((f) => {
+        if (f.normal.some((c, i) => Math.abs(c - n[i]) > 1e-6)) return false;
+        const depth = [0, 3, 6, 9].map(
+          (i) => (f.positions[i] - 0.5) * n[0] + (f.positions[i + 2] - 0.5) * n[2],
+        );
+        const ys = [1, 4, 7, 10].map((i) => f.positions[i] * 16);
+        return (
+          depth.every((d) => Math.abs(d + 5 / 16) < 1e-4) &&
+          Math.abs(Math.min(...ys) - 4) < 1e-4 &&
+          Math.abs(Math.max(...ys) - 12) < 1e-4
+        );
+      });
+      const tag = `${facing} ${label}`;
+      if (bellies.length !== 1) {
+        bellyFaults.push(`${tag}: ${bellies.length} belly faces`);
+        continue;
+      }
+      const f = bellies[0];
+      const us = [0, 2, 4, 6].map((i) => Math.round(f.uvs[i] * 16 * 1000) / 1000);
+      const vs = [1, 3, 5, 7].map((i) => Math.round(f.uvs[i] * 16 * 1000) / 1000);
+      const got = [Math.min(...us), Math.min(...vs), Math.max(...us), Math.max(...vs)];
+      if (got.some((c, i) => Math.abs(c - window[i]) > 1e-3)) {
+        bellyFaults.push(`${tag}: window ${got.join(",")}`);
+      }
+      if (pack !== null && faceOpacity(f) < 1) {
+        bellyFaults.push(`${tag}: ${faceOpacity(f).toFixed(3)} opaque`);
+      }
+    }
+  }
+  equal("every shelf state has one solid belly at the back, in its own window", bellyFaults, []);
+
   // A cross has no side to cover, and a rotated box is refused outright: a
   // tilted plane can pass through a face without covering it.
   check("a cross covers nothing", !coversFace(block("dandelion"), "down"));
@@ -6569,7 +6626,7 @@ if (pack === null) {
 
   // 5, 6. Blocks the app did not offer at all until the registry generated the
   // list, and the pack was updated to one that has them.
-  check("a shelf is a back panel and two lips", boxCount("oak_shelf", { facing: "north" }) === 3);
+  check("a shelf is a back panel, two lips and the belly between them", boxCount("oak_shelf", { facing: "north" }) === 4);
   equal("...wearing its own texture", await bakedKey("oak_shelf", { facing: "north" }), "minecraft:block/oak_shelf");
   /*
    * `oak_shelf.png` is a *sheet* -- 128x128 where an ordinary block texture is
@@ -6593,11 +6650,12 @@ if (pack === null) {
   // Vanilla draws no face where one part covers another, and says so per face
   // rather than leaving them to z-fight.
   // Three boxes of six faces, less the one each that another part covers: the
-  // panel has no north, and neither lip has a south.
+  // panel has no north, and neither lip has a south. Plus the belly, a plane
+  // with its north face alone: that is the face the panel lacks.
   check(
     "and the covered faces are left out",
-    shelfBlock.extraFaces.length === 15,
-    `${shelfBlock.extraFaces.length} faces, expected 18 less the three vanilla omits`,
+    shelfBlock.extraFaces.length === 16,
+    `${shelfBlock.extraFaces.length} faces, expected 18 less the three vanilla omits, plus the belly`,
   );
   check("an iron chain is two planes", boxCount("iron_chain") === 2);
   check("...and so is a copper one", boxCount("copper_chain") === 2);
