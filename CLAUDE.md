@@ -4955,6 +4955,13 @@ knowing:
   The sherds are not drawn. They are the block entity's `sherds` list, a
   function of the position like a sign's text, so every pot wears the plain
   side.
+- **An open fence gate was two posts and nothing else**, on the reasoning
+  that that "reads as open". Vanilla's `template_fence_gate_open.json` swings
+  each leaf a quarter turn onto the side the gate faces: an upright at
+  `z 13..15` and two bars back to the post. `in_wall` was read nowhere, and the
+  two `_wall` models are the same elements three units lower, which is what
+  lines a gate up with a wall's lower top. `powered` moves nothing.
+  `bamboo_fence_gate` is still the ordinary template, not its own custom one.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it

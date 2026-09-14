@@ -769,8 +769,41 @@ console.log("\n--- shapes ---");
       Math.min(...eastVerts.map((v) => v[0])) === 7 / 16,
   );
 
-  const open = await baker.bakeBlockstate(block("oak_fence_gate", { facing: "south", open: "true" }));
-  check("an open gate drops its bars", open.extraFaces.length < gate.extraFaces.length);
+  /*
+   * An open gate was the two posts and nothing else. Vanilla swings each leaf
+   * onto the side the gate faces, so the model reaches from the posts' line
+   * (7..9) out to 15 on that side, and still spans the whole opening.
+   */
+  const openFaults: string[] = [];
+  const reach: Record<string, (v: [number, number, number][]) => boolean> = {
+    south: (v) => Math.min(...v.map((p) => p[2])) === 7 / 16 && Math.max(...v.map((p) => p[2])) === 15 / 16,
+    north: (v) => Math.min(...v.map((p) => p[2])) === 1 / 16 && Math.max(...v.map((p) => p[2])) === 9 / 16,
+    east: (v) => Math.min(...v.map((p) => p[0])) === 7 / 16 && Math.max(...v.map((p) => p[0])) === 15 / 16,
+    west: (v) => Math.min(...v.map((p) => p[0])) === 1 / 16 && Math.max(...v.map((p) => p[0])) === 9 / 16,
+  };
+  for (const facing of ["south", "north", "east", "west"]) {
+    const opened = await baker.bakeBlockstate(block("oak_fence_gate", { facing, open: "true" }));
+    const v = allVertices(opened);
+    // The arms' outer uprights: 9 units tall, standing 13..15 out from the posts.
+    const uprights = opened.extraFaces.filter((f) => {
+      const ys = [1, 4, 7, 10].map((i) => f.positions[i]);
+      return Math.min(...ys) === 6 / 16 && Math.max(...ys) === 15 / 16;
+    });
+    if (!reach[facing](v) || uprights.length === 0) openFaults.push(facing);
+  }
+  equal("an open gate swings both leaves out on the side it faces", openFaults, []);
+
+  const heights = async (props: Record<string, string>) => {
+    const ys = allVertices(await baker.bakeBlockstate(block("oak_fence_gate", { facing: "south", ...props }))).map(
+      (v) => Math.round(v[1] * 16),
+    );
+    return [Math.min(...ys), Math.max(...ys)];
+  };
+  equal("a gate stands 5..16", await heights({ open: "false" }), [5, 16]);
+  equal("...and three lower in a wall, open or shut", [
+    await heights({ open: "false", in_wall: "true" }),
+    await heights({ open: "true", in_wall: "true" }),
+  ], [[2, 13], [2, 13]]);
 }
 
 {

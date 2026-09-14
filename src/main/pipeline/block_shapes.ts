@@ -2675,29 +2675,50 @@ function lightningRod(entry: PaletteEntry): BlockShape {
 }
 
 /**
- * `template_fence_gate.json`: two posts and the bars between them, authored
- * facing south. Getting the authoring direction wrong is what made gates sit
- * across the fence line instead of in it.
+ * `template_fence_gate.json` and its three siblings: two posts and two leaves,
+ * authored facing south. Getting the authoring direction wrong is what made
+ * gates sit across the fence line instead of in it.
+ *
+ * An open gate was drawn as the two posts alone, "reading as open". It is not
+ * what vanilla draws: `template_fence_gate_open.json` swings each leaf a
+ * quarter turn onto the south side of its post, an upright at `z 13..15` and
+ * two bars from the post out to it, so an open gate is two short arms pointing
+ * the way it faces. `in_wall` was read nowhere, and the two `_wall` models are
+ * the same elements three units lower, which is what lets a gate line up with
+ * the lower top of a wall beside it. `powered` moves nothing.
+ *
+ * The bars carry no face towards what they run into: vanilla states none,
+ * and each would be coincident with a post's or an upright's side.
  */
-const FENCE_GATE_POSTS: Box[] = [
-  [0, 5, 7, 2, 16, 9],
-  [14, 5, 7, 16, 16, 9],
+const FENCE_GATE_POSTS: ShapeBox[] = [
+  { box: [0, 5, 7, 2, 16, 9] },
+  { box: [14, 5, 7, 16, 16, 9] },
 ];
-const FENCE_GATE_BARS: Box[] = [
-  [6, 6, 7, 10, 15, 9],
-  [2, 12, 7, 6, 15, 9],
-  [10, 12, 7, 14, 15, 9],
-  [2, 6, 7, 6, 9, 9],
-  [10, 6, 7, 14, 9, 9],
+const FENCE_GATE_CLOSED: ShapeBox[] = [
+  // Vanilla's two inner uprights, 6..8 and 8..10, as one box: the face between
+  // them is inside the gate.
+  { box: [6, 6, 7, 10, 15, 9] },
+  { box: [2, 6, 7, 6, 9, 9], omit: ["west", "east"] },
+  { box: [2, 12, 7, 6, 15, 9], omit: ["west", "east"] },
+  { box: [10, 6, 7, 14, 9, 9], omit: ["west", "east"] },
+  { box: [10, 12, 7, 14, 15, 9], omit: ["west", "east"] },
+];
+const FENCE_GATE_OPEN: ShapeBox[] = [
+  { box: [0, 6, 13, 2, 15, 15] },
+  { box: [14, 6, 13, 16, 15, 15] },
+  { box: [0, 6, 9, 2, 9, 13], omit: ["north", "south"] },
+  { box: [0, 12, 9, 2, 15, 13], omit: ["north", "south"] },
+  { box: [14, 6, 9, 16, 9, 13], omit: ["north", "south"] },
+  { box: [14, 12, 9, 16, 15, 13], omit: ["north", "south"] },
 ];
 
 function fenceGate(entry: PaletteEntry): BlockShape {
-  // An open gate swings its leaves flat against the posts; drawing just the
-  // posts reads as "open" and avoids modelling the swing.
-  const parts =
-    entry.properties.open === "true"
-      ? FENCE_GATE_POSTS
-      : [...FENCE_GATE_POSTS, ...FENCE_GATE_BARS];
+  const leaves = entry.properties.open === "true" ? FENCE_GATE_OPEN : FENCE_GATE_CLOSED;
+  const drop = entry.properties.in_wall === "true" ? 3 : 0;
+  const parts = [...FENCE_GATE_POSTS, ...leaves].map((part): ShapeBox => {
+    const [x0, y0, z0, x1, y1, z1] = part.box;
+    return { ...part, box: [x0, y0 - drop, z0, x1, y1 - drop, z1] };
+  });
   return transform(parts, southFacingSteps(entry), false);
 }
 
