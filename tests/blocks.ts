@@ -5895,6 +5895,30 @@ console.log("\n--- the state a placed block starts in ---");
     placementState("minecraft:chiseled_bookshelf", onFloor(1, 0)).facing,
     "west",
   );
+  // A lantern clicked onto the underside of a block hangs from it.
+  const lanterns = [...parseBlockList(readFileSync("block_id_list.txt", "utf-8"))].filter(
+    (id) => id.endsWith("lantern") && id !== "minecraft:jack_o_lantern" && id !== "minecraft:sea_lantern",
+  );
+  const under: PlacementLook = { direction: { x: 0, y: 1, z: 0 }, against: "down", cursorY: 0, run: null };
+  const side: PlacementLook = { direction: { x: 1, y: 0.1, z: 0 }, against: "west", cursorY: 0.5, run: null };
+  check("the lanterns are all found", lanterns.length === 10, String(lanterns.length));
+  equal(
+    "every lantern placed under a block hangs",
+    lanterns.filter((id) => placementState(id, under).hanging !== "true"),
+    [],
+  );
+  equal(
+    "...and stands on a floor, and against a wall",
+    lanterns.filter(
+      (id) => placementState(id, onFloor(1, 0)).hanging !== "false" || placementState(id, side).hanging !== "false",
+    ),
+    [],
+  );
+  check(
+    "...and neither a jack o'lantern nor a mangrove propagule is given one",
+    !("hanging" in placementState("minecraft:jack_o_lantern", under)) &&
+      placementState("minecraft:mangrove_propagule", under).hanging !== "true",
+  );
   // Every shelf opens towards you, and all twelve landed facing north.
   const shelves = [...parseBlockList(readFileSync("block_id_list.txt", "utf-8"))].filter((id) =>
     id.endsWith("_shelf"),

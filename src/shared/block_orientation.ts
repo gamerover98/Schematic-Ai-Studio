@@ -485,6 +485,27 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return {};
   }
 
+  /*
+   * A lantern clicked onto the underside of a block hangs from it.
+   *
+   * Vanilla's `LanternBlock` tries the vertical directions nearest the look,
+   * sets `hanging` for up, and keeps the first that can survive. The survival
+   * half needs the document and this file has only the click, so the face
+   * decides: the underside hangs, the top stands. A side click is left at the
+   * registry's `hanging=false` rather than guessed from the look -- at eye
+   * level that look is a hair either way of horizontal, and a lantern hung off
+   * a wall with nothing above it looks deliberate.
+   *
+   * Membership is the registry's `hanging` plus the name, because two other
+   * blocks answer part of it: `jack_o_lantern` ends in `lantern` and has no
+   * `hanging`, and `mangrove_propagule` has `hanging` and is placed standing.
+   */
+  if (name.endsWith("lantern") && hasProperty(name, "hanging")) {
+    if (look.against === "down") return { hanging: "true" };
+    if (look.against === "up") return { hanging: "false" };
+    return {};
+  }
+
   if (name.endsWith("_stairs")) {
     return { facing: horizontalFacing(look.direction), half: upper ? "top" : "bottom" };
   }
