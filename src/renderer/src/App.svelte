@@ -69,6 +69,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
   import { continuedPlacement } from "./lib/block_hover.js";
   import { movedRegion, translatedRegion } from "./lib/selection_drag.js";
+  import { ghostRequests, ghostStillWanted, grabGhost, releaseGhost } from "./lib/ghost_request.js";
 import {
   gizmoOrigin,
   scaledRegion,
@@ -3346,6 +3347,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * destination as a box.
    */
   let moving = $state<{ region: RegionSpec; chunks: ChunkGeometry[] } | null>(null);
+  /** Which press the mesh in flight belongs to -- see `ghost_request.ts`. */
+  const ghostFetch = ghostRequests();
 
   /**
    * Which handles the gizmo is showing.
@@ -3412,6 +3415,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (selection !== null) return;
     if (pivot !== null) pivot = null;
     if (stamp !== null) stamp = null;
+    // The move ghost is released by the drag ending; this is the net under
+    // that, so a ghost can never outlive the selection it was drawn for.
+    releaseGhost(ghostFetch);
+    if (moving !== null) moving = null;
   });
 
   /**
@@ -3441,11 +3448,14 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (stamp !== null) return;
     if (!selection || moving !== null) return;
     const region = { ...selection };
+    const token = grabGhost(ghostFetch);
     try {
       const response = await api().regionMesh(forIpc(region));
       // The drag may have ended while this was in flight, and a ghost that
-      // arrived after the release would sit on the build until the next one.
-      if (!response.ok || !selection) return;
+      // arrived after the release would stand at the corner of every
+      // selection after it. Asked of the drag, not of the selection: a move
+      // takes the selection along, so that one is still there.
+      if (!response.ok || !ghostStillWanted(ghostFetch, token)) return;
       moving = { region, chunks: response.chunks };
     } catch {
       // A missing ghost costs the preview, not the gesture: the destination
@@ -3492,6 +3502,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       depth > depthBefore
         ? recordEditSelection(selectionTimeline, depthBefore, before, now)
         : recordSelection(selectionTimeline, depth, before, now);
+  }
+
+  /**
+   * The gizmo drag is over, whatever it decided. Called after the commit has
+   * been dispatched, so `commitMove` has already taken its region.
+   */
+  function endGhost(): void {
+    releaseGhost(ghostFetch);
+    moving = null;
   }
 
   /** Carries the pivot along with the box whose cell it names. */
@@ -4820,6 +4839,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       autoGrow={settings.editing.autoGrow}
       onpivotchange={(next) => (pivot = next)}
       ongizmograb={() => void armGhost()}
+      ongizmorelease={endGhost}
       ontransform={(transform, origin) => void gizmoTransform(transform, origin)}
       onscale={(spec, origin) => void gizmoScale(spec, origin)}
       documentSize={docState?.size ?? null}

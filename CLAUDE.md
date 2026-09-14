@@ -2885,6 +2885,23 @@ had already forgotten the pivot. So it is an effect on `selection === null`
 rather than an eighth line: this file's own rule about discipline at N call
 sites, applied to the one place where it had already failed at seven.
 
+**A move ghost lives as long as its drag, and it used to live until a
+commit.** `moving` was cleared by `commitMove` alone, and drawn as `moving ??
+stamp` at the corner of whatever was selected. Two ways it was never cleared,
+and both depend on timing, which is why the report called it hard to
+reproduce: press an arrow and let go without moving a whole block (no move, so
+no commit), or let go before the region's mesh arrived (the commit cleared
+it, then the late answer wrote it back). That second one was guarded, but
+with `!selection`, and a move takes the selection along with it. The ghost
+then stood over every later selection and covered a copy's stamp. Escape and
+opening another document did not clear it, only a restart did.
+
+`ghost_request.ts` gives each press a token, and a mesh is accepted only for
+the current one. `endGizmoDrag` sends `ongizmorelease` on **every** path,
+after the commit has been dispatched, so `commitMove` still reads its region
+first. The `selection === null` effect clears `moving` as well, as a safety
+net in case something else ever forgets to release it.
+
 **And a paste grows, which is `moveRegion`'s rule one verb further on.**
 `pasteClipboard` clips by letting `tx.setBlock` return `false`, so a paste over
 the edge came back with a short count and nothing anywhere saying why. That was

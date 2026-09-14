@@ -437,6 +437,12 @@ import { isTyping } from "./typing.js";
      */
     ongizmograb?: () => void;
     /**
+     * A gizmo drag ended, whatever it decided. Sent on every path -- a release
+     * that moved nothing commits nothing, and the ghost `ongizmograb` asked for
+     * must go all the same.
+     */
+    ongizmorelease?: () => void;
+    /**
      * The palette in force, already resolved against the OS preference.
      *
      * The viewer never reads this value -- the colours come from the same CSS
@@ -496,6 +502,7 @@ import { isTyping } from "./typing.js";
     ontransform,
     onscale,
     ongizmograb,
+    ongizmorelease,
   }: Props = $props();
 
   /**
@@ -1991,11 +1998,15 @@ import { isTyping } from "./typing.js";
     ghostGroup?.position.set(ghostHome.x, ghostHome.y, ghostHome.z);
     if (controls) controls.enabled = cameraMode !== "fly";
     onselectiongesture?.("end");
-    if (!commit || result === null || origin === null) return;
-    if (result.kind === "move") onghostcommit?.(result.to);
-    else if (result.kind === "pivot") onpivotchange?.(result.cell);
-    else if (result.kind === "transform") ontransform?.(result.transform, origin);
-    else onscale?.(result.spec, origin);
+    if (commit && result !== null && origin !== null) {
+      if (result.kind === "move") onghostcommit?.(result.to);
+      else if (result.kind === "pivot") onpivotchange?.(result.cell);
+      else if (result.kind === "transform") ontransform?.(result.transform, origin);
+      else onscale?.(result.spec, origin);
+    }
+    // Last, and on every path: the commit has taken what it needs, and a drag
+    // that decided nothing still asked for a ghost that must not stay behind.
+    ongizmorelease?.();
   }
 
   /** Refreshes the hovered face, throttled like the crosshair highlight. */

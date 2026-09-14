@@ -102,6 +102,12 @@ import {
   scaledRegion,
   transformedRegion,
 } from "../src/renderer/src/lib/gizmo.js";
+import {
+  ghostRequests,
+  ghostStillWanted,
+  grabGhost,
+  releaseGhost,
+} from "../src/renderer/src/lib/ghost_request.js";
 import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
 
@@ -4426,6 +4432,43 @@ console.log("\n--- the picture a copy leaves behind ---");
   check(
     "a drag hands the ghost's position back when it ends",
     endDrag.includes("ghostGroup?.position.set(ghostHome"),
+  );
+
+  /*
+   * A move ghost lives as long as its drag, and it used to live until a commit.
+   * Released without moving a block, or released before its mesh arrived, it
+   * stood at the corner of every selection after it until the app restarted.
+   */
+  {
+    const requests = ghostRequests();
+    const late = grabGhost(requests);
+    releaseGhost(requests);
+    check("a mesh that arrives after the release is refused", !ghostStillWanted(requests, late));
+    const first = grabGhost(requests);
+    const second = grabGhost(requests);
+    check(
+      "...a second press makes the first one's mesh stale",
+      !ghostStillWanted(requests, first) && ghostStillWanted(requests, second),
+    );
+  }
+  const releaseAt = endDrag.indexOf("ongizmorelease?.()");
+  check(
+    "every gizmo drag ends by releasing its ghost, whether or not it committed",
+    releaseAt >= 0 && !endDrag.slice(0, releaseAt).includes("return"),
+    "a press released without moving a block commits nothing",
+  );
+  check("...and the app is listening", app.includes("ongizmorelease={endGhost}"));
+  const armMove = app.slice(app.indexOf("async function armGhost"), app.indexOf("function adoptEditedSelection"));
+  check(
+    "the move mesh is accepted only for the drag that asked for it",
+    armMove.includes("ghostStillWanted(ghostFetch, token)") && !armMove.includes("|| !selection)"),
+    "a move takes the selection along, so asking for one proves nothing",
+  );
+  check(
+    "...and a dropped selection takes the move ghost with it too",
+    /if \(selection !== null\) return;[^}]*releaseGhost\(ghostFetch\);\s*if \(moving !== null\) moving = null;/.test(
+      app.replace(/\r/g, ""),
+    ),
   );
 
   /*
