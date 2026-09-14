@@ -170,6 +170,18 @@ const FRONT_TO_PLAYER: ReadonlySet<string> = new Set([
   ...COPPER_CHESTS,
 ]);
 
+/**
+ * The shelves, by suffix: twelve woods, and a list of twelve is how a thirteenth
+ * goes missing. Vanilla's `ShelfBlock` places with
+ * `getHorizontalDirection().getOpposite()`, a furnace's rule -- the camera, not
+ * the clicked face, so a shelf placed against a wall looking at it still opens
+ * towards you. They were in no table and all landed on `facing=north`.
+ *
+ * `chiseled_bookshelf` does not end in `_shelf` ("bookshelf"), so the suffix
+ * cannot reach it by accident.
+ */
+const FRONT_TO_PLAYER_SUFFIXES = ["_shelf"] as const;
+
 /** The same, for the ones whose `facing` also takes `up` and `down`. */
 const FRONT_TO_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set([
   "dispenser",
@@ -588,7 +600,7 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return look.against === null ? {} : { face: "wall", facing: look.against };
   }
 
-  if (FRONT_TO_PLAYER.has(name)) {
+  if (FRONT_TO_PLAYER.has(name) || FRONT_TO_PLAYER_SUFFIXES.some((s) => name.endsWith(s))) {
     return { facing: OPPOSITE[horizontalFacing(look.direction)] };
   }
 

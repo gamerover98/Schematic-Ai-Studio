@@ -5895,6 +5895,16 @@ console.log("\n--- the state a placed block starts in ---");
     placementState("minecraft:chiseled_bookshelf", onFloor(1, 0)).facing,
     "west",
   );
+  // Every shelf opens towards you, and all twelve landed facing north.
+  const shelves = [...parseBlockList(readFileSync("block_id_list.txt", "utf-8"))].filter((id) =>
+    id.endsWith("_shelf"),
+  );
+  check("the shelves are all found", shelves.length === 12, String(shelves.length));
+  equal(
+    "every shelf turns its front to you",
+    shelves.filter((id) => placementState(id, onFloor(1, 0)).facing !== "west"),
+    [],
+  );
   // A decorated pot's `facing` is the look direction itself; the renderer puts
   // its front on the opposite side, so the front still turns to you.
   equal(
