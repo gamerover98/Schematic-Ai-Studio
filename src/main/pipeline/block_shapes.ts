@@ -3686,6 +3686,90 @@ function chiseledBookshelf(entry: PaletteEntry): BlockShape {
   return boxes(body, ...(slots.kind === "boxes" ? slots.boxes : []));
 }
 
+const POT_BASE = "entity/decorated_pot/decorated_pot_base";
+const POT_SIDE = "entity/decorated_pot/decorated_pot_side";
+
+/**
+ * A decorated pot, which has **no block model at all**: `decorated_pot.json`
+ * names a particle and nothing else, and `DecoratedPotRenderer` draws the pot
+ * from two `ModelPart` layers. It was a 14x16x14 box wearing the base sheet on
+ * its lid and floor and the side tile on four faces -- a crate, with a whole
+ * 32-texel sheet of parts squeezed onto each flat face and no neck.
+ *
+ * The base layer is a neck, a lip under it, and a 14x14 plane at the top and
+ * at the bottom; the sides layer is four 14x16 planes carrying only their
+ * outward face. The neck is posed with `xRot = pi` about `(0, 37, 16)`, which
+ * turns it over: the 8x3x8 cube lands on top at `y 17..20` and the 6x1x6 one
+ * becomes the narrow collar between it and the lid. Both are deflated or
+ * inflated by vanilla's `CubeDeformation` (-0.1 and +0.2) while their UVs keep
+ * the undeformed sizes, so those two are not one texel per unit, and that is
+ * vanilla.
+ *
+ * The windows were not worked out by hand. The renderer's cubes, their poses
+ * and `ModelPart.Cube`'s unwrap were emulated, and each face's window and turn
+ * read back off the resulting vertices -- the flip swaps the neck's `up` and
+ * `down` patches and its `north` and `south` strips, which is exactly the part
+ * a hand transcription gets backwards. The four sides need none: a plane from
+ * 1 to 15 derives vanilla's `[1, 0, 15, 16]` on its own.
+ *
+ * The model is authored at `facing=north`, because the renderer turns it by
+ * `180 - toYRot` and that is zero there; the front is then on the **south**,
+ * facing the player who was looking north.
+ *
+ * `cracked` moves nothing. It decides whether breaking the pot drops the pot or
+ * its sherds, and the renderer never reads it -- `signal_fire`'s answer.
+ * `waterlogged` is the mesher's, like any other block.
+ *
+ * What is not done is the sherds: they are the block entity's `sherds` list,
+ * one pattern per side, which is a function of the *position* like a sign's
+ * text. Every pot is drawn with the plain brick side a pot without sherds has.
+ */
+function decoratedPot(entry: PaletteEntry): BlockShape {
+  return transform(
+    [
+      {
+        box: [4.1, 17.1, 4.1, 11.9, 19.9, 11.9],
+        texture: POT_BASE,
+        uv: {
+          up: [4, 0, 8, 4],
+          down: [8, 4, 12, 0],
+          north: [12, 4, 16, 5.5],
+          south: [4, 4, 8, 5.5],
+          west: [0, 4, 4, 5.5],
+          east: [8, 4, 12, 5.5],
+        },
+      },
+      {
+        box: [4.8, 15.8, 4.8, 11.2, 17.2, 11.2],
+        texture: POT_BASE,
+        uv: {
+          up: [3, 2.5, 6, 5.5],
+          down: [6, 5.5, 9, 2.5],
+          north: [9, 5.5, 12, 6],
+          south: [3, 5.5, 6, 6],
+          west: [0, 5.5, 3, 6],
+          east: [6, 5.5, 9, 6],
+        },
+      },
+      ...([16, 0] as const).map(
+        (y): ShapeBox => ({
+          box: [1, y, 1, 15, y, 15],
+          texture: POT_BASE,
+          uv: { up: [7, 13.5, 14, 6.5], down: [0, 6.5, 7, 13.5] },
+        }),
+      ),
+      { box: [1, 0, 1, 15, 16, 1], texture: POT_SIDE, omit: ["south"] },
+      { box: [1, 0, 15, 15, 16, 15], texture: POT_SIDE, omit: ["north"] },
+      { box: [1, 0, 1, 1, 16, 15], texture: POT_SIDE, omit: ["east"] },
+      { box: [15, 0, 1, 15, 16, 15], texture: POT_SIDE, omit: ["west"] },
+    ],
+    // `facingSteps` falls back to east, and the registry's default is north: a
+    // bare pot would otherwise come out a quarter turn round.
+    (FACING_STEPS[entry.properties.facing ?? "north"] ?? 3) + 1,
+    false,
+  );
+}
+
 /**
  * Azalea: a hollow shell of leaves with the bush hanging inside it.
  *
@@ -4505,7 +4589,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   // the same two expressions the `_skull` and `_wall_skull` suffixes already
   // reach. Two copies of one shape is how one of them comes to be corrected
   // and the other not -- and this pair very nearly was.
-  decorated_pot: () => boxes([1, 0, 1, 15, 16, 15]),
+  decorated_pot: decoratedPot,
   sniffer_egg: () => boxes([1, 0, 1, 15, 16, 15]),
   /*
    * The two bare pre-Flattening names. `SUFFIX_SHAPES` keys `_sign` and

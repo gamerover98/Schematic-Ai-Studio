@@ -4921,6 +4921,23 @@ knowing:
   takes the type from the cell below, which the YZX walk has already
   decoded. A top with no bottom under it keeps the table's answer. Writing
   needs nothing: the game reads a top half's type from below as well.
+- **A decorated pot has no block model, and it was a crate.** It was a
+  14x16x14 box with the whole base sheet squeezed onto its lid and floor and
+  no neck. `DecoratedPotRenderer` draws two `ModelPart` layers: a neck turned
+  over by `xRot = pi` so the 8x3x8 cube sits on a 6x1x6 collar, a 14x14 plane
+  at the top and at the bottom, and four 14x16 sides that carry only their
+  outward face. The windows were read off an emulation of those cubes, their
+  poses and `ModelPart.Cube`'s unwrap rather than worked out by hand, because
+  the flip swaps the neck's patches. That is exactly what a transcription gets
+  backwards, and `tests/blocks.ts` checks that swap by name.
+
+  The model is `facing=north`, where the renderer's `180 - toYRot` is zero, so
+  the front is on the south. Placing one sets `facing` to where you look, not
+  to its opposite (`AWAY_FROM_PLAYER`), and that is what turns the front
+  towards you. `cracked` moves nothing: it decides what breaking the pot drops.
+  The sherds are not drawn. They are the block entity's `sherds` list, a
+  function of the position like a sign's text, so every pot wears the plain
+  side.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it

@@ -399,9 +399,9 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
 
   /*
    * Blocks drawn from `textures/entity/`, like the beds and chests above but
-   * without a sheet layout worth unwrapping. A decorated pot's patterns are a
-   * stack of layers this code cannot compose, so it wears its plain side; a
-   * skull is drawn from the mob's own texture, which is what vanilla does.
+   * without a sheet layout worth unwrapping. A decorated pot's boxes name their
+   * own sheets in `block_shapes.ts`, so its row is only the fallback; a skull
+   * is drawn from the mob's own texture, which is what vanilla does.
    */
   decorated_pot: {
     top: ["entity/decorated_pot/decorated_pot_base"],

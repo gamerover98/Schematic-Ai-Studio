@@ -3873,6 +3873,11 @@ if (pack === null) {
     await waterFaces([block("air"), block("oak_fence", { waterlogged: "true" })], [1], 0),
     6,
   );
+  equal(
+    "...and so is a waterlogged decorated pot",
+    await waterFaces([block("air"), block("decorated_pot", { waterlogged: "true" })], [1], 0),
+    6,
+  );
   /*
    * And it is one body of water, not two blocks of it. Two waterlogged cells
    * side by side do not draw the surface between them, for the same reason an
@@ -5890,6 +5895,13 @@ console.log("\n--- the state a placed block starts in ---");
     placementState("minecraft:chiseled_bookshelf", onFloor(1, 0)).facing,
     "west",
   );
+  // A decorated pot's `facing` is the look direction itself; the renderer puts
+  // its front on the opposite side, so the front still turns to you.
+  equal(
+    "a decorated pot faces where you look, which puts its front towards you",
+    placementState("minecraft:decorated_pot", onFloor(1, 0)).facing,
+    "east",
+  );
 
   const stairs = placementState("minecraft:oak_stairs", onFloor(1, 0));
   equal("stairs gain their shape", stairs.shape, "straight");
@@ -6326,6 +6338,74 @@ if (pack === null) {
     occludesNeighbours(block("chiseled_bookshelf", { facing: "east" })),
   );
   check("...where the beacon, the other box shape covering its whole cell, is not", !occludesNeighbours(block("beacon")));
+
+  /*
+   * A decorated pot was a 14x16x14 crate: the whole base sheet squeezed onto
+   * its lid and floor, and no neck. It is `DecoratedPotRenderer`'s two layers
+   * now -- a neck on a collar, a plane at the top and the bottom, and four
+   * outward-facing sides.
+   */
+  const POT_BASE_KEY = "minecraft:entity/decorated_pot/decorated_pot_base";
+  const POT_SIDE_KEY = "minecraft:entity/decorated_pot/decorated_pot_side";
+  const potFaults: string[] = [];
+  // The texel the lid's north-west corner reads, per facing: the renderer turns
+  // the model by `180 - toYRot`, and east and west are where a turn the wrong
+  // way round shows.
+  const lidCorner: Record<string, [number, number]> = {
+    north: [7, 13.5],
+    east: [7, 6.5],
+    south: [14, 6.5],
+    west: [14, 13.5],
+  };
+  for (const facing of ["north", "east", "south", "west"]) {
+    const pot = await baker.bakeBlockstate(block("decorated_pot", { facing }));
+    const faces = pot.extraFaces;
+    const sides = faces.filter((f) => f.textureKey === POT_SIDE_KEY);
+    const outward = sides.every((f) => {
+      const axis = f.normal[0] !== 0 ? 0 : 2;
+      const at = span(f, axis)[0];
+      return (at === 1 && f.normal[axis] === -1) || (at === 15 && f.normal[axis] === 1);
+    });
+    if (sides.length !== 4 || !outward) potFaults.push(`${facing}: ${sides.length} sides, outward ${outward}`);
+    const neckTop = faces.find((f) => f.normal[1] === 1 && span(f, 1)[0] === 19.9);
+    if (neckTop === undefined || neckTop.textureKey !== POT_BASE_KEY || span(neckTop, 0).join() !== "4.1,11.9") {
+      potFaults.push(`${facing}: no neck on top`);
+    }
+    // The pose turns the neck over, so its top reads the patch `ModelPart.Cube`
+    // unwraps as its *underside*, and the other way round.
+    const uRange = (f: BakedFace | undefined) => {
+      if (f === undefined) return "none";
+      const us = [0, 2, 4, 6].map((i) => f.uvs[i] * 16);
+      return `${Math.min(...us)}..${Math.max(...us)}`;
+    };
+    const neckBottom = faces.find((f) => f.normal[1] === -1 && span(f, 1)[0] === 17.1);
+    if (uRange(neckTop) !== "4..8" || uRange(neckBottom) !== "8..12") {
+      potFaults.push(`${facing}: neck reads ${uRange(neckTop)} on top and ${uRange(neckBottom)} below`);
+    }
+    const lid = faces.find((f) => f.normal[1] === 1 && span(f, 1)[0] === 16);
+    const corner = lid === undefined ? -1 : [0, 1, 2, 3].find((i) => lid.positions[i * 3] * 16 === 1 && Math.round(lid.positions[i * 3 + 2] * 16) === 1);
+    const read = lid === undefined || corner === undefined || corner < 0 ? null : [lid.uvs[corner * 2] * 16, lid.uvs[corner * 2 + 1] * 16];
+    if (read === null || read.some((n, i) => Math.abs(n - lidCorner[facing][i]) > 1e-3)) {
+      potFaults.push(`${facing}: lid corner reads ${read}`);
+    }
+    // The collar's two caps read the corner of the sheet the neck's art leaves
+    // clear, and that is vanilla; everything else is solid terracotta.
+    const holed = faces.filter(
+      (f) => !(f.normal[1] !== 0 && [15.8, 17.2].includes(span(f, 1)[0])) && faceOpacity(f) < 1,
+    );
+    if (pack !== null && holed.length > 0) potFaults.push(`${facing}: ${holed.length} faces with holes`);
+  }
+  equal("a decorated pot is a neck, a collar, a lid, a floor and four sides, turned by facing", potFaults, []);
+  const potUvs = async (props: Record<string, string>) =>
+    (await baker.bakeBlockstate(block("decorated_pot", props))).extraFaces
+      .map((f) => `${Array.from(f.positions).join()}|${Array.from(f.uvs).join()}`)
+      .join(";");
+  equal("...a bare one is the north-facing one", await potUvs({}), await potUvs({ facing: "north" }));
+  equal(
+    "...and cracked moves nothing",
+    await potUvs({ facing: "east", cracked: "true" }),
+    await potUvs({ facing: "east", cracked: "false" }),
+  );
 
   /*
    * A sunflower's upper half is a short cross with the flower on top, and it

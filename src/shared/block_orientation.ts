@@ -254,6 +254,14 @@ export function rotationSegment(direction: {
 const AWAY_FROM_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set(["piston", "sticky_piston"]);
 
 /**
+ * The same, horizontally: `facing` is `getHorizontalDirection()` itself, not its
+ * opposite. A decorated pot is the case, and its front still turns to the
+ * player -- the renderer draws that front on the side *opposite* `facing`,
+ * which is why it is not in `FRONT_TO_PLAYER`.
+ */
+const AWAY_FROM_PLAYER: ReadonlySet<string> = new Set(["decorated_pot"]);
+
+/**
  * Blocks that stick to whatever they were clicked onto.
  *
  * `facing` here means "the way it looks out of the wall", which is the face
@@ -592,6 +600,10 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return { facing: nearestFace(look.direction) };
   }
 
+  if (AWAY_FROM_PLAYER.has(name)) {
+    return { facing: horizontalFacing(look.direction) };
+  }
+
   return {};
 }
 
@@ -652,6 +664,7 @@ export const ORIENTED_BLOCK_NAMES: readonly string[] = [
   ...FRONT_TO_PLAYER,
   ...FRONT_TO_PLAYER_ANY_AXIS,
   ...AWAY_FROM_PLAYER_ANY_AXIS,
+  ...AWAY_FROM_PLAYER,
   ...WALL_MOUNTED,
   ...FACE_AND_FACING,
   ...POINTS_INTO_CLICKED,
