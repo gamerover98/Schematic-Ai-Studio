@@ -2826,6 +2826,114 @@ console.log("\n--- every material is reported ---");
  * cell along `facing`, which is where the camera was looking when the block was
  * picked up -- so all of this is `applyEdit`'s, not the renderer's.
  */
+/*
+ * A vine hangs from a vine.
+ *
+ * A vine is replaceable, so clicking one with a vine used to write the vine
+ * back over itself and a column could not be hung. It goes under the bottom
+ * of the column now, clinging to the sides of the vine above it.
+ */
+console.log("\n--- a vine hangs from a vine ---");
+{
+  const VINE = "minecraft:vine";
+  const vineOn = (props: Record<string, string>) => ({ namespacedName: VINE, properties: props });
+  const hanging = () => {
+    const session = newDocument({ width: 4, height: 7, length: 4 });
+    setBlock(session.doc, 1, 5, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 1, 5, 1, vineOn({ north: "true", east: "false", south: "false", west: "false", up: "false" }));
+    return session;
+  };
+  const click = (
+    session: ReturnType<typeof newDocument>,
+    at: [number, number, number],
+    against: "up" | "down" | "north" | "south" | "east" | "west",
+    block = VINE,
+  ) =>
+    applyEdit(session, {
+      kind: "setBlock",
+      x: at[0],
+      y: at[1],
+      z: at[2],
+      block: { namespacedName: block, properties: {} },
+      against,
+    });
+  const at = (session: ReturnType<typeof newDocument>, x: number, y: number, z: number) => {
+    const b = getBlock(session.doc, x, y, z);
+    return b.namespacedName === VINE ? `vine north=${b.properties.north}` : b.namespacedName;
+  };
+
+  {
+    const session = hanging();
+    click(session, [1, 5, 2], "south");
+    equal("a vine clicked from the front hangs under it", at(session, 1, 4, 1), "vine north=true");
+    equal("...and the clicked vine is still there, unchanged", at(session, 1, 5, 1), "vine north=true");
+    equal("...and nothing was put in front of it", at(session, 1, 5, 2), "minecraft:air");
+
+    click(session, [1, 4, 1], "down");
+    equal("a vine clicked from below goes under the column", at(session, 1, 3, 1), "vine north=true");
+
+    click(session, [1, 5, 2], "south");
+    equal("clicking the top of a three-long column adds a fourth", at(session, 1, 2, 1), "vine north=true");
+
+    // One wall beside the lowest vine alone, and it takes that too.
+    setBlock(session.doc, 2, 1, 1, { namespacedName: "minecraft:stone", properties: {} });
+    click(session, [1, 5, 2], "south");
+    const bottom = getBlock(session.doc, 1, 1, 1);
+    equal(
+      "...and a vine beside a wall clings to it as well as hanging",
+      [bottom.properties.north, bottom.properties.east],
+      ["true", "true"],
+    );
+  }
+
+  {
+    const session = hanging();
+    setBlock(session.doc, 1, 4, 1, { namespacedName: "minecraft:stone", properties: {} });
+    equal("a column with stone under it is refused", click(session, [1, 5, 2], "south"), 0);
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 3, length: 4 });
+    setBlock(session.doc, 1, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 1, 0, 1, vineOn({ north: "true" }));
+    click(session, [1, 0, 2], "south");
+    equal("a vine hung past the floor grows the schematic", session.doc.height, 4);
+    equal("...and the content moves up over it", at(session, 1, 1, 1), "vine north=true");
+    equal("...with the new vine underneath", at(session, 1, 0, 1), "vine north=true");
+  }
+
+  {
+    const session = hanging();
+    click(session, [1, 5, 2], "south", "minecraft:stone");
+    equal("stone clicked onto a vine still replaces it", at(session, 1, 5, 1), "minecraft:stone");
+  }
+
+  {
+    // A four-long column, and the wall only the top one clings to goes away.
+    const session = hanging();
+    for (const y of [4, 3, 2]) setBlock(session.doc, 1, y, 1, vineOn({ north: "true" }));
+    applyEdit(session, {
+      kind: "setBlock",
+      x: 1,
+      y: 5,
+      z: 0,
+      block: { namespacedName: "minecraft:air", properties: {} },
+      against: "south",
+    });
+    equal(
+      "breaking the wall a column hangs from lets go of the whole column",
+      [5, 4, 3, 2].map((y) => at(session, 1, y, 1)),
+      Array(4).fill("vine north=false"),
+    );
+    undo(session.doc, session.history);
+    equal(
+      "...and one undo puts it all back",
+      [5, 4, 3, 2].map((y) => at(session, 1, y, 1)),
+      Array(4).fill("vine north=true"),
+    );
+  }
+}
+
 console.log("\n--- a bed is two blocks ---");
 {
   const bedAt = (

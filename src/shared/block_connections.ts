@@ -598,11 +598,26 @@ export function connectedState(
   }
 
   if (name === "vine") {
-    // A vine clings to what is beside and above it, and has no `down`.
-    for (const face of [...HORIZONTAL_FACES, "up" as Face]) {
+    /*
+     * A vine clings to what is beside and above it, and has no `down`.
+     *
+     * **And a side is held up by the vine above it**, which is what lets a
+     * vine hang. Vanilla's `VineBlock.canSupportAtFace`: a horizontal face is
+     * supported by a full block on that side, or by the block above being a
+     * vine that has that same face. Without the second half a vine under a
+     * vine with no wall of its own came out with every face `false` and drew
+     * as the cross. `up` is not inherited: it is only ever a ceiling.
+     *
+     * A vine left with no support at all stays, as the cross, where vanilla
+     * would drop it. Removing blocks is not this pass's to decide.
+     */
+    const above = neighbours.up ?? null;
+    for (const face of HORIZONTAL_FACES) {
       const side = neighbours[face] ?? null;
-      put(face, side !== null && side.solid ? "true" : "false");
+      const hung = above !== null && above.name === "vine" && above.properties[face] === "true";
+      put(face, (side !== null && side.solid) || hung ? "true" : "false");
     }
+    put("up", above !== null && above.solid ? "true" : "false");
     return out;
   }
 

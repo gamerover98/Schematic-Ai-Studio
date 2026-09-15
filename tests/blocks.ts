@@ -7234,6 +7234,23 @@ console.log("\n--- neighbour-derived state ---");
   });
   const self = (name: string, properties: Record<string, string> = {}) => ({ name, properties });
 
+  // Vines: a side is held up by a wall, or by the vine above having that side.
+  equal(
+    "a vine under a vine keeps the side the one above clings to",
+    connectedState(self("vine"), { up: thin("vine", { north: "true", up: "true" }) }),
+    { north: "true", east: "false", south: "false", west: "false", up: "false" },
+  );
+  equal(
+    "...and clings to a wall beside it as well",
+    connectedState(self("vine"), { up: thin("vine", { north: "true" }), east: solid("stone") }),
+    { north: "true", east: "true", south: "false", west: "false", up: "false" },
+  );
+  equal(
+    "...but hangs from nothing that is not a vine",
+    connectedState(self("vine"), { up: thin("oak_fence", { north: "true" }) }),
+    { north: "false", east: "false", south: "false", west: "false", up: "false" },
+  );
+
   // Fences.
   equal(
     "a lone fence connects to nothing",

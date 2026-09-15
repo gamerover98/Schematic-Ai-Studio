@@ -1423,6 +1423,34 @@ which is where a run has to start anyway.
 axis the block is born with, the slab merge, `use`, and the replaceable
 redirect, which steps back along it to find what was clicked.
 
+**A vine hangs from a vine, and that rule is main's rather than the
+renderer's.** A vine is replaceable, so the redirect sent a vine clicked onto a
+vine back into the clicked cell: a vine written over itself, and a column that
+could not be hung by hand. The chain's answer could not be reused. It
+recognises a chain by its geometry, and a vine's plane says nothing to a
+renderer that holds no schematic. `hangingVineTarget` in `session.ts` runs
+ahead of the redirect. A vine clicked onto any vine of a column, from any side,
+goes into the first cell under the column that is not a vine (the user chose
+this over the cell directly below), with `against: "down"`. From there it is an
+ordinary placement: refused over a block that is not replaceable, and grows the
+document past the floor.
+
+What it clings to is `connectedState`'s, after vanilla's
+`VineBlock.canSupportAtFace`. A side is held up by a full block on that side
+**or by the vine above having that side**, so a hanging vine inherits the
+column's sides and takes any wall beside it too. `up` is not inherited. A vine
+left with no support stays, as the cross, where vanilla would drop it.
+
+**That makes a vine column the one place `deriveConnections` is not a single
+sweep.** A change to one vine changes what every vine under it may keep, and a
+column has no bound, so dripstone's three-cell window is no answer here. When a
+vine is rewritten, the vines below it are derived again one by one, until one
+does not move or the column ends. `rederive` deliberately skips the
+`isDependent` check, because a vine the pass already rewrote has a palette
+index past the end of that array. Breaking the wall a four-long column hangs
+from lets go of all four in one transaction, and `tests/session.ts` fails
+without the walk.
+
 The epsilon is not a tuning knob and the rule is deliberately narrow: a tie
 means the existing answer was a coin toss, so only those change. Everything
 with a real winner keeps the answer it always had, which is why the lectern is

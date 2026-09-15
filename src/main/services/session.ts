@@ -520,6 +520,48 @@ function floorUnder(
   return { name: below.namespacedName, covers: coversFace(below, "up") };
 }
 
+/**
+ * Where a vine clicked onto a vine goes: under the bottom of the column.
+ *
+ * A vine is replaceable, so the redirect below sent a vine clicked onto a vine
+ * back into the clicked cell, and a vine was written over a vine. A column
+ * could not be hung by hand at all. The chain had the same complaint and its
+ * answer is `continuedPlacement` in the renderer. That cannot serve here: a
+ * chain is recognised by its geometry, and nothing about a vine's plane says
+ * "vine" to a renderer that holds no schematic. Main can see it.
+ *
+ * So clicking any vine of a column, from any side, puts the new one in the
+ * first cell under the column that is not a vine. Chosen by the user over the
+ * cell directly below, because it lengthens the column from wherever it is
+ * clicked. What the new vine clings to is `connectedState`'s: the sides of the
+ * vine above it, and any wall beside it.
+ *
+ * `against` becomes `down`, the face of the vine above, so nothing downstream
+ * that steps back along it finds a different block. The rest of the arm is
+ * unchanged: a cell holding something that is not replaceable refuses, and one
+ * below the document grows it. A cell outside the document below the origin
+ * reads as not a vine, so the walk stops there.
+ */
+function hangingVineTarget(
+  doc: SchematicDocument,
+  request: { x: number; y: number; z: number; against?: string },
+  held: PaletteEntry,
+): { x: number; y: number; z: number; against: string } | null {
+  if (held.namespacedName !== "minecraft:vine") return null;
+  const clicked = clickedCell(request);
+  if (clicked === null) return null;
+  const inside = (y: number) =>
+    clicked.x >= 0 && clicked.x < doc.width && clicked.z >= 0 && clicked.z < doc.length && y >= 0 && y < doc.height;
+  const isVine = (y: number) =>
+    inside(y) && getBlock(doc, clicked.x, y, clicked.z).namespacedName === "minecraft:vine";
+  if (!isVine(clicked.y)) return null;
+  let y = clicked.y - 1;
+  while (isVine(y)) {
+    y -= 1;
+  }
+  return { x: clicked.x, y, z: clicked.z, against: "down" };
+}
+
 function doubleSlabTarget(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number; against?: string },
@@ -1001,10 +1043,14 @@ export function applyEdit(
      */
     const held = toEntry(request.block);
     const clicked = emptiness(held) ? null : clickedCell(request);
+    // Ahead of the redirect, which would otherwise write a vine over the vine.
+    const hanging = emptiness(held) ? null : hangingVineTarget(doc, request, held);
     const target =
-      clicked !== null && isReplaceable(getBlock(doc, clicked.x, clicked.y, clicked.z).namespacedName)
-        ? { ...request, x: clicked.x, y: clicked.y, z: clicked.z }
-        : request;
+      hanging !== null
+        ? { ...request, ...hanging }
+        : clicked !== null && isReplaceable(getBlock(doc, clicked.x, clicked.y, clicked.z).namespacedName)
+          ? { ...request, x: clicked.x, y: clicked.y, z: clicked.z }
+          : request;
     const entry = placeable(floodedPlacement(doc, target, held));
 
     /*
