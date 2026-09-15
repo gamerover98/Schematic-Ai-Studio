@@ -292,6 +292,10 @@ const AWAY_FROM_PLAYER: ReadonlySet<string> = new Set(["decorated_pot"]);
  */
 const WALL_MOUNTED: ReadonlySet<string> = new Set([
   "ladder",
+  // Vanilla's `TripWireHookBlock` sets `facing` to the opposite of the
+  // horizontal look direction and keeps it where the wall behind can hold it,
+  // which on a side click is the clicked face: this rule exactly.
+  "tripwire_hook",
   // The two pre-Flattening spellings the app still offers; every other member
   // of both families is caught by the suffixes below.
   "wall_torch",

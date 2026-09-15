@@ -4837,9 +4837,15 @@ knowing:
   Two things are deliberately left. **The connections are not derived**, so a
   placed wire is unconnected and lies north-south, which is what the game draws
   for an isolated one; `block_connections.ts` dispatches on fence, wall and
-  pane and has never had a wire arm. And `tripwire_hook` is still
-  `againstWall(e, 3)`, which is the lever's fault on the block that pulls this
-  one taut.
+  pane and has never had a wire arm.
+- **A tripwire hook was the ladder's plate three units thick**, wearing a sheet
+  that is mostly a hole, so it drew almost nothing and took the face off the
+  wall. It is the four `tripwire_hook*` models now: a plank plate, a stick and
+  a ring, turned by `facing` from north, where the plate is on the *south*
+  wall. `powered` tilts the stick down; `attached` lowers the ring and adds the
+  string, written already rescaled because vanilla tilts it with `rescale`.
+  `facing` is the clicked face (`WALL_MOUNTED`, as vanilla's
+  `TripWireHookBlock` places it). Legacy `131` already carries `facing`.
 - **A small dripleaf was a placeholder, and the walk that exists to catch that
   could not see it.** The pack ships `small_dripleaf_top`, `_side`, `_stem_top`
   and `_stem_bottom` and no `small_dripleaf.png` at all. At `half=lower` —

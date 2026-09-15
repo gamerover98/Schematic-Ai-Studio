@@ -4520,6 +4520,158 @@ function tripwire(entry: PaletteEntry): BlockShape {
   );
 }
 
+/**
+ * A tripwire hook: a plank plate on the wall, a stick out of it, and a ring on
+ * the end of the stick. Transcribed from `tripwire_hook.json`, `_on`,
+ * `_attached` and `_attached_on`, which the blockstate chooses between by
+ * `attached` and `powered` and turns by `facing`.
+ *
+ * It was `againstWall(e, 3)`, the ladder's plate three units thick, wearing
+ * `tripwire_hook.png` -- a sheet whose art is a small ring and a hole -- over a
+ * whole face of the cell. So it drew almost nothing, and what it did draw was
+ * a plate lying on the cell boundary, which made `coversFace` answer true and
+ * took the face off the block it hung on.
+ *
+ * The model is **north-authored**: `facing=north` has no `y`, and its plate is
+ * against the *south* wall. `facing` is where the hook points, out of the wall,
+ * which is `WALL_MOUNTED`'s rule and is why the hook is in that table.
+ *
+ * What the two properties move:
+ *
+ * - **`attached`** lowers the ring from where the stick holds it up and adds
+ *   the length of string running north out of the cell. That string is written
+ *   **already rescaled**: vanilla tilts it 22.5 degrees with `rescale: true`,
+ *   which this file has no notion of, and a 22.5-degree rescale stretches the
+ *   two axes across the turn by `1 / cos(22.5)` about the origin `[8, 0, 0]`.
+ * - **`powered`** tilts the stick down and drops the ring onto its end.
+ *
+ * Every element names its own texture, because three sheets meet in one block:
+ * `#hook` is `tripwire_hook`, `#wood` is `oak_planks` and `#tripwire` is
+ * `tripwire`. The four thin planes are the inside of the ring, each with one
+ * face in vanilla, so each omits the other.
+ */
+const HOOK_RESCALE = 1 / Math.cos(Math.PI / 8);
+const HOOK_TEXTURE = "tripwire_hook";
+const HOOK_WOOD = "oak_planks";
+
+/** The ring and its four inside faces, from the ring box's own coordinates. */
+function hookRing(
+  y0: number,
+  y1: number,
+  z0: number,
+  rotation: BoxRotation | undefined,
+): ShapeBox[] {
+  const z1 = z0 + 3.6;
+  const inner0 = z0 + 1.2;
+  const inner1 = z0 + 2.4;
+  const tilt = rotation === undefined ? {} : { rotation };
+  return [
+    {
+      box: [6.2, y0, z0, 9.8, y1, z1],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: {
+        down: [5, 3, 11, 9],
+        up: [5, 3, 11, 9],
+        north: [5, 3, 11, 4],
+        south: [5, 8, 11, 9],
+        west: [5, 8, 11, 9],
+        east: [5, 3, 11, 4],
+      },
+    },
+    {
+      box: [7.4, y0, inner1, 8.6, y1, inner1],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: { north: [7, 8, 9, 9] },
+      omit: ["south"],
+    },
+    {
+      box: [7.4, y0, inner0, 8.6, y1, inner0],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: { south: [7, 3, 9, 4] },
+      omit: ["north"],
+    },
+    {
+      box: [7.4, y0, inner0, 7.4, y1, inner1],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: { east: [7, 8, 9, 9] },
+      omit: ["west"],
+    },
+    {
+      box: [8.6, y0, inner0, 8.6, y1, inner1],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: { west: [7, 3, 9, 4] },
+      omit: ["east"],
+    },
+  ];
+}
+
+/** The stick; `attached` alone states no `south` face, and no tilt. */
+function hookStick(angle: number | null): ShapeBox {
+  return {
+    box: [7.4, 5.2, 10, 8.8, 6.8, 14],
+    ...(angle === null ? {} : { rotation: { origin: [8, 6, 14], axis: "x", angle } as const }),
+    texture: HOOK_WOOD,
+    uv: {
+      down: [7, 9, 9, 14],
+      up: [7, 2, 9, 7],
+      north: [7, 9, 9, 11],
+      south: [7, 9, 9, 11],
+      west: [2, 9, 7, 11],
+      east: [9, 9, 14, 11],
+    },
+    ...(angle === null ? { omit: ["south"] } : {}),
+  };
+}
+
+const HOOK_PLATE: ShapeBox = {
+  box: [6, 1, 14, 10, 9, 16],
+  texture: HOOK_WOOD,
+  uv: {
+    down: [6, 14, 10, 16],
+    up: [6, 0, 10, 2],
+    north: [6, 7, 10, 15],
+    south: [6, 7, 10, 15],
+    west: [0, 7, 2, 15],
+    east: [14, 7, 16, 15],
+  },
+};
+
+/** The string pulled taut, `height` units off the floor before the rescale. */
+function hookString(height: number): ShapeBox {
+  return {
+    box: [7.75, height * HOOK_RESCALE, 0, 8.25, height * HOOK_RESCALE, 6.7 * HOOK_RESCALE],
+    rotation: { origin: [8, 0, 0], axis: "x", angle: -22.5 },
+    texture: "tripwire",
+    uv: { down: [16, 6, 0, 8], up: [0, 6, 16, 8] },
+    uvRotation: { down: 90, up: 90 },
+  };
+}
+
+function tripwireHook(entry: PaletteEntry): BlockShape {
+  const attached = entry.properties.attached === "true";
+  const powered = entry.properties.powered === "true";
+  let parts: ShapeBox[];
+  if (!attached && !powered) {
+    parts = [...hookRing(3.8, 4.6, 7.9, { origin: [8, 6, 5.2], axis: "x", angle: -45 }), hookStick(45)];
+  } else if (!attached) {
+    parts = [...hookRing(4.2, 5, 6.7, undefined), hookStick(-22.5)];
+  } else if (!powered) {
+    parts = [
+      hookString(1.5),
+      ...hookRing(4.2, 5, 6.7, { origin: [8, 4.2, 6.7], axis: "x", angle: -22.5 }),
+      hookStick(null),
+    ];
+  } else {
+    parts = [hookString(0.5), ...hookRing(3.4, 4.2, 6.7, undefined), hookStick(-22.5)];
+  }
+  return transform([...parts, HOOK_PLATE], northFacingSteps(entry), false);
+}
+
 /** Exact block names, taking precedence over the suffix table. */
 const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>> = {
   /*
@@ -4578,7 +4730,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   calibrated_sculk_sensor: calibratedSculkSensor,
   sculk_shrieker: sculkShrieker,
   tripwire: tripwire,
-  tripwire_hook: (e) => againstWall(e, 3),
+  tripwire_hook: tripwireHook,
   glow_lichen: (e) => againstWall(e, 1),
 
   // Vanilla insets the cactus by 1/16 on all four sides; drawn as a full cube

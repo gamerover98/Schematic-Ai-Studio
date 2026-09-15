@@ -3028,6 +3028,88 @@ if (pack === null) {
   );
 }
 
+console.log("\n--- a tripwire hook is a plate, a stick and a ring ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was `againstWall(e, 3)`: a plate over a whole face of the cell wearing
+   * a sheet that is mostly hole, which drew next to nothing and took the face
+   * off the wall behind it. Transcribed from the four `tripwire_hook*` models.
+   */
+  const HOOK_SIDES = ["north", "south", "west", "east", "up", "down"] as const;
+  const corners = (f: BakedFace): number[][] =>
+    [0, 1, 2, 3].map((i) => [0, 1, 2].map((a) => f.positions[i * 3 + a] * 16));
+  const partsOf = async (properties: Record<string, string>) => {
+    const baked = await baker.bakeBlockstate(block("tripwire_hook", properties));
+    const all = [...Object.values(baked.faces), ...baked.extraFaces];
+    const of = (name: string) => all.filter((f) => f.textureKey.endsWith(`/${name}`));
+    return { all, hook: of("tripwire_hook"), wood: of("oak_planks"), wire: of("tripwire") };
+  };
+
+  // Ring (six faces and four inside planes), stick, plate; `attached` adds the
+  // string's two faces and alone leaves the stick's south face out.
+  const expected: Record<string, [number, number, number]> = {
+    "false/false": [10, 12, 0],
+    "false/true": [10, 12, 0],
+    "true/false": [10, 11, 2],
+    "true/true": [10, 12, 2],
+  };
+  const counts: string[] = [];
+  const offTile: string[] = [];
+  for (const attached of ["false", "true"]) {
+    for (const powered of ["false", "true"]) {
+      for (const facing of ["north", "east", "south", "west"]) {
+        const where = `${attached}/${powered}`;
+        const { all, hook, wood, wire } = await partsOf({ facing, attached, powered });
+        const got = [hook.length, wood.length, wire.length];
+        if (got.join() !== expected[where].join()) counts.push(`${where}/${facing} ${got.join("+")}`);
+        for (const f of all) {
+          if (f.uvs.some((uv) => uv < -1e-6 || uv > 1 + 1e-6)) offTile.push(`${where}/${facing}`);
+        }
+      }
+    }
+  }
+  equal("every state draws its ring, stick, plate and string", counts, []);
+  equal("...with every window inside its tile", offTile, []);
+
+  // The ring hangs off the end of the stick, so the model's rotations landed
+  // where vanilla's do: the stick tilts up and the ring sits at its tip.
+  const upright = await partsOf({ facing: "north", attached: "false", powered: "false" });
+  const top = (faces: BakedFace[]) => Math.max(...faces.flatMap((f) => corners(f).map((p) => p[1])));
+  // The plate stops at y = 9, so anything of wood above it is the stick.
+  check("an idle hook's stick leans up", top(upright.wood) > 9.3);
+  check("...and carries the ring up with it", top(upright.hook) > 9);
+  const taut = await partsOf({ facing: "north", attached: "true", powered: "false" });
+  const low = Math.min(...taut.wire.flatMap((f) => corners(f).map((p) => p[1])));
+  equal("an attached hook's string meets the wire at its height", +low.toFixed(2), 1.5);
+
+  /*
+   * The plate is on the wall the hook was clicked onto. `WALL_MOUNTED`'s rule,
+   * checked through the geometry: the block that was clicked is on the far
+   * side of the clicked face, so the plate has to reach that side of the cell.
+   */
+  const OUT: Record<string, [number, number]> = { north: [2, 16], south: [2, 0], east: [0, 0], west: [0, 16] };
+  for (const clicked of ["north", "south", "east", "west"] as const) {
+    const step = FACE_VECTOR[clicked];
+    const state = placementState("minecraft:tripwire_hook", {
+      direction: { x: -step.x, y: 0, z: -step.z },
+      against: clicked,
+      cursorY: 0.5,
+      run: null,
+    });
+    const { wood } = await partsOf(state);
+    const [axis, boundary] = OUT[clicked];
+    const reaches = wood.some((f) => corners(f).every((p) => Math.abs(p[axis] - boundary) < 1e-3));
+    check(`a hook clicked onto a ${clicked} face is plated to the block behind it`, reaches, `facing=${state.facing}`);
+  }
+
+  const hook = block("tripwire_hook", defaultStateFor("minecraft:tripwire_hook") ?? {});
+  check("a tripwire hook is boxes rather than a cube", shapeFor(hook).kind === "boxes");
+  check("...it does not occlude", !occludesNeighbours(hook));
+  equal("...and covers no face of its cell", HOOK_SIDES.filter((face) => coversFace(hook, face)), []);
+}
+
 console.log("\n--- the sculk sensors and the shrieker ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");
