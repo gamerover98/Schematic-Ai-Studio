@@ -13,7 +13,13 @@ import { tmpdir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { documentSize, getBlock, setBlock, setBlockEntity } from "../src/main/domain/document.js";
+import {
+  documentSize,
+  getBlock,
+  getBlockEntity,
+  setBlock,
+  setBlockEntity,
+} from "../src/main/domain/document.js";
 import { DOCUMENT_SIZE } from "../src/shared/settings.js";
 import {
   DEFAULT_LEGACY_VERSION,
@@ -1208,6 +1214,66 @@ console.log("\n--- the right button opens what it lands on ---");
       getBlock(session.doc, 1, 0, 0).namespacedName,
       "minecraft:stone",
     );
+  }
+
+  /*
+   * A copper golem statue takes its next pose, which is the game's other
+   * right-click: `useItemOn` calls `getNextPose()` and places nothing. The
+   * order is the enum's and the cycle comes back round.
+   */
+  for (const name of ["minecraft:copper_golem_statue", "minecraft:waxed_oxidized_copper_golem_statue"]) {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 0, 1, { namespacedName: name, properties: { facing: "south" } });
+    setBlockEntity(session.doc, 1, 0, 1, {
+      id: "minecraft:copper_golem_statue",
+      pos: [1, 0, 1],
+      nbt: { CustomName: { type: "string", value: "Ramino" } },
+    });
+    const use = () =>
+      applyEdit(session, {
+        kind: "use",
+        x: 1,
+        y: 0,
+        z: 0,
+        block: { namespacedName: "minecraft:stone", properties: {} },
+        against: "north",
+      });
+    const pose = () => getBlock(session.doc, 1, 0, 1).properties.copper_golem_pose;
+    const seen: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      use();
+      seen.push(pose());
+    }
+    const short = name.replace("minecraft:", "");
+    equal(`${short}: four right-clicks go round the four poses`, seen, ["sitting", "running", "star", "standing"]);
+    equal("...placing nothing in front of it", getBlock(session.doc, 1, 0, 0).namespacedName, "minecraft:air");
+    equal("...keeping its facing", getBlock(session.doc, 1, 0, 1).properties.facing, "south");
+    equal(
+      "...and its block entity",
+      getBlockEntity(session.doc, 1, 0, 1)?.nbt.CustomName,
+      { type: "string", value: "Ramino" },
+    );
+    undoEdit(session);
+    equal("...and one undo takes back one pose", pose(), "star");
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 0, 1, { namespacedName: "minecraft:copper_golem_statue", properties: {} });
+    applyEdit(session, {
+      kind: "setBlock",
+      x: 1,
+      y: 0,
+      z: 0,
+      block: { namespacedName: "minecraft:stone", properties: {} },
+      against: "north",
+    });
+    equal(
+      "a sneaking click on a statue still places beside it",
+      getBlock(session.doc, 1, 0, 0).namespacedName,
+      "minecraft:stone",
+    );
+    equal("...and leaves the pose alone", getBlock(session.doc, 1, 0, 1).properties.copper_golem_pose, undefined);
   }
 }
 

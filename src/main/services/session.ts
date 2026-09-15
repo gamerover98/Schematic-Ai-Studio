@@ -31,6 +31,7 @@ import {
   createDocument,
   documentFromLoaded,
   getBlock,
+  getBlockEntity,
   markSaved,
   normalizeRegion,
   paletteHistogram,
@@ -80,7 +81,12 @@ import { loadStructure } from "../pipeline/loader.js";
 import type { PaletteEntry } from "../pipeline/types.js";
 import { matchesBlockPattern, paletteEntryCacheKey } from "../pipeline/types.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
-import { hasProperty, isOpenable, isReplaceable } from "../../shared/block_states.js";
+import {
+  hasProperty,
+  isOpenable,
+  isReplaceable,
+  legalValuesFor,
+} from "../../shared/block_states.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
 import { standsOn, type SupportBelow } from "../../shared/block_support.js";
 import { coversFace } from "../pipeline/block_shapes.js";
@@ -621,15 +627,15 @@ function floodedPlacement(
   return { ...entry, properties: { ...entry.properties, waterlogged: "true" } };
 }
 
-interface OpenTarget {
+interface UseTarget {
   readonly cells: readonly { x: number; y: number; z: number; entry: PaletteEntry }[];
-  /** `true` when the door is being opened; only the undo label reads it. */
-  readonly opening: boolean;
-  readonly name: string;
+  /** What the undo step is called: "Open …", "Close …", "Pose …". */
+  readonly label: string;
 }
 
 /**
- * What a right-click should **open**, or `null` when it should place instead.
+ * What a right-click should **open** or **turn**, or `null` when it should
+ * place instead.
  *
  * The gesture is the game's: right-click a door and it swings, and you have to
  * sneak to put a block on it. Here it did the second thing always, so the one
@@ -652,13 +658,21 @@ interface OpenTarget {
  *
  * The far half is only taken when it is the same block. A door with something
  * else above it is already broken, and opening half of it would not mend it.
+ *
+ * **A copper golem statue takes its next pose**, which is the game's other
+ * right-click on a block: `CopperGolemStatueBlock.useItemOn` calls
+ * `getNextPose()` with anything in hand but an axe, and places nothing.
+ * The order is the enum's, standing, sitting, running, star, and round again,
+ * and it is read off the registry's `copper_golem_pose` values, which list
+ * them in that order -- `tests/session.ts` pins it, because the order is the
+ * cycle.
  */
 /**
  * The cell that was clicked, one step back along `against`.
  *
  * `request.x/y/z` is where the block would *go*, which is the cell across the
  * face; the renderer computes it and main only ever steps back. Written out
- * here rather than reusing `openTarget`, which asks a different question and
+ * here rather than reusing `useTarget`, which asks a different question and
  * answers `null` for everything that is not a door.
  */
 function clickedCell(request: {
@@ -674,10 +688,10 @@ function clickedCell(request: {
   return { x: request.x - step.x, y: request.y - step.y, z: request.z - step.z };
 }
 
-function openTarget(
+function useTarget(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number; against?: string },
-): OpenTarget | null {
+): UseTarget | null {
   const against = request.against;
   if (against === undefined) return null;
   const step = FACE_VECTOR[against as keyof typeof FACE_VECTOR];
@@ -685,6 +699,22 @@ function openTarget(
   const at = { x: request.x - step.x, y: request.y - step.y, z: request.z - step.z };
 
   const existing = getBlock(doc, at.x, at.y, at.z);
+
+  const poses = legalValuesFor(existing.namespacedName, "copper_golem_pose");
+  if (poses !== null && poses.length > 0) {
+    const current = poses.indexOf(existing.properties.copper_golem_pose ?? "standing");
+    const pose = poses[(Math.max(0, current) + 1) % poses.length];
+    return {
+      cells: [
+        {
+          ...at,
+          entry: { ...existing, properties: { ...existing.properties, copper_golem_pose: pose } },
+        },
+      ],
+      label: `Pose ${existing.namespacedName}: ${pose}`,
+    };
+  }
+
   /*
    * The registry decides, which excludes air for free and covers every wood
    * without a list. A block carrying `open` that the registry has never heard
@@ -716,7 +746,7 @@ function openTarget(
       cells.push({ ...other, entry: swung(there) });
     }
   }
-  return { cells, opening, name: existing.namespacedName };
+  return { cells, label: `${opening ? "Open" : "Close"} ${existing.namespacedName}` };
 }
 
 /**
@@ -980,24 +1010,25 @@ export function applyEdit(
    *
    * Both halves land in one transaction, or Ctrl+Z would take a door back a
    * half at a time -- which is the rule the placement below already keeps,
-   * arrived at from the other direction. None of these blocks carries a block
-   * entity, so `setBlock` dropping one is not a hazard here the way it is in
-   * `connect.ts`.
+   * arrived at from the other direction.
+   *
+   * **The block entity is put back by hand**, `connect.ts`'s trap for
+   * `connect.ts`'s reason: `setBlock` treats any write as displacing what was
+   * there and drops the record with it. No door carries one, and a copper
+   * golem statue does -- turning it would otherwise throw its record away.
    */
   if (request.kind === "use") {
-    const target = openTarget(doc, request);
+    const target = useTarget(doc, request);
     if (target === null) {
       return applyEdit(session, { ...request, kind: "setBlock" }, options);
     }
-    return runTransaction(
-      doc,
-      history,
-      `${target.opening ? "Open" : "Close"} ${target.name}`,
-      (tx) =>
-        target.cells.reduce(
-          (changed, cell) => changed + (tx.setBlock(cell.x, cell.y, cell.z, cell.entry) ? 1 : 0),
-          0,
-        ),
+    return runTransaction(doc, history, target.label, (tx) =>
+      target.cells.reduce((changed, cell) => {
+        const record = getBlockEntity(doc, cell.x, cell.y, cell.z);
+        const wrote = tx.setBlock(cell.x, cell.y, cell.z, cell.entry);
+        if (wrote && record !== null) tx.setBlockEntity(cell.x, cell.y, cell.z, record);
+        return changed + (wrote ? 1 : 0);
+      }, 0),
     );
   }
 

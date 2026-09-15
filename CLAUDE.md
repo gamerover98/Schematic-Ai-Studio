@@ -3380,6 +3380,14 @@ being looked into. An **iron** door opens here, which in game it does not
 without redstone — deliberate, because this is an editor and refusing would be
 faithful and useless.
 
+**A copper golem statue takes its next pose**, the game's other right-click on
+a block: `CopperGolemStatueBlock.useItemOn` calls `getNextPose()` and places
+nothing. The order, standing, sitting, running, star and round again, is read
+from the registry's `copper_golem_pose` values, which list it that way, and
+`tests/session.ts` pins it. The statue has a block entity and `setBlock` drops
+it with every write, so `useTarget` puts it back by hand, `connect.ts`'s trap
+for `connect.ts`'s reason.
+
 **A hotbar belongs to a schematic, not to the window.** It lived in
 `UiSettings`, written with `patchUi`: one bar for the whole app, so opening the
 next schematic handed you the last one's blocks — and a legacy `.schematic`
