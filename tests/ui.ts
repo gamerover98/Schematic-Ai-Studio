@@ -2690,6 +2690,40 @@ console.log("\n--- selection history ---");
   );
 }
 
+console.log("\n--- the history position does not stop at the undo cap ---");
+{
+  /*
+   * Main's undo stack holds 200 transactions. Keyed by its length, the ordering
+   * stopped moving at the cap: a selection made at 200, then a fill that left
+   * the length at 200, and Ctrl+Z went to the selection, then to every
+   * selection before it, and never to the blocks. Reported as undo moving the
+   * selections back and not the blocks. The key is the top transaction's id,
+   * which keeps rising.
+   */
+  const box = (n: number) => ({ minX: n, minY: 0, minZ: 0, maxX: n, maxY: 0, maxZ: 0 });
+  const at = (n: number): SelectionState => ({ selection: box(n), anchor: { x: n, y: 0, z: 0 } });
+  const none: SelectionState = { selection: null, anchor: null };
+
+  const selected = recordSelection(emptyTimeline(), 200, none, at(1));
+  equal("keyed by the length, a fill at the cap loses the press to the selection", undoTarget(selected, 200, true), "selection");
+  equal("keyed by the id, the fill after the selection takes it", undoTarget(recordDocumentEdit(selected, 201), 201, true), "document");
+
+  const moved = recordEditSelection(selected, 200, at(1), at(7));
+  equal("a gizmo move at the cap is still one press: the blocks first", undoTarget(moved, 201, true), "document");
+  equal("...and the box comes back with them", takeEditUndo(moved, 200)?.state.selection, box(1));
+
+  // The renderer must key on the id, everywhere: one site reading the length is
+  // the bug back at that site.
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8")
+    .replace(/\/\*[^]*?\*\//g, " ")
+    .replace(/\/\/.*$/gm, " ");
+  equal("App.svelte orders the selection history by nothing called undoDepth", app.match(/undoDepth/g)?.length ?? 0, 0);
+  check(
+    "...and the history position is the top transaction's id",
+    /docState\?\.undoTransactionId \?\? 0/.test(app) && /docState\.undoTransactionId \?\? 0/.test(app),
+  );
+}
+
 // --- the creative inventory ------------------------------------------------
 //
 // Nine hundred blocks is nine hundred one-block meshes if drawn naively, and

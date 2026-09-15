@@ -244,8 +244,29 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * gesture the user experienced as one movement.
    */
   let gestureFrom: SelectionState | null = null;
-  /** Main's undo depth as of the last time it was accounted for. */
-  let lastUndoDepth = 0;
+  /** Main's history position as of the last time it was accounted for. */
+  let lastHistoryPosition = 0;
+
+  /**
+   * Where main's history stands, as the key both stacks are ordered by: the id
+   * of the transaction on top of the undo stack, 0 when there is none.
+   *
+   * **Not `undoDepth`, and that was the bug.** The undo stack is capped at 200
+   * (`createHistory`), so from the 201st transaction on its length stays at 200
+   * whatever happens. At the cap every selection step was recorded at the
+   * depth the document still had, so `undoTarget` sent every press to the
+   * selections and walked back through all of them before touching a block.
+   * The gizmo's pairing failed too (`depth > depthBefore` never true), and so
+   * did the watcher that notices an edit. In creative mode every placed block
+   * is a transaction, so 200 is an ordinary session.
+   *
+   * A transaction id has what the ordering needs and no ceiling: ids are never
+   * reused, a new edit is always higher, and an undo or a redo lands back on
+   * exactly the id that was on top before.
+   */
+  function historyPosition(): number {
+    return docState?.undoTransactionId ?? 0;
+  }
 
   /*
    * Whether there is anything at all to take back, from either stack. The
@@ -253,10 +274,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * would sit greyed out with a selection change waiting to be undone.
    */
   const canUndoAnything = $derived(
-    undoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canUndo === true) !== "none",
+    undoTarget(selectionTimeline, historyPosition(), docState?.canUndo === true) !== "none",
   );
   const canRedoAnything = $derived(
-    redoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canRedo === true) !== "none",
+    redoTarget(selectionTimeline, historyPosition(), docState?.canRedo === true) !== "none",
   );
 
   /**
@@ -893,7 +914,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     gestureFrom = null;
     if (from === null) return;
     const now = selectionNow();
-    selectionTimeline = recordSelection(selectionTimeline, docState?.undoDepth ?? 0, from, now);
+    selectionTimeline = recordSelection(selectionTimeline, historyPosition(), from, now);
     lastSelection = now;
   }
 
@@ -915,7 +936,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       }
       selectionTimeline = recordSelection(
         selectionTimeline,
-        docState?.undoDepth ?? 0,
+        historyPosition(),
         lastSelection,
         now,
       );
@@ -953,17 +974,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   });
 
   $effect(() => {
-    const depth = docState?.undoDepth ?? null;
+    const depth = docState === null ? null : (docState.undoTransactionId ?? 0);
     untrack(() => {
       if (depth === null) {
         selectionTimeline = forgetTimeline();
-        lastUndoDepth = 0;
+        lastHistoryPosition = 0;
         return;
       }
-      if (depth > lastUndoDepth) {
+      if (depth > lastHistoryPosition) {
         selectionTimeline = recordDocumentEdit(selectionTimeline, depth);
       }
-      lastUndoDepth = depth;
+      lastHistoryPosition = depth;
     });
   });
 
@@ -975,7 +996,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   async function undoAnything(): Promise<void> {
     if (busy) return;
-    const target = undoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canUndo === true);
+    const target = undoTarget(selectionTimeline, historyPosition(), docState?.canUndo === true);
     if (target === "document") {
       await runDocument(t("task.undoing"), () => api().undo());
       /*
@@ -984,7 +1005,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        * -- after the undo -- is what makes one press take back the whole
        * gesture rather than half of it.
        */
-      const paired = takeEditUndo(selectionTimeline, docState?.undoDepth ?? 0);
+      const paired = takeEditUndo(selectionTimeline, historyPosition());
       if (paired !== null) {
         selectionTimeline = paired.timeline;
         restoreSelection(paired.state);
@@ -1000,7 +1021,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   async function redoAnything(): Promise<void> {
     if (busy) return;
-    const target = redoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canRedo === true);
+    const target = redoTarget(selectionTimeline, historyPosition(), docState?.canRedo === true);
     if (target === "document") {
       /*
        * Taken *before* the redo, unlike its opposite number. A redo raises the
@@ -1010,7 +1031,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        * that stack, which is a fix rather than a side effect: nothing was
        * branched away from.
        */
-      const paired = takeEditRedo(selectionTimeline, docState?.undoDepth ?? 0);
+      const paired = takeEditRedo(selectionTimeline, historyPosition());
       await runDocument(t("task.redoing"), () => api().redo());
       if (paired !== null) {
         selectionTimeline = paired.timeline;
@@ -3497,7 +3518,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     anchor = { x: next.minX, y: next.minY, z: next.minZ };
     const now = selectionNow();
     lastSelection = now;
-    const depth = docState?.undoDepth ?? 0;
+    const depth = historyPosition();
     selectionTimeline =
       depth > depthBefore
         ? recordEditSelection(selectionTimeline, depthBefore, before, now)
@@ -3536,7 +3557,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       const held = selection;
       if (!held) return;
       const before = selectionNow();
-      adoptEditedSelection(before, movedRegion(held, to), docState?.undoDepth ?? 0);
+      adoptEditedSelection(before, movedRegion(held, to), historyPosition());
       movePivot(held, to);
       return;
     }
@@ -3550,7 +3571,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     moving = null;
     if (!region) return;
     const before = selectionNow();
-    const depthBefore = docState?.undoDepth ?? 0;
+    const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.moving"), () =>
       api().moveRegion({ region: forIpc(region), to }),
     );
@@ -3594,7 +3615,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const region = { ...selection };
     const to = transformedRegion(region, origin, transform);
     const before = selectionNow();
-    const depthBefore = docState?.undoDepth ?? 0;
+    const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.transforming"), () =>
       api().transformRegion({
         region: forIpc(region),
@@ -3637,7 +3658,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const region = { ...selection };
     const to = scaledRegion(region, origin, spec);
     const before = selectionNow();
-    const depthBefore = docState?.undoDepth ?? 0;
+    const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.scaling"), () =>
       api().scaleRegion({ region: forIpc(region), spec, to: { x: to.minX, y: to.minY, z: to.minZ } }),
     );

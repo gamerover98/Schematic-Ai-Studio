@@ -2934,6 +2934,35 @@ console.log("\n--- a vine hangs from a vine ---");
   }
 }
 
+/*
+ * The undo stack is capped, so its length is not an ordering, and the renderer
+ * orders its selection history against main's by what `documentState` reports.
+ * Past 200 transactions the length stopped moving and Ctrl+Z reached only the
+ * selections. The top transaction's id is what the renderer keys on now.
+ */
+console.log("\n--- the history position keeps moving past the undo cap ---");
+{
+  const session = newDocument({ width: 16, height: 1, length: 16 });
+  const ids: number[] = [];
+  for (let i = 0; i < 205; i += 1) {
+    applyEdit(session, {
+      kind: "setBlock",
+      x: i % 16,
+      y: 0,
+      z: Math.floor(i / 16),
+      block: { namespacedName: "minecraft:stone", properties: {} },
+    });
+    ids.push(documentState(session).undoTransactionId ?? 0);
+  }
+  equal("the undo stack's length stops at its cap", documentState(session).undoDepth, 200);
+  check(
+    "...while the top transaction's id rises at every edit, past the cap too",
+    ids.every((id, i) => i === 0 || id > ids[i - 1]),
+  );
+  undo(session.doc, session.history);
+  equal("an undo lands back on the id from before the last edit", documentState(session).undoTransactionId, ids[203]);
+}
+
 console.log("\n--- a bed is two blocks ---");
 {
   const bedAt = (

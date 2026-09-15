@@ -3008,13 +3008,29 @@ gesture rather than after it, which is the difference between a warning and a
 report; the refusal itself stays main's, because the renderer holds no schematic
 and a viewport that decided this would be a second opinion.
 
-**Ctrl+Z reaches the selection, and `undoDepth` is what makes that answerable.**
-The block edits live in main and the selection lives in the renderer;
-interleaving two stacks needs a shared ordering, and that field — main's undo
-stack depth — is it. The rule is one sentence: **a selection is undone only while
-no block edit has landed on top of it.** `selection_history.ts` holds it. A drag
-is one step rather than one per frame, which is why `Viewer.svelte` reports
-gesture boundaries at all: only it knows where the press was.
+**Ctrl+Z reaches the selection, and `undoTransactionId` is what makes that
+answerable.** The block edits live in main and the selection lives in the
+renderer; interleaving two stacks needs a shared ordering, and that field — the
+id of the transaction on top of main's undo stack, 0 when empty — is it. The
+rule is one sentence: **a selection is undone only while no block edit has
+landed on top of it.** `selection_history.ts` holds it. A drag is one step
+rather than one per frame, which is why `Viewer.svelte` reports gesture
+boundaries at all: only it knows where the press was.
+
+**The ordering was the stack's length, `undoDepth`, and the stack is capped at
+200.** `createHistory(limit = 200)` drops the oldest transaction past the cap,
+so from the 201st on the length stayed at 200 whatever was done. Every
+selection step then compared equal to the document, and `undoTarget` sent every
+press to the selections, walking back through all of them without reaching a
+block. `adoptEditedSelection` stopped pairing (`depth > depthBefore` never
+true), and the watcher that notices an edit stopped firing. In creative mode
+every placed block is a transaction, so the cap is an ordinary session, and it
+was reported as undo moving selections back and not blocks. A transaction id
+has what the ordering needs and no ceiling: never reused, higher for every new
+edit, and an undo or a redo lands back on exactly the id that was on top.
+`historyPosition()` in `App.svelte` is the one reading. `undoDepth` stays on
+`DocumentState` as a count. `tests/ui.ts` refuses any `undoDepth` left in
+`App.svelte`, with comments stripped.
 
 **A gesture that moved the blocks *and* the box is one press, and was two.**
 The gizmo's commits write `selection` only after awaiting the edit, so by then
