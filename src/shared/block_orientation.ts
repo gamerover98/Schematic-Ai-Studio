@@ -179,8 +179,13 @@ const FRONT_TO_PLAYER: ReadonlySet<string> = new Set([
  *
  * `chiseled_bookshelf` does not end in `_shelf` ("bookshelf"), so the suffix
  * cannot reach it by accident.
+ *
+ * **The copper golem statues are the same rule**, all eight by one suffix:
+ * `CopperGolemStatueBlock.getStateForPlacement` is
+ * `getHorizontalDirection().getOpposite()`, so the golem looks back at whoever
+ * set it down. They were in no table and every one of them faced north.
  */
-const FRONT_TO_PLAYER_SUFFIXES = ["_shelf"] as const;
+const FRONT_TO_PLAYER_SUFFIXES = ["_shelf", "copper_golem_statue"] as const;
 
 /** The same, for the ones whose `facing` also takes `up` and `down`. */
 const FRONT_TO_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set([

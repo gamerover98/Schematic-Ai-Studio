@@ -44,6 +44,18 @@ export interface ShapeBox {
    */
   readonly rotation?: BoxRotation;
   /**
+   * More tilts, applied after `rotation` and in order: a `ModelPart` chain.
+   *
+   * An entity model nests its parts, and each part turns its children about
+   * where it stands, on all three axes at once -- a copper golem statue's arm
+   * is an arm part turned 25 degrees holding a part turned -60. One tilt
+   * cannot say that. A chain of them can, once every cube is placed at rest
+   * and each part's turns are taken about the running sum of the offsets down
+   * to it, innermost first. `modelPartBoxes` is what builds these; nothing
+   * transcribed from a block model needs one.
+   */
+  readonly chain?: readonly BoxRotation[];
+  /**
    * A texture other than the block's own, by plain name (`glass`). Beacons are
    * the reason: they are a glass shell around a glowing core, two textures in
    * one block.
@@ -283,6 +295,9 @@ function rotateShapeBox(entry: ShapeBox, steps: number): ShapeBox {
     textures: rotateFaceMap(entry.textures, steps),
     uvRotation: turnFlatFaces(rotateFaceMap(entry.uvRotation, steps), steps),
     rotation: rotateBoxRotation(entry.rotation, steps),
+    ...(entry.chain === undefined
+      ? {}
+      : { chain: entry.chain.map((tilt) => rotateBoxRotation(tilt, steps)!) }),
     omit,
   };
 }
@@ -693,6 +708,391 @@ function unwrapCube(
     east: strip(u + dz + dx, v + dz, dz, dy),
     south: strip(u + 2 * dz + dx, v + dz, dx, dy),
   };
+}
+
+// --- entity models ------------------------------------------------------------
+//
+// A block whose renderer draws an **entity model** -- the copper golem statue
+// -- is transcribed as that model's `ModelPart` tree rather than as boxes,
+// because the tree is what Java states and the boxes are not: every part
+// turns its children, on any axis, by any angle.
+
+/** One `addBox` of a `CubeListBuilder`, in the model's own units. */
+export interface ModelCube {
+  /** `texOffs(u, v)`, in texels of the sheet. */
+  readonly tex: readonly [number, number];
+  readonly from: readonly [number, number, number];
+  readonly size: readonly [number, number, number];
+  /** `CubeDeformation`: grows the box on every side and moves no UV. */
+  readonly grow?: number;
+}
+
+/** One `addOrReplaceChild`: its `PartPose` and what hangs off it. */
+export interface ModelPartDef {
+  readonly offset: readonly [number, number, number];
+  /** `xRot, yRot, zRot` in radians, Java's numbers as written. */
+  readonly rotation?: readonly [number, number, number];
+  readonly cubes?: readonly ModelCube[];
+  readonly children?: readonly ModelPartDef[];
+}
+
+/**
+ * A `ModelPart` tree as boxes, drawn the way `ModelPart.render` draws it.
+ *
+ * Java poses a part with `translate(offset / 16)` and then
+ * `rotationZYX(zRot, yRot, xRot)` -- x first, then y, then z -- and a child
+ * inherits all of it. Written as boxes, a cube is placed at rest, at its
+ * coordinates plus every offset down to it, and each part's turns are taken
+ * about the running sum of the offsets down to *that* part, innermost first.
+ * The two say the same thing; `tests/blocks.ts` builds Java's matrices and
+ * holds every vertex to them.
+ *
+ * The model's origin is the middle of the floor of the cell, `(8, 0, 8)`,
+ * which is the renderer's `translate(0.5, 0, 0.5)`.
+ *
+ * **The windows are `ModelPart.Cube`'s, restated for `boxFaces`.** Java
+ * gives each face a rectangle of the sheet and which corner lands where;
+ * `boxFaces` reads a window the vanilla-block way round on the same box. The
+ * two differ only by reversed axes on some faces -- never a quarter-turn,
+ * because both map the face's horizontal axis to U -- so each face is its
+ * rectangle with the right ends swapped. `grow` moves the box and not the
+ * rectangle, which is Java's too: the rectangle is cut from the size.
+ */
+export function modelPartBoxes(root: ModelPartDef, sheet = 64): ShapeBox[] {
+  const scale = 16 / sheet;
+  const out: ShapeBox[] = [];
+  const walk = (
+    part: ModelPartDef,
+    parent: readonly [number, number, number],
+    outer: readonly BoxRotation[],
+  ): void => {
+    const at: [number, number, number] = [
+      parent[0] + part.offset[0],
+      parent[1] + part.offset[1],
+      parent[2] + part.offset[2],
+    ];
+    const origin: [number, number, number] = [at[0] + 8, at[1], at[2] + 8];
+    const own: BoxRotation[] = [];
+    const [xRot, yRot, zRot] = part.rotation ?? [0, 0, 0];
+    for (const [axis, radians] of [
+      ["x", xRot],
+      ["y", yRot],
+      ["z", zRot],
+    ] as const) {
+      if (radians !== 0) own.push({ origin, axis, angle: (radians * 180) / Math.PI });
+    }
+    const chain = [...own, ...outer];
+    for (const cube of part.cubes ?? []) {
+      const grow = cube.grow ?? 0;
+      const [fx, fy, fz] = cube.from;
+      const [w, h, d] = cube.size;
+      const [u, v] = cube.tex;
+      const U = (n: number): number => n * scale;
+      const u0 = U(u);
+      const u1 = U(u + d);
+      const u2 = U(u + d + w);
+      const u22 = U(u + d + 2 * w);
+      const u3 = U(u + 2 * d + w);
+      const u4 = U(u + 2 * d + 2 * w);
+      const v0 = U(v);
+      const v1 = U(v + d);
+      const v2 = U(v + d + h);
+      out.push({
+        box: [
+          fx - grow + origin[0],
+          fy - grow + origin[1],
+          fz - grow + origin[2],
+          fx + w + grow + origin[0],
+          fy + h + grow + origin[1],
+          fz + d + grow + origin[2],
+        ],
+        uv: {
+          down: [u1, v0, u2, v1],
+          up: [u2, v1, u22, v0],
+          west: [u1, v2, u0, v1],
+          north: [u2, v2, u1, v1],
+          east: [u3, v2, u2, v1],
+          south: [u4, v2, u3, v1],
+        },
+        ...(chain.length === 0 ? {} : { chain }),
+      });
+    }
+    for (const child of part.children ?? []) walk(child, at, chain);
+  };
+  walk(root, [0, 0, 0], []);
+  return out;
+}
+
+/**
+ * The copper golem statue's four poses, `CopperGolemModel`'s four layers.
+ *
+ * Transcribed from the decompiled 1.21.11 client
+ * (`net/minecraft/client/model/animal/golem/CopperGolemModel.java`), and
+ * compared number for number against a 26.2 one, which is identical:
+ * `createBodyLayer` for `standing`, then `createSittingPoseBodyLayer`,
+ * `createRunningPoseBodyLayer` and `createStarPoseBodyLayer`. The parts named
+ * `*_r1` are Blockbench's rotated children and are kept as Java has them.
+ * Items and empty locator parts (`rightItem`) draw nothing and are left out.
+ *
+ * Bedrock ships the same four poses as `.geo.json`, and they are **not** the
+ * same model: the running pose in particular is a different arrangement. This
+ * app writes Java schematics, so Java is the source.
+ *
+ * `createBodyLayer`'s mesh is `translated(0, 24, 0)` for the walking golem;
+ * the statue's `setupAnim` puts `root.y` back to 0, so none of the four is
+ * lifted.
+ */
+export const COPPER_GOLEM_POSES: Readonly<Record<string, readonly ModelPartDef[]>> = {
+  standing: [
+    {
+      offset: [0, -5, 0],
+      cubes: [{ tex: [0, 15], from: [-4, -6, -3], size: [8, 6, 6] }],
+      children: [
+        {
+          offset: [0, -6, 0],
+          cubes: [
+            { tex: [0, 0], from: [-4, -5, -5], size: [8, 5, 10], grow: 0.015 },
+            { tex: [56, 0], from: [-1, -2, -6], size: [2, 3, 2] },
+            { tex: [37, 8], from: [-1, -9, -1], size: [2, 4, 2], grow: -0.015 },
+            { tex: [37, 0], from: [-2, -13, -2], size: [4, 4, 4], grow: -0.015 },
+          ],
+        },
+        { offset: [-4, -6, 0], cubes: [{ tex: [36, 16], from: [-3, -1, -2], size: [3, 10, 4] }] },
+        { offset: [4, -6, 0], cubes: [{ tex: [50, 16], from: [0, -1, -2], size: [3, 10, 4] }] },
+      ],
+    },
+    { offset: [0, -5, 0], cubes: [{ tex: [0, 27], from: [-4, 0, -2], size: [4, 5, 4] }] },
+    { offset: [0, -5, 0], cubes: [{ tex: [16, 27], from: [0, 0, -2], size: [4, 5, 4] }] },
+  ],
+  sitting: [
+    {
+      offset: [0, -3, 2.325],
+      cubes: [
+        { tex: [3, 19], from: [-3, -4, -4.525], size: [6, 1, 6] },
+        { tex: [0, 15], from: [-4, -3, -3.525], size: [8, 6, 6] },
+      ],
+      children: [
+        {
+          offset: [0, -1, -4.325],
+          rotation: [0, 0, -3.1416],
+          cubes: [{ tex: [3, 18], from: [-4, -3, -2.2], size: [8, 6, 3] }],
+        },
+        {
+          offset: [0, -6, -0.2],
+          cubes: [
+            { tex: [37, 8], from: [-1, -7, -3.3], size: [2, 4, 2], grow: -0.015 },
+            { tex: [37, 0], from: [-2, -11, -4.3], size: [4, 4, 4], grow: -0.015 },
+            { tex: [0, 0], from: [-4, -3, -7.325], size: [8, 5, 10] },
+            { tex: [56, 0], from: [-1, 0, -8.325], size: [2, 3, 2] },
+          ],
+        },
+        {
+          offset: [-4, -5.6, -1.8],
+          rotation: [0.4363, 0, 0],
+          children: [
+            {
+              offset: [0, 0.0893, 0.1198],
+              rotation: [-1.0472, 0, 0],
+              cubes: [{ tex: [36, 16], from: [-3.075, -0.9733, -1.9966], size: [3, 10, 4] }],
+            },
+          ],
+        },
+        {
+          offset: [4, -5.6, -1.7],
+          rotation: [0.4363, 0, 0],
+          children: [
+            {
+              offset: [0, -0.0015, -0.0808],
+              rotation: [-1.0472, 0, 0],
+              cubes: [{ tex: [50, 16], from: [0.075, -1.0443, -1.8997], size: [3, 10, 4] }],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      offset: [-2.1, -2.1, -2.075],
+      children: [
+        {
+          offset: [0.05, -1.9, 1.075],
+          rotation: [-1.5708, 0, 0],
+          cubes: [{ tex: [0, 27], from: [-2, 0.975, 0], size: [4, 5, 4] }],
+        },
+      ],
+    },
+    {
+      offset: [2, -2, -2.075],
+      children: [
+        {
+          offset: [0.05, -2, 1.075],
+          rotation: [-1.5708, 0, 0],
+          cubes: [{ tex: [16, 27], from: [-2, 0.975, 0], size: [4, 5, 4] }],
+        },
+      ],
+    },
+  ],
+  running: [
+    {
+      offset: [-1.064, -5, 0],
+      children: [
+        {
+          offset: [1.1, 0.1, 0.7],
+          rotation: [0.1204, -0.0064, -0.0779],
+          cubes: [{ tex: [0, 15], from: [-4.02, -6.116, -3.5], size: [8, 6, 6] }],
+        },
+        {
+          offset: [0.7, -5.6, -1.8],
+          cubes: [
+            { tex: [0, 0], from: [-4, -5.1, -5], size: [8, 5, 10] },
+            { tex: [56, 0], from: [-1.02, -2.1, -6], size: [2, 3, 2] },
+            { tex: [37, 8], from: [-1.02, -9.1, -1], size: [2, 4, 2], grow: -0.015 },
+            { tex: [37, 0], from: [-2, -13.1, -2], size: [4, 4, 4], grow: -0.015 },
+          ],
+        },
+        {
+          offset: [-4, -6, 0],
+          children: [
+            {
+              offset: [0.7, -0.248, -1.62],
+              rotation: [1.0036, 0, 0],
+              cubes: [{ tex: [36, 16], from: [-3.052, -1.11, -2.036], size: [3, 10, 4] }],
+            },
+          ],
+        },
+        {
+          offset: [4, -6, 0],
+          children: [
+            {
+              offset: [0.732, 0, 0],
+              rotation: [-0.8715, -0.0535, -0.0449],
+              cubes: [{ tex: [50, 16], from: [0.032, -1.1, -2], size: [3, 10, 4] }],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      offset: [-3.064, -5, 0],
+      children: [
+        {
+          offset: [1.048, 0, -0.9],
+          rotation: [-0.8727, 0, 0],
+          cubes: [{ tex: [0, 27], from: [-1.856, -0.1, -1.09], size: [4, 5, 4] }],
+        },
+      ],
+    },
+    {
+      offset: [0.936, -5, 0],
+      children: [
+        {
+          offset: [1, 0, 0],
+          rotation: [0.7854, 0, 0],
+          cubes: [{ tex: [16, 27], from: [-2.088, -0.1, -2], size: [4, 5, 4] }],
+        },
+      ],
+    },
+  ],
+  star: [
+    {
+      offset: [0, -5, 0],
+      cubes: [{ tex: [0, 15], from: [-4, -6, -3], size: [8, 6, 6] }],
+      children: [
+        {
+          offset: [0, -6, 0],
+          cubes: [
+            { tex: [0, 0], from: [-4, -5, -5], size: [8, 5, 10] },
+            { tex: [56, 0], from: [-1, -2, -6], size: [2, 3, 2] },
+            { tex: [37, 8], from: [-1, -9, -1], size: [2, 4, 2], grow: -0.015 },
+            { tex: [37, 0], from: [-2, -13, -2], size: [4, 4, 4], grow: -0.015 },
+          ],
+        },
+        {
+          offset: [-4, -6, 0],
+          children: [
+            {
+              offset: [1, 1, 0],
+              rotation: [0, 0, 1.9199],
+              cubes: [{ tex: [36, 16], from: [-1.5, -5, -2], size: [3, 10, 4] }],
+            },
+          ],
+        },
+        {
+          offset: [4, -6, 0],
+          children: [
+            {
+              offset: [-1, 1, 0],
+              rotation: [0, 0, -1.9199],
+              cubes: [{ tex: [50, 16], from: [-1.5, -5, -2], size: [3, 10, 4] }],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      offset: [-3, -5, 0],
+      children: [
+        {
+          offset: [0.35, 2, 0.01],
+          rotation: [0, 0, 0.2618],
+          cubes: [{ tex: [0, 27], from: [-2, -2.5, -2], size: [4, 5, 4] }],
+        },
+      ],
+    },
+    {
+      offset: [1, -5, 0],
+      children: [
+        {
+          offset: [1.65, 2, 0],
+          rotation: [0, 0, -0.2618],
+          cubes: [{ tex: [16, 27], from: [-2, -2.5, -2], size: [4, 5, 4] }],
+        },
+      ],
+    },
+  ],
+};
+
+/** `Direction.toYRot()`: south 0, west 90, north 180, east 270. */
+const TO_Y_ROT: Readonly<Record<string, number>> = { south: 0, west: 90, north: 180, east: 270 };
+const OPPOSITE_HORIZONTAL: Readonly<Record<string, string>> = {
+  north: "south",
+  south: "north",
+  east: "west",
+  west: "east",
+};
+
+/**
+ * The statue's root pose, from `CopperGolemStatueModel.setupAnim`: turned by
+ * the opposite of `facing`, and over by half a turn about z -- an entity model
+ * is written with y pointing down, and that half turn is what stands it up.
+ * The two are one `rotationZYX(pi, yRot, 0)`, so y first, then z.
+ */
+export function copperGolemStatueRoot(pose: string, facing: string): ModelPartDef {
+  const yRot = (TO_Y_ROT[OPPOSITE_HORIZONTAL[facing] ?? "south"] * Math.PI) / 180;
+  return {
+    offset: [0, 0, 0],
+    rotation: [0, yRot, Math.PI],
+    children: COPPER_GOLEM_POSES[pose] ?? COPPER_GOLEM_POSES.standing,
+  };
+}
+
+/**
+ * A copper golem statue: the golem, in one of four poses, on the floor of its
+ * cell and facing `facing`.
+ *
+ * It was one 8x14x8 box with coordinate-derived UVs over the golem's entity
+ * sheet, the same in every pose. Vanilla has no block model to read -- the
+ * blockstate names a model holding a particle and nothing else -- because the
+ * statue is a block entity drawn with the golem's own entity model, one layer
+ * per `copper_golem_pose`.
+ *
+ * **Standing, it is 24 units tall**, the antenna's knob reaching half a block
+ * into the cell above, exactly as in the game. A click on that half picks the
+ * empty cell above, which is a banner's cloth one block along.
+ */
+function copperGolemStatue(entry: PaletteEntry): BlockShape {
+  const pose = entry.properties.copper_golem_pose ?? "standing";
+  const facing = entry.properties.facing ?? "north";
+  return { kind: "boxes", boxes: modelPartBoxes(copperGolemStatueRoot(pose, facing)) };
 }
 
 /**
@@ -1686,9 +2086,8 @@ const SUFFIX_SHAPES: ReadonlyArray<readonly [string, (entry: PaletteEntry) => Bl
   // A cauldron with something in it is the same iron pot, with the something
   // drawn in it.
   ["_cauldron", cauldron],
-  // The copper golem, stood still. A statue is not a cube and drawing it as one
-  // walled off whatever it was standing next to.
-  ["_golem_statue", (e) => transform([[4, 0, 4, 12, 14, 12]], facingSteps(e), false)],
+  // The copper golem, in whichever of its four poses the statue holds.
+  ["_golem_statue", copperGolemStatue],
   ["_tulip", () => ({ kind: "cross" })],
   ["_mushroom", () => ({ kind: "cross" })],
 ];
@@ -5062,8 +5461,8 @@ export function coversFace(entry: PaletteEntry, face: CellFace): boolean {
   const [u, v] = [0, 1, 2].filter((a) => a !== axis) as [0 | 1 | 2, 0 | 1 | 2];
 
   const rects: Array<[number, number, number, number]> = [];
-  for (const { box, rotation } of shape.boxes) {
-    if (rotation !== undefined) continue;
+  for (const { box, rotation, chain } of shape.boxes) {
+    if (rotation !== undefined || chain !== undefined) continue;
     // The box has to touch the boundary this face sits on...
     if (atMin ? box[axis] > 0 : box[axis + 3] < 16) continue;
     // ...and what it covers of the square is clipped to the square: a potted

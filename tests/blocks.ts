@@ -25,10 +25,12 @@ import {
   type PlacementLook,
 } from "../src/shared/block_orientation.js";
 import {
+  COPPER_GOLEM_POSES,
   coversFace,
   occludesFace,
   occludesNeighbours,
   shapeFor,
+  type ModelPartDef,
 } from "../src/main/pipeline/block_shapes.js";
 import {
   ModelBaker,
@@ -3134,6 +3136,220 @@ console.log("\n--- a tripwire is laid along the look ---");
       `x ${Math.min(...xs)}..${Math.max(...xs)} z ${Math.min(...zs)}..${Math.max(...zs)}`,
     );
   }
+}
+
+console.log("\n--- a copper golem statue is the golem, in four poses ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * The statue is a block entity drawn with the golem's entity model, so what
+   * is checked here is Java's own drawing of it, rebuilt from scratch: the
+   * renderer's `translate(0.5, 0, 0.5)`, the statue model's root pose, each
+   * part's `translate(offset / 16)` and `rotationZYX`, and `ModelPart.Cube`'s
+   * vertices and `Polygon`'s UVs. It reads the pose tree the shape reads,
+   * so it holds the arithmetic -- pivots, turn order, windows -- rather than
+   * the transcription, which the extents and the nose below speak for.
+   */
+  type M4 = number[];
+  const mul = (a: M4, b: M4): M4 => {
+    const out = new Array<number>(16).fill(0);
+    for (let r = 0; r < 4; r += 1) {
+      for (let c = 0; c < 4; c += 1) {
+        for (let k = 0; k < 4; k += 1) out[r * 4 + c] += a[r * 4 + k] * b[k * 4 + c];
+      }
+    }
+    return out;
+  };
+  const translate = (x: number, y: number, z: number): M4 => [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z, 0, 0, 0, 1];
+  const rotX = (a: number): M4 => [1, 0, 0, 0, 0, Math.cos(a), -Math.sin(a), 0, 0, Math.sin(a), Math.cos(a), 0, 0, 0, 0, 1];
+  const rotY = (a: number): M4 => [Math.cos(a), 0, Math.sin(a), 0, 0, 1, 0, 0, -Math.sin(a), 0, Math.cos(a), 0, 0, 0, 0, 1];
+  const rotZ = (a: number): M4 => [Math.cos(a), -Math.sin(a), 0, 0, Math.sin(a), Math.cos(a), 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const apply = (m: M4, p: number[]): number[] =>
+    [0, 1, 2].map((r) => m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3]);
+
+  interface Quad {
+    positions: number[][];
+    uvs: number[][];
+    normal: number[];
+  }
+  /** `ModelPart.visit` over a part tree, emitting `Cube.compile`'s quads. */
+  const javaQuads = (part: ModelPartDef, parent: M4, out: Quad[]): void => {
+    const [xRot, yRot, zRot] = part.rotation ?? [0, 0, 0];
+    const pose = mul(
+      mul(parent, translate(part.offset[0] / 16, part.offset[1] / 16, part.offset[2] / 16)),
+      mul(rotZ(zRot), mul(rotY(yRot), rotX(xRot))),
+    );
+    for (const cube of part.cubes ?? []) {
+      const g = cube.grow ?? 0;
+      const [w, h, d] = cube.size;
+      const [x0, y0, z0] = [cube.from[0] - g, cube.from[1] - g, cube.from[2] - g];
+      const [x1, y1, z1] = [cube.from[0] + w + g, cube.from[1] + h + g, cube.from[2] + d + g];
+      const t0 = [x0, y0, z0], t1 = [x1, y0, z0], t2 = [x1, y1, z0], t3 = [x0, y1, z0];
+      const l0 = [x0, y0, z1], l1 = [x1, y0, z1], l2 = [x1, y1, z1], l3 = [x0, y1, z1];
+      const [u, v] = cube.tex;
+      const u1 = u + d, u2 = u + d + w, u22 = u + d + 2 * w, u3 = u + 2 * d + w, u4 = u + 2 * d + 2 * w;
+      const v1 = v + d, v2 = v + d + h;
+      const polygons: Array<[number[][], number, number, number, number, number[]]> = [
+        [[l1, l0, t0, t1], u1, v, u2, v1, [0, -1, 0]],
+        [[t2, t3, l3, l2], u2, v1, u22, v, [0, 1, 0]],
+        [[t0, l0, l3, t3], u, v1, u1, v2, [-1, 0, 0]],
+        [[t1, t0, t3, t2], u1, v1, u2, v2, [0, 0, -1]],
+        [[l1, t1, t2, l2], u2, v1, u3, v2, [1, 0, 0]],
+        [[l0, l1, l2, l3], u3, v1, u4, v2, [0, 0, 1]],
+      ];
+      for (const [vertices, pu0, pv0, pu1, pv1, facingOut] of polygons) {
+        const corners = [
+          [pu1, pv0],
+          [pu0, pv0],
+          [pu0, pv1],
+          [pu1, pv1],
+        ];
+        out.push({
+          positions: vertices.map((p) => apply(pose, p.map((n) => n / 16))),
+          uvs: corners.map(([cu, cv]) => [cu / 64, cv / 64]),
+          // `pose.transformNormal`: the rotation alone, which is the matrix
+          // applied to a direction rather than a point.
+          normal: [0, 1, 2].map((r) => pose[r * 4] * facingOut[0] + pose[r * 4 + 1] * facingOut[1] + pose[r * 4 + 2] * facingOut[2]),
+        });
+      }
+    }
+    for (const child of part.children ?? []) javaQuads(child, pose, out);
+  };
+  const TO_Y_ROT: Record<string, number> = { south: 0, west: 90, north: 180, east: 270 };
+  const AWAY: Record<string, string> = { north: "south", south: "north", east: "west", west: "east" };
+  const oracle = (pose: string, facing: string): Quad[] => {
+    const out: Quad[] = [];
+    const root: ModelPartDef = {
+      offset: [0, 0, 0],
+      rotation: [0, (TO_Y_ROT[AWAY[facing]] * Math.PI) / 180, Math.PI],
+      children: COPPER_GOLEM_POSES[pose],
+    };
+    javaQuads(root, translate(0.5, 0, 0.5), out);
+    return out;
+  };
+
+  const POSES = ["standing", "sitting", "running", "star"];
+  const FACINGS = ["north", "east", "south", "west"];
+  const bake = async (name: string, properties: Record<string, string>) => {
+    const baked = await baker.bakeBlockstate(block(name, properties));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const close = (a: number, b: number) => Math.abs(a - b) < 1e-4;
+
+  const mismatches: string[] = [];
+  const digests = new Set<string>();
+  for (const pose of POSES) {
+    for (const facing of FACINGS) {
+      const where = `${pose}/${facing}`;
+      const faces = await bake("copper_golem_statue", { copper_golem_pose: pose, facing });
+      const quads = oracle(pose, facing);
+      if (faces.length !== quads.length) {
+        mismatches.push(`${where}: ${faces.length} faces, Java draws ${quads.length}`);
+        continue;
+      }
+      const unmatched = [...quads];
+      for (const face of faces) {
+        const corners = [0, 1, 2, 3].map((i) => ({
+          p: [0, 1, 2].map((a) => face.positions[i * 3 + a]),
+          uv: [face.uvs[i * 2], face.uvs[i * 2 + 1]],
+        }));
+        const found = unmatched.findIndex((quad) =>
+          quad.normal.every((n, a) => close(n, face.normal[a])) &&
+          corners.every((corner) =>
+            quad.positions.some(
+              (p, k) =>
+                p.every((n, a) => close(n, corner.p[a])) &&
+                close(quad.uvs[k][0], corner.uv[0]) &&
+                close(quad.uvs[k][1], corner.uv[1]),
+            ),
+          ),
+        );
+        if (found === -1) {
+          mismatches.push(`${where}: a face matches no Java quad in place and UV`);
+          break;
+        }
+        unmatched.splice(found, 1);
+      }
+      if (facing === "north") {
+        digests.add(faces.map((f) => Array.from(f.positions, (n) => n.toFixed(3)).join()).join("|"));
+      }
+    }
+  }
+  equal("every face of every pose and facing is Java's, in place, facing and UV", mismatches, []);
+  // Single-sided, a face wound against its own normal is not drawn at all.
+  const woundBackwards: string[] = [];
+  for (const pose of POSES) {
+    for (const facing of FACINGS) {
+      const faces = await bake("copper_golem_statue", { copper_golem_pose: pose, facing });
+      if (!faces.every(windingAgrees)) woundBackwards.push(`${pose}/${facing}`);
+    }
+  }
+  equal("...and wound the way it faces", woundBackwards, []);
+  equal("...and the four poses are four different shapes", digests.size, 4);
+
+  const texture = (await bake("copper_golem_statue", {}))[0]?.textureKey;
+  equal("a statue wears the golem's entity sheet", texture, "minecraft:entity/copper_golem/copper_golem");
+
+  /*
+   * The face points where `facing` says. The nose is the one 2x3x2 cube, and
+   * its window starts at texel 56 of the sheet -- so a face reading only that
+   * corner of the sheet is the nose, whichever way the shape put it.
+   */
+  const noseWrong: string[] = [];
+  for (const pose of POSES) {
+    for (const facing of FACINGS) {
+      const faces = await bake("copper_golem_statue", { copper_golem_pose: pose, facing });
+      const nose = faces.filter((f) => Array.from(f.uvs).every((n, i) => (i % 2 === 0 ? n >= 55.9 / 64 : n <= 5.1 / 64)));
+      const points = nose.flatMap((f) => [0, 1, 2, 3].map((i) => [f.positions[i * 3], f.positions[i * 3 + 2]]));
+      const cx = points.reduce((s, p) => s + p[0], 0) / Math.max(1, points.length) - 0.5;
+      const cz = points.reduce((s, p) => s + p[1], 0) / Math.max(1, points.length) - 0.5;
+      const step = FACE_VECTOR[facing as "north"];
+      if (nose.length !== 6 || cx * step.x + cz * step.z < 0.25) {
+        noseWrong.push(`${pose}/${facing} (${nose.length} faces, ${cx.toFixed(2)}, ${cz.toFixed(2)})`);
+      }
+    }
+  }
+  equal("the golem's nose points the way the statue faces, in every pose", noseWrong, []);
+
+  const standing = await bake("copper_golem_statue", { copper_golem_pose: "standing", facing: "north" });
+  const heights = standing.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3 + 1] * 16));
+  equal(
+    "standing, it stands on the floor and is 24 units tall, antenna and all",
+    [+Math.min(...heights).toFixed(2), +Math.max(...heights).toFixed(2)],
+    [0, 23.99],
+  );
+
+  const statues = [
+    "copper_golem_statue",
+    "exposed_copper_golem_statue",
+    "weathered_copper_golem_statue",
+    "oxidized_copper_golem_statue",
+    "waxed_copper_golem_statue",
+    "waxed_exposed_copper_golem_statue",
+    "waxed_weathered_copper_golem_statue",
+    "waxed_oxidized_copper_golem_statue",
+  ];
+  equal(
+    "no statue occludes or covers a face of its cell",
+    statues.filter((name) => {
+      const entry = block(name, defaultStateFor(`minecraft:${name}`) ?? {});
+      return (
+        occludesNeighbours(entry) ||
+        (["north", "south", "east", "west", "up", "down"] as const).some((face) => coversFace(entry, face))
+      );
+    }),
+    [],
+  );
+
+  const looking = { direction: { x: 1, y: 0, z: 0 }, against: "up" as const, cursorY: 0, run: null };
+  equal(
+    "a statue set down looking east faces west, back at whoever placed it",
+    ["copper_golem_statue", "waxed_oxidized_copper_golem_statue"].map(
+      (name) => orientPlacement(`minecraft:${name}`, looking).facing,
+    ),
+    ["west", "west"],
+  );
 }
 
 console.log("\n--- the sculk sensors and the shrieker ---");

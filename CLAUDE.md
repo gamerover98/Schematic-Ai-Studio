@@ -5013,6 +5013,30 @@ knowing:
   The sherds are not drawn. They are the block entity's `sherds` list, a
   function of the position like a sign's text, so every pot wears the plain
   side.
+- **A copper golem statue has no block model, and it was one 8x14x8 box.** Its
+  blockstate names a model holding a particle; the statue is drawn by a block
+  entity renderer with the golem's **entity model**, one layer per
+  `copper_golem_pose`. `COPPER_GOLEM_POSES` transcribes `CopperGolemModel`'s
+  four layers from a decompiled 1.21.11 client, identical number for number in
+  26.2. Bedrock ships the same four poses as `.geo.json` and they are a
+  different model, the running pose most of all, so they are not the source.
+
+  **A `ModelPart` tree is not a list of boxes.** Every part turns its children,
+  on any axis and by any angle, so `ShapeBox.chain` carries the turns:
+  `modelPartBoxes` places each cube at rest, at its coordinates plus every
+  offset down to it, and takes each part's `rotationZYX` about the running sum
+  of the offsets down to that part, innermost first. The root is the statue
+  model's `setupAnim`: the opposite of `facing`, then half a turn about z,
+  which stands up a model written with y pointing down. The windows are
+  `ModelPart.Cube`'s rectangles with some axes reversed for `boxFaces`. The
+  check does not trust any of that: `tests/blocks.ts` rebuilds Java's matrices,
+  cubes and polygons and holds every vertex's place, normal and UV to them in
+  all sixteen states.
+
+  Standing, it is 24 units tall, and the antenna's knob reaches half a block
+  into the cell above, as in the game. A click on that half picks the empty
+  cell, a banner's cloth one block along, so a right-click there places rather
+  than turns. It is placed facing the player (`FRONT_TO_PLAYER_SUFFIXES`).
 - **An open fence gate was two posts and nothing else**, on the reasoning
   that that "reads as open". Vanilla's `template_fence_gate_open.json` swings
   each leaf a quarter turn onto the side the gate faces: an upright at

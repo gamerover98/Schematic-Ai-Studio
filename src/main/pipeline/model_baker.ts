@@ -1605,7 +1605,7 @@ export class ModelBaker {
        * 22.5 degrees off the wall, so none of its faces is on any plane, and
        * asking whether it is *nearly* there is a question with no right answer.
        */
-      if (part.rotation === undefined) {
+      if (part.rotation === undefined && part.chain === undefined) {
         for (const [name, face] of Object.entries(all)) {
           const at = CULL_BOUNDARY[name as CellFace];
           if (at !== undefined && scaled[at[0]] === at[1]) {
@@ -1613,10 +1613,10 @@ export class ModelBaker {
           }
         }
       }
-      const built = Object.values(all);
-      extraFaces.push(
-        ...(part.rotation ? built.map((face) => tiltFace(face, part.rotation!)) : built),
-      );
+      let built = Object.values(all);
+      if (part.rotation) built = built.map((face) => tiltFace(face, part.rotation!));
+      for (const tilt of part.chain ?? []) built = built.map((face) => tiltFace(face, tilt));
+      extraFaces.push(...built);
     }
     return { faces: {}, extraFaces, textureKey: primaryKey, isFullCube: false };
   }
