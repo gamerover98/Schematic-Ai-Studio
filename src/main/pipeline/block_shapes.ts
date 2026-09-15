@@ -3210,6 +3210,99 @@ function sunflower(entry: PaletteEntry): BlockShape {
   return entry.properties.half === "upper" ? boxes(...SUNFLOWER_TOP) : { kind: "cross" };
 }
 
+/**
+ * A spore blossom hangs from the ceiling: a base plane a tenth under the top of
+ * the cell and four petals drooping 22.5 degrees from its edges. It was a full
+ * cube wearing `spore_blossom` on six sides, which is the petal sprite smeared
+ * over a block that also sealed its cell.
+ *
+ * Transcribed from `models/block/spore_blossom.json` (1.21.4). No `rescale`, so
+ * the petals keep their 16 units and reach past the cell, as vanilla's do. The
+ * blockstate has one variant.
+ *
+ * **The windows are verbatim and the two quarter-turns about z are not.**
+ * Vanilla's `90`/`270` on the up and down faces of the two petals tilted about
+ * z, copied as written, put each sprite's yellow base on the petal's tip
+ * instead of at the middle of the flower. That was reported from the editor
+ * with a screenshot of the game beside it. Here they are swapped, and
+ * `tests/blocks.ts` checks the base texel of all four petals. The two petals
+ * tilted about x have no rotation and were right. So on a flat face this
+ * app's direction for a quarter-turn may be the opposite of vanilla's. The
+ * other `up`/`down` quarter-turns in this file have not been checked against
+ * a picture.
+ */
+const SPORE_BLOSSOM: readonly ShapeBox[] = [
+  { box: [1, 15.9, 1, 15, 15.9, 15], texture: "spore_blossom_base", uv: { up: [1, 1, 15, 15], down: [1, 1, 15, 15] } },
+  {
+    box: [8, 15.7, 0, 24, 15.7, 16],
+    rotation: { origin: [8, 16, 0], axis: "z", angle: -22.5 },
+    texture: "spore_blossom",
+    uv: { up: [0, 0, 16, 16], down: [0, 16, 16, 0] },
+    // Vanilla writes `up: 90, down: 270` here. Copied as written, the sprite
+    // came out a half turn round, with its base at the tip. See below.
+    uvRotation: { up: 270, down: 90 },
+  },
+  {
+    box: [-8, 15.7, 0, 8, 15.7, 16],
+    rotation: { origin: [8, 16, 0], axis: "z", angle: 22.5 },
+    texture: "spore_blossom",
+    uv: { up: [0, 0, 16, 16], down: [0, 16, 16, 0] },
+    uvRotation: { up: 90, down: 270 },
+  },
+  {
+    box: [0, 15.7, 8, 16, 15.7, 24],
+    rotation: { origin: [0, 16, 8], axis: "x", angle: 22.5 },
+    texture: "spore_blossom",
+    uv: { up: [16, 16, 0, 0], down: [16, 0, 0, 16] },
+  },
+  {
+    box: [0, 15.7, -8, 16, 15.7, 8],
+    rotation: { origin: [0, 16, 8], axis: "x", angle: -22.5 },
+    texture: "spore_blossom",
+    uv: { up: [0, 0, 16, 16], down: [0, 16, 16, 0] },
+  },
+];
+
+/**
+ * Bamboo is a stalk that thickens with `age` and carries leaves by `leaves`.
+ * It was one 3x3 column for every state, so neither property showed.
+ *
+ * `blockstates/bamboo.json` (1.21.4) is a multipart: `age=0` applies one of
+ * `bamboo1..4_age0`, a 2x2 stalk at 7..9, and `age=1` one of `bamboo1..4_age1`,
+ * a 3x3 at 6.5..9.5; `leaves=small|large` adds two crossed planes wearing
+ * `bamboo_small_leaves` or `bamboo_large_leaves`. The four stalk models are a
+ * weighted *random* pick per position and differ only in which column of
+ * `bamboo_stalk.png` their sides read; a shape here is baked per state, so it
+ * is always the first. Vanilla's random offset in x and z is not reproduced
+ * either, for the same reason.
+ *
+ * `stage` is in no `when` at all: it only says whether the stalk may still
+ * grow, so it moves nothing, which is `signal_fire`'s answer.
+ */
+function bamboo(entry: PaletteEntry): BlockShape {
+  const thick = entry.properties.age === "1";
+  const [lo, hi] = thick ? [6.5, 9.5] : [7, 9];
+  const w = hi - lo;
+  const side: UvWindow = [0, 0, w, 16];
+  const parts: ShapeBox[] = [
+    {
+      box: [lo, 0, lo, hi, 16, hi],
+      texture: "bamboo_stalk",
+      uv: { up: [13, 0, 13 + w, w], down: [13, 4, 13 + w, 4 + w], north: side, south: side, west: side, east: side },
+    },
+  ];
+  const leaves = entry.properties.leaves;
+  if (leaves === "small" || leaves === "large") {
+    const texture = `bamboo_${leaves}_leaves`;
+    const whole: UvWindow = [0, 0, 16, 16];
+    parts.push(
+      { box: [0.8, 0, 8, 15.2, 16, 8], texture, uv: { north: whole, south: whole } },
+      { box: [8, 0, 0.8, 8, 16, 15.2], texture, uv: { west: whole, east: whole } },
+    );
+  }
+  return boxes(...parts);
+}
+
 function pitcherCrop(entry: PaletteEntry): BlockShape {
   const raw = Number(entry.properties.age ?? "0");
   const age = Number.isFinite(raw) ? Math.min(4, Math.max(0, Math.trunc(raw))) : 0;
@@ -4492,7 +4585,8 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   // it merges with whatever it stands next to.
   cactus: () => boxes([1, 0, 1, 15, 16, 15]),
   scaffolding: () => boxes([0, 14, 0, 16, 16, 16]),
-  bamboo: () => boxes([6.5, 0, 6.5, 9.5, 16, 9.5]),
+  bamboo,
+  spore_blossom: () => boxes(...SPORE_BLOSSOM),
   /*
    * Ahead of the `_fence` suffix, which is where it had been landing: a
    * bamboo fence is vanilla's `custom_fence`, a different model on a

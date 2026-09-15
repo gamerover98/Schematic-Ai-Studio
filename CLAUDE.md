@@ -4962,6 +4962,27 @@ knowing:
   two `_wall` models are the same elements three units lower, which is what
   lines a gate up with a wall's lower top. `powered` moves nothing.
   `bamboo_fence_gate` is still the ordinary template, not its own custom one.
+- **A carved pumpkin's front texture is its bare name**, which the `facing`
+  derivation cannot find: it offers `<name>_front`. So `carved_pumpkin` was
+  the only name that resolved on any face and all six wore the carved face.
+  `SpecialFaceRule.front` is for that, with `pumpkin_side` round the sides and
+  `pumpkin_top` on both ends (`orientable`). The jack o'lantern is the same.
+  A bare one is drawn facing north, the registry's default. Legacy `86` and
+  `91` already arrive with `facing` from `legacy_blocks.json`.
+- **A spore blossom was a cube wearing its petal sprite.** Vanilla is a base
+  plane at `y = 15.9` and four petals hinged at the middle and drooping 22.5
+  degrees. The windows are vanilla's. The quarter-turns on the two petals
+  tilted about z are not: copied as written, they put the sprite's yellow base
+  on the tip. This was reported against a screenshot of the game, so they are
+  swapped, and a texel check pins it. This app's quarter-turn on a flat face
+  may run the opposite way to vanilla's. The other `up`/`down` quarter-turns
+  in `block_shapes.ts` have not been checked against a picture.
+- **Bamboo was one 3x3 column in every state.** `age` picks a 2x2 or a 3x3
+  stalk and `leaves` adds two crossed planes of small or large leaves. Vanilla
+  picks one of four stalk models at random per position, and they differ only
+  in the column of `bamboo_stalk` their sides read. A shape is baked per
+  state, so this always uses the first, with no random offset. `stage` is in no
+  `when` and moves nothing.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it

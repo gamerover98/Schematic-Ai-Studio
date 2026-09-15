@@ -98,6 +98,18 @@ export interface SpecialFaceRule {
    * campfire's lesson one table along.
    */
   readonly vertical?: readonly string[];
+  /**
+   * The face the block points at, for a block whose front texture is its
+   * **bare name** rather than `<name>_front`.
+   *
+   * The carved pumpkin and the jack o'lantern are the two: `carved_pumpkin.json`
+   * is `orientable` with `front: block/carved_pumpkin`, `side:
+   * block/pumpkin_side` and `top: block/pumpkin_top`. Without a row the bare
+   * name was the only candidate that resolved on any face, so all six wore the
+   * carved face. With `side` and `top` alone the front would take `side` too,
+   * because the `facing` arm falls through to this table -- hence the field.
+   */
+  readonly front?: readonly string[];
 }
 
 /**
@@ -377,6 +389,21 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
   // Ice that is melting is four textures; a schematic captures one moment and
   // frame 0 is the one that still looks like ice.
   frosted_ice: { top: ["frosted_ice_0"], side: ["frosted_ice_0"], bottom: ["frosted_ice_0"] },
+  // `orientable`: the carved face on `facing`, the plain pumpkin everywhere
+  // else, and the lid on the floor too. Pre-Flattening `86` and `91` arrive
+  // already holding `facing` through `legacy_blocks.json`.
+  carved_pumpkin: {
+    front: ["carved_pumpkin"],
+    top: ["pumpkin_top"],
+    side: ["pumpkin_side"],
+    bottom: ["pumpkin_top"],
+  },
+  jack_o_lantern: {
+    front: ["jack_o_lantern"],
+    top: ["pumpkin_top"],
+    side: ["pumpkin_side"],
+    bottom: ["pumpkin_top"],
+  },
   bamboo: { top: ["bamboo_stalk"], side: ["bamboo_stalk"], bottom: ["bamboo_stalk"] },
   bamboo_sapling: { top: ["bamboo_stage0"], side: ["bamboo_stage0"], bottom: ["bamboo_stage0"] },
   // The brushable blocks: `_0` is undisturbed, which is how a schematic holds
@@ -2093,7 +2120,10 @@ export class ModelBaker {
      * a dropper's sides are. Falling through costs nothing anywhere else: what
      * follows offers `_side` and the bare name in the same order these did.
      */
-    const facing = entry.properties.facing;
+    // A bare carved pumpkin is the registry's `facing=north`, and still has a
+    // face: without the default it would be a plain pumpkin.
+    const facing =
+      entry.properties.facing ?? (SPECIAL_FACE_RULES[normalized]?.front !== undefined ? "north" : undefined);
     if (facing !== undefined) {
       const lit = entry.properties.lit === "true";
       const vertical = facing === "up" || facing === "down";
@@ -2108,6 +2138,7 @@ export class ModelBaker {
            * for everything else this candidate simply misses.
            */
           ...(vertical ? [`${normalized}_front_vertical`] : []),
+          ...(SPECIAL_FACE_RULES[normalized]?.front ?? []),
           `${normalized}_front`,
           ...ModelBaker.plainCandidates(entry, normalized, face),
         ];

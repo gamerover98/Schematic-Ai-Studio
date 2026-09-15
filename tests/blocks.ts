@@ -807,6 +807,108 @@ console.log("\n--- shapes ---");
 }
 
 {
+  /*
+   * A carved pumpkin wore its carved face on all six sides: the bare name was
+   * the only candidate that resolved. `orientable` puts the face on `facing`
+   * alone, `pumpkin_side` round the rest and `pumpkin_top` on both ends.
+   */
+  const faults: string[] = [];
+  for (const name of ["carved_pumpkin", "jack_o_lantern"]) {
+    for (const facing of ["north", "south", "east", "west"]) {
+      const baked = await baker.bakeBlockstate(block(name, { facing }));
+      for (const [dir, face] of Object.entries(baked.faces)) {
+        const want =
+          dir === facing ? `minecraft:block/${name}` : dir === "up" || dir === "down" ? "minecraft:block/pumpkin_top" : "minecraft:block/pumpkin_side";
+        if (face.textureKey !== want) faults.push(`${name}[facing=${facing}] ${dir}: ${face.textureKey}`);
+      }
+    }
+    const bare = await baker.bakeBlockstate(block(name));
+    if (bare.faces.north?.textureKey !== `minecraft:block/${name}`) faults.push(`bare ${name} has no face on north`);
+  }
+  equal("a carved pumpkin has one carved face, on the side it faces", faults, []);
+}
+
+{
+  /*
+   * A spore blossom was a cube wearing its petal sprite on six faces. Vanilla
+   * hangs a base plane from the ceiling and droops four petals from it.
+   */
+  const blossom = await baker.bakeBlockstate(block("spore_blossom"));
+  const ys = allVertices(blossom).map((v) => v[1]);
+  check("a spore blossom is not a cube", !blossom.isFullCube);
+  check("...it hangs from the top of its cell", Math.max(...ys) <= 1 + 1e-6 && Math.min(...ys) > 0.5);
+  check(
+    "...with its petals drooping below the base",
+    Math.min(...ys) < 10 / 16,
+  );
+  equal(
+    "...a base and four petals, each drawn from both sides",
+    [
+      blossom.extraFaces.filter((f) => f.textureKey === "minecraft:block/spore_blossom_base").length,
+      blossom.extraFaces.filter((f) => f.textureKey === "minecraft:block/spore_blossom").length,
+    ],
+    [2, 8],
+  );
+
+  /*
+   * And each petal wears the sprite with its yellow base at the hinge, in the
+   * middle of the flower, and its transparent tip at the far end. The two
+   * petals tilted about z came out a half turn round with every geometric check
+   * passing, which is what a picture check is for.
+   */
+  const petalFaults: string[] = [];
+  for (const face of blossom.extraFaces.filter((f) => f.textureKey === "minecraft:block/spore_blossom")) {
+    const verts = [0, 1, 2, 3].map((i): [number, number, number] => [
+      face.positions[i * 3],
+      face.positions[i * 3 + 1],
+      face.positions[i * 3 + 2],
+    ]);
+    const byHeight = [...verts].sort((a, b) => b[1] - a[1]);
+    const mid = (a: number[], b: number[]) => [0, 1, 2].map((k) => (a[k] + b[k]) / 2);
+    const hinge = mid(byHeight[0], byHeight[1]);
+    const tip = mid(byHeight[2], byHeight[3]);
+    const along = (t: number) => [0, 1, 2].map((k) => hinge[k] + (tip[k] - hinge[k]) * t) as [number, number, number];
+    const base = texelOn(face, along(0.5 / 16));
+    const end = texelOn(face, along(15.5 / 16));
+    const [r, g, b] = base.rgba.split(",").map(Number);
+    const yellow = base.alpha > 128 && r > 150 && g > 120 && b < 130;
+    if (!yellow || end.alpha > 128) {
+      petalFaults.push(`normal ${face.normal.map((n) => n.toFixed(2))}: base ${base.rgba}, tip ${end.rgba}`);
+    }
+  }
+  equal("...each petal's yellow base is at the middle of the flower", petalFaults, []);
+}
+
+{
+  /*
+   * Every bamboo was one 3x3 column whatever its state. `age` thickens the
+   * stalk from 2x2 to 3x3, `leaves` adds two crossed planes of small or large
+   * leaves, and `stage` moves nothing in vanilla's blockstate.
+   */
+  const bake = (props: Record<string, string>) => baker.bakeBlockstate(block("bamboo", props));
+  const width = async (props: Record<string, string>) => {
+    const stalk = (await bake(props)).extraFaces.filter((f) => f.textureKey === "minecraft:block/bamboo_stalk");
+    const xs = stalk.flatMap((f) => [0, 3, 6, 9].map((i) => f.positions[i]));
+    return Math.round((Math.max(...xs) - Math.min(...xs)) * 32);
+  };
+  equal("a young bamboo stalk is two wide, an old one three (in half units)", [
+    await width({ age: "0", leaves: "none" }),
+    await width({ age: "1", leaves: "none" }),
+  ], [4, 6]);
+  const leafKeys = async (leaves: string) =>
+    (await bake({ age: "1", leaves })).extraFaces.map((f) => f.textureKey).filter((k) => k.includes("leaves"));
+  equal("bamboo with no leaves has none", (await leafKeys("none")).length, 0);
+  equal("small leaves are two planes of small leaves", await leafKeys("small"), Array(4).fill("minecraft:block/bamboo_small_leaves"));
+  equal("large leaves are two planes of large leaves", await leafKeys("large"), Array(4).fill("minecraft:block/bamboo_large_leaves"));
+  const flat = (b: BakedBlock) => b.extraFaces.map((f) => [...f.positions, ...f.uvs, f.textureKey].join()).join("|");
+  equal(
+    "stage moves nothing",
+    flat(await bake({ age: "1", leaves: "large", stage: "1" })),
+    flat(await bake({ age: "1", leaves: "large", stage: "0" })),
+  );
+}
+
+{
   // `wall_torch.json` hangs the torch off the -X edge and the blockstate
   // rotates from facing=east: a torch facing east is mounted on the wall to
   // its west, not its east. The *base* is what has to touch that wall — the
