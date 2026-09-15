@@ -4834,10 +4834,15 @@ knowing:
   which is `signal_fire`'s answer: what they change is behaviour and particles,
   and this file may not invent geometry for either.
 
-  Two things are deliberately left. **The connections are not derived**, so a
-  placed wire is unconnected and lies north-south, which is what the game draws
-  for an isolated one; `block_connections.ts` dispatches on fence, wall and
-  pane and has never had a wire arm.
+  **The connections are derived now**, by vanilla's `shouldConnectTo`: a side
+  connects to another wire or to a hook pointing back at this one. **A wire
+  with nothing beside it keeps the run it was laid along, and that is a
+  deviation.** Vanilla's isolated wire is all `false` and lies north-south
+  whichever way the player faced, and the first wire of a run is always
+  isolated. So `orientPlacement` lays a wire along the look, east-west as
+  `east=true,west=true`, and `connectedState` keeps that pair when no side
+  connects. North-south stays all `false`, which draws the same and is what the
+  game writes. `attached` is still not derived.
 - **A tripwire hook was the ladder's plate three units thick**, wearing a sheet
   that is mostly a hole, so it drew almost nothing and took the face off the
   wall. It is the four `tripwire_hook*` models now: a plank plate, a stick and

@@ -3110,6 +3110,32 @@ if (pack === null) {
   equal("...and covers no face of its cell", HOOK_SIDES.filter((face) => coversFace(hook, face)), []);
 }
 
+/*
+ * A tripwire is laid along the camera. It has no `facing`, so what a placement
+ * says is the run: two arms east-west, or vanilla's own isolated wire, which
+ * lies north-south.
+ */
+console.log("\n--- a tripwire is laid along the look ---");
+{
+  const lay = (x: number, z: number) =>
+    orientPlacement("minecraft:tripwire", { direction: { x, y: -0.3, z }, against: "up", cursorY: 0, run: null });
+  const WIRE = { north: "false", east: "false", south: "false", west: "false" };
+  equal("looking east lays it east-west", lay(1, 0.2), { ...WIRE, east: "true", west: "true" });
+  equal("...and so does looking west", lay(-1, -0.2), { ...WIRE, east: "true", west: "true" });
+  equal("looking north lays it north-south", lay(0.2, -1), WIRE);
+  if (pack !== null) {
+    const faces = (await baker.bakeBlockstate(block("tripwire", { ...WIRE, east: "true", west: "true" })))
+      .extraFaces;
+    const xs = faces.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3] * 16));
+    const zs = faces.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3 + 2] * 16));
+    check(
+      "...and an east-west wire is drawn running east-west, edge to edge",
+      Math.min(...xs) < 0.01 && Math.max(...xs) > 15.99 && Math.min(...zs) > 7.7 && Math.max(...zs) < 8.3,
+      `x ${Math.min(...xs)}..${Math.max(...xs)} z ${Math.min(...zs)}..${Math.max(...zs)}`,
+    );
+  }
+}
+
 console.log("\n--- the sculk sensors and the shrieker ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");
@@ -7363,6 +7389,41 @@ console.log("\n--- neighbour-derived state ---");
     "...and a neighbour with no sturdy map falls back to solid",
     connectedState(self("vine"), { up: solid("stone") }).up,
     "true",
+  );
+
+  /*
+   * A tripwire connects to a wire, and to a hook pointing back at it, and to
+   * nothing else. With nothing to connect to it keeps the run it was laid in:
+   * east-west as the two arms, north-south as vanilla's own all-false.
+   */
+  const WIRE = { north: "false", east: "false", south: "false", west: "false" };
+  equal(
+    "a tripwire connects to a tripwire",
+    connectedState(self("tripwire"), { north: thin("tripwire") }),
+    { ...WIRE, north: "true" },
+  );
+  equal(
+    "...and to a hook to its east that points west, back at it",
+    connectedState(self("tripwire"), { east: thin("tripwire_hook", { facing: "west" }) }),
+    { ...WIRE, east: "true" },
+  );
+  equal(
+    "...but not to one pointing away",
+    connectedState(self("tripwire"), {
+      east: thin("tripwire_hook", { facing: "east" }),
+      north: solid("stone"),
+    }),
+    WIRE,
+  );
+  equal(
+    "a lone tripwire laid east-west stays east-west",
+    connectedState(self("tripwire", { ...WIRE, east: "true", west: "true" }), {}),
+    { ...WIRE, east: "true", west: "true" },
+  );
+  equal(
+    "...and one laid north-south is vanilla's isolated wire",
+    connectedState(self("tripwire", { ...WIRE, north: "true", south: "true" }), {}),
+    WIRE,
   );
 
   // Fences.

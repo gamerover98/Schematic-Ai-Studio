@@ -2962,6 +2962,41 @@ console.log("\n--- a vine hangs from a vine ---");
 }
 
 /*
+ * A tripwire connects to what it runs into, which nothing derived: every wire
+ * lay north-south with all four sides false whatever was beside it.
+ */
+console.log("\n--- a tripwire connects to wires and hooks ---");
+{
+  const session = newDocument({ width: 5, height: 3, length: 3 });
+  for (let x = 0; x < 5; x += 1) {
+    setBlock(session.doc, x, 0, 1, { namespacedName: "minecraft:stone", properties: {} });
+  }
+  const place = (x: number, name: string, properties: Record<string, string>) =>
+    applyEdit(session, {
+      kind: "setBlock",
+      x,
+      y: 1,
+      z: 1,
+      block: { namespacedName: `minecraft:${name}`, properties },
+      against: "up",
+    });
+  const sides = (x: number) => {
+    const p = getBlock(session.doc, x, 1, 1).properties;
+    return ["north", "east", "south", "west"].filter((face) => p[face] === "true").join(",");
+  };
+  const EAST_WEST = { north: "false", south: "false", east: "true", west: "true" };
+
+  place(2, "tripwire", EAST_WEST);
+  equal("a lone wire laid east-west keeps its run", sides(2), "east,west");
+  place(3, "tripwire", EAST_WEST);
+  equal("a second wire beside it connects the pair", [sides(2), sides(3)], ["east", "west"]);
+  place(1, "tripwire_hook", { facing: "east", attached: "false", powered: "false" });
+  equal("a hook pointing at the run is connected to", sides(2), "east,west");
+  place(4, "tripwire_hook", { facing: "east", attached: "false", powered: "false" });
+  equal("...and one pointing away is not", sides(3), "west");
+}
+
+/*
  * The undo stack is capped, so its length is not an ordering, and the renderer
  * orders its selection history against main's by what `documentState` reports.
  * Past 200 transactions the length stopped moving and Ctrl+Z reached only the

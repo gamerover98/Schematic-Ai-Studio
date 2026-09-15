@@ -520,6 +520,47 @@ function dripstoneThickness(
   return "frustum";
 }
 
+/**
+ * A tripwire's four connections: `TripWireBlock.shouldConnectTo`, plus one
+ * deviation for a wire with nothing to connect to.
+ *
+ * A side connects to another wire, or to a hook that points back at this one.
+ * That is vanilla's whole rule, and until it was here nothing derived it, so
+ * every wire ever placed was unconnected and lay north-south.
+ *
+ * **A wire with no neighbour keeps the axis it was laid along**, and that is
+ * the deviation. Vanilla has no answer for it: an isolated wire is all
+ * `false`, which draws north-south, whatever way the player faced. This is an
+ * editor and the first wire of a run is always isolated, so a run laid
+ * east-west came out crossways until its second wire went down.
+ * `orientPlacement` lays a wire along the look, as `east=true,west=true` for
+ * east-west, and this keeps exactly that. North-south stays vanilla's all
+ * `false`, which draws the same, so a lone wire out of a file is not rewritten
+ * into a state the game never writes.
+ */
+function tripwireSides(
+  self: { readonly properties: Readonly<Record<string, string>> },
+  neighbours: Neighbours,
+): Record<string, string> {
+  const sides: Record<string, string> = {};
+  let any = false;
+  for (const face of HORIZONTAL_FACES) {
+    const side = neighbours[face] ?? null;
+    const connects =
+      side !== null &&
+      (side.name === "tripwire" ||
+        (side.name === "tripwire_hook" && (side.properties.facing ?? "north") === OPPOSITE[face]));
+    sides[face] = connects ? "true" : "false";
+    any ||= connects;
+  }
+  if (any) return sides;
+  const p = self.properties;
+  const eastWest =
+    (p.east === "true" || p.west === "true") && p.north !== "true" && p.south !== "true";
+  const arm = eastWest ? "true" : "false";
+  return { north: "false", east: arm, south: "false", west: arm };
+}
+
 const MUSHROOM_BLOCKS: ReadonlySet<string> = new Set([
   "brown_mushroom_block",
   "red_mushroom_block",
@@ -646,6 +687,11 @@ export function connectedState(
     return out;
   }
 
+  if (name === "tripwire") {
+    for (const [face, value] of Object.entries(tripwireSides(block, neighbours))) put(face, value);
+    return out;
+  }
+
   if (MUSHROOM_BLOCKS.has(name)) {
     // Inverted: a face is *true* where the skin shows, which is where there is
     // no sibling covering it.
@@ -692,6 +738,7 @@ export function isNeighbourDependent(name: string): boolean {
     name === "redstone_wire" ||
     name === "chorus_plant" ||
     name === "vine" ||
+    name === "tripwire" ||
     name === "pointed_dripstone" ||
     MUSHROOM_BLOCKS.has(name) ||
     hasProperty(name, "snowy")

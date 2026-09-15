@@ -510,6 +510,18 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return {};
   }
 
+  /*
+   * A tripwire is laid along the look. It has no `facing`: its four
+   * connections are the neighbours', derived in `block_connections.ts`, and
+   * what a placement can say is only which way the run goes when there are
+   * none yet. East-west is the pair of arms; north-south is vanilla's own
+   * isolated wire, all `false`, which already draws that way.
+   */
+  if (name === "tripwire") {
+    const eastWest = FACE_AXIS[horizontalFacing(look.direction)] === "x" ? "true" : "false";
+    return { north: "false", east: eastWest, south: "false", west: eastWest };
+  }
+
   if (name.endsWith("_stairs")) {
     return { facing: horizontalFacing(look.direction), half: upper ? "top" : "bottom" };
   }
