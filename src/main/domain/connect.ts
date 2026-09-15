@@ -65,7 +65,7 @@ import {
   type Neighbours,
 } from "../../shared/block_connections.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
-import { occludesNeighbours } from "../pipeline/block_shapes.js";
+import { coversFace, occludesNeighbours } from "../pipeline/block_shapes.js";
 import { paletteEntryIsAir, type PaletteEntry } from "../pipeline/types.js";
 import { getBlock, getBlockEntity, type SchematicDocument } from "./document.js";
 import type { TransactionScope } from "./history.js";
@@ -185,7 +185,31 @@ function factsOf(entry: PaletteEntry): NeighbourBlock | null {
     // What a fence or a wall attaches to is a full opaque cube, which is the
     // question `occludesNeighbours` already answers for the mesher.
     solid: occludesNeighbours(entry),
+    sturdy: sturdyFaces(entry),
   };
+}
+
+/**
+ * Cube-shaped by `shapeFor` and still nothing to hang a vine on: the fluids
+ * have no collision shape, and neither do the two markers that are empty
+ * space by design. A barrier is not here -- it is solid to walk into.
+ */
+const NO_BODY: ReadonlySet<string> = new Set([
+  "water",
+  "lava",
+  "bubble_column",
+  "structure_void",
+  "light",
+]);
+
+const SIX_FACES: readonly Face[] = ["north", "south", "east", "west", "up", "down"];
+
+/** `NeighbourBlock.sturdy`: per face, `coversFace` for a block with a body. */
+function sturdyFaces(entry: PaletteEntry): Partial<Record<Face, boolean>> {
+  const faces: Partial<Record<Face, boolean>> = {};
+  const hasBody = !NO_BODY.has(bareName(entry));
+  for (const face of SIX_FACES) faces[face] = hasBody && coversFace(entry, face);
+  return faces;
 }
 
 function paletteFacts(doc: SchematicDocument): PaletteFacts {

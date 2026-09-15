@@ -7250,6 +7250,38 @@ console.log("\n--- neighbour-derived state ---");
     connectedState(self("vine"), { up: thin("oak_fence", { north: "true" }) }),
     { north: "false", east: "false", south: "false", west: "false", up: "false" },
   );
+  /*
+   * What a vine clings to is a whole face of the collision shape, not a full
+   * opaque cube: leaves are not `solid` and carry every face as `sturdy`. The
+   * face asked is the one turned *towards* the vine, which is where a wrong
+   * `OPPOSITE` would hide -- so the leaves offer that face alone.
+   */
+  const leavesFacing = (face: string) => ({
+    name: "oak_leaves",
+    properties: {},
+    solid: false,
+    sturdy: { [face]: true },
+  });
+  equal(
+    "a vine clings to leaves beside it",
+    connectedState(self("vine"), { east: leavesFacing("west") }).east,
+    "true",
+  );
+  equal(
+    "...by the face turned towards it, not the far one",
+    connectedState(self("vine"), { east: leavesFacing("east") }).east,
+    "false",
+  );
+  equal(
+    "a vine under leaves hangs from their underside",
+    connectedState(self("vine"), { up: leavesFacing("down") }).up,
+    "true",
+  );
+  equal(
+    "...and a neighbour with no sturdy map falls back to solid",
+    connectedState(self("vine"), { up: solid("stone") }).up,
+    "true",
+  );
 
   // Fences.
   equal(

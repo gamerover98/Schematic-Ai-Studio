@@ -2932,6 +2932,33 @@ console.log("\n--- a vine hangs from a vine ---");
       Array(4).fill("vine north=true"),
     );
   }
+
+  {
+    /*
+     * What a vine clings to is a whole face of a collision shape, and main
+     * computes that per palette entry: leaves and glass are not full opaque
+     * cubes and still hold a vine, beside it or overhead; water holds none.
+     */
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    const put = (x: number, y: number, z: number, name: string) =>
+      setBlock(session.doc, x, y, z, { namespacedName: `minecraft:${name}`, properties: {} });
+    put(3, 1, 1, "oak_leaves");
+    click(session, [2, 1, 1], "west");
+    equal("a vine placed against leaves clings to them", getBlock(session.doc, 2, 1, 1).properties.east, "true");
+
+    put(1, 4, 3, "oak_leaves");
+    click(session, [1, 3, 3], "down");
+    equal("a vine placed under leaves hangs from their underside", getBlock(session.doc, 1, 3, 3).properties.up, "true");
+
+    put(3, 4, 3, "glass");
+    click(session, [3, 3, 3], "down");
+    equal("...and from glass", getBlock(session.doc, 3, 3, 3).properties.up, "true");
+
+    put(0, 1, 3, "water");
+    put(1, 0, 3, "stone");
+    click(session, [1, 1, 3], "up");
+    equal("but water beside a vine holds nothing up", getBlock(session.doc, 1, 1, 3).properties.west, "false");
+  }
 }
 
 /*

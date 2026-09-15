@@ -58,6 +58,25 @@ export interface NeighbourBlock {
    * to. `occludesNeighbours`' answer, computed by main and passed in.
    */
   readonly solid: boolean;
+  /**
+   * Which of its faces something can hang off: the face is whole, and the
+   * block has a body to hang it on. `coversFace` minus the fluids and the
+   * markers with nothing in them, computed by main.
+   *
+   * It is not `solid`, and a vine is why. Vanilla's `MultifaceBlock.canAttachTo`
+   * asks whether the *collision* shape fills the face, so a vine clings to
+   * leaves, glass and the underside of a top slab -- none of which is a full
+   * opaque cube. Asked through `solid`, a jungle canopy held up no vines at
+   * all. Absent means "fall back to `solid`", which is what a caller that
+   * builds a neighbour by hand gets.
+   */
+  readonly sturdy?: Readonly<Partial<Record<Face, boolean>>>;
+}
+
+/** Whether `block` offers a whole face on its side `face`. */
+function sturdyAt(block: NeighbourBlock | null, face: Face): boolean {
+  if (block === null) return false;
+  return block.sturdy?.[face] ?? block.solid;
 }
 
 /**
@@ -610,14 +629,20 @@ export function connectedState(
      *
      * A vine left with no support at all stays, as the cross, where vanilla
      * would drop it. Removing blocks is not this pass's to decide.
+     *
+     * "A full block" is a whole face of the *collision* shape, `sturdy`, and
+     * not `solid`: a vine hangs off leaves and glass, and off the underside of
+     * any of them, which is how a jungle canopy grows its curtains. The
+     * underside is `up`, and placing a vine there is 1.13's (17w47a: "vines
+     * can now be placed on the bottom of blocks").
      */
     const above = neighbours.up ?? null;
     for (const face of HORIZONTAL_FACES) {
       const side = neighbours[face] ?? null;
       const hung = above !== null && above.name === "vine" && above.properties[face] === "true";
-      put(face, (side !== null && side.solid) || hung ? "true" : "false");
+      put(face, sturdyAt(side, OPPOSITE[face]) || hung ? "true" : "false");
     }
-    put("up", above !== null && above.solid ? "true" : "false");
+    put("up", sturdyAt(above, "down") ? "true" : "false");
     return out;
   }
 

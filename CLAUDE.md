@@ -1436,9 +1436,12 @@ ordinary placement: refused over a block that is not replaceable, and grows the
 document past the floor.
 
 What it clings to is `connectedState`'s, after vanilla's
-`VineBlock.canSupportAtFace`. A side is held up by a full block on that side
+`VineBlock.canSupportAtFace`. A side is held up by a whole face of a collision
+shape on that side (`NeighbourBlock.sturdy`, not `solid`: leaves and glass hold
+a vine, beside it and overhead, as a jungle canopy does; water does not)
 **or by the vine above having that side**, so a hanging vine inherits the
-column's sides and takes any wall beside it too. `up` is not inherited. A vine
+column's sides and takes any wall beside it too. `up` is not inherited; it is
+the underside of the block above, placeable since 1.13 (17w47a). A vine
 left with no support stays, as the cross, where vanilla would drop it.
 
 **That makes a vine column the one place `deriveConnections` is not a single
