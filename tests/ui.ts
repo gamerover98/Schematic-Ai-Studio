@@ -150,6 +150,7 @@ import {
   MAX_LOOK_STEP,
 } from "../src/renderer/src/lib/look_filter.js";
 import { en } from "../src/renderer/src/lib/locales/en.js";
+import { BANNER_EDITOR_URL } from "../src/shared/banner_patterns.js";
 import { propertyRows } from "../src/renderer/src/lib/inspector_rows.js";
 import {
   arcBetween,
@@ -1906,6 +1907,146 @@ console.log("\n--- framing ---");
   check(
     "...and no longer measures the geometry to do it",
     !/setFromObject\([a-z]/.test(viewer),
+  );
+}
+
+// --- a camera asked for over MCP --------------------------------------------
+//
+// `capture_viewport` moves the camera and then photographs the window, so the
+// viewer has to put the camera where it was told, draw, and only then answer.
+// All of that runs from the rendering steps, which this harness has no
+// browser for -- so the arithmetic is `tests/mcp.ts`'s, and this reads the
+// call sites the way the framing checks above do.
+console.log("\n--- a camera asked for over MCP ---");
+{
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const aim = viewer.slice(viewer.indexOf("async function aimCamera("), viewer.indexOf("function nextFrame("));
+  check("the viewer has somewhere to apply a requested camera", aim.length > 0);
+  check(
+    "...which moves the camera and the orbit's target to what was asked",
+    /camera\.position\.set\(position\.x, position\.y, position\.z\)/.test(aim) &&
+      /controls\.target\.set\(target\.x, target\.y, target\.z\)/.test(aim),
+  );
+  /*
+   * The order is the rule. An answer sent before the frame is drawn lets main
+   * photograph the old view and call it the new one, which is the whole
+   * failure `capture_viewport` aiming was built to prevent.
+   */
+  const drawn = aim.indexOf("renderFrame()");
+  const waited = aim.indexOf("await nextFrame()");
+  const answered = aim.indexOf("oncameraaimed?.({ id: request.id, camera: cameraState() })");
+  check(
+    "...draws the frame, waits for it, and only then answers",
+    drawn > 0 && waited > drawn && answered > waited,
+    `${drawn} / ${waited} / ${answered}`,
+  );
+  check("...after the camera-mode effects have run", aim.indexOf("await tick()") >= 0 && aim.indexOf("await tick()") < drawn);
+  check(
+    "the render loop draws through the same function",
+    /frame = requestAnimationFrame\(animate\);[\s\S]{0,4000}renderFrame\(\);/.test(viewer),
+  );
+  const subscription = app.slice(app.indexOf("api().onCameraAim("), app.indexOf("api().onDocumentChanged("));
+  check(
+    "the app leaves flight before a camera is put in place",
+    subscription.includes("document.exitPointerLock()") && subscription.includes('cameraMode = "orbit"'),
+  );
+  check("...hands the request to the viewer", /\{cameraRequest\}/.test(app));
+  check("...and relays the answer to main", app.includes("api().reportCameraAimed(reply)"));
+}
+
+// --- a patterned banner, in the inspector ------------------------------------
+//
+// A banner's design is edited on the banner: the inspector lists its layers,
+// adds, removes and reorders them, picks among the sixteen dyes, and takes a
+// pasted /give command. The block field still reads that command, and the
+// hint beside it now sends a person to the inspector instead.
+console.log("\n--- a patterned banner, in the inspector ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const tools = readFileSync(path.join(RENDERER, "lib", "SelectionTools.svelte"), "utf8");
+  const inventory = readFileSync(path.join(RENDERER, "lib", "CreativeInventory.svelte"), "utf8");
+  const hint = readFileSync(path.join(RENDERER, "lib", "BannerPatternHint.svelte"), "utf8");
+  const panel = readFileSync(path.join(RENDERER, "lib", "InspectorPanel.svelte"), "utf8");
+  const editor = readFileSync(path.join(RENDERER, "lib", "BannerPatternEditor.svelte"), "utf8");
+
+  const parse = app.slice(app.indexOf("function parseBlock("), app.indexOf("async function changeBlockProperty("));
+  check(
+    "every block the app reads is taken apart by the shared splitter first",
+    parse.indexOf("splitBlockInput(text)") >= 0 &&
+      parse.indexOf("splitBlockInput(text)") < parse.indexOf("resolveBlockInput("),
+  );
+  check("...and the patterns travel with the block to main", /bannerPatterns: input\.bannerPatterns/.test(parse));
+
+  const field = tools.indexOf('id="tool-to-block"');
+  const fill = tools.indexOf("onclick={() => onfill(block)}");
+  const shown = tools.indexOf('<BannerPatternHint where="place" />');
+  check("the hint sits under the block field", field >= 0 && shown > field && shown < fill);
+  check("...when the field holds a banner", /\{#if holdsBanner\}/.test(tools) && tools.includes("isBannerBlock("));
+  check(
+    "the inventory says it when banners are searched for",
+    /\/banner\/i\.test\(query\)/.test(inventory) && inventory.includes('<BannerPatternHint where="place" />'),
+  );
+  check(
+    "the hint links the editor, opening outside the window",
+    /href=\{BANNER_EDITOR_URL\}/.test(hint) && /target="_blank"/.test(hint) && /rel="noreferrer"/.test(hint),
+  );
+  equal("...at the address the user gave", BANNER_EDITOR_URL, "https://www.planetminecraft.com/banner/");
+  const place = [en["banner.hint.place.before"], en["banner.hint.editor"], en["banner.hint.place.after"]].join("");
+  check(
+    "...and sends a person to the inspector, not to the block field",
+    place.includes("inspector") && !/block field/i.test(place),
+    place,
+  );
+  const inside = [en["banner.hint.inspector.before"], en["banner.hint.editor"], en["banner.hint.inspector.after"]].join("");
+  check("...and inside the editor, says the /give command is pasted there", inside.includes("/give"), inside);
+
+  check(
+    "the inspector mounts the pattern editor for any banner",
+    /\{#if inspection\.banner\}/.test(panel) && panel.includes("<BannerPatternEditor"),
+  );
+  check(
+    "...and leaves the design out of the one-leaf NBT rows",
+    /field\.path\[0\] !== "patterns"/.test(panel) &&
+      /field\.path\[0\] !== "Patterns"/.test(panel) &&
+      panel.includes("{#each nbtFields as field"),
+  );
+  check("the layers are a numbered list", /<ol id="banner-layers"/.test(editor) && editor.includes("{index + 1}."));
+  check(
+    "...with a delete, an add and a move per layer",
+    editor.includes("remove(index)") &&
+      editor.includes("onclick={add}") &&
+      editor.includes("move(index, -1)") &&
+      editor.includes("move(index, 1)"),
+  );
+  check("...capped at what the game draws", editor.includes("rows.length >= MAX_BANNER_LAYERS"));
+  check(
+    "the colour picker offers the sixteen dyes, in the cloth's own colours",
+    /\{#each BANNER_COLORS as dye/.test(editor) && editor.includes("DYE_HEX[dye]"),
+  );
+  check("a paste takes only the design out of a /give command", editor.includes("splitBlockInput(text).bannerPatterns"));
+  const change = app.slice(app.indexOf("async function changeBannerPatterns("), app.indexOf("async function changeNbtValue("));
+  check(
+    "a change is the inspector's setState, carrying the state and the design",
+    /kind: "setState"/.test(change) &&
+      /bannerPatterns: patterns/.test(change) &&
+      /properties: \{ \.\.\.current\.properties \}/.test(change),
+  );
+  check("...wired to the panel", app.includes("onchangebanner={changeBannerPatterns}"));
+
+  const pick = app.slice(app.indexOf("async function onPickMaterial("), app.indexOf("let blockRegistry"));
+  check(
+    "the middle button picks a banner up with its design",
+    pick.includes("response.banner?.layers") && /banner_patterns=\[/.test(pick),
+  );
+
+  // A composed cloth grows the atlas, and the icons drawn against the old one
+  // were thrown away and never asked for again: the hotbar went blank.
+  const icons = readFileSync(path.join(RENDERER, "lib", "block_icons.svelte.ts"), "utf8");
+  const adopt = icons.slice(icons.indexOf("function adoptAtlas("), icons.indexOf("function adoptAtlas(") + 2000);
+  check(
+    "an atlas that replaces another makes every icon reader ask again",
+    /if \(replacing\) generation \+= 1/.test(adopt) && /export function iconsReady\(\): boolean \{\s*void generation;/.test(icons),
   );
 }
 

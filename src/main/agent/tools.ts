@@ -88,7 +88,18 @@ import {
   versionRangesSentence,
 } from "../../shared/mc_versions.js";
 import { versionRangeOf } from "../../shared/block_versions.js";
-import { paletteEntryCacheKey, type PaletteEntry } from "../pipeline/types.js";
+import { matchesBlockPattern, paletteEntryCacheKey, type PaletteEntry } from "../pipeline/types.js";
+import { splitBlockInput } from "../../shared/block_input.js";
+import { bannerLayersFrom, parseBannerLayers, type BannerLayer } from "../pipeline/banner_nbt.js";
+import {
+  BANNER_COLORS,
+  BANNER_EDITOR_URL,
+  BANNER_PATTERNS,
+  LOOM_LAYER_LIMIT,
+  MAX_BANNER_LAYERS,
+  isBannerBlock,
+} from "../../shared/banner_patterns.js";
+import { checkBannerPatterns, regionCells, stampBanner } from "../domain/banner_place.js";
 import { MAX_DOCUMENT_VOLUME, MAX_EDIT_VOLUME } from "../services/session.js";
 import { orderRegion } from "../domain/grow.js";
 import {
@@ -158,11 +169,53 @@ interface RegionArgs {
 
 /** Parses `minecraft:oak_stairs[facing=north]`, the spelling used everywhere. */
 function toEntry(block: string): PaletteEntry {
+  return readBlock(block).entry;
+}
+
+/**
+ * The block and the banner patterns riding with it, out of one string.
+ *
+ * `splitBlockInput` first, because a patterned banner's spelling is full of the
+ * commas and brackets `parsePaletteEntry` splits on -- and because the spelling
+ * people have for one is a whole `/give` command, which is taken apart there.
+ */
+function readBlock(block: string): { entry: PaletteEntry; layers: BannerLayer[] | null } {
   const trimmed = String(block ?? "").trim();
   if (trimmed === "") {
     throw new Error("a block id is required");
   }
-  return parsePaletteEntry(trimmed.includes(":") ? trimmed : `minecraft:${trimmed}`);
+  const input = splitBlockInput(trimmed);
+  const id = input.block.split("[", 1)[0].includes(":") ? input.block : `minecraft:${input.block}`;
+  return {
+    entry: parsePaletteEntry(id),
+    layers: input.bannerPatterns === null ? null : parseBannerLayers(input.bannerPatterns),
+  };
+}
+
+/**
+ * A placement with its patterns, checked against the document before anything
+ * is written -- a design the schematic's version lacks is refused by name, not
+ * placed as a plain banner.
+ */
+function toPlacement(
+  context: ToolContext,
+  block: string,
+): { entry: PaletteEntry; layers: BannerLayer[] | null } {
+  const { layers } = readBlock(block);
+  const entry = toPlacedEntry(block);
+  if (layers !== null) checkBannerPatterns(context.doc, entry, layers);
+  return { entry, layers };
+}
+
+/** A pattern to match, which banner patterns cannot be part of. */
+function toPattern(block: string): PaletteEntry {
+  const { entry, layers } = readBlock(block);
+  if (layers !== null) {
+    throw new Error(
+      "The block being replaced is matched by its name and states; banner patterns only go on the block that replaces it.",
+    );
+  }
+  return entry;
 }
 
 /**
@@ -916,6 +969,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           properties,
           note: !context.allowedBlocks.has(name)
             ? "This app cannot place that block — check the spelling."
+            : isBannerBlock(name)
+              ? "A banner's design is not a block state: give it as banner_patterns=[...] inside the id. list_banner_patterns names the designs."
             : properties.length === 0
               ? isKnownBlock(name)
                 ? "This block has no block states. Place it by name."
@@ -929,6 +984,110 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         spelling:
           "Pass states inside the id: minecraft:oak_stairs[facing=east,half=top]. Anything you leave out is written at the value shown in placedAs.",
       };
+    },
+  },
+
+  {
+    /*
+     * The designs a banner can carry, and how to name them.
+     *
+     * A question about Minecraft rather than about this build, like
+     * `describe_block`, and in `NO_DOCUMENT` for its reason. Without it a model
+     * asked for "a banner with a creeper on a gradient" had to already know that
+     * the creeper is `creeper`, the gradient is `gradient`, which of the two is
+     * drawn on top, and that `stripe_left` is on the left *as seen from the
+     * front* -- all of which is in `shared/banner_patterns.ts`, from the game.
+     */
+    name: "list_banner_patterns",
+    description:
+      "Every design a Minecraft banner can carry: its id, what it looks like and where it sits on the flag, and the version it arrived in; plus the sixteen colours. " +
+      "Ask before placing a banner with a design. Patterns go inside the banner's id: " +
+      'minecraft:magenta_banner[banner_patterns=[{pattern:"mojang",color:"orange"},{pattern:"border",color:"black"}]]. ' +
+      `A user can also design one on the Planet Minecraft banner editor (${BANNER_EDITOR_URL}) and paste the /give command it generates; set_block accepts that command whole.`,
+    schema: { type: "object", properties: {}, additionalProperties: false },
+    async run(context, _args, id) {
+      step(context, "list_banner_patterns", "looking up banner patterns", id);
+      return {
+        patterns: BANNER_PATTERNS.map((row) => ({
+          id: row.id,
+          name: row.name,
+          description: row.description,
+          since: mcVersion(row.since)?.label ?? row.since,
+          legacyCode: row.code,
+        })),
+        colors: [...BANNER_COLORS],
+        syntax:
+          'Name the banner, then its layers bottom to top: minecraft:<colour>_banner[rotation=0,banner_patterns=[{pattern:"<id>",color:"<colour>"},...]]. ' +
+          "The banner's own colour is its name; a wall banner is minecraft:<colour>_wall_banner[facing=north,...].",
+        rules: [
+          "Layers are drawn in order, so a later layer covers an earlier one where they overlap.",
+          `A loom makes at most ${LOOM_LAYER_LIMIT} layers; the game draws at most ${MAX_BANNER_LAYERS}, and more is refused.`,
+          "Left and right are as seen from the front of the banner, which is the side it faces.",
+          "base covers the whole flag; as a first layer it repaints the banner's own colour.",
+          "A design newer than the schematic's version is refused by name. The patterns are written the way that version writes them.",
+          "capture_viewport with camera {from: <the side the banner faces>} shows the result.",
+        ],
+        editor: {
+          url: BANNER_EDITOR_URL,
+          note:
+            "Design a banner there and copy the /give command it generates. set_block takes it whole as the block. " +
+            "In the app, a person clicks a placed banner and pastes it into the inspector's banner patterns, which also edits the layers one by one.",
+        },
+      };
+    },
+  },
+
+  {
+    /*
+     * A new design on a banner that is already there.
+     *
+     * `set_block` places a patterned banner in one go; this is the verb for the
+     * one standing in the build already, which `set_block` would replace with a
+     * fresh block entity and so drop whatever else it carried -- a custom name,
+     * a datapack's keys. Its patterns are replaced as a list, in the spelling
+     * the schematic's version uses, as one undo step.
+     */
+    name: "set_banner_patterns",
+    description:
+      "Replace the pattern layers on a banner already in the schematic, keeping everything else about it. Layers are bottom to top; an empty list clears them. " +
+      "list_banner_patterns names the designs and colours. Refuses a cell that is not a banner, and a design the schematic's Minecraft version does not have.",
+    schema: {
+      type: "object",
+      properties: {
+        x: { type: "integer" },
+        y: { type: "integer" },
+        z: { type: "integer" },
+        patterns: {
+          type: "array",
+          maxItems: MAX_BANNER_LAYERS,
+          items: {
+            type: "object",
+            properties: {
+              pattern: { type: "string", enum: BANNER_PATTERNS.map((row) => row.id) },
+              color: { type: "string", enum: [...BANNER_COLORS] },
+            },
+            required: ["pattern", "color"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["x", "y", "z", "patterns"],
+      additionalProperties: false,
+    },
+    async run(context, args: { x: number; y: number; z: number; patterns: unknown }, id) {
+      const { x, y, z } = args;
+      const block = getBlock(context.doc, x, y, z);
+      if (!isBannerBlock(block.namespacedName)) {
+        throw new Error(
+          `(${x},${y},${z}) holds ${block.namespacedName}, not a banner. ` +
+            `Place one with set_block, which takes the patterns in the same call.`,
+        );
+      }
+      const layers = bannerLayersFrom(args.patterns);
+      checkBannerPatterns(context.doc, block, layers);
+      step(context, "set_banner_patterns", `patterning the banner at (${x},${y},${z})`, id);
+      const changed = stampBanner(context.doc, context.tx, [{ x, y, z }], block, layers);
+      return { changed, layers: layers.length };
     },
   },
 
@@ -977,7 +1136,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       "Fill a region with one block. Defaults to the user's selection. Use minecraft:air to " +
       "clear. The block has to exist in the schematic's Minecraft version, which " +
-      "get_schematic_info reports.",
+      "get_schematic_info reports. A banner's banner_patterns=[...] go on every banner filled.",
     schema: {
       type: "object",
       properties: { ...regionSchema.properties, block: { type: "string" } },
@@ -988,11 +1147,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       const { region, ...notes } = resolveRegion(context, args ?? {});
       const entry = toPlacedEntry(args.block);
       await checkBlockAllowed(context, entry);
+      const { layers } = toPlacement(context, args.block);
       if (regionVolume(region) > MAX_EDIT_VOLUME) {
         throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
       }
       step(context, "fill_region", `filling ${describeRegion(region)} with ${entry.namespacedName}`, id);
-      return { changed: context.tx.fill(region, entry), region, ...notes };
+      const changed = context.tx.fill(region, entry);
+      const patterned =
+        layers === null ? 0 : stampBanner(context.doc, context.tx, regionCells(region), entry, layers);
+      return { changed: Math.max(changed, patterned), region, ...notes };
     },
   },
 
@@ -1001,7 +1164,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       "Replace one block with another inside a region. Defaults to the user's selection. " +
       "Naming `from` without states matches the block in every state it appears in; " +
-      "spell the states out to match only that one. get_palette shows what is there.",
+      "spell the states out to match only that one. get_palette shows what is there. " +
+      "`to` may be a banner with banner_patterns=[...]; `from` may not.",
     schema: {
       type: "object",
       properties: {
@@ -1015,16 +1179,26 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     async run(context, args: Partial<RegionArgs> & { from: string; to: string }, id) {
       const { region, ...notes } = resolveRegion(context, args ?? {});
       // `from` is a pattern and `to` is a placement -- see `toPlacedEntry`.
-      const from = toEntry(args.from);
+      const from = toPattern(args.from);
       const to = toPlacedEntry(args.to);
       await checkBlockAllowed(context, to);
+      const { layers } = toPlacement(context, args.to);
       step(
         context,
         "replace_blocks",
         `replacing ${from.namespacedName} with ${to.namespacedName} in ${describeRegion(region)}`,
         id,
       );
+      // Found before the replace, which leaves them indistinguishable from the
+      // cells that already held `to` and were not asked to change.
+      const matched =
+        layers === null
+          ? []
+          : [...regionCells(region)].filter(({ x, y, z }) =>
+              matchesBlockPattern(getBlock(context.doc, x, y, z), from),
+            );
       const changed = context.tx.replace(region, from, to);
+      if (layers !== null) stampBanner(context.doc, context.tx, matched, to, layers);
       return {
         changed,
         region,
@@ -1054,7 +1228,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       "Place a single block at one coordinate. The block has to exist in the schematic's " +
       "Minecraft version -- get_schematic_info reports it, and before 1.13 the set is much " +
-      "smaller.",
+      "smaller. A banner can carry its design in the id, " +
+      'minecraft:red_banner[rotation=0,banner_patterns=[{pattern:"creeper",color:"black"}]] ' +
+      "(list_banner_patterns), and a whole /give command for a banner is accepted as the block.",
     schema: {
       type: "object",
       properties: {
@@ -1069,8 +1245,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     async run(context, args: { x: number; y: number; z: number; block: string }, id) {
       const entry = toPlacedEntry(args.block);
       await checkBlockAllowed(context, entry);
+      const { layers } = toPlacement(context, args.block);
       step(context, "set_block", `placing ${entry.namespacedName} at (${args.x},${args.y},${args.z})`, id);
-      const changed = context.tx.setBlock(args.x, args.y, args.z, entry);
+      const placed = context.tx.setBlock(args.x, args.y, args.z, entry);
+      // A banner that already held this state still takes the design it was
+      // asked for, and that is a change.
+      const changed =
+        (layers !== null &&
+          stampBanner(context.doc, context.tx, [{ x: args.x, y: args.y, z: args.z }], entry, layers) > 0) ||
+        placed;
       return {
         changed: changed ? 1 : 0,
         note: changed
@@ -1207,10 +1390,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       const outcome = await executeJsBuild(String(args.code ?? ""), context.allowedBlocks);
       let changed = 0;
       for (const [x, y, z, blockData] of outcome.placements) {
-        // Through `toPlacedEntry` like every other placement: a script that
+        // Through `toPlacement` like every other placement: a script that
         // writes `safeSetBlock(x, y, z, "campfire")` means the same thing a
-        // `set_block` call does.
-        if (context.tx.setBlock(x, y, z, toPlacedEntry(blockData))) {
+        // `set_block` call does, patterned banners included.
+        const { entry, layers } = toPlacement(context, blockData);
+        const placed = context.tx.setBlock(x, y, z, entry);
+        const stamped = layers !== null && stampBanner(context.doc, context.tx, [{ x, y, z }], entry, layers) > 0;
+        if (placed || stamped) {
           changed += 1;
         }
       }

@@ -351,6 +351,24 @@ would have lost exactly what `editing.voidBlock` exists to preserve. It falls
 back to air when the empty space block is itself too new for the target —
 `structure_void` being 1.10, that is a real case rather than a defensive one.
 
+**A rename keeps the block entity, and it did not.** `tx.remap` writes through
+`setBlock`, which treats any write as displacing what was there, so every cell
+the version change renamed or restated lost its block entity with nothing
+counted: a 1.13 `sign` renamed to `oak_sign` for 1.14 came out blank. The
+records of every renamed or restated cell are taken before the remap and put
+back after it; a dropped block keeps nothing, as before.
+
+**And a banner is restated as well, because what it looks like is not in the
+block.** `restateBanners` in `domain/banner_place.ts` rewrites every banner's
+block entity in the target's spelling (the table is in the banner section
+below), and past the Flattening it moves the colour too: `magenta_banner`
+becomes `white_banner` with `Base` saying magenta going back, and `Base`
+becomes the name going forward. A design the target does not have is **counted
+into the same refusal a lost block gets** -- `VersionWouldLoseBlocksError.layers`
+-- and removed only with `dropUnrepresentable`. The reader draws all three
+spellings whatever the version says, so a version change that left banners
+alone would look right here and be blank in the game it was made for.
+
 **Two tables, and which one answers is decided by the era rather than by
 merging them.** `legacy_blocks.json` enumerates the pre-Flattening set exactly;
 `block_versions.json` is the flat era only and its generator refuses a
@@ -1483,7 +1501,7 @@ what the inventory never offered. That is the same failure the hand-written
 `DEFAULT_STATE` had, one layer down, and it is the argument for generating a set
 rather than curating one.
 
-**Seven vendored datasets, seven generators, seven skills.** The pattern is the
+**Eight vendored datasets, eight generators, eight skills.** The pattern is the
 same each time and it is the one to copy: the answers are looked up, recorded
 with where they came from, and the generator replaces only the rows between two
 markers. Running with nothing new must change no bytes — if it rewrites the file
@@ -1498,8 +1516,9 @@ every time, the ordering or the formatting has drifted and *that* is the bug.
 | `resources/litematica_versions.json` | `gen-litematica-versions.mjs` | `mc-litematic` |
 | `resources/command_syntax.json` | `gen-command-syntax.mjs` | `mc-commands` |
 | `resources/block_versions.json` | `gen-block-versions.mjs` | `mc-block-versions` |
+| `resources/banner_patterns.json` | `gen-banner-patterns.mjs` | `mc-banner-patterns` |
 
-**Every one of them now names what reads it downstream, and six of the seven
+**Every one of them now names what reads it downstream, and seven of the eight
 say «the MCP wire».** That section was missing and its absence had a cost: the
 skills described JSON → generator → table and stopped, so somebody could do
 everything `mc-versions` asked, twice, and leave `DEFAULT_SETTINGS.version`
@@ -2163,11 +2182,41 @@ push — the caller already has the value, and a selection-face drag sends an ed
 many times a second. `announceDocument` is the unasked case. Folding them into
 one function with a flag would put that decision at twenty-one call sites.
 
-**`capture_viewport` photographs the window, and cannot aim the camera.** Main
-cannot work out where the canvas is — the layout is CSS — and cannot *ask* the
-renderer anything, only be told; so the renderer reports its rect from `resize`.
-Aiming would need a request from main to the renderer and a reply channel, which
-does not exist.
+**`capture_viewport` can aim the camera, and that is main's first question to
+the renderer.** Main cannot work out where the canvas is — the layout is CSS —
+so the renderer still reports its rect from `resize`. Aiming is different: a
+picture taken before the new view is drawn is a picture of the old one, so main
+has to *ask* and wait. `IPC.cameraAim` goes out as an event with an `id`,
+`IPC.cameraAimed` comes back as one (`ipcMain.on`), and
+`services/renderer_request.ts` matches them, times out, and refuses a late
+answer rather than letting it settle the next request. Electron-free, so
+`tests/services.ts` drives it.
+
+Three things about it are load-bearing:
+
+- **the arithmetic is main's, in `shared/camera_aim.ts`.** A compass side, an
+  elevation and a distance are resolved against the document into a position
+  and a target before the renderer hears of it, so `tests/mcp.ts` states every
+  number and every refusal; the renderer only applies. `documentFraming` lives
+  there now, re-exported by `framing.ts`, because `camera: {}` is the R key's
+  shot and two copies would disagree. A distance behind the draw distance is
+  brought in and *says so* in the answer;
+- **the reply is sent after a frame is drawn**, and not only by the display.
+  `renderFrame()` is the loop's body pulled out, so `aimCamera` draws at once
+  and then waits for a frame or 250 ms, whichever comes first: a window behind
+  the terminal an agent runs in is throttled, and waiting on
+  `requestAnimationFrame` alone would photograph the old view. `aimCamera` waits
+  a `tick` first, because App leaves flight in the same breath and the
+  camera-mode effect puts the orbit target 24 blocks ahead;
+- **the camera stays where the agent put it**, which was the user's choice: the
+  person watching sees what the model looked at, and R brings the shot back. The
+  tool stays `readOnly` -- the flag is about the schematic, the undo stack and
+  the clipboard, and a permission prompt per look would make it useless.
+
+With no camera asked for, a window that does not answer is still photographed,
+as it always was; with one, not answering is a refusal. The answer carries where
+the camera stood, and `pictureContent` in `mcp/policy.ts` sends it as text
+beside the image block, which used to be sent alone.
 
 **One IPC channel per verb, all declared in `src/shared/ipc.ts`.** No generic
 dispatcher. Everything crossing must be structured-clone-safe — binary payloads
@@ -5202,11 +5251,95 @@ knowing:
   back of every banner in the build. What omitting it costs is the couple of
   units below the cloth's hem, seen from due south. The bar's south face is
   *entirely* behind the cloth, so that one is free.
-- **The patterns are still not composed, and a plain banner is not a
-  stand-in for one.** They are a stack of layers in the block entity's NBT
-  and that is a different job; what changed is that the base colour is no
-  longer a lump of wool. Shulker boxes keep the wool, because their sheet is
-  still laid out for an animated lid.
+- **The cloth wore its back, upside down, and nothing could see it.** Its
+  windows were `unwrapCube`'s, which reads a strip bottom-up and puts the first
+  side window on the model's north face -- right for a chest. The flag is a
+  `ModelPart` cube scaled by `(2/3, -2/3, -2/3)`: model `y` runs down the world
+  and `z` is turned round, so its north window (`u 1..21, v 1..41`) is the side
+  facing away from the pole, the right way up, with `u 1` on the west.
+  Invisible while the cloth was one colour; `stripe_left` came out on the right
+  at the bottom. `BANNER_CLOTH_UV` is vanilla's now, and `tests/blocks.ts`
+  states it in pixels on the front of both a standing and a wall banner.
+- **The patterns are composed, into one tile per look.** `BannerRenderer`
+  draws the tinted `entity/banner/base`, then up to sixteen
+  `entity/banner/<id>` layers tinted by their dyes with alpha blending.
+  `ModelBaker.bannerCloth` does that once into pixels rather than as coplanar
+  quads, under a key built from everything that went in -- so two banners
+  that look alike share a tile. It is a **per-position overlay**, the signs'
+  arrangement for the signs' reasons: `preview.ts`'s `bannersIn` reads the
+  block entities and composes **before the atlas is packed** (a tile made
+  during meshing is one the mesh cannot find, and `buildMesh` drops the face),
+  `culledFaces` swaps the key on faces wearing `entity/banner/base`, and
+  `chunked_mesh.ts` diffs the keys and redraws only the banner's chunk. The
+  pattern sheets are kept out of `textureCache`, which is what the atlas
+  packs: forty masks at 256 pixels would be megabytes nothing addresses.
+
+  A legacy banner is always `white_banner` in the palette and keeps its
+  colour in `Base`, so it is put in the overlay even with no layers -- before
+  this every 1.12 banner drew white. Shulker boxes keep the wool, because
+  their sheet is still laid out for an animated lid. Hotbar icons stay the
+  plain banner: a composed tile per slot would move the atlas every icon
+  addresses.
+- **Three spellings, from the game's own datafixers.** 1.8 to 1.12.2 store
+  `Patterns:[{Pattern:"moj",Color:14}]` with the colour **inverted** and a
+  `Base`; 1.13 to 1.20.4 the same list with the dye's number
+  (`BlockEntityBannerColorFix`, schema 1451); 1.20.5 on
+  `patterns:[{pattern:"minecraft:mojang",color:"orange"}]`
+  (`BannerPatternFormatFix`, schema 3818). `pipeline/banner_nbt.ts` reads all
+  three whatever the file claims and writes the one the document's version
+  reads, keeping every other key and removing the other spellings. A legacy
+  banner with no `Base` is black in the game, so one is always written, and
+  the legacy block entity id is `Banner` (MCEdit drops the namespace).
+
+  Text somebody wrote is read strictly -- an unknown design or colour is
+  refused by name -- and NBT out of a file leniently, skipping a layer it
+  cannot read (a datapack's design) and drawing the rest.
+- **A banner is named with its design, everywhere a block is named.**
+  `shared/block_input.ts`'s `splitBlockInput` takes
+  `magenta_banner[rotation=4,banner_patterns=[...]]` apart, and a whole
+  `/give @p ... 1` with it, because that is what the Planet Minecraft banner
+  editor hands out; `/setblock`'s `{patterns:[...]}` and a pre-1.20.5 `/give`'s
+  `{BlockEntityTag:{Patterns:[...]}}` are read too. It scans with a depth
+  counter, because the list is full of the commas the state splitter cuts on,
+  and **refuses** any other component or NBT key rather than dropping it.
+  `App.svelte`'s `parseBlock`, the agent tools, the build script and the block
+  icons all call it first. `BlockSpec.bannerPatterns` carries the list raw to
+  main, which checks it against the version (`checkBannerPatterns`) before any
+  growth and writes it after the block in the same transaction
+  (`stampBanner`), because `setBlock` drops the block entity it displaces. A
+  fill stamps every banner in the box; a replace only the cells it matched.
+
+  Over MCP, `list_banner_patterns` gives every design with where it sits *as
+  seen from the front*, `set_banner_patterns` repaints one already placed, and
+  `inspect_block` hands back `blockData`, a spelling `set_block` places again.
+- **A design is edited in the inspector, on the banner.** That is the answer
+  to "how do I put a design on a banner already in the document", which had
+  none: the NBT rows read `patterns[3].pattern` a leaf at a time, cannot add,
+  remove or reorder a layer, and show nothing on a banner with no block entity.
+  `BlockInspection.banner` is present on **every** banner, with no layers when
+  it carries none, and `BannerPatternEditor` is a numbered list with the sixteen
+  dyes as swatches (`DYE_HEX`, the table the cloth is tinted with, moved to
+  `shared/` so the renderer can read it) and a paste field that takes only the
+  design out of a `/give`. Every change sends the whole list through the
+  inspector's own `setState`, with `bannerPatterns` beside the state: one undo
+  step, checked against the version, written in the document's spelling. The
+  hint beside the block field sends a person there rather than telling them to
+  paste into the field, which still works and is no longer what the screen
+  teaches.
+
+  **`setState` keeps the block entity while the name is unchanged, and it did
+  not.** `setBlock` drops the record of any cell it writes, so turning a
+  patterned banner in the inspector erased its design -- and editing a chest's
+  `facing` there emptied it. A different name still takes the record away.
+
+  **A turn starts from what is drawn.** A banner placed by a fill carries no
+  `rotation`, and `transformProperties` rewrites only what an entry carries, so
+  the gizmo turned it into itself. `drawnOrientation` in `transform.ts` writes
+  the baker's own fallback first -- `rotation=0`, and `facing=east` on a wall
+  banner -- and deliberately not the 26.2 registry default of 8, which would
+  spin it half round before the turn. And the middle button picks a banner up
+  **with** its design, from `banner.layers` rather than `blockData`, which on a
+  legacy document renames a white banner after its `Base`.
 - **Redstone dust was three faults in one block, and each hid the others.**
   Vanilla ships the texture **greyscale** -- the shipped pack's palette is
   three greys and transparency, none darker than 217 -- and multiplies it by
@@ -5884,6 +6017,15 @@ every hopper landed on the registry default `down` with its spout hanging in
 mid-air beside whatever it was meant to feed. `facing` is the clicked face
 reversed, with the one exception the game states outright: there is no
 upward-facing hopper, so a click on a floor gives `down`.
+
+**An anvil is laid across the look.** `AnvilBlock.getStateForPlacement` is
+`getHorizontalDirection().getClockWise()`, and the model's long axis is on `z`
+at `facing=south`, so looking north gives `facing=east` and the horn to one
+side. It was left out of `orientPlacement` on purpose, as a guess that would
+look deliberate -- and every anvil therefore landed on `facing=north`, which is
+one of the four guesses. `CLOCKWISE_FROM_LOOK` is the table, and `tests/blocks.ts`
+checks the baked top as well as the property, because a table one quarter out
+still names four directions.
 
 **Pointed dripstone points away from where you look, vertically.** Its placement
 is vanilla's `getNearestLookingVerticalDirection()` reversed: look up at a

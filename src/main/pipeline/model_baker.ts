@@ -1408,6 +1408,80 @@ export class ModelBaker {
     return answer;
   }
 
+  /**
+   * A banner's cloth with its patterns painted on, under a key of its own.
+   *
+   * `BannerRenderer` draws the flag, then `entity/banner/base` tinted by the
+   * banner's colour, then each layer's `entity/banner/<id>` tinted by its dye
+   * with ordinary alpha blending, at most sixteen. The same thing is done here
+   * once, into pixels, rather than as sixteen coplanar quads: coplanar is
+   * unresolvable at any distance (`depth.ts`), and a stack of them would
+   * z-fight over every banner in the build.
+   *
+   * The key is a function of everything that went in, so two banners that look
+   * alike share one tile and the atlas does not grow per banner. It is primed
+   * before the atlas is packed, in `preview.ts`, for the glyphs' reason.
+   *
+   * Every pattern sheet has the base's layout -- the flag's unwrap at the same
+   * place -- so the result is addressed by the very windows the plain cloth
+   * uses, and the mesher only has to swap the key. A sheet of a different
+   * resolution is sampled to the base's; a pack missing one design draws the
+   * rest and says so once, rather than drawing a blank banner.
+   *
+   * `null` when the pack has no base at all, which leaves the plain cloth.
+   */
+  async bannerCloth(
+    baseHex: string,
+    layers: readonly { readonly pattern: string; readonly hex: string }[],
+  ): Promise<string | null> {
+    const baseKey = "minecraft:entity/banner/base";
+    const key = `${baseKey}#${baseHex}|${layers.map((layer) => `${layer.pattern}:${layer.hex}`).join("|")}`;
+    if (key in this.textureCache) return key;
+    if (!(await this.ensureTextureCached(baseKey))) return null;
+    const out = applyTint(this.textureCache[baseKey], parseHexColor(baseHex));
+    const { width, height, data } = out;
+    for (const layer of layers) {
+      const layerKey = `minecraft:entity/banner/${layer.pattern}`;
+      /*
+       * Not through `ensureTextureCached`: everything in `textureCache` is
+       * packed into the atlas, and a mask is never drawn on its own -- forty
+       * of them at 256 pixels would be megabytes of tiles nothing addresses.
+       */
+      if (!this.bannerMasks.has(layerKey)) {
+        this.bannerMasks.set(layerKey, await this.textureSource.loadTexture(layerKey));
+      }
+      const mask = this.bannerMasks.get(layerKey) ?? null;
+      if (mask === null) {
+        if (!this.missingBannerLayers.has(layer.pattern)) {
+          this.missingBannerLayers.add(layer.pattern);
+          console.warn(`[banner] the resource pack has no ${layerKey}; that layer is not drawn`);
+        }
+        continue;
+      }
+      const [r, g, b] = parseHexColor(layer.hex);
+      for (let y = 0; y < height; y += 1) {
+        const my = Math.min(mask.height - 1, Math.floor((y * mask.height) / height));
+        for (let x = 0; x < width; x += 1) {
+          const mx = Math.min(mask.width - 1, Math.floor((x * mask.width) / width));
+          const from = (my * mask.width + mx) * 4;
+          const alpha = mask.data[from + 3] / 255;
+          if (alpha === 0) continue;
+          const to = (y * width + x) * 4;
+          data[to] = ((mask.data[from] * r) / 255) * alpha + data[to] * (1 - alpha);
+          data[to + 1] = ((mask.data[from + 1] * g) / 255) * alpha + data[to + 1] * (1 - alpha);
+          data[to + 2] = ((mask.data[from + 2] * b) / 255) * alpha + data[to + 2] * (1 - alpha);
+        }
+      }
+    }
+    this.textureCache[key] = out;
+    return key;
+  }
+
+  /** Designs a pack was found to lack, so each is reported once. */
+  private readonly missingBannerLayers = new Set<string>();
+  /** The pattern sheets, decoded once and kept out of the atlas. */
+  private readonly bannerMasks = new Map<string, RgbaImage | null>();
+
   /** The ASCII font page, loaded once. `null` once it is known to be absent. */
   private async fontPage(): Promise<RgbaImage | null> {
     if (this.fontSheet === undefined) {

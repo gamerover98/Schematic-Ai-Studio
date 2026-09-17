@@ -19,7 +19,14 @@
   import McpIndicator from "./lib/McpIndicator.svelte";
   import UpdateIndicator from "./lib/UpdateIndicator.svelte";
   import { showsIndicator } from "./lib/mcp_status.js";
-  import type { McpActivity, McpStatus, UpdateStatus } from "../../shared/ipc.js";
+  import type {
+    BlockSpec,
+    CameraAimRequest,
+    McpActivity,
+    McpStatus,
+    UpdateStatus,
+  } from "../../shared/ipc.js";
+  import { splitBlockInput } from "../../shared/block_input.js";
   import InspectorPanel from "./lib/InspectorPanel.svelte";
   import AboutModal from "./lib/AboutModal.svelte";
   import AnchorModal from "./lib/AnchorModal.svelte";
@@ -306,6 +313,14 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   let cameraMode = $state<CameraMode>("orbit");
 
   /**
+   * The camera main last asked for, handed to the viewer as it arrived.
+   *
+   * `raw` because it is replaced whole and never mutated, and the viewer keys
+   * on the object's identity: two identical requests are two answers owed.
+   */
+  let cameraRequest = $state.raw<CameraAimRequest | null>(null);
+
+  /**
    * What is in your hand: the active hotbar slot, in both camera modes.
    *
    * There used to be two answers — a `activeBlock` for orbit and the hotbar for
@@ -523,13 +538,28 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * from the same `inspectBlock` the inspector uses. Its base name, not the
    * full state: picking a stair should hand you a stair, not one facing the way
    * that particular one happened to face.
+   *
+   * A banner keeps its design, though. The design is not a state -- it is what
+   * the banner *is* -- and picking one up to place copies of it is the whole
+   * reason to pick it. It travels as `banner_patterns=[...]`, which the hotbar
+   * labels and `parseBlock` places like any other held block. Built from the
+   * layers rather than from `blockData`, which on a pre-Flattening document
+   * renames a white banner after its `Base` -- a block that version cannot hold.
    */
   async function onPickMaterial(at: { x: number; y: number; z: number }): Promise<void> {
     if (busy) return;
     try {
       const response = await api().inspectBlock(at.x, at.y, at.z);
       if (!response.ok || response.block === "minecraft:air") return;
-      holdBlock(response.block.split("[")[0]);
+      const base = response.block.split("[")[0];
+      const layers = response.banner?.layers ?? [];
+      holdBlock(
+        layers.length === 0
+          ? base
+          : `${base}[banner_patterns=[${layers
+              .map((layer) => `{pattern:"${layer.pattern}",color:"${layer.color}"}`)
+              .join(",")}]]`,
+      );
     } catch (err) {
       failed(err, t("task.pickingBlock"));
     }
@@ -787,7 +817,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     look: PlacementLook,
   ): Promise<void> {
     if (busy) return;
-    const held = parseBlock(placingBlock);
+    let held: BlockSpec;
+    try {
+      held = parseBlock(placingBlock);
+    } catch (err) {
+      // A held block that cannot be read -- a pasted command cut short -- is
+      // said out loud, not thrown past the click into the failure handler.
+      failed(err, t("task.placingBlock"));
+      return;
+    }
     /*
      * A chain has no end to click, so the column is continued by the half of
      * it that was clicked. The rule and the whole argument for it are in
@@ -1508,6 +1546,22 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // has not come back.
       }
     })();
+    /*
+     * `capture_viewport` asking for a camera.
+     *
+     * Flight is left first, for two reasons that are one: the pointer lock
+     * steers the camera the moment the mouse moves, so a view put in place
+     * under it would be gone before the picture was taken -- and orbit is the
+     * mode that *has* a target, which is half of what was asked for. A request
+     * that only asks where the camera is moves nothing and leaves flight alone.
+     */
+    const unsubscribeCamera = api().onCameraAim((request) => {
+      if (request.camera !== null) {
+        if (document.pointerLockElement) document.exitPointerLock();
+        cameraMode = "orbit";
+      }
+      cameraRequest = request;
+    });
     const unsubscribeDocument = api().onDocumentChanged((state) => {
       docState = state;
       void refreshDocument();
@@ -1562,6 +1616,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       unsubscribeStartup();
       unsubscribeTrace();
       unsubscribeDocument();
+      unsubscribeCamera();
       unsubscribeMcp();
       unsubscribeUpdates();
       for (const off of unsubscribeMenu) off();
@@ -2928,7 +2983,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     };
   }
 
-  function parseBlock(text: string): { namespacedName: string; properties?: Record<string, string> } {
+  function parseBlock(text: string): BlockSpec {
     /*
      * `35:14` becomes red wool before anything else looks at it.
      *
@@ -2941,11 +2996,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * Only on a legacy document. Above 1.13 a file holds no `ID:DATA`, so
      * resolving one would answer a question the schematic cannot ask.
      */
-    const trimmed = resolveBlockInput(text, legacyForDoc).trim();
-    const name = trimmed.includes(":") ? trimmed : `minecraft:${trimmed}`;
+    /*
+     * A patterned banner is taken apart first -- and a whole `/give` command
+     * with it, which is what the banner editor hands out. Its pattern list is
+     * full of the commas and brackets the loop below splits on, so it has to
+     * be out of the way before anything reads the states. It throws a sentence
+     * naming what it could not read; every caller runs this inside a `try`.
+     */
+    const input = splitBlockInput(text);
+    const patterns = input.bannerPatterns === null ? {} : { bannerPatterns: input.bannerPatterns };
+    const trimmed = resolveBlockInput(input.block, legacyForDoc).trim();
+    const name = trimmed.split("[", 1)[0].includes(":") ? trimmed : `minecraft:${trimmed}`;
     const bracket = name.indexOf("[");
     if (bracket === -1) {
-      return { namespacedName: name };
+      return { namespacedName: name, ...patterns };
     }
     // `oak_stairs[facing=north]` typed by hand: the same spelling the palette
     // list shows, so a material can be copied straight back into the field.
@@ -2954,7 +3018,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       const eq = part.indexOf("=");
       if (eq > 0) properties[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
     }
-    return { namespacedName: name.slice(0, bracket), properties };
+    return { namespacedName: name.slice(0, bracket), properties, ...patterns };
   }
 
   /**
@@ -3009,6 +3073,31 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         }),
     );
     // No re-inspect here: `runDocument` already refreshes the inspected block.
+  }
+
+  /**
+   * Repaints the inspected banner with a whole design.
+   *
+   * The inspector's own `setState` edit, carrying the block exactly as it is and
+   * the design beside it: main keeps the state, checks the design against the
+   * document's version and writes it in the document's spelling, as one undo
+   * step. A design main refuses leaves the old one where it was, so the panel is
+   * handed the inspection it already had and its rows go back to match it.
+   */
+  async function changeBannerPatterns(patterns: string): Promise<void> {
+    if (!inspection || !inspectedAt) return;
+    const at = inspectedAt;
+    const current = inspection;
+    const outcome = await runDocument(t("task.changingBannerPatterns"), () =>
+      api().applyEdit({
+        kind: "setState",
+        x: at.x,
+        y: at.y,
+        z: at.z,
+        block: { namespacedName: current.block, properties: { ...current.properties }, bannerPatterns: patterns },
+      }),
+    );
+    if (outcome === null && inspection === current) inspection = { ...current };
   }
 
   /**
@@ -4827,6 +4916,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           legacy={legacyForDoc}
           onchangeproperty={changeBlockProperty}
           onchangenbt={changeNbtValue}
+          onchangebanner={changeBannerPatterns}
         />
       </ToolWindow>
     {/if}
@@ -4889,6 +4979,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       ground={settings.preview.ground}
       groundColor={settings.preview.groundColor}
       theme={resolvedTheme}
+      {cameraRequest}
+      oncameraaimed={(reply) => api().reportCameraAimed(reply)}
     />
 
     <!--

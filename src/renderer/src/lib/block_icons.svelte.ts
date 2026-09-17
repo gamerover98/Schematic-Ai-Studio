@@ -151,7 +151,22 @@ function warm(): void {
  */
 let ready = $state(false);
 
+/**
+ * Bumped whenever an atlas replaces the one the icons were drawn against.
+ *
+ * The warm-up settles the atlas, and then something moves it anyway: a sign's
+ * letters or a banner's composed cloth is a texture of its own, cut into the
+ * same baker, and the next icon request comes back with a bigger atlas.
+ * `adoptAtlas` rightly throws away every icon drawn against the old one -- and
+ * then only the blocks in *that* request were drawn again, so picking up a
+ * patterned banner blanked the other eight hotbar slots until something
+ * changed them. Read through `iconsReady`, so every effect that asks for icons
+ * asks again.
+ */
+let generation = $state(0);
+
 export function iconsReady(): boolean {
+  void generation;
   return ready;
 }
 
@@ -223,10 +238,13 @@ function adoptAtlas(atlas: MeshAtlas | null, nextVersion: number): void {
   // the first few icons of a batch rendered before the upload completed.
   gl?.initTexture(atlasTexture);
 
+  const replacing = atlasVersion !== null;
   atlasVersion = nextVersion;
   // Anything drawn against the old atlas is now wrong.
   painted = new Map();
   requested = new Set();
+  // ...and has to be asked for again by whoever was showing it.
+  if (replacing) generation += 1;
 }
 
 /** Shade every vertex by the way its face points, as the game does. */

@@ -78,6 +78,7 @@ import {
 import { parseSnbt, stringifySnbt } from "../src/main/domain/snbt.js";
 import type { NbtCompound } from "../src/main/pipeline/types.js";
 import type { DocumentSession } from "../src/main/services/session.js";
+import { BannerPatternError, readBanner } from "../src/main/pipeline/banner_nbt.js";
 import { clearBakerCache } from "../src/main/services/preview.js";
 import { loadStructure } from "../src/main/pipeline/loader.js";
 import {
@@ -5110,6 +5111,331 @@ console.log("\n--- which era a document is in ---");
   }
 }
 
+// --- a banner is placed with its design --------------------------------------
+/*
+ * The design is a block entity, and `setBlock` drops the block entity of what
+ * it displaces -- so the design has to be written after the block, in the same
+ * transaction, and in the spelling the schematic's version reads.
+ */
+console.log("\n--- a banner is placed with its design ---");
+{
+  const names = legacyBlockNames(await loadLegacyBlockTable(LEGACY_BLOCKS));
+  const PATTERNS = '[{"pattern":"mojang","color":"orange"},{"pattern":"flower","color":"magenta"}]';
+  const LAYERS = [
+    { pattern: "mojang", color: "orange" },
+    { pattern: "flower", color: "magenta" },
+  ];
+  const thrown = (run: () => void): Error | null => {
+    try {
+      run();
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err : new Error(String(err));
+    }
+  };
+  const banner = (x: number, y: number, z: number, patterns = PATTERNS, name = "minecraft:magenta_banner") => ({
+    kind: "setBlock" as const,
+    x,
+    y,
+    z,
+    block: { namespacedName: name, properties: { rotation: "0" }, bannerPatterns: patterns },
+  });
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const depth = session.history.undoStack.length;
+    applyEdit(session, banner(1, 1, 1));
+    const record = getBlockEntity(session.doc, 1, 1, 1);
+    equal("placed by hand, a banner carries its design", record === null ? null : readBanner(record.nbt, "named").layers, LAYERS);
+    check("...in 1.20.5's spelling", record !== null && record.nbt.patterns !== undefined && record.nbt.Patterns === undefined);
+    equal("...under the block entity id the game uses", record?.id, "minecraft:banner");
+    equal("...as one step", session.history.undoStack.length, depth + 1);
+    undoEdit(session);
+    check(
+      "one undo takes back the banner and its design together",
+      getBlock(session.doc, 1, 1, 1).namespacedName === "minecraft:air" && getBlockEntity(session.doc, 1, 1, 1) === null,
+    );
+
+    const refused = thrown(() => applyEdit(session, banner(2, 1, 1, PATTERNS, "minecraft:stone")));
+    check("patterns on a block that is not a banner are refused", refused instanceof BannerPatternError, String(refused));
+    equal("...and nothing is placed", getBlock(session.doc, 2, 1, 1).namespacedName, "minecraft:air");
+
+    /*
+     * A replace writes the design onto the cells it replaced, and only those:
+     * a banner of the same kind already standing there was not asked to change.
+     */
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 3, 0, 0, { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" } });
+    applyEdit(session, {
+      kind: "replace",
+      region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 },
+      from: { namespacedName: "minecraft:stone" },
+      to: { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" }, bannerPatterns: PATTERNS },
+    });
+    check("a replace writes the design where it replaced", getBlockEntity(session.doc, 0, 0, 0) !== null);
+    equal("...and not onto a banner that was already there", getBlockEntity(session.doc, 3, 0, 0), null);
+    closeDocument();
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_20_4"));
+    applyEdit(session, {
+      kind: "fill",
+      region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+      block: { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" }, bannerPatterns: PATTERNS },
+    });
+    const both = [0, 1].map((x) => getBlockEntity(session.doc, x, 0, 0));
+    check(
+      "a fill writes the design onto every banner, in 1.20.4's spelling",
+      both.every((record) => record !== null && record.nbt.Patterns !== undefined && record.nbt.patterns === undefined),
+    );
+    const newer = thrown(() => applyEdit(session, banner(3, 3, 3, '[{pattern:"flow",color:"blue"}]')));
+    check(
+      "a design newer than the schematic's version is refused by name",
+      newer instanceof BannerPatternError && newer.message.includes("flow"),
+      String(newer),
+    );
+    equal("...before anything is placed", getBlock(session.doc, 3, 3, 3).namespacedName, "minecraft:air");
+    closeDocument();
+  }
+
+  {
+    // Before the Flattening a banner is white by name and coloured by `Base`.
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "mcedit", null);
+    applyEdit(session, banner(0, 0, 0, PATTERNS, "minecraft:white_banner"), {
+      placeableNames: names,
+      versionLabel: "1.12.2",
+    });
+    const record = getBlockEntity(session.doc, 0, 0, 0);
+    check("a legacy banner's design is in the old spelling", record !== null && record.nbt.Patterns !== undefined);
+    equal("...with its colours inverted", record === null ? null : readBanner(record.nbt, "legacy").layers, LAYERS);
+    equal("...and a Base saying white, without which it would be black", record?.nbt.Base, { type: "int", value: 15 });
+    equal("...under the id 1.8 knows", record?.id, "minecraft:Banner");
+    closeDocument();
+  }
+
+  /*
+   * A version change rewrites every banner for the version it lands in. Left
+   * alone, the reader here draws all three spellings and nothing would look
+   * wrong -- until the file reached the game, where every banner is blank.
+   */
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, banner(1, 1, 1));
+    applyEdit(session, banner(2, 1, 1, '[{pattern:"flow",color:"blue"},{pattern:"border",color:"black"}]'));
+
+    const refusal = thrown(() => setDocumentVersion(session, "JE_1_20_4"));
+    check(
+      "a design the target does not have is refused first and counted",
+      refusal instanceof VersionWouldLoseBlocksError && refusal.message.includes("flow") && refusal.layers.count === 1,
+      String(refusal),
+    );
+    check("...and nothing moved", session.doc.dataVersion === dataVersionOf("JE_1_21_4"));
+
+    setDocumentVersion(session, "JE_1_20_4", { dropUnrepresentable: true });
+    const kept = getBlockEntity(session.doc, 1, 1, 1);
+    equal("going back to 1.20.4 respells the design", kept === null ? null : readBanner(kept.nbt, "coded").layers, LAYERS);
+    check("...leaving no 1.20.5 list behind", kept !== null && kept.nbt.patterns === undefined);
+    const trimmed = getBlockEntity(session.doc, 2, 1, 1);
+    equal(
+      "...and takes off only the layer it cannot hold",
+      trimmed === null ? null : readBanner(trimmed.nbt, "coded").layers,
+      [{ pattern: "border", color: "black" }],
+    );
+
+    setDocumentVersion(session, "JE_1_21_4");
+    const forward = getBlockEntity(session.doc, 1, 1, 1);
+    check("and forward again it is 1.20.5's spelling", forward !== null && forward.nbt.patterns !== undefined && forward.nbt.Patterns === undefined);
+    closeDocument();
+  }
+
+  {
+    // Back past the Flattening, a magenta banner is a white one whose Base says magenta.
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "mcedit", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, banner(0, 0, 0));
+    setBlock(session.doc, 1, 0, 0, { namespacedName: "minecraft:red_banner", properties: { rotation: "4" } });
+    setDocumentVersion(session, "JE_1_12_2", { placeableNames: names });
+    equal("a coloured banner is a white one before 1.13", getBlock(session.doc, 0, 0, 0).namespacedName, "minecraft:white_banner");
+    const patterned = getBlockEntity(session.doc, 0, 0, 0);
+    equal("...whose Base keeps its colour", patterned === null ? null : readBanner(patterned.nbt, "legacy").base, "magenta");
+    equal("...and whose design survives, inverted", patterned === null ? null : readBanner(patterned.nbt, "legacy").layers, LAYERS);
+    const plain = getBlockEntity(session.doc, 1, 0, 0);
+    equal("a plain one is given a Base, or it would be black", plain === null ? null : readBanner(plain.nbt, "legacy").base, "red");
+    equal("...and keeps its rotation", getBlock(session.doc, 1, 0, 0).properties.rotation, "4");
+    closeDocument();
+  }
+
+  {
+    // And forward past it, Base becomes the name.
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_12_2"));
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:white_banner", properties: { rotation: "0" } });
+    setBlockEntity(session.doc, 0, 0, 0, {
+      id: "minecraft:Banner",
+      pos: [0, 0, 0],
+      nbt: { Base: { type: "int", value: 4 }, Patterns: { type: "list", value: { type: "end", value: [] } } },
+    });
+    setDocumentVersion(session, "JE_1_13");
+    // 4 is a dye's damage value before 1.13 -- lapis lazuli -- so blue, where the
+    // modern numbering would have read yellow.
+    equal("a legacy Base becomes the banner's name after the Flattening", getBlock(session.doc, 0, 0, 0).namespacedName, "minecraft:blue_banner");
+    const record = getBlockEntity(session.doc, 0, 0, 0);
+    check("...and leaves the block entity", record !== null && record.nbt.Base === undefined, JSON.stringify(record?.nbt));
+    closeDocument();
+  }
+
+  {
+    /*
+     * A rename used to take the block entity with it: `remap` writes through
+     * `setBlock`, which drops what it displaces. A 1.13 sign renamed to
+     * `oak_sign` for 1.14 lost its text.
+     */
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_13"));
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:sign", properties: { rotation: "0" } });
+    setBlockEntity(session.doc, 0, 0, 0, {
+      id: "minecraft:sign",
+      pos: [0, 0, 0],
+      nbt: { Text1: { type: "string", value: '{"text":"kept"}' } },
+    });
+    setDocumentVersion(session, "JE_1_14");
+    equal("a renamed sign is renamed", getBlock(session.doc, 0, 0, 0).namespacedName, "minecraft:oak_sign");
+    equal(
+      "...and keeps what was written on it",
+      getBlockEntity(session.doc, 0, 0, 0)?.nbt.Text1,
+      { type: "string", value: '{"text":"kept"}' },
+    );
+    closeDocument();
+  }
+
+  {
+    // `inspect_block`'s spelling is one `set_block` reads back.
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, banner(0, 0, 0));
+    equal(
+      "inspecting a patterned banner spells the block that places it again",
+      inspect(session, 0, 0, 0).blockData,
+      'minecraft:magenta_banner[rotation=0,banner_patterns=[{pattern:"mojang",color:"orange"},{pattern:"flower",color:"magenta"}]]',
+    );
+    equal("...and a plain block has no such spelling", inspect(session, 1, 1, 1).blockData, undefined);
+    closeDocument();
+  }
+}
+
+
+// --- a banner already placed is repainted, turned and kept --------------------
+/*
+ * The inspector's `setState` is how a design reaches a banner already in the
+ * document, and how its state is edited. Both used to go through `setBlock`
+ * alone, which drops the block entity of the cell it writes: turning a
+ * patterned banner in the inspector erased its design.
+ */
+console.log("\n--- a banner already placed is repainted, turned and kept ---");
+{
+  const names = legacyBlockNames(await loadLegacyBlockTable(LEGACY_BLOCKS));
+  const PATTERNS = '[{pattern:"mojang",color:"orange"},{pattern:"flower",color:"magenta"}]';
+  const LAYERS = [
+    { pattern: "mojang", color: "orange" },
+    { pattern: "flower", color: "magenta" },
+  ];
+  const repaint = (x: number, y: number, z: number, name: string, properties: Record<string, string>, patterns: string) => ({
+    kind: "setState" as const,
+    x,
+    y,
+    z,
+    block: { namespacedName: name, properties, bannerPatterns: patterns },
+  });
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 1, 1, 1, { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" } });
+    equal("a plain banner is offered to the pattern editor, with no layers", inspect(session, 1, 1, 1).banner, { layers: [] });
+    equal("...and a block that is not a banner is not", inspect(session, 0, 0, 0).banner, undefined);
+
+    const depth = session.history.undoStack.length;
+    applyEdit(session, repaint(1, 1, 1, "minecraft:magenta_banner", { rotation: "0" }, PATTERNS));
+    equal("the inspector puts a design on a banner already in the document", inspect(session, 1, 1, 1).banner?.layers, LAYERS);
+    equal("...as one step", session.history.undoStack.length, depth + 1);
+
+    applyEdit(session, {
+      kind: "setState",
+      x: 1,
+      y: 1,
+      z: 1,
+      block: { namespacedName: "minecraft:magenta_banner", properties: { rotation: "4" } },
+    });
+    equal("turning it in the inspector turns it", getBlock(session.doc, 1, 1, 1).properties.rotation, "4");
+    equal("...and keeps its design", inspect(session, 1, 1, 1).banner?.layers, LAYERS);
+
+    applyEdit(session, repaint(1, 1, 1, "minecraft:magenta_banner", { rotation: "4" }, "[]"));
+    const cleared = getBlockEntity(session.doc, 1, 1, 1);
+    check("an empty list takes the design off", cleared !== null && cleared.nbt.patterns === undefined, JSON.stringify(cleared?.nbt));
+
+    // A chest's contents are the same fact about a different block.
+    setBlock(session.doc, 2, 0, 0, { namespacedName: "minecraft:chest", properties: { facing: "north" } });
+    setBlockEntity(session.doc, 2, 0, 0, { id: "minecraft:chest", pos: [2, 0, 0], nbt: { Lock: { type: "string", value: "kept" } } });
+    applyEdit(session, { kind: "setState", x: 2, y: 0, z: 0, block: { namespacedName: "minecraft:chest", properties: { facing: "east" } } });
+    equal("a chest turned in the inspector keeps what it holds", getBlockEntity(session.doc, 2, 0, 0)?.nbt.Lock, { type: "string", value: "kept" });
+    applyEdit(session, { kind: "setState", x: 2, y: 0, z: 0, block: { namespacedName: "minecraft:stone", properties: {} } });
+    equal("...while a different block does not inherit it", getBlockEntity(session.doc, 2, 0, 0), null);
+    closeDocument();
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_20_4"));
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:blue_banner", properties: {} });
+    applyEdit(session, repaint(0, 0, 0, "minecraft:blue_banner", {}, PATTERNS));
+    const record = getBlockEntity(session.doc, 0, 0, 0);
+    check("...in 1.20.4's spelling on a 1.20.4 schematic", record !== null && record.nbt.Patterns !== undefined && record.nbt.patterns === undefined);
+    let refused: unknown = null;
+    try {
+      applyEdit(session, repaint(0, 0, 0, "minecraft:blue_banner", {}, '[{pattern:"flow",color:"blue"}]'));
+    } catch (err) {
+      refused = err;
+    }
+    check("...and a design that version lacks is refused by name", refused instanceof BannerPatternError && refused.message.includes("flow"), String(refused));
+    closeDocument();
+  }
+
+  {
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "mcedit", null);
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:white_banner", properties: { rotation: "0" } });
+    setBlockEntity(session.doc, 0, 0, 0, { id: "minecraft:Banner", pos: [0, 0, 0], nbt: { Base: { type: "int", value: 1 } } });
+    applyEdit(session, repaint(0, 0, 0, "minecraft:white_banner", { rotation: "0" }, PATTERNS), {
+      placeableNames: names,
+      versionLabel: "1.12.2",
+    });
+    const record = getBlockEntity(session.doc, 0, 0, 0);
+    equal("a legacy banner repainted keeps the colour its Base gives it", record === null ? null : readBanner(record.nbt, "legacy").base, "red");
+    equal("...and takes the design, inverted", record === null ? null : readBanner(record.nbt, "legacy").layers, LAYERS);
+    closeDocument();
+  }
+
+  {
+    /*
+     * A banner placed by a fill carries no `rotation`, and a turn rewrites only
+     * the properties an entry carries -- so the gizmo turned it into itself and
+     * it stood where it was. It starts from what is drawn: 0.
+     */
+    const session = newDocument({ width: 3, height: 3, length: 3 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 1, 1, 1, { namespacedName: "minecraft:magenta_banner", properties: {} });
+    applyEdit(session, repaint(1, 1, 1, "minecraft:magenta_banner", {}, PATTERNS));
+    const one = { minX: 1, minY: 1, minZ: 1, maxX: 1, maxY: 1, maxZ: 1 };
+    transformRegion(session, one, { kind: "rotate", steps: 1 });
+    equal("a banner with no rotation turns a quarter with the gizmo", getBlock(session.doc, 1, 1, 1).properties.rotation, "4");
+    equal("...and keeps its design", inspect(session, 1, 1, 1).banner?.layers, LAYERS);
+    transformRegion(session, one, { kind: "mirror", axis: "x" });
+    equal("a mirrored one is reflected", getBlock(session.doc, 1, 1, 1).properties.rotation, "12");
+    equal("...and keeps its design too", inspect(session, 1, 1, 1).banner?.layers, LAYERS);
+
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:red_wall_banner", properties: {} });
+    transformRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 }, { kind: "rotate", steps: 1 });
+    equal("a wall banner with no facing turns from the east it is drawn facing", getBlock(session.doc, 0, 0, 0).properties.facing, "south");
+
+    setBlock(session.doc, 2, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    transformRegion(session, { minX: 2, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 }, { kind: "rotate", steps: 1 });
+    equal("...while a block with no such property is given none", getBlock(session.doc, 2, 0, 0).properties, {});
+    closeDocument();
+  }
+}
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

@@ -34,6 +34,7 @@ import type { BlockEntityRecord, PaletteEntry } from "../pipeline/types.js";
 import { getBlock, normalizeRegion, type SchematicDocument } from "./document.js";
 import type { TransactionScope } from "./history.js";
 import type { RegionSpec } from "../../shared/ipc.js";
+import { hasProperty } from "../../shared/block_states.js";
 
 /** Quarter-turns, in the east -> south direction. */
 export type Quarter = 0 | 1 | 2 | 3;
@@ -337,6 +338,34 @@ export interface TransformPlacement {
 
 const AIR: PaletteEntry = { namespacedName: "minecraft:air", properties: {} };
 
+/**
+ * A block's orientation as it is *drawn*, written out when the entry leaves it
+ * unsaid -- so a turn has something to turn.
+ *
+ * `transformProperties` rewrites the properties an entry carries and nothing
+ * else, which is right for a stair from a file and did nothing at all for a
+ * banner placed by a fill: it carries no `rotation`, so a quarter turn wrote it
+ * back exactly as it was and the banner stayed where it stood.
+ *
+ * The value filled in is the one the baker draws for an absent property, not
+ * the registry's default. The baker reads a missing `rotation` as 0 (signs,
+ * heads, banners alike) and a wall banner's missing `facing` as east, through
+ * `facingSteps`. The 26.2 registry says `rotation=8`, and starting from it
+ * would spin the banner half round before the turn -- a jump nobody asked for.
+ * `facing` is filled for wall banners only, because that fallback is a fact
+ * about the shapes that read `facingSteps`, and a cube with a front answers
+ * its own way.
+ */
+function drawnOrientation(entry: PaletteEntry): Readonly<Record<string, string>> {
+  const name = entry.namespacedName;
+  const out = { ...entry.properties };
+  if (out.rotation === undefined && hasProperty(name, "rotation")) out.rotation = "0";
+  if (out.facing === undefined && name.endsWith("_wall_banner") && hasProperty(name, "facing")) {
+    out.facing = "east";
+  }
+  return out;
+}
+
 export function applyRegionTransform(
   doc: SchematicDocument,
   tx: TransactionScope,
@@ -394,10 +423,12 @@ export function applyRegionTransform(
     }
   };
 
-  const properties = (source: Readonly<Record<string, string>>): Record<string, string> =>
-    transform.kind === "mirror"
+  const properties = (entry: PaletteEntry): Record<string, string> => {
+    const source = drawnOrientation(entry);
+    return transform.kind === "mirror"
       ? mirrorProperties(source, transform.axis)
       : rotateProperties(source, transform.steps);
+  };
 
   // The snapshot. Block entities come with it: a chest that moves but loses its
   // contents is a worse outcome than one that does not move at all.
@@ -449,7 +480,7 @@ export function applyRegionTransform(
     const x = corner.x + lx;
     const y = corner.y + ly;
     const z = corner.z + lz;
-    if (tx.setBlock(x, y, z, { ...cell.entry, properties: properties(cell.entry.properties) })) {
+    if (tx.setBlock(x, y, z, { ...cell.entry, properties: properties(cell.entry) })) {
       changed += 1;
     }
     if (cell.entity !== null) {

@@ -24,6 +24,9 @@ import {
   type ResizeRequest,
   type VersionRequest,
   type RendererFailure,
+  type CameraAimReply,
+  type CameraAimRequest,
+  type CameraState,
   type VoidBlockRequest,
   type EditResponse,
   type ConvertRequest,
@@ -75,6 +78,9 @@ import {
   type TransformRequest,
 } from "../../shared/ipc.js";
 import { contentShiftSince } from "../domain/history.js";
+import { createReplyTable, RendererTimeoutError } from "../services/renderer_request.js";
+import { BannerPatternError } from "../pipeline/banner_nbt.js";
+import type { CameraPlacement } from "../../shared/camera_aim.js";
 import { SCHEMATIC_FORMAT_LABEL, schematicExtension } from "../../shared/schematic.js";
 import {
   dataVersionOf,
@@ -329,8 +335,53 @@ let viewportRect: { x: number; y: number; width: number; height: number } | null
  */
 async function captureViewport(
   window: BrowserWindow | null,
-): Promise<{ data: string; width: number; height: number } | null> {
+  camera: CameraPlacement | null,
+): Promise<{ data: string; width: number; height: number; camera: CameraState | null } | null> {
   if (window === null || window.isDestroyed()) return null;
+  /*
+   * Minimised is refused by name rather than photographed. The renderer draws
+   * nothing while the window is minimised, so the aim below would time out --
+   * and a picture of a minimised window is not a picture of anything.
+   */
+  if (window.isMinimized()) {
+    throw new Error(
+      "The Schematic AI Studio window is minimised, so there is nothing to photograph. " +
+        "Ask the user to restore it and try again.",
+    );
+  }
+  /*
+   * Asked before the picture is taken, and awaited, because the answer is the
+   * point: the reply comes back only once the frame from the new camera has
+   * been drawn, so `capturePage` below photographs the view that was asked
+   * for rather than the one before it.
+   *
+   * With no camera asked for, the question is only "where is it", and a window
+   * that does not answer is still worth photographing -- that is what this tool
+   * did before it could aim. With one, not answering means the view never
+   * moved, and a picture of the old view described as the new one is the
+   * failure this whole change exists to prevent.
+   */
+  let state: CameraState | null = null;
+  try {
+    state = await cameraReplies.ask(
+      (id) => window.webContents.send(IPC.cameraAim, { id, camera } satisfies CameraAimRequest),
+      camera === null ? CAMERA_REPORT_MS : CAMERA_AIM_MS,
+    );
+  } catch (err) {
+    if (!(err instanceof RendererTimeoutError)) throw err;
+    if (camera !== null) {
+      throw new Error(
+        "The window did not draw the new view in time, so no picture was taken. It may be " +
+          "hidden or busy; ask the user to bring Schematic AI Studio to the front and try again.",
+      );
+    }
+  }
+  if (camera !== null && state === null) {
+    throw new Error(
+      "The viewport is not showing, so the camera could not be moved. Ask the user to close " +
+        "whatever is covering the 3D view and try again.",
+    );
+  }
   const rect = viewportRect;
   const image =
     rect !== null && rect.width > 0 && rect.height > 0
@@ -344,8 +395,25 @@ async function captureViewport(
   const size = image.getSize();
   const scaled = size.width > 1024 ? image.resize({ width: 1024 }) : image;
   const out = scaled.getSize();
-  return { data: scaled.toPNG().toString("base64"), width: out.width, height: out.height };
+  return {
+    data: scaled.toPNG().toString("base64"),
+    width: out.width,
+    height: out.height,
+    camera: state,
+  };
 }
+
+/**
+ * The camera answers `captureViewport` is waiting on.
+ *
+ * Two deadlines, for the two questions. Aiming has to wait for a frame, and a
+ * window behind others is throttled rather than stopped, so it gets seconds;
+ * merely asking where the camera is must not make a plain screenshot slower
+ * than it was before the question existed.
+ */
+const CAMERA_AIM_MS = 4000;
+const CAMERA_REPORT_MS = 600;
+const cameraReplies = createReplyTable<CameraState | null>(CAMERA_AIM_MS);
 
 function emitProgress(window: BrowserWindow | null, event: ProgressEvent): void {
   if (window && !window.isDestroyed()) {
@@ -391,7 +459,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     discoveryFile: mcpDiscoveryFile(),
     defaultRoot: async () => generatedDir(),
     bridgeFile: mcpBridgeFile(),
-    capture: async () => await captureViewport(getWindow()),
+    capture: async (camera) => await captureViewport(getWindow(), camera),
     onStatus: (status) => {
       const window = getWindow();
       if (window && !window.isDestroyed()) {
@@ -733,6 +801,18 @@ ${report.stack}`),
   );
 
   /*
+   * The renderer's answer to `IPC.cameraAim`.
+   *
+   * `ipcMain.on`, not `handle`: the question went out as an event, so the answer
+   * comes back as one, and `renderer_request.ts` matches the two by id. A reply
+   * nothing is waiting for -- a late one, after its deadline -- is dropped there.
+   */
+  ipcMain.on(IPC.cameraAimed, (_event, reply: CameraAimReply): void => {
+    if (reply === null || typeof reply !== "object" || typeof reply.id !== "number") return;
+    cameraReplies.settle(reply.id, reply.camera ?? null);
+  });
+
+  /*
    * The pointer was locked, or released.
    *
    * Nothing is stored here: the only thing in main that can act on it is the
@@ -1067,6 +1147,10 @@ ${report.stack}`),
     if (err instanceof BlockNotInVersionError) {
       // Its message already names the block, the version and the way out.
       // Wrapping it would bury the only sentence that helps.
+      return { ok: false, kind: "invalid-input", message: err.message };
+    }
+    if (err instanceof BannerPatternError) {
+      // Names the design or the colour it could not use, for the same reason.
       return { ok: false, kind: "invalid-input", message: err.message };
     }
     if (err instanceof VersionWouldLoseBlocksError) {

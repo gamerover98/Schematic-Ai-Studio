@@ -24,8 +24,10 @@ import {
   placementState,
   type PlacementLook,
 } from "../src/shared/block_orientation.js";
+import { BANNER_PATTERNS } from "../src/shared/banner_patterns.js";
 import {
   COPPER_GOLEM_POSES,
+  DYE_COLOURS,
   coversFace,
   occludesFace,
   occludesNeighbours,
@@ -46,7 +48,8 @@ import {
   type SignText,
 } from "../src/main/pipeline/sign_text.js";
 import { buildAtlas } from "../src/main/pipeline/atlas.js";
-import { atlasAnimations } from "../src/main/services/preview.js";
+import { atlasAnimations, buildDocumentPreview } from "../src/main/services/preview.js";
+import { createDocument, setBlock, setBlockEntity } from "../src/main/domain/document.js";
 import type { BakedFace, PaletteEntry, StructureData } from "../src/main/pipeline/types.js";
 import { paletteEntryCacheKey, paletteEntryIsAir } from "../src/main/pipeline/types.js";
 import { connectedState, COPPER_CHESTS } from "../src/shared/block_connections.js";
@@ -5137,6 +5140,179 @@ if (pack === null) {
   );
 }
 
+// --- a banner wears its design --------------------------------------------------
+//
+// The patterns are layers in the block entity, composed here into one tile per
+// look. Everything below is stated in pixels, because every way this goes wrong
+// -- a layer missing, the layers in the wrong order, the design on the back or
+// upside down -- still produces a plausible banner.
+console.log("\n--- a banner wears its design ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  const WHITE = DYE_COLOURS.white;
+  const BLACK = DYE_COLOURS.black;
+  const cloth = async (layers: Array<[string, string]>) =>
+    await baker.bannerCloth(
+      WHITE,
+      layers.map(([pattern, colour]) => ({ pattern, hex: DYE_COLOURS[colour] })),
+    );
+  /** A texel of a composed tile, by the sheet's own 64-texel coordinates. */
+  const sheetTexel = (key: string, u: number, v: number): [number, number, number] => {
+    const image = baker.textures[key];
+    const x = Math.floor((u / 64) * image.width);
+    const y = Math.floor((v / 64) * image.height);
+    const i = (y * image.width + x) * 4;
+    return [image.data[i], image.data[i + 1], image.data[i + 2]];
+  };
+  const dark = (rgb: readonly number[]) => rgb[0] + rgb[1] + rgb[2] < 150;
+  const light = (rgb: readonly number[]) => rgb[0] + rgb[1] + rgb[2] > 600;
+
+  /*
+   * The table and the pack agree: every design the table names is a texture the
+   * bundled pack draws, and changes the flag. A row whose id was misspelled
+   * would compose to a plain banner and say nothing.
+   */
+  const plain = await cloth([]);
+  const blank: string[] = [];
+  for (const row of BANNER_PATTERNS) {
+    const key = await cloth([[row.id, "black"]]);
+    let differs = false;
+    for (let v = 1; v < 41 && !differs && key !== null && plain !== null; v += 1) {
+      for (let u = 1; u < 21 && !differs; u += 1) {
+        differs = sheetTexel(key, u + 0.5, v + 0.5).join() !== sheetTexel(plain, u + 0.5, v + 0.5).join();
+      }
+    }
+    if (!differs) blank.push(row.id);
+  }
+  equal("every design in the table is drawn by the pack", blank, []);
+  equal("...all forty-three of them", BANNER_PATTERNS.length, 43);
+
+  /*
+   * The codes are the game's, transcribed a second time here from
+   * `BannerPatternFormatFix.PATTERN_ID_MAP` rather than read back out of the
+   * table: a code off by a letter reads an old file's layer as another design.
+   */
+  const DATAFIX: Record<string, string> = {
+    b: "base", bl: "square_bottom_left", br: "square_bottom_right", tl: "square_top_left",
+    tr: "square_top_right", bs: "stripe_bottom", ts: "stripe_top", ls: "stripe_left",
+    rs: "stripe_right", cs: "stripe_center", ms: "stripe_middle", drs: "stripe_downright",
+    dls: "stripe_downleft", ss: "small_stripes", cr: "cross", sc: "straight_cross",
+    bt: "triangle_bottom", tt: "triangle_top", bts: "triangles_bottom", tts: "triangles_top",
+    ld: "diagonal_left", rd: "diagonal_up_right", lud: "diagonal_up_left", rud: "diagonal_right",
+    mc: "circle", mr: "rhombus", vh: "half_vertical", hh: "half_horizontal",
+    vhr: "half_vertical_right", hhb: "half_horizontal_bottom", bo: "border", cbo: "curly_border",
+    gra: "gradient", gru: "gradient_up", bri: "bricks", glb: "globe", cre: "creeper",
+    sku: "skull", flo: "flower", moj: "mojang", pig: "piglin",
+  };
+  equal(
+    "every legacy code names the design the game's datafixer says it does",
+    BANNER_PATTERNS.filter((row) => row.code !== null && DATAFIX[row.code] !== row.id).map((row) => row.id),
+    [],
+  );
+  equal(
+    "...and only flow and guster have none",
+    BANNER_PATTERNS.filter((row) => row.code === null).map((row) => row.id),
+    ["flow", "guster"],
+  );
+
+  // Layers are drawn over what is under them, in order.
+  const stripe = await cloth([["stripe_bottom", "black"]]);
+  if (stripe !== null) {
+    check("a layer takes its colour where its design is", dark(sheetTexel(stripe, 11, 38)));
+    check("...and leaves the banner's colour everywhere else", light(sheetTexel(stripe, 11, 5)));
+  }
+  const brownThenBlack = await cloth([["triangle_bottom", "brown"], ["triangle_bottom", "black"]]);
+  const blackThenBrown = await cloth([["triangle_bottom", "black"], ["triangle_bottom", "brown"]]);
+  if (brownThenBlack !== null && blackThenBrown !== null) {
+    check("the later layer is the one on top", dark(sheetTexel(brownThenBlack, 11, 39)));
+    const brown = sheetTexel(blackThenBrown, 11, 39);
+    check("...so the same two the other way round come out brown", brown[0] > brown[2] + 20 && !dark(brown), brown.join());
+    check("two orders are two tiles", brownThenBlack !== blackThenBrown);
+  }
+  const gradient = await cloth([["gradient", "black"]]);
+  if (gradient !== null) {
+    const middle = sheetTexel(gradient, 11, 21);
+    check(
+      "a gradient blends rather than covers",
+      !dark(middle) && !light(middle),
+      middle.join(),
+    );
+  }
+  equal("the same look is the same tile", await cloth([["stripe_bottom", "black"]]), stripe);
+
+  /*
+   * And it is the **front** that wears it, the right way up.
+   *
+   * The cloth's windows used to be `unwrapCube`'s, which put the design's back
+   * on the front and turned it upside down -- invisible for as long as the
+   * cloth was one flat colour. `stripe_left` is on the left as the banner is
+   * looked at, and `stripe_top` at the top: a banner facing south is looked at
+   * from the south, where left is west.
+   */
+  const frontOf = async (name: string, props: Record<string, string>, key: string) => {
+    const baked = await baker.bakeBlockstate(block(name, props));
+    const face = baked.extraFaces.find((f) => f.textureKey.includes("banner/base") && f.normal[2] > 0.9);
+    return face === undefined ? null : { ...face, textureKey: key };
+  };
+  const left = await cloth([["stripe_left", "black"]]);
+  const top = await cloth([["stripe_top", "black"]]);
+  for (const [name, props] of [
+    ["white_banner", { rotation: "0" }],
+    ["white_wall_banner", { facing: "south" }],
+  ] as const) {
+    if (left === null || top === null) break;
+    const byLeft = await frontOf(name, props, left);
+    const byTop = await frontOf(name, props, top);
+    if (byLeft === null || byTop === null) {
+      check(`${name} has a front`, false);
+      continue;
+    }
+    const z = byLeft.positions[2];
+    const ys = [1, 4, 7, 10].map((i) => byLeft.positions[i]);
+    const [low, high] = [Math.min(...ys), Math.max(...ys)];
+    const at = (x: number, t: number): [number, number, number] => [x, low + (high - low) * t, z];
+    check(`${name}: a left stripe is on the west, the left seen from the south`, texelOn(byLeft, at(0.2, 0.5)).luminance < 60);
+    check(`...and not on the east`, texelOn(byLeft, at(0.8, 0.5)).luminance > 180);
+    check(`${name}: a top stripe is at the top`, texelOn(byTop, at(0.5, 0.9)).luminance < 60);
+    check(`...and not at the bottom`, texelOn(byTop, at(0.5, 0.1)).luminance > 180);
+  }
+
+  /*
+   * The composed cloth is in the atlas before the chunks are meshed.
+   *
+   * The atlas is packed once per preview and the chunks' UVs address it, so a
+   * tile first made *during* meshing is one the mesh cannot find -- and
+   * `buildMesh` drops a face whose texture the atlas does not have. The cloth
+   * would simply be missing, on the first banner of every design. Same number
+   * of triangles as a plain banner is the whole statement.
+   */
+  const triangles = async (patterned: boolean): Promise<number> => {
+    const doc = createDocument({ width: 1, height: 2, length: 1, format: "sponge3", dataVersion: 4189 });
+    setBlock(doc, 0, 0, 0, block("red_banner", { rotation: "0" }));
+    if (patterned) {
+      setBlockEntity(doc, 0, 0, 0, {
+        id: "minecraft:banner",
+        pos: [0, 0, 0],
+        nbt: {
+          patterns: {
+            type: "list",
+            value: {
+              type: "compound",
+              // A design no other check here composes, so the tile is new.
+              value: [{ pattern: { type: "string", value: "minecraft:globe" }, color: { type: "string", value: "lime" } }],
+            },
+          },
+        },
+      });
+    }
+    const preview = await buildDocumentPreview(doc, { resourcePackPath: pack });
+    return preview.mesh.chunks.reduce((total, chunk) => total + chunk.indices.length, 0);
+  };
+  const plainCount = await triangles(false);
+  equal("a patterned banner draws every face a plain one does", await triangles(true), plainCount);
+}
+
 console.log("\n--- what a sign says ---");
 {
   const str = (value: string) => ({ type: "string", value });
@@ -7314,6 +7490,53 @@ if (pack === null) {
         `${level.length} vertices level, ${vs.size} distinct v`,
       );
     }
+  }
+
+  /*
+   * An anvil is laid across the look. Vanilla's placement is
+   * `getHorizontalDirection().getClockWise()`, and every anvil placed by hand
+   * used to land on the registry's `facing=north` whichever way it was put down.
+   *
+   * The property alone is not the check: a clockwise and an anticlockwise rule
+   * agree on nothing, but a table typed one quarter out would still name four
+   * directions. So the block is baked too, and the top -- the part with the horn,
+   * sixteen long and ten wide -- has to run across the direction of the look.
+   */
+  {
+    const look = (x: number, z: number): PlacementLook => ({
+      direction: { x, y: -0.4, z },
+      against: "up",
+      cursorY: 0,
+      run: null,
+    });
+    const LOOKS = [
+      ["north", 0, -1, "east"],
+      ["east", 1, 0, "south"],
+      ["south", 0, 1, "west"],
+      ["west", -1, 0, "north"],
+    ] as const;
+    for (const name of ["anvil", "chipped_anvil", "damaged_anvil"]) {
+      equal(
+        `${name} turns clockwise from the look`,
+        LOOKS.map(([, x, z]) => placementState(`minecraft:${name}`, look(x, z)).facing),
+        LOOKS.map(([, , , facing]) => facing),
+      );
+    }
+    for (const [towards, x, z] of LOOKS) {
+      const faces = await facesOf("anvil", placementState("minecraft:anvil", look(x, z)));
+      const top = faces.flatMap((f) => [0, 1, 2, 3].map((i) => [...f.positions.slice(i * 3, i * 3 + 3)]));
+      const onTop = top.filter((p) => p[1] > 10 / 16 + 1e-6);
+      const span = (axis: number) =>
+        Math.max(...onTop.map((p) => p[axis])) - Math.min(...onTop.map((p) => p[axis]));
+      const across = x !== 0 ? span(2) : span(0);
+      const along = x !== 0 ? span(0) : span(2);
+      check(
+        `an anvil placed looking ${towards} lies across the look`,
+        Math.abs(across - 1) < 1e-6 && Math.abs(along - 10 / 16) < 1e-6,
+        `across ${across}, along ${along}`,
+      );
+    }
+    check("the anvils are named for the id-list check", ORIENTED_BLOCK_NAMES.includes("damaged_anvil"));
   }
 
   /*

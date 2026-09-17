@@ -20,6 +20,7 @@
   import { blockLabel, gridWindow, inventoryBlocks } from "./inventory.js";
 import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
   import { t } from "./i18n.svelte.js";
+  import BannerPatternHint from "./BannerPatternHint.svelte";
 
   interface Props {
     open: boolean;
@@ -143,6 +144,16 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
         </span>
         <button class="icon" onclick={onclose} aria-label={t("common.close")}>&#x00d7;</button>
       </header>
+      <!--
+        Searching for banners is the moment to say where a *patterned* one comes
+        from: the grid holds sixteen plain colours and nothing else, and the
+        design is pasted into a field this window does not have.
+      -->
+      {#if /banner/i.test(query)}
+        <div class="banner">
+          <BannerPatternHint where="place" />
+        </div>
+      {/if}
 
       <div
         class="grid"
@@ -223,6 +234,11 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
   .purpose {
     flex: none;
     font-size: 12px;
+  }
+
+  .banner {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
   }
 
   input {

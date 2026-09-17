@@ -56,31 +56,12 @@ export function gridCentre(size: BoxSize | null): { x: number; z: number } {
 /**
  * The establishing shot for a document of this size.
  *
- * Derived from the **document box** rather than from the geometry in it, which
- * is the fix as much as the centring is: `Box3.setFromObject` on an empty
- * document is an empty box, so framing gave up and left the camera wherever it
- * had been mounted -- pointed at nothing, at the exact moment the user most
- * needs to see where the work surface is.
- *
- * The angle and the 1.6 are the ones the mesh-bounds version used, kept so an
- * ordinary document opens looking the way it always did.
+ * It lives in `shared/camera_aim.ts` now, because `capture_viewport` over MCP
+ * frames an empty `camera: {}` with it too -- and the R key and that tool
+ * framing the same build two different ways would be the first thing anybody
+ * comparing a screenshot with the window noticed.
  */
-export function documentFraming(size: BoxSize): { target: Vec3; position: Vec3 } {
-  const target = {
-    x: size.width / 2,
-    y: size.height / 2,
-    z: size.length / 2,
-  };
-  const distance = Math.max(size.width, size.height, size.length) * 1.6;
-  return {
-    target,
-    position: {
-      x: target.x + distance,
-      y: target.y + distance * 0.7,
-      z: target.z + distance,
-    },
-  };
-}
+export { documentFraming } from "../../../shared/camera_aim.js";
 
 /**
  * The viewport's vertical field of view, in degrees.

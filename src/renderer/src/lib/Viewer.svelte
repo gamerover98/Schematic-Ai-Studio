@@ -16,8 +16,11 @@
    * lighting with the AO-dependent intensities, same 256/32 grid at y=-0.01
    * with depthWrite off, same 1.6·maxDim framing, same R-to-reset.
    */
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import type {
+    CameraAimReply,
+    CameraAimRequest,
+    CameraState,
     ChunkGeometry,
     AtlasAnimation,
     MeshAtlas,
@@ -451,6 +454,16 @@ import { isTyping } from "./typing.js";
      * scene has to be told when to go and look again.
      */
     theme?: ResolvedTheme;
+    /**
+     * A camera main asked for -- `capture_viewport` over MCP -- or `null`.
+     *
+     * Applied when the *object* changes, so asking twice for the same view is
+     * two requests with two answers. `camera: null` inside it means "leave the
+     * camera, and say where it is".
+     */
+    cameraRequest?: CameraAimRequest | null;
+    /** The answer, sent once the frame from that camera has been drawn. */
+    oncameraaimed?: (reply: CameraAimReply) => void;
   }
 
   const {
@@ -503,6 +516,8 @@ import { isTyping } from "./typing.js";
     onscale,
     ongizmograb,
     ongizmorelease,
+    cameraRequest = null,
+    oncameraaimed,
   }: Props = $props();
 
   /**
@@ -2972,6 +2987,105 @@ import { isTyping } from "./typing.js";
     });
   }
 
+  /**
+   * Draws one frame from wherever the camera is: the sky, the world, the
+   * compass, and the anti-aliased copy onto the canvas.
+   *
+   * Out of the animation loop so a frame can be drawn *on request* as well as
+   * on the display's schedule. `capture_viewport` moves the camera and then
+   * photographs the window, and a window behind others has its
+   * `requestAnimationFrame` throttled -- so waiting for the loop alone could
+   * photograph the view before the move. The loop calls this every frame and
+   * nothing about that changed.
+   */
+  function renderFrame(): void {
+    if (renderer && scene && camera) {
+      renderer.info.reset();
+      /*
+       * Rebuilt here rather than in an effect, and before anything is
+       * drawn: `fromScene` binds render targets of its own, which is not
+       * something to do in the middle of drawing into one.
+       */
+      if (globalIllumination && sky && skyScene) {
+        if (environmentStale && performance.now() - environmentAt > ENVIRONMENT_MS) {
+          buildEnvironment();
+        }
+      }
+      if (aaTarget !== null) renderer.setRenderTarget(aaTarget);
+      /*
+       * The sky first, then the depth buffer cleared, then the world.
+       *
+       * Two renders rather than one scene, because the sky has to be behind
+       * everything at every distance: the sun and the moon are transparent,
+       * and three.js draws transparent objects after every opaque one, so
+       * in a single scene they would paint over the schematic however their
+       * depth test was set.
+       *
+       * The dome rides with the camera, which is also what makes it a sky
+       * rather than a sphere you can fly out of.
+       */
+      if (skyScene && skyGroup && sky) {
+        /*
+         * Position and scale every frame rather than in an effect: both
+         * follow the camera -- one its place, the other its far plane --
+         * and the far plane moves with a setting this component does not
+         * own the writes to.
+         */
+        skyGroup.position.copy(camera.position);
+        const reach = skyScale();
+        skyGroup.scale.setScalar(reach);
+        if (stars) {
+          /*
+           * Point size is a material property in *world* units, so scaling
+           * the group does not touch it. Left at its unit-sphere value the
+           * stars come out a hundredth of a pixel across, which is to say
+           * a night sky with no stars in it.
+           */
+          (stars.material as THREE.PointsMaterial).size = reach * 0.004;
+        }
+        renderer.autoClear = true;
+        renderer.render(skyScene, camera);
+        renderer.autoClear = false;
+        renderer.clearDepth();
+        renderer.render(scene, camera);
+        renderer.autoClear = true;
+      } else {
+        renderer.render(scene, camera);
+      }
+      drawCompass();
+      /*
+       * ...and the whole frame, resolved, onto the canvas. The compass is
+       * inside it: it is part of the picture, and a pass that landed on
+       * the canvas after the copy would be the one unaliased thing on
+       * screen.
+       */
+      if (aaTarget !== null && aaScene && aaCamera) {
+        renderer.setRenderTarget(null);
+        const wasAutoClear = renderer.autoClear;
+        renderer.autoClear = false;
+        renderer.render(aaScene, aaCamera);
+        renderer.autoClear = wasAutoClear;
+      }
+      fpsFrames += 1;
+      const now = performance.now();
+      if (fpsAt === 0) fpsAt = now;
+      if (showFps && now - fpsAt >= FPS_MS) {
+        const seconds = (now - fpsAt) / 1000;
+        fps = {
+          fps: Math.round(fpsFrames / seconds),
+          ms: Math.round(((now - fpsAt) / fpsFrames) * 10) / 10,
+          triangles: renderer.info.render.triangles,
+          calls: renderer.info.render.calls,
+        };
+        fpsFrames = 0;
+        fpsAt = now;
+      } else if (!showFps) {
+        fpsFrames = 0;
+        fpsAt = now;
+      }
+    }
+  }
+
   onMount(() => {
     try {
       /*
@@ -3109,91 +3223,7 @@ import { isTyping } from "./typing.js";
         // distance to the camera, so it would visibly swell and shrink in steps
         // during an orbit if it only kept up twenty times a second.
         updateGizmo();
-        if (renderer && scene && camera) {
-          renderer.info.reset();
-          /*
-           * Rebuilt here rather than in an effect, and before anything is
-           * drawn: `fromScene` binds render targets of its own, which is not
-           * something to do in the middle of drawing into one.
-           */
-          if (globalIllumination && sky && skyScene) {
-            if (environmentStale && performance.now() - environmentAt > ENVIRONMENT_MS) {
-              buildEnvironment();
-            }
-          }
-          if (aaTarget !== null) renderer.setRenderTarget(aaTarget);
-          /*
-           * The sky first, then the depth buffer cleared, then the world.
-           *
-           * Two renders rather than one scene, because the sky has to be behind
-           * everything at every distance: the sun and the moon are transparent,
-           * and three.js draws transparent objects after every opaque one, so
-           * in a single scene they would paint over the schematic however their
-           * depth test was set.
-           *
-           * The dome rides with the camera, which is also what makes it a sky
-           * rather than a sphere you can fly out of.
-           */
-          if (skyScene && skyGroup && sky) {
-            /*
-             * Position and scale every frame rather than in an effect: both
-             * follow the camera -- one its place, the other its far plane --
-             * and the far plane moves with a setting this component does not
-             * own the writes to.
-             */
-            skyGroup.position.copy(camera.position);
-            const reach = skyScale();
-            skyGroup.scale.setScalar(reach);
-            if (stars) {
-              /*
-               * Point size is a material property in *world* units, so scaling
-               * the group does not touch it. Left at its unit-sphere value the
-               * stars come out a hundredth of a pixel across, which is to say
-               * a night sky with no stars in it.
-               */
-              (stars.material as THREE.PointsMaterial).size = reach * 0.004;
-            }
-            renderer.autoClear = true;
-            renderer.render(skyScene, camera);
-            renderer.autoClear = false;
-            renderer.clearDepth();
-            renderer.render(scene, camera);
-            renderer.autoClear = true;
-          } else {
-            renderer.render(scene, camera);
-          }
-          drawCompass();
-          /*
-           * ...and the whole frame, resolved, onto the canvas. The compass is
-           * inside it: it is part of the picture, and a pass that landed on
-           * the canvas after the copy would be the one unaliased thing on
-           * screen.
-           */
-          if (aaTarget !== null && aaScene && aaCamera) {
-            renderer.setRenderTarget(null);
-            const wasAutoClear = renderer.autoClear;
-            renderer.autoClear = false;
-            renderer.render(aaScene, aaCamera);
-            renderer.autoClear = wasAutoClear;
-          }
-          fpsFrames += 1;
-          const now = performance.now();
-          if (fpsAt === 0) fpsAt = now;
-          if (showFps && now - fpsAt >= FPS_MS) {
-            const seconds = (now - fpsAt) / 1000;
-            fps = {
-              fps: Math.round(fpsFrames / seconds),
-              ms: Math.round(((now - fpsAt) / fpsFrames) * 10) / 10,
-              triangles: renderer.info.render.triangles,
-              calls: renderer.info.render.calls,
-            };
-            fpsFrames = 0;
-            fpsAt = now;
-          } else if (!showFps) {
-            fpsFrames = 0;
-            fpsAt = now;
-          }
-        }
+        renderFrame();
       };
       animate();
 
@@ -4001,6 +4031,79 @@ import { isTyping } from "./typing.js";
       }
     }
   });
+
+  /**
+   * A camera asked for over MCP: put it there, draw, and answer.
+   *
+   * Declared after the two effects above, and the application waits a `tick`
+   * besides, because the app leaves flight in the same breath as it asks: those
+   * two re-run on `cameraMode`, and the second one puts the orbit's target 24
+   * blocks ahead of the camera. Applied before them, the target asked for would
+   * be overwritten by the one flight hands back.
+   */
+  $effect(() => {
+    const request = cameraRequest;
+    if (request === null) return;
+    untrack(() => void aimCamera(request));
+  });
+
+  async function aimCamera(request: CameraAimRequest): Promise<void> {
+    await tick();
+    if (!camera || !controls || !renderer) {
+      oncameraaimed?.({ id: request.id, camera: null });
+      return;
+    }
+    if (request.camera !== null) {
+      // A compass flight still running would carry the camera on from here.
+      flight = null;
+      const { position, target } = request.camera;
+      camera.position.set(position.x, position.y, position.z);
+      controls.target.set(target.x, target.y, target.z);
+      camera.lookAt(controls.target);
+      controls.enabled = cameraMode !== "fly";
+      controls.update();
+      // Orthographic derives its frustum from the distance to the target.
+      resize();
+      renderFrame();
+    }
+    await nextFrame();
+    oncameraaimed?.({ id: request.id, camera: cameraState() });
+  }
+
+  /**
+   * One display frame, or a short wait where there are none.
+   *
+   * `renderFrame` has already drawn the new view into the canvas; this is the
+   * time for it to reach the screen. A window behind others has its frames
+   * throttled rather than stopped, and one that gets none at all must still
+   * answer -- main photographs what the canvas holds either way.
+   */
+  function nextFrame(): Promise<void> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+      setTimeout(finish, 250);
+    });
+  }
+
+  function cameraState(): CameraState | null {
+    if (!camera || !controls) return null;
+    const round = (n: number) => Math.round(n * 1000) / 1000;
+    return {
+      position: { x: round(camera.position.x), y: round(camera.position.y), z: round(camera.position.z) },
+      target: {
+        x: round(controls.target.x),
+        y: round(controls.target.y),
+        z: round(controls.target.z),
+      },
+      projection: camera === ortho ? "orthographic" : "perspective",
+    };
+  }
 
   $effect(() => {
     if (loaded) applyWireframe(loaded, wireframe);

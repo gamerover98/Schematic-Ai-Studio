@@ -15,6 +15,9 @@
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import type { ClipboardInfo, PaletteCount, RegionSpec, TransformRequest } from "../../../shared/ipc.js";
   import BlockPicker from "./BlockPicker.svelte";
+  import BannerPatternHint from "./BannerPatternHint.svelte";
+  import { isBannerBlock } from "../../../shared/banner_patterns.js";
+  import { splitBlockInput } from "../../../shared/block_input.js";
   import { t } from "./i18n.svelte.js";
 
   interface Props {
@@ -108,6 +111,19 @@
   );
 
   const none = $derived(selection === null);
+
+  /*
+   * Whether the field names a banner, however it was spelled: a bare id, one
+   * with a design already in it, or a pasted `/give` command. A half-typed or
+   * malformed one is not a banner yet, and the hint waits.
+   */
+  const holdsBanner = $derived.by(() => {
+    try {
+      return isBannerBlock(splitBlockInput(block).block.split("[", 1)[0]);
+    } catch {
+      return false;
+    }
+  });
 </script>
 
 <div class="tools">
@@ -175,6 +191,9 @@
         &#x229E;
       </button>
     </div>
+    {#if holdsBanner}
+      <BannerPatternHint where="place" />
+    {/if}
     <button
       class="primary wide"
       onclick={() => onfill(block)}

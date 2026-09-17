@@ -23,6 +23,7 @@ import { fileURLToPath } from "url";
 
 import { loadStructure } from "../src/main/pipeline/loader.js";
 import { IPC, openCodeModelRequiresKey } from "../src/shared/ipc.js";
+import { createReplyTable, RendererTimeoutError } from "../src/main/services/renderer_request.js";
 import { rememberedFromIndex } from "../src/main/services/conversation_core.js";
 import {
   adoptSubject,
@@ -3094,6 +3095,60 @@ console.log("\n--- updates ---");
     "...and writes latest.yml for every release, dev or not",
     /^detectUpdateChannel:\s*false\s*$/m.test(builderYml),
   );
+}
+
+/*
+ * A question main asks the window, and the wait for its answer.
+ *
+ * `capture_viewport` moves the camera and must not photograph the view before
+ * the move, so it asks and waits. What can go wrong is all in the matching:
+ * an answer that resolves the wrong question, a window that never answers and
+ * a call that hangs, or a late answer that lands on the next request.
+ */
+console.log("\n--- a question for the renderer ---");
+{
+  const table = createReplyTable<string>(1000);
+  const sent: number[] = [];
+  const first = table.ask((id) => sent.push(id));
+  const second = table.ask((id) => sent.push(id));
+  check("each question goes out with its own id", sent.length === 2 && sent[0] !== sent[1], JSON.stringify(sent));
+  check("an answer nobody asked for is refused", !table.settle(9999, "stray"));
+  // Answered out of order, which is what two MCP calls in quick succession do.
+  check("the second answer settles the second question", table.settle(sent[1], "second"));
+  check("...and the first the first", table.settle(sent[0], "first"));
+  equal("so each question gets its own answer", await Promise.all([first, second]), ["first", "second"]);
+  equal("...and nothing is left waiting", table.pending(), 0);
+  check("an answer given twice is refused the second time", !table.settle(sent[0], "again"));
+
+  let timedOut: unknown = null;
+  let lateId = -1;
+  try {
+    await table.ask((id) => {
+      lateId = id;
+    }, 20);
+  } catch (err) {
+    timedOut = err;
+  }
+  check("a window that never answers is given up on", timedOut instanceof RendererTimeoutError, String(timedOut));
+  equal("...and forgotten", table.pending(), 0);
+  // The failure this matching exists for: a late reply resolving the question
+  // asked after it.
+  const next = table.ask(() => {}, 1000);
+  check("a late answer does not settle the next question", !table.settle(lateId, "late"));
+  equal("...which is still waiting", table.pending(), 1);
+  table.settle(lateId + 1, "on time");
+  equal("...until its own answer arrives", await next, "on time");
+
+  let thrown: unknown = null;
+  try {
+    await table.ask(() => {
+      throw new Error("no window");
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  check("a question that cannot be sent fails at once", thrown instanceof Error && thrown.message === "no window");
+  equal("...and leaves nothing waiting", table.pending(), 0);
 }
 
 console.log("\n--- ipc channels ---");

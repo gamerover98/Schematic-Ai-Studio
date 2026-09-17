@@ -32,6 +32,17 @@ import {
 } from "../src/main/services/schematic_nbt.js";
 import { createHistory } from "../src/main/domain/history.js";
 import type { NbtCompound } from "../src/main/pipeline/types.js";
+import {
+  BannerPatternError,
+  bannerBlockData,
+  parseBannerLayers,
+  readBanner,
+  writeBanner,
+  type BannerLayer,
+} from "../src/main/pipeline/banner_nbt.js";
+import { bannerFormat } from "../src/shared/banner_patterns.js";
+import { splitBlockInput } from "../src/shared/block_input.js";
+import { parseSnbt } from "../src/main/domain/snbt.js";
 
 import {
   countBlocks,
@@ -2714,6 +2725,193 @@ console.log("\n--- what exists in which Minecraft version ---");
   );
 }
 
+
+// --- a banner's design, as three eras write it ------------------------------
+//
+// 1.8 to 1.12.2 store `Patterns` with the colours inverted and the cloth's own
+// colour in `Base`; 1.13 to 1.20.4 store `Patterns` with the dye's number;
+// 1.20.5 on store `patterns` with names. A banner written in the wrong one
+// opens as a plain banner in the game it was written for, with nothing saying
+// why -- which is why each spelling is stated here as the bytes it becomes.
+console.log("\n--- a banner's design, as three eras write it ---");
+{
+  const layers: BannerLayer[] = [
+    { pattern: "mojang", color: "orange" },
+    { pattern: "flower", color: "magenta" },
+  ];
+  const strip = (tag: unknown) => JSON.parse(JSON.stringify(tag));
+
+  equal("1.20.4 and 1.20.5 sit either side of the datafixer's 3818", [
+    bannerFormat("flat", 3700),
+    bannerFormat("flat", 3837),
+    bannerFormat("flat", null),
+    bannerFormat("legacy", 1343),
+  ], ["coded", "named", "named", "legacy"]);
+
+  const named = writeBanner({ CustomName: { type: "string", value: '"Hi"' } }, layers, "named", null);
+  equal("from 1.20.5 a layer is a namespaced id and a dye's name", strip(named.patterns), {
+    type: "list",
+    value: {
+      type: "compound",
+      value: [
+        { pattern: { type: "string", value: "minecraft:mojang" }, color: { type: "string", value: "orange" } },
+        { pattern: { type: "string", value: "minecraft:flower" }, color: { type: "string", value: "magenta" } },
+      ],
+    },
+  });
+  check("...and whatever else the banner carried stays", named.CustomName !== undefined);
+
+  const coded = writeBanner(named, layers, "coded", null);
+  equal("before it, a layer is a code and the dye's number", strip(coded.Patterns), {
+    type: "list",
+    value: {
+      type: "compound",
+      value: [
+        { Pattern: { type: "string", value: "moj" }, Color: { type: "int", value: 1 } },
+        { Pattern: { type: "string", value: "flo" }, Color: { type: "int", value: 2 } },
+      ],
+    },
+  });
+  check("...and the other spelling is gone, so the two cannot disagree", coded.patterns === undefined);
+
+  const legacy = writeBanner({}, layers, "legacy", "white");
+  equal(
+    "before the Flattening the numbers are inverted",
+    (strip(legacy.Patterns).value.value as Array<{ Color: { value: number } }>).map((layer) => layer.Color.value),
+    [14, 13],
+  );
+  equal("...and the cloth's own colour is Base, where white is 15", strip(legacy.Base), { type: "int", value: 15 });
+
+  for (const [label, nbt, format] of [
+    ["named", named, "named"],
+    ["coded", coded, "coded"],
+    ["legacy", legacy, "legacy"],
+  ] as const) {
+    equal(`the ${label} spelling reads back as what was written`, readBanner(nbt, format).layers, layers);
+  }
+  equal("a legacy Base reads back as its colour", readBanner(writeBanner({}, [], "legacy", "red"), "legacy").base, "red");
+  check(
+    "a pre-1.20.5 file refuses a design it has no spelling for, rather than dropping it",
+    (() => {
+      try {
+        writeBanner({}, [{ pattern: "flow", color: "blue" }], "coded", null);
+        return false;
+      } catch (err) {
+        return err instanceof BannerPatternError && err.message.includes("flow");
+      }
+    })(),
+  );
+
+  /*
+   * A file is read leniently: a layer naming a datapack's design is skipped
+   * and the rest are drawn, rather than the whole banner vanishing.
+   */
+  const withForeign = parseSnbt('{patterns:[{pattern:"mypack:dragon",color:"red"},{pattern:"minecraft:border",color:"black"}]}');
+  equal(
+    "a file's unreadable layer is skipped, not fatal",
+    readBanner((withForeign as { value: NbtCompound }).value, "named").layers,
+    [{ pattern: "border", color: "black" }],
+  );
+
+  // What a person pastes, which is read strictly.
+  const pasted =
+    '/give @p minecraft:magenta_banner[banner_patterns=[{"pattern":"mojang","color":"orange"},{"pattern":"flower","color":"magenta"},{"pattern":"gradient","color":"blue"},{"pattern":"circle","color":"white"},{"pattern":"triangle_bottom","color":"brown"},{"pattern":"triangle_bottom","color":"black"}]] 1';
+  const input = splitBlockInput(pasted);
+  equal("a whole /give command comes apart into the block", input.block, "minecraft:magenta_banner");
+  equal(
+    "...and its six layers, in order",
+    parseBannerLayers(input.bannerPatterns ?? "").map((layer) => `${layer.pattern}:${layer.color}`),
+    [
+      "mojang:orange",
+      "flower:magenta",
+      "gradient:blue",
+      "circle:white",
+      "triangle_bottom:brown",
+      "triangle_bottom:black",
+    ],
+  );
+  equal(
+    "the bare id says the same thing as the command",
+    splitBlockInput(pasted.replace(/^\/give @p /, "").replace(/ 1$/, "")),
+    input,
+  );
+  equal(
+    "states are kept, beside the patterns in either order",
+    splitBlockInput('red_banner[banner_patterns=[{pattern:"moj",color:"black"}],rotation=4]'),
+    { block: "red_banner[rotation=4]", bannerPatterns: '[{pattern:"moj",color:"black"}]' },
+  );
+  equal(
+    "a block with no patterns passes straight through",
+    splitBlockInput("minecraft:oak_stairs[facing=east,half=top]"),
+    { block: "minecraft:oak_stairs[facing=east,half=top]", bannerPatterns: null },
+  );
+  equal(
+    "the /setblock spelling is read as well",
+    splitBlockInput('white_banner{patterns:[{pattern:"minecraft:cross",color:"red"}]}').bannerPatterns,
+    '[{pattern:"minecraft:cross",color:"red"}]',
+  );
+  equal(
+    "...and a pre-1.20.5 /give's BlockEntityTag",
+    parseBannerLayers(
+      splitBlockInput('/give Steve minecraft:white_banner{BlockEntityTag:{Patterns:[{Pattern:"cr",Color:14}]}} 3')
+        .bannerPatterns ?? "",
+    ),
+    [{ pattern: "cross", color: "red" }],
+  );
+  equal(
+    "a selector with brackets is still one target",
+    splitBlockInput("give @a[distance=..5] minecraft:blue_banner").block,
+    "minecraft:blue_banner",
+  );
+
+  const refusal = (fn: () => unknown): string => {
+    try {
+      fn();
+      return "";
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  };
+  check(
+    "a design that does not exist is refused by name",
+    refusal(() => parseBannerLayers('[{pattern:"dragon",color:"red"}]')).includes('"dragon"'),
+  );
+  check(
+    "...and so is a colour that is not a dye",
+    refusal(() => parseBannerLayers('[{pattern:"cross",color:"teal"}]')).includes("cross"),
+  );
+  check(
+    "a component this app cannot place is refused, not dropped",
+    refusal(() => splitBlockInput('red_banner[custom_name="x"]')).includes("custom_name"),
+  );
+  check(
+    "...and so is NBT that is not a pattern list",
+    refusal(() => splitBlockInput('red_banner{CustomName:"x"}')).includes("CustomName"),
+  );
+  check(
+    "seventeen layers is more than the game draws",
+    refusal(() =>
+      parseBannerLayers(`[${Array.from({ length: 17 }, () => '{pattern:"base",color:"red"}').join(",")}]`),
+    ).includes("16"),
+  );
+  check("an unclosed bracket says so", refusal(() => splitBlockInput("red_banner[banner_patterns=[")).includes("never closed"));
+
+  /*
+   * The spelling `inspect_block` hands back is one `set_block` reads, including
+   * a legacy banner's colour, which lives in `Base` and not in its name.
+   */
+  const spelled = bannerBlockData(
+    { namespacedName: "minecraft:white_banner", properties: { rotation: "4" } },
+    { base: "red", layers: [{ pattern: "cross", color: "black" }] },
+  );
+  equal("a legacy banner is spelled with the colour its Base gives it", spelled,
+    'minecraft:red_banner[rotation=4,banner_patterns=[{pattern:"cross",color:"black"}]]');
+  const back = splitBlockInput(spelled);
+  equal("...and reads back as itself", [back.block, parseBannerLayers(back.bannerPatterns ?? "")], [
+    "minecraft:red_banner[rotation=4]",
+    [{ pattern: "cross", color: "black" }],
+  ]);
+}
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

@@ -225,6 +225,39 @@ export function servingChanged(
     before.requireAuth !== after.requireAuth
   );
 }
+
+/**
+ * A picture goes back as an image block, not as JSON with base64 in it --
+ * and what was said about it goes back beside it, as text.
+ *
+ * MCP has a content type for images and a client that gets one shows the model
+ * the picture; the same bytes inside a `text` block are a wall of base64 that
+ * costs the tokens and conveys nothing. That used to be the whole answer, which
+ * was right while the picture was the whole answer.
+ *
+ * It is not any more. A picture taken from a camera the tool placed comes with
+ * *where* the camera stood, and sometimes with a note that it had to move in
+ * front of the draw distance. Dropping those would leave the model describing a
+ * view without knowing which way it faced -- which is the exact confusion the
+ * `camera` argument exists to remove. So everything but the pixels rides in a
+ * text block after the image.
+ *
+ * `null` for anything that is not a picture, which is then answered as JSON.
+ * Here rather than in `server.ts` because that module imports Electron and
+ * the suites cannot load it.
+ */
+export function pictureContent(
+  result: unknown,
+): Array<{ type: "image"; data: string; mimeType: string } | { type: "text"; text: string }> | null {
+  const shot = result as { data?: unknown; width?: unknown } | null;
+  if (typeof shot?.data !== "string" || typeof shot.width !== "number") return null;
+  const { data, ...rest } = shot as Record<string, unknown> & { data: string };
+  return [
+    { type: "image", data, mimeType: "image/png" },
+    { type: "text", text: JSON.stringify(rest, null, 2) },
+  ];
+}
+
 /**
  * Which transport a request belongs to.
  *

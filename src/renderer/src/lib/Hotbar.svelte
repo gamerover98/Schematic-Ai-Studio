@@ -24,6 +24,7 @@
    * be the one that failed to persist.
    */
   import { HOTBAR_SLOTS } from "../../../shared/settings.js";
+  import { splitBlockInput } from "../../../shared/block_input.js";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { t } from "./i18n.svelte.js";
   import { isTyping } from "./typing.js";
@@ -52,9 +53,21 @@
 
   const { slots, active, visible, ownsWheel, onselect, onedit, onopeninventory }: Props = $props();
 
-  /** `minecraft:oak_planks` → `oak planks`, which is what fits under a tile. */
+  /**
+   * `minecraft:oak_planks` → `oak planks`, which is what fits under a tile.
+   *
+   * Through `splitBlockInput` first, because a slot may hold a patterned banner
+   * pasted as a whole `/give` command -- and labelled by its first characters
+   * that is `/give @p m…` under every one of them.
+   */
   function label(id: string): string {
-    return id.replace(/^minecraft:/, "").replace(/\[.*$/, "").replace(/_/g, " ");
+    let block = id;
+    try {
+      block = splitBlockInput(id).block;
+    } catch {
+      // Half a command: label what is there, as before.
+    }
+    return block.replace(/^minecraft:/, "").replace(/\[.*$/, "").replace(/_/g, " ");
   }
 
   /**

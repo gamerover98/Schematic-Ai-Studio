@@ -111,6 +111,21 @@ import {
   type Extent,
 } from "../domain/grow.js";
 import { peelEmptyFaces } from "../domain/shrink.js";
+import {
+  bannerFormatOf,
+  checkBannerPatterns,
+  regionCells,
+  restateBanners,
+  stampBanner,
+} from "../domain/banner_place.js";
+import {
+  BannerPatternError,
+  bannerBlockData,
+  parseBannerLayers,
+  readBanner,
+  type BannerLayer,
+} from "../pipeline/banner_nbt.js";
+import { isBannerBlock } from "../../shared/banner_patterns.js";
 
 export interface DocumentSession {
   readonly doc: SchematicDocument;
@@ -348,6 +363,11 @@ function toEntry(block: { namespacedName: string; properties?: Record<string, st
   return { namespacedName: block.namespacedName, properties: block.properties ?? {} };
 }
 
+/** The banner patterns a request carries, read, or `null` when it carries none. */
+function layersOf(block: { bannerPatterns?: string }): BannerLayer[] | null {
+  return block.bannerPatterns === undefined ? null : parseBannerLayers(block.bannerPatterns);
+}
+
 /**
  * A block that cannot exist in the version this schematic is for.
  *
@@ -383,15 +403,31 @@ export class VersionWouldLoseBlocksError extends Error {
     readonly count: number,
     readonly versionLabel: string,
     readonly replacement: string,
+    /**
+     * Banner pattern layers whose design the target does not have. Counted into
+     * the same refusal, because a banner losing its design is the same kind of
+     * loss as a block losing its existence, and one confirmation covers both.
+     */
+    readonly layers: { readonly count: number; readonly designs: readonly string[] } = {
+      count: 0,
+      designs: [],
+    },
   ) {
     const shown = blocks.slice(0, 6).join(", ");
     const rest = blocks.length - 6;
     const more = rest > 0 ? ", and " + String(rest) + " more" : "";
-    super(
-      `${count.toLocaleString()} block(s) of ${blocks.length} type(s) do not exist in ` +
-        `Minecraft ${versionLabel} and would be replaced with ${replacement}: ` +
-        `${shown}${more}. This can be undone.`,
-    );
+    const lostBlocks =
+      count === 0
+        ? ""
+        : `${count.toLocaleString()} block(s) of ${blocks.length} type(s) do not exist in ` +
+          `Minecraft ${versionLabel} and would be replaced with ${replacement}: ` +
+          `${shown}${more}. `;
+    const lostLayers =
+      layers.count === 0
+        ? ""
+        : `${layers.count.toLocaleString()} banner pattern layer(s) use a design Minecraft ` +
+          `${versionLabel} does not have and would be removed: ${layers.designs.join(", ")}. `;
+    super(`${lostBlocks}${lostLayers}This can be undone.`);
     this.name = "VersionWouldLoseBlocksError";
   }
 }
@@ -1083,6 +1119,14 @@ export function applyEdit(
           ? { ...request, x: clicked.x, y: clicked.y, z: clicked.z }
           : request;
     const entry = placeable(floodedPlacement(doc, target, held));
+    /*
+     * A patterned banner is checked here, before anything below can grow the
+     * document or merge a slab: a design the schematic's version does not
+     * have is refused by name, and a refusal found after a growth would have
+     * resized the box on its way out.
+     */
+    const layers = layersOf(request.block);
+    if (layers !== null) checkBannerPatterns(doc, entry, layers);
 
     /*
      * **The refusal**, and three boundaries on it.
@@ -1239,6 +1283,10 @@ export function applyEdit(
         }
         const wrote = tx.setBlock(at.minX, at.minY, at.minZ, entry) ? 1 : 0;
         broke = wrote > 0 && emptiness(entry);
+        // After the block, which drops whatever block entity it displaced.
+        if (layers !== null && wrote > 0) {
+          stampBanner(doc, tx, [{ x: at.minX, y: at.minY, z: at.minZ }], entry, layers);
+        }
         return wrote;
       },
       {
@@ -1270,11 +1318,41 @@ export function applyEdit(
    */
   if (request.kind === "setState") {
     const entry = placeable(toEntry(request.block));
+    const layers = layersOf(request.block);
+    if (layers !== null) checkBannerPatterns(doc, entry, layers);
     return runTransaction(
       doc,
       history,
       `Edit ${entry.namespacedName}`,
-      (tx) => (tx.setBlock(request.x, request.y, request.z, entry) ? 1 : 0),
+      (tx) => {
+        /*
+         * A state edit is not a new block, so what the block carries stays.
+         *
+         * `setBlock` drops the block entity of any cell it writes, which is right
+         * when a chest becomes stone and wrong here: turning a patterned banner
+         * in this panel erased its design, and editing a chest's `facing` would
+         * have emptied it. Only while the name is unchanged -- a different block
+         * is a different block, and its record would describe something else.
+         */
+        const kept = getBlockEntity(doc, request.x, request.y, request.z);
+        const before = getBlock(doc, request.x, request.y, request.z);
+        // The same state again writes nothing: `setBlock` would still take the
+        // record off and this would put it back, an undo step for no change.
+        const same = paletteEntryCacheKey(before) === paletteEntryCacheKey(entry);
+        let changed = !same && tx.setBlock(request.x, request.y, request.z, entry) ? 1 : 0;
+        if (!same && kept !== null && before.namespacedName === entry.namespacedName) {
+          tx.setBlockEntity(request.x, request.y, request.z, kept);
+        }
+        // The design, after the block and its carried record, in the same undo
+        // step. A banner whose state did not move still counts as edited.
+        if (
+          layers !== null &&
+          stampBanner(doc, tx, [{ x: request.x, y: request.y, z: request.z }], entry, layers) > 0
+        ) {
+          changed = 1;
+        }
+        return changed;
+      },
       { derive: false },
     );
   }
@@ -1306,26 +1384,52 @@ export function applyEdit(
 
   if (request.kind === "fill") {
     const entry = placeable(toEntry(request.block));
+    const layers = layersOf(request.block);
+    if (layers !== null) checkBannerPatterns(doc, entry, layers);
     return runTransaction(doc, history, `Fill with ${entry.namespacedName}`, (tx) => {
       // One transaction, so growing and filling are one undo step -- and the
       // resize goes in first, because a block delta recorded before it would be
       // an index into the old shape. `history.ts` flushes on resize for exactly
       // that reason.
       if (growth !== null) tx.resize(growth.size, growth.shift);
-      return tx.fill(region, entry);
+      const changed = tx.fill(region, entry);
+      // Every banner in the box, including one that already held this state
+      // and so was not counted as changed: it was asked for with this design.
+      if (layers !== null) stampBanner(doc, tx, regionCells(region), entry, layers);
+      return changed;
     });
   }
 
   // `from` is a pattern over what is already there, so it is deliberately not
   // guarded: refusing it would make "take out the block some other tool wrote"
   // impossible, which is exactly when somebody needs it.
+  if (request.from.bannerPatterns !== undefined) {
+    throw new BannerPatternError(
+      "The block being replaced is matched by its name and states; banner patterns only go on the block that replaces it.",
+    );
+  }
   const from = toEntry(request.from);
   const to = placeable(toEntry(request.to));
+  const layers = layersOf(request.to);
+  if (layers !== null) checkBannerPatterns(doc, to, layers);
   return runTransaction(
     doc,
     history,
     `Replace ${from.namespacedName} with ${to.namespacedName}`,
-    (tx) => tx.replace(region, from, to),
+    (tx) => {
+      // The cells the replace is about to write, found before it writes them:
+      // afterwards they are indistinguishable from the ones that already held
+      // `to`, and those were not asked to change.
+      const matched =
+        layers === null
+          ? []
+          : [...regionCells(region)].filter(({ x, y, z }) =>
+              matchesBlockPattern(getBlock(doc, x, y, z), from),
+            );
+      const changed = tx.replace(region, from, to);
+      if (layers !== null) stampBanner(doc, tx, matched, to, layers);
+      return changed;
+    },
   );
 }
 
@@ -1540,8 +1644,21 @@ export function setDocumentVersion(
   const plan = new Map<string, { to: PaletteEntry; kind: Kind }>();
   const doomed: string[] = [];
 
+  /*
+   * Banners, whose look lives in a block entity the block pass cannot see.
+   * Asked first because it renames: going back past the Flattening a
+   * `magenta_banner` is a `white_banner` with a `Base`, not a block to drop.
+   */
+  const banners = restateBanners(doc, { era: info.era, dataVersion: info.dataVersion });
+
   for (const entry of doc.palette) {
     if (entry.namespacedName === AIR.namespacedName) continue;
+
+    const bannerRename = banners.renames.get(paletteEntryCacheKey(entry));
+    if (bannerRename !== undefined) {
+      plan.set(paletteEntryCacheKey(entry), { to: bannerRename, kind: "rename" });
+      continue;
+    }
 
     // 1. the name.
     const renamed = target === null ? null : renameFor(entry.namespacedName, target);
@@ -1596,13 +1713,14 @@ export function setDocumentVersion(
     else rewrittenCells += cells;
   }
 
-  if (droppedCells > 0 && options.dropUnrepresentable !== true) {
+  if ((droppedCells > 0 || banners.droppedLayers > 0) && options.dropUnrepresentable !== true) {
     const names = [...new Set(doomed)].sort();
     throw new VersionWouldLoseBlocksError(
       names,
       droppedCells,
       info.label,
       fill.namespacedName === AIR.namespacedName ? "air" : fill.namespacedName,
+      { count: banners.droppedLayers, designs: banners.droppedDesigns },
     );
   }
 
@@ -1620,12 +1738,33 @@ export function setDocumentVersion(
     history,
     `Set the Minecraft version to ${info.label}`,
     (tx) => {
+      /*
+       * The block entities of every cell the remap renames or restates, put
+       * back after it. `remap` writes through `setBlock`, which treats any
+       * write as displacing what was there -- so a rename was quietly taking
+       * the block entity with it, which for `sign` becoming `oak_sign` is the
+       * text on every sign. A dropped block keeps nothing, as before.
+       */
+      const kept = [...doc.blockEntities.values()].filter((record) => {
+        const step = plan.get(paletteEntryCacheKey(getBlock(doc, ...record.pos)));
+        return step !== undefined && step.kind !== "drop";
+      });
       // Blocks first, then the header: a run that threw half way must never
       // leave a document claiming a version its palette contradicts.
       const wrote =
         plan.size === 0
           ? 0
           : tx.remap(region, (entry) => plan.get(paletteEntryCacheKey(entry))?.to ?? null);
+      for (const record of kept) tx.setBlockEntity(...record.pos, record);
+      // Then each banner as the target spells it: its name where the colour
+      // moved in or out of it, and its block entity in the target's format.
+      for (const cell of banners.cells) {
+        const here = getBlock(doc, cell.x, cell.y, cell.z);
+        if (here.namespacedName !== cell.name) {
+          tx.setBlock(cell.x, cell.y, cell.z, { namespacedName: cell.name, properties: here.properties });
+        }
+        tx.setBlockEntity(cell.x, cell.y, cell.z, cell.record);
+      }
       tx.setHeader({ ...readHeader(doc), dataVersion: info.dataVersion });
       return wrote;
     },
@@ -1638,6 +1777,14 @@ export function setDocumentVersion(
     parts.push(
       `${droppedCells.toLocaleString()} replaced with ` +
         (fill.namespacedName === AIR.namespacedName ? "air" : fill.namespacedName),
+    );
+  }
+  if (banners.cells.length > 0) {
+    parts.push(`${banners.cells.length.toLocaleString()} banner(s) rewritten for ${info.label}`);
+  }
+  if (banners.droppedLayers > 0) {
+    parts.push(
+      `${banners.droppedLayers.toLocaleString()} pattern layer(s) removed (${banners.droppedDesigns.join(", ")})`,
     );
   }
   return {
@@ -1756,7 +1903,15 @@ export function redoEdit(session: DocumentSession): string | null {
 export function inspect(session: DocumentSession, x: number, y: number, z: number) {
   const entry = getBlock(session.doc, x, y, z);
   const blockEntity = session.doc.blockEntities.get(`${x},${y},${z}`) ?? null;
+  const banner = isBannerBlock(entry.namespacedName);
+  const look =
+    blockEntity !== null && banner ? readBanner(blockEntity.nbt, bannerFormatOf(session.doc)) : null;
   return {
+    ...(look !== null && (look.layers.length > 0 || look.base !== null)
+      ? { blockData: bannerBlockData(entry, look) }
+      : {}),
+    // Every banner, patterned or not: the inspector's editor starts from here.
+    ...(banner ? { banner: { layers: (look?.layers ?? []).map((layer) => ({ ...layer })) } } : {}),
     block: entry.namespacedName,
     properties: { ...entry.properties },
     blockEntity:

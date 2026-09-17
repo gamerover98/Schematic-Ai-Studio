@@ -42,6 +42,15 @@ import {
 } from "../../shared/mc_versions.js";
 import { mayDelete, mayReplaceDocument, withinRoot, type Verdict } from "./policy.js";
 import { type DocumentSession } from "../services/session.js";
+import {
+  AIM_SIDES,
+  DEFAULT_AIM_ELEVATION,
+  MAX_AIM_ELEVATION,
+  parseCameraAim,
+  resolveCameraAim,
+  type CameraPlacement,
+} from "../../shared/camera_aim.js";
+import type { CameraState } from "../../shared/ipc.js";
 
 /** Everything these tools need that they must not import for themselves. */
 export interface Lifecycle {
@@ -104,11 +113,27 @@ export interface Lifecycle {
   /**
    * A picture of the 3D viewport, as PNG bytes already base64-encoded.
    *
+   * `camera` is where to put the camera first, already resolved; `null` leaves
+   * it where the user had it. The answer carries where it actually stood, which
+   * is `null` only when the window could not say.
+   *
    * `null` when there is no window to photograph — the process outlives its
    * window on macOS, and a client asking then should be told so rather than
    * handed a blank image.
    */
-  capture(): Promise<{ data: string; width: number; height: number } | null>;
+  capture(camera: CameraPlacement | null): Promise<{
+    data: string;
+    width: number;
+    height: number;
+    camera: CameraState | null;
+  } | null>;
+  /**
+   * How far the viewport draws, in blocks.
+   *
+   * Asked per call for `allowDelete`'s reason: it is a setting the user can
+   * move, and a camera stood behind the far plane photographs an empty sky.
+   */
+  drawDistance(): Promise<number>;
   /** The open schematic's own version history, newest first. */
   versions(): Promise<readonly { id: string; label: string; at: number }[]>;
   /** Snapshot the current state under a label. */
@@ -210,12 +235,17 @@ const DISCARD = {
  * invisible in a block list — a roof one block short, a wall inside out, a
  * staircase facing the wall.
  *
- * It photographs the window as it *is*, including the camera angle the user
- * left it at. Aiming the camera would need main to make a request *of* the
- * renderer and wait for it, and main can only send — a correlation id and a
- * reply channel is real work and is deliberately not in this change. So the
- * description says what the picture is of, rather than letting a model assume
- * it chose the angle.
+ * Without `camera` it photographs the window as it *is*, the angle the user
+ * left it at. With one it moves the camera first -- a side of the build by
+ * compass word, or a position -- waits for that frame to be drawn, and then
+ * takes the picture. The camera **stays** there afterwards, which is the user's
+ * choice and the honest one: the person watching sees what the model looked at,
+ * and R puts the establishing shot back.
+ *
+ * Still `readOnly`. The flag is a promise about the schematic, the undo stack
+ * and the clipboard, and none of them moves; the view is presentation, the way
+ * a scrollbar is. Marking it otherwise would put a permission prompt in front
+ * of every look a model takes at its own work.
  */
 /**
  * The `version` property every tool that names one shares.
@@ -241,22 +271,87 @@ const VERSION_PROPERTY = {
     versionRangesSentence(),
 } as const;
 
+const POINT = {
+  type: "object",
+  properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } },
+  required: ["x", "y", "z"],
+  additionalProperties: false,
+} as const;
+
 const CAPTURE: LifecycleSpec = {
   name: "capture_viewport",
   description:
-    "A picture of the 3D viewport as the user is currently looking at it — their camera angle, their lighting, their theme. Use it to check what you have built actually looks right; a block list cannot show you a wall facing the wrong way. You cannot aim the camera, so ask the user to move it if you need another angle.",
-  schema: { type: "object", properties: {}, additionalProperties: false },
+    "A picture of the 3D viewport — the user's lighting and theme. Use it to check that what you have built actually looks right; a block list cannot show you a wall facing the wrong way. " +
+    "Without `camera` it shows the view the user left. With `camera` it first moves the camera, and the camera stays there afterwards, so the user sees what you looked at. " +
+    "Coordinates are the schematic's own blocks: north is -z, east is +x, up is +y. " +
+    "The answer says where the camera stood.",
+  schema: {
+    type: "object",
+    properties: {
+      camera: {
+        type: "object",
+        description:
+          "Where to look from. `{}` is the establishing shot of the whole schematic. " +
+          "`from` names the side the camera stands on (from `north` shows the north face of the build); " +
+          "`target` defaults to the middle of the schematic and `distance` to far enough to see all of it. " +
+          "Or give an exact `position` instead of `from`.",
+        properties: {
+          target: { ...POINT, description: "The point to look at, in blocks." },
+          position: { ...POINT, description: "Exactly where the camera stands. Not with from." },
+          from: { type: "string", enum: [...AIM_SIDES] },
+          elevation: {
+            type: "number",
+            minimum: -MAX_AIM_ELEVATION,
+            maximum: MAX_AIM_ELEVATION,
+            description: `Degrees above the horizontal, with a compass side in from. Default ${DEFAULT_AIM_ELEVATION}.`,
+          },
+          distance: { type: "number", exclusiveMinimum: 0, description: "Blocks from the target." },
+        },
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
+  },
   readOnly: true,
   destructive: false,
-  async run(host) {
-    const shot = await host.capture();
+  async run(host, args) {
+    const aim = parseCameraAim((args as { camera?: unknown } | null)?.camera);
+    if (!aim.ok) throw new McpRefusal(aim.refused);
+
+    let camera: CameraPlacement | null = null;
+    let notes: readonly string[] = [];
+    if (aim.value !== null) {
+      /*
+       * Resolved against the open document, which is what "the middle of the
+       * schematic" and "far enough to see all of it" are measured from. With
+       * nothing open there is nothing those words can mean, and the viewport
+       * is showing the start screen besides.
+       */
+      const session = host.session();
+      if (session === null) {
+        throw new McpRefusal(
+          "No schematic is open, so there is nothing to aim the camera at. Use open_document or create_document first.",
+        );
+      }
+      const { doc } = session;
+      const resolved = resolveCameraAim(
+        aim.value,
+        { width: doc.width, height: doc.height, length: doc.length },
+        await host.drawDistance(),
+      );
+      if (!resolved.ok) throw new McpRefusal(resolved.refused);
+      camera = resolved.value.camera;
+      notes = resolved.value.notes;
+    }
+
+    const shot = await host.capture(camera);
     if (shot === null) {
       throw new McpRefusal(
         "There is no window open to photograph. Ask the user to bring Schematic AI Studio " +
           "to the front and try again.",
       );
     }
-    return shot;
+    return notes.length === 0 ? shot : { ...shot, note: notes.join(" ") };
   },
 };
 

@@ -17,6 +17,7 @@
 // stay full cubes, which is the same answer as before for anything not listed.
 
 import { paletteEntryIsAir, type CellFace, type PaletteEntry } from "./types.js";
+import { DYE_HEX } from "../../shared/banner_patterns.js";
 
 /** A box in Minecraft's 1/16 units: `[x0, y0, z0, x1, y1, z1]`, each 0..16. */
 export type Box = readonly [number, number, number, number, number, number];
@@ -1750,39 +1751,46 @@ function composter(entry: PaletteEntry): BlockShape {
 const BANNER_SCALE = 2 / 3;
 const bannerUnits = (n: number): number => n * BANNER_SCALE;
 
-/** The three parts' windows on the sheet, in the sheet's own texels. */
-const BANNER_CLOTH_UV = unwrapCube(0, 0, 20, 40, 1);
+/**
+ * The flag's windows, as `BannerRenderer` puts them on the cloth.
+ *
+ * Not `unwrapCube`'s, which reads a strip bottom-up and puts the first side
+ * window on the model's north face -- right for a chest, and exactly wrong
+ * here. The flag is a `ModelPart` cube at `(-10, 0, -2)` scaled by
+ * `(2/3, -2/3, -2/3)`, so model `y` runs *down* the world and model `z` is
+ * turned round: the cube's north window, `u 1..21 v 1..41`, lands on the side
+ * facing away from the pole, which is the side the banner faces, the right way
+ * up and with `u 1` on the west.
+ *
+ * It made no difference while the cloth was one flat colour, and that is why
+ * it survived: the front wore the back's window upside down, and every texel of
+ * both was the same dye. A pattern is not symmetric, and `stripe_left` came out
+ * on the right, at the bottom. `tests/blocks.ts` states it on the front face in
+ * pixels.
+ *
+ * In sixteenths of a 64-wide sheet, so a texel is a quarter.
+ */
+const BANNER_CLOTH_UV: Readonly<Record<string, UvWindow>> = {
+  south: [1 / 4, 1 / 4, 21 / 4, 41 / 4],
+  // The back reads the mirrored window, so from behind a design is a mirror
+  // image of the front rather than a copy of it -- which is what cloth is.
+  north: [22 / 4, 1 / 4, 42 / 4, 41 / 4],
+  west: [0, 1 / 4, 1 / 4, 41 / 4],
+  east: [21 / 4, 1 / 4, 22 / 4, 41 / 4],
+  up: [1 / 4, 0, 21 / 4, 1 / 4],
+  down: [21 / 4, 0, 41 / 4, 1 / 4],
+};
+
+/** The pole's and the bar's windows, in the sheet's own texels. */
 const BANNER_POLE_UV = unwrapCube(44, 0, 2, 42, 2);
 const BANNER_BAR_UV = unwrapCube(0, 42, 20, 2, 2);
 
 /**
- * Vanilla's `DyeColor.textureDiffuseColor`, which is what the base layer is
- * multiplied by.
- *
- * Corroborated against the pack rather than trusted: every one of the sixteen
- * is within 35 of the mean of its own `<colour>_wool` texture, and every one
- * of those means is the same hue a shade darker -- which is what a wool
- * texture is. A transposed pair would show up as two colours swapping places,
- * not as a uniform offset.
+ * The dyes' tint colours. The table is in `shared/banner_patterns.ts` now, where
+ * the inspector's colour picker can read it too; re-exported so the pipeline
+ * and its checks keep one name.
  */
-const DYE_COLOURS: Readonly<Record<string, string>> = {
-  white: "f9fffe",
-  orange: "f9801d",
-  magenta: "c74ebd",
-  light_blue: "3ab3da",
-  yellow: "fed83d",
-  lime: "80c71f",
-  pink: "f38baa",
-  gray: "474f52",
-  light_gray: "9d9d97",
-  cyan: "169c9c",
-  purple: "8932b8",
-  blue: "3c44aa",
-  brown: "835432",
-  green: "5e7c16",
-  red: "b02e26",
-  black: "1d1d21",
-};
+export const DYE_COLOURS: Readonly<Record<string, string>> = DYE_HEX;
 
 /**
  * The cloth's texture: the base layer, tinted by the block's own dye.

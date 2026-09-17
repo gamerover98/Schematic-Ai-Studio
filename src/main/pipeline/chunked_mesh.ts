@@ -136,6 +136,16 @@ export interface ChunkMeshCache {
    */
   signs: Map<number, string>;
   /**
+   * The composed cloth each patterned banner wears, by flat voxel index.
+   *
+   * The signs' rule a fourth time: a banner's design is a block entity,
+   * so repainting one moves no voxel and no light, and without this the chunk
+   * would go on showing the old design. The texture key *is* the digest --
+   * `ModelBaker.bannerCloth` builds it from everything that went into the
+   * pixels.
+   */
+  banners: Map<number, string>;
+  /**
    * What the void block was, as `voidDigest` renders it.
    *
    * The three grids above are the document; this is not. It is the one input
@@ -362,6 +372,7 @@ export function createChunkMeshCache(): ChunkMeshCache {
     voxels: new Int32Array(0),
     light: new Uint8Array(0),
     signs: new Map(),
+    banners: new Map(),
     voidKey: "",
     chunks: new Map(),
   };
@@ -400,6 +411,8 @@ export async function buildChunkedMesh(
   signs: ReadonlyMap<number, SignText> | null = null,
   /** Palette entries that are the void block; see `culledFaces`. */
   voidIndices: ReadonlySet<number> | null = null,
+  /** The patterned banners' cloth keys, by flat index; see `culledFaces`. */
+  banners: ReadonlyMap<number, string> | null = null,
 ): Promise<ChunkedMeshResult> {
   const width = struct.bounds.maxX - struct.bounds.minX + 1;
   const height = struct.bounds.maxY - struct.bounds.minY + 1;
@@ -451,9 +464,10 @@ export async function buildChunkedMesh(
   if (signs !== null) {
     for (const [at, text] of signs) written.set(at, signDigest(text));
   }
-  if (reusable) {
-    for (const at of new Set([...written.keys(), ...cache.signs.keys()])) {
-      if (written.get(at) === cache.signs.get(at)) continue;
+  const painted = new Map<number, string>(banners ?? []);
+  const markOwnChunk = (before: ReadonlyMap<number, string>, after: ReadonlyMap<number, string>): void => {
+    for (const at of new Set([...after.keys(), ...before.keys()])) {
+      if (after.get(at) === before.get(at)) continue;
       const x = Math.floor(at / (height * length));
       const rest = at - x * height * length;
       const cx = Math.floor(x / CHUNK_SIZE);
@@ -461,6 +475,12 @@ export async function buildChunkedMesh(
       const cz = Math.floor((rest % length) / CHUNK_SIZE);
       if (cx < nx && cy < ny && cz < nz) dirty.add(chunkKey(cx, cy, cz, nx, ny));
     }
+  };
+  if (reusable) {
+    markOwnChunk(cache.signs, written);
+    // A banner's cloth hangs into the cell below or above, but it is emitted
+    // by the banner's own cell, so its own chunk is the one that redraws it.
+    markOwnChunk(cache.banners, painted);
   }
 
   const chunks = reusable ? new Map(cache.chunks) : new Map<number, ChunkLayers>();
@@ -483,6 +503,7 @@ export async function buildChunkedMesh(
       shading,
       signs ?? undefined,
       voidIndices ?? undefined,
+      banners ?? undefined,
     );
     /*
      * Partitioned here rather than meshed twice.
@@ -571,6 +592,7 @@ export async function buildChunkedMesh(
       voxels: Int32Array.from(struct.voxels),
       light,
       signs: written,
+      banners: painted,
       voidKey,
       chunks,
     },

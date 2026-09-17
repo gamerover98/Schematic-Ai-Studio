@@ -24,6 +24,8 @@ import {
   type Artifact,
   type BlockIconsResponse,
   type BgptApi,
+  type CameraAimReply,
+  type CameraAimRequest,
   type DocumentMeshResponse,
   type DocumentState,
   type DocumentStateResponse,
@@ -89,6 +91,14 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.viewportRect, rect) as Promise<void>,
   reportPointerLock: (locked: boolean) =>
     ipcRenderer.invoke(IPC.pointerLock, locked) as Promise<void>,
+  onCameraAim(listener) {
+    const wrapped = (_event: unknown, payload: CameraAimRequest) => listener(payload);
+    ipcRenderer.on(IPC.cameraAim, wrapped);
+    return () => ipcRenderer.removeListener(IPC.cameraAim, wrapped);
+  },
+  // `send`, because the request came as an event too: `invoke` only runs from
+  // the renderer to main, and this is the other half of a question main asked.
+  reportCameraAimed: (reply: CameraAimReply) => ipcRenderer.send(IPC.cameraAimed, reply),
   copyToClipboard: (text: string) =>
     ipcRenderer.invoke(IPC.clipboardWrite, text) as Promise<void>,
   getDefaultOutputDir: () => ipcRenderer.invoke(IPC.defaultOutputDir) as Promise<string>,

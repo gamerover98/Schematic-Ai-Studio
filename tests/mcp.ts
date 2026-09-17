@@ -37,6 +37,7 @@ import {
   isInside,
   mayDelete,
   mayReplaceDocument,
+  pictureContent,
   routeRequest,
   servingChanged,
   samePath,
@@ -44,6 +45,7 @@ import {
   withinRoot,
 } from "../src/main/mcp/policy.js";
 import { countBlocks, getBlock } from "../src/main/domain/document.js";
+import { BANNER_EDITOR_URL, BANNER_PATTERNS } from "../src/shared/banner_patterns.js";
 import {
   MC_VERSION_NAMES,
   dataVersionOf,
@@ -170,6 +172,7 @@ function fakeLifecycle(over: Partial<Lifecycle> & { log?: string[] } = {}): Life
       log.push("announce");
     },
     capture: async () => null,
+    drawDistance: async () => 512,
     versions: async () => [{ id: "v1", label: "before the roof", at: 1 }],
     saveVersion: async (label) => {
       log.push(`version:${label}`);
@@ -436,7 +439,7 @@ try {
         await callTool(
           tool.name,
           region,
-          options(spy, fakeLifecycle({ capture: async () => ({ data: "iVBOR", width: 8, height: 8 }) })),
+          options(spy, fakeLifecycle({ capture: async () => ({ data: "iVBOR", width: 8, height: 8, camera: null }) })),
         );
       } catch (err) {
         raised = err instanceof Error ? err.message : String(err);
@@ -970,12 +973,165 @@ try {
     const shot = (await callTool(
       "capture_viewport",
       {},
-      options(sink, fakeLifecycle({ capture: async () => ({ data: "iVBOR", width: 1024, height: 640 }) })),
+      options(sink, fakeLifecycle({ capture: async () => ({ data: "iVBOR", width: 1024, height: 640, camera: null }) })),
     )).result as { data: string; width: number };
     equal("...and otherwise hands back the image", shot.width, 1024);
     // Read-only: photographing the window is not an edit, so nothing queues and
     // the viewport has nothing to redraw.
     equal("...without touching the undo stack", currentSession()?.history.undoStack.length ?? -1, 0);
+
+    /*
+     * Aiming the camera.
+     *
+     * The picture is only as useful as the model's idea of where it was taken
+     * from, so what is checked is what reaches the window: the camera the host
+     * is asked for, resolved from compass words against the open document. The
+     * window itself is Electron's and cannot be reached from here.
+     */
+    {
+      const asked: unknown[] = [];
+      const aiming = (drawDistance = 512) =>
+        fakeLifecycle({
+          drawDistance: async () => drawDistance,
+          capture: async (camera) => {
+            asked.push(camera);
+            return {
+              data: "iVBOR",
+              width: 8,
+              height: 8,
+              camera: camera === null ? null : { ...camera, projection: "perspective" as const },
+            };
+          },
+        });
+      const shoot = async (args: unknown, drawDistance?: number) => {
+        asked.length = 0;
+        const result = await attempt("capture_viewport", args, options(sink, aiming(drawDistance)));
+        return { result, camera: asked[0] as { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } | null | undefined };
+      };
+
+      open(); // 8x8x8, so the middle is (4, 4, 4)
+
+      const plain = await shoot({});
+      equal("no camera leaves the view where the user had it", plain.camera, null);
+
+      const north = await shoot({ camera: { from: "north" } });
+      equal("from north looks at the middle of the schematic", north.camera?.target, { x: 4, y: 4, z: 4 });
+      check(
+        "...standing on the north side, which is -z",
+        north.camera !== undefined && north.camera !== null && north.camera.position.z < 4 && Math.abs(north.camera.position.x - 4) < 1e-9,
+        JSON.stringify(north.camera),
+      );
+      check(
+        "...above the target, at the default elevation",
+        north.camera != null && north.camera.position.y > 4,
+        JSON.stringify(north.camera),
+      );
+      const reach = north.camera == null
+        ? NaN
+        : Math.hypot(north.camera.position.x - 4, north.camera.position.y - 4, north.camera.position.z - 4);
+      check("...far enough out to see all of it by default", Math.abs(reach - 8 * 1.6) < 1e-9, String(reach));
+      check(
+        "...and says where it stood",
+        (north.result.camera as { target?: unknown } | undefined)?.target !== undefined,
+        JSON.stringify(north.result),
+      );
+
+      const east = await shoot({ camera: { from: "east", elevation: 0, distance: 10 } });
+      equal("from east stands on +x, level, at the distance asked", east.camera?.position, { x: 14, y: 4, z: 4 });
+
+      const above = await shoot({ camera: { from: "above", distance: 20 } });
+      check(
+        "from above looks straight down, leaning south so north stays at the top",
+        above.camera != null &&
+          Math.abs(above.camera.position.y - 24) < 1e-9 &&
+          above.camera.position.z > 4 &&
+          above.camera.position.z - 4 < 0.1,
+        JSON.stringify(above.camera),
+      );
+
+      const exact = await shoot({ camera: { position: { x: 1, y: 2, z: 3 }, target: { x: 0, y: 0, z: 0 } } });
+      equal("an exact position is taken as given", exact.camera, {
+        position: { x: 1, y: 2, z: 3 },
+        target: { x: 0, y: 0, z: 0 },
+      });
+
+      const establishing = await shoot({ camera: {} });
+      check(
+        "an empty camera is the establishing shot, off the +x/+z corner",
+        establishing.camera != null &&
+          establishing.camera.position.x > 4 &&
+          establishing.camera.position.z > 4 &&
+          establishing.camera.position.y > 4,
+        JSON.stringify(establishing.camera),
+      );
+
+      /*
+       * Brought in front of the far plane, and said out loud. A camera stood
+       * behind it photographs an empty sky, and moving it silently would leave
+       * the model believing the picture was taken from where it asked.
+       */
+      const far = await shoot({ camera: { from: "south", distance: 1000 } }, 100);
+      const farReach = far.camera == null
+        ? NaN
+        : Math.hypot(far.camera.position.x - 4, far.camera.position.y - 4, far.camera.position.z - 4);
+      check("a camera past the draw distance is brought in front of it", farReach <= 90 + 1e-9, String(farReach));
+      check(
+        "...and the answer says so",
+        typeof far.result.note === "string" && (far.result.note as string).includes("draw"),
+        JSON.stringify(far.result),
+      );
+
+      for (const [label, camera, word] of [
+        ["an unknown side", { from: "up" }, "from"],
+        ["a position and a side at once", { from: "north", position: { x: 0, y: 0, z: 0 } }, "not both"],
+        ["an elevation past the pole", { from: "north", elevation: 95 }, "above"],
+        ["an elevation with no side", { elevation: 10 }, "from"],
+        ["a field that does not exist", { yaw: 90 }, "yaw"],
+        ["a distance of nothing", { from: "west", distance: 0 }, "distance"],
+        ["a position on its own target", { position: { x: 4, y: 4, z: 4 } }, "same point"],
+      ] as const) {
+        const refused = await shoot({ camera });
+        check(
+          `${label} is refused by name, before the window is asked`,
+          typeof refused.result.refused === "string" &&
+            (refused.result.refused as string).includes(word) &&
+            refused.camera === undefined,
+          JSON.stringify(refused.result),
+        );
+      }
+
+      closeDocument();
+      const nothing = await shoot({ camera: { from: "north" } });
+      check(
+        "with nothing open there is nothing to aim at",
+        typeof nothing.result.refused === "string" && (nothing.result.refused as string).includes("open_document"),
+        JSON.stringify(nothing.result),
+      );
+      open();
+    }
+
+    /*
+     * And the picture reaches the client as an image *with* its camera beside
+     * it. It used to be the image alone, which was the whole answer while the
+     * tool could not aim; now the model needs to know which way it was facing.
+     */
+    {
+      const content = pictureContent({
+        data: "iVBOR",
+        width: 8,
+        height: 8,
+        camera: { position: { x: 1, y: 2, z: 3 }, target: { x: 0, y: 0, z: 0 }, projection: "perspective" },
+        note: "Moved in.",
+      });
+      equal("a picture is an image block first", content?.[0], { type: "image", data: "iVBOR", mimeType: "image/png" });
+      const described = content?.[1]?.type === "text" ? JSON.parse(content[1].text) : null;
+      check(
+        "...with the camera and the note beside it, and no pixels in the text",
+        described !== null && described.camera?.position?.y === 2 && described.note === "Moved in." && !("data" in described),
+        JSON.stringify(described),
+      );
+      equal("...and anything else is not a picture", pictureContent({ changed: 1 }), null);
+    }
 
     /*
      * Going back to a version that is not there.
@@ -1011,6 +1167,105 @@ try {
       "announce",
     ]);
 
+  }
+
+  // --- a banner's design, over the wire --------------------------------------
+  //
+  // A model designing a banner needs three things this app now has: the names
+  // of the designs with what each looks like, a way to put them on a banner,
+  // and a spelling of a banner it is looking at that places it again.
+  console.log("\n--- a banner's design, over the wire ---");
+  {
+    const sink = { changed: 0 };
+    const banners = {
+      ...options(sink),
+      allowedBlocks: new Set([...ALLOWED, "minecraft:magenta_banner", "minecraft:white_banner"]),
+    };
+
+    closeDocument();
+    const listed = await attempt("list_banner_patterns", {}, banners);
+    const rows = (listed.patterns ?? []) as Array<{ id: string; description: string; since: string }>;
+    equal("every design is listed with nothing open", rows.map((row) => row.id), BANNER_PATTERNS.map((row) => row.id));
+    check("...each with what it looks like", rows.every((row) => row.description.length > 10));
+    check("...and the release it arrived in, by label", rows.find((row) => row.id === "globe")?.since === "1.14");
+    equal("...beside the sixteen colours", (listed.colors as string[] | undefined)?.length, 16);
+    check(
+      "the editor a user designs one on is named, with its address",
+      (listed.editor as { url?: string } | undefined)?.url === BANNER_EDITOR_URL &&
+        (findTool("list_banner_patterns")?.description ?? "").includes(BANNER_EDITOR_URL),
+    );
+    check(
+      "listing them is read-only",
+      describeTools().find((tool) => tool.name === "list_banner_patterns")?.annotations.readOnlyHint === true,
+    );
+
+    open();
+    const given =
+      '/give @p minecraft:magenta_banner[banner_patterns=[{"pattern":"mojang","color":"orange"},{"pattern":"flower","color":"magenta"},{"pattern":"gradient","color":"blue"},{"pattern":"circle","color":"white"},{"pattern":"triangle_bottom","color":"brown"},{"pattern":"triangle_bottom","color":"black"}]] 1';
+    const placed = await attempt("set_block", { x: 1, y: 1, z: 1, block: given }, banners);
+    equal("a whole /give command is placed as a banner", placed.changed, 1);
+    const inspected = await attempt("inspect_block", { x: 1, y: 1, z: 1 }, banners);
+    const spelled = String(inspected.blockData ?? "");
+    check(
+      "inspecting it spells the design, in order",
+      spelled.startsWith("minecraft:magenta_banner[") &&
+        spelled.includes('{pattern:"mojang",color:"orange"}') &&
+        spelled.indexOf('"brown"') < spelled.indexOf('"black"'),
+      spelled,
+    );
+    await attempt("set_block", { x: 2, y: 1, z: 1, block: spelled }, banners);
+    equal(
+      "...and that spelling places the same banner again",
+      (await attempt("inspect_block", { x: 2, y: 1, z: 1 }, banners)).blockData,
+      spelled,
+    );
+
+    const depth = currentSession()?.history.undoStack.length ?? -1;
+    const redesigned = await attempt(
+      "set_banner_patterns",
+      { x: 1, y: 1, z: 1, patterns: [{ pattern: "creeper", color: "black" }] },
+      banners,
+    );
+    equal("a standing banner takes a new design", redesigned.changed, 1);
+    check(
+      "...which replaces the old one",
+      String((await attempt("inspect_block", { x: 1, y: 1, z: 1 }, banners)).blockData).endsWith(
+        'banner_patterns=[{pattern:"creeper",color:"black"}]]',
+      ),
+    );
+    equal("...as one undo step", currentSession()?.history.undoStack.length, depth + 1);
+
+    await attempt("set_block", { x: 3, y: 1, z: 1, block: "minecraft:stone" }, banners);
+    const notBanner = await attempt(
+      "set_banner_patterns",
+      { x: 3, y: 1, z: 1, patterns: [{ pattern: "creeper", color: "black" }] },
+      banners,
+    );
+    check(
+      "a cell that is not a banner is refused by name",
+      String(notBanner.refused ?? "").includes("not a banner"),
+      JSON.stringify(notBanner),
+    );
+    const unknown = await attempt(
+      "set_banner_patterns",
+      { x: 1, y: 1, z: 1, patterns: [{ pattern: "dragon", color: "black" }] },
+      banners,
+    );
+    check(
+      "a design that does not exist is refused by name",
+      String(unknown.refused ?? "").includes("dragon"),
+      JSON.stringify(unknown),
+    );
+    const onStone = await attempt(
+      "set_block",
+      { x: 4, y: 1, z: 1, block: 'minecraft:stone[banner_patterns=[{pattern:"cross",color:"red"}]]' },
+      banners,
+    );
+    check(
+      "set_block refuses patterns on a block that is not a banner",
+      String(onStone.refused ?? "").includes("not a banner"),
+      JSON.stringify(onStone),
+    );
   }
 
   // --- the version is the client's to choose -------------------------------

@@ -254,6 +254,34 @@ console.log("\n--- and it skips the untouched chunks ---");
   equal("...and rubbing it out does too", rubbedOut.rebuilt, 1);
 }
 
+// --- a banner's design is a block entity too --------------------------------
+//
+// The signs' rule once more. Repainting a banner moves no voxel and no light,
+// so without the overlay being diffed the chunk would go on showing the old
+// design -- the new one in the file, the old one on screen.
+console.log("\n--- a banner's design ---");
+{
+  const doc = seeded();
+  const first = await fromScratch(doc);
+  const BANNER = block("minecraft:white_banner", { rotation: "0" });
+  setBlock(doc, 5, 5, 5, BANNER);
+  const at = 5 * doc.height * doc.length + 5 * doc.length + 5;
+  const painted = (key: string) => new Map([[at, key]]);
+  const mesh = (cache: ChunkMeshCache, banners: ReadonlyMap<number, string> | null) =>
+    buildChunkedMesh(toStructureData(doc), baker, buildAtlas(baker.textures).uvRects, 1, cache, null, null, null, banners);
+
+  const placed = await mesh(first.cache, null);
+  check("placing the banner rebuilt its chunk", placed.rebuilt >= 1);
+  const designed = await mesh(placed.cache, painted("minecraft:entity/banner/base#f9fffe|mojang:f9801d"));
+  equal("giving it a design rebuilds exactly its chunk", designed.rebuilt, 1);
+  const same = await mesh(designed.cache, painted("minecraft:entity/banner/base#f9fffe|mojang:f9801d"));
+  equal("the same design rebuilds nothing", same.rebuilt, 0);
+  const redesigned = await mesh(same.cache, painted("minecraft:entity/banner/base#f9fffe|creeper:1d1d21"));
+  equal("a different design rebuilds exactly its chunk", redesigned.rebuilt, 1);
+  const cleared = await mesh(redesigned.cache, null);
+  equal("...and clearing it does too", cleared.rebuilt, 1);
+}
+
 // --- what has to invalidate everything --------------------------------------
 console.log("\n--- full invalidation ---");
 {

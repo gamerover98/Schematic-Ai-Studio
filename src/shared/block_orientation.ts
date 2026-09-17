@@ -23,8 +23,9 @@
  * Only families this file can state with confidence appear below. A block that
  * is not named keeps its default state, which is exactly what happened before —
  * so an omission costs nothing, while a wrong guess writes a block state that
- * is *worse* than the default because it looks deliberate. `observer` and
- * `anvil` are the two that were left out for that reason, not overlooked.
+ * is *worse* than the default because it looks deliberate. `observer` is left
+ * out for that reason, not overlooked. `anvil` was too, until its rule was read
+ * off vanilla's source instead of guessed -- see `CLOCKWISE_FROM_LOOK`.
  *
  * Stairs' `shape` is also absent, and that one is structural: a corner is
  * decided by what the *neighbours* are, which is a question about the document
@@ -277,6 +278,36 @@ const AWAY_FROM_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set(["piston", "stick
  * which is why it is not in `FRONT_TO_PLAYER`.
  */
 const AWAY_FROM_PLAYER: ReadonlySet<string> = new Set(["decorated_pot"]);
+
+/**
+ * Blocks whose `facing` is a quarter turn clockwise from the look, seen from
+ * above.
+ *
+ * The anvils are the whole family, and vanilla says it in one line:
+ * `AnvilBlock.getStateForPlacement` is
+ * `getHorizontalDirection().getClockWise()`. The model is authored with its
+ * long axis on `z` at `facing=south`, so the turn is what lays the anvil
+ * *across* the look: put one down facing north and you see it side on, horn
+ * to one side, which is how an anvil is always seen from where it was placed.
+ *
+ * This file's header named `anvil` as left out on purpose, because a wrong
+ * guess looks deliberate. That is an argument for reading the source rather
+ * than for leaving it out: every anvil placed by hand landed on the registry's
+ * `facing=north`, which is one of the four guesses too.
+ */
+const CLOCKWISE_FROM_LOOK: ReadonlySet<string> = new Set([
+  "anvil",
+  "chipped_anvil",
+  "damaged_anvil",
+]);
+
+/** `Direction.getClockWise()` for the four horizontal directions. */
+const CLOCKWISE: Record<HorizontalFacing, HorizontalFacing> = {
+  north: "east",
+  east: "south",
+  south: "west",
+  west: "north",
+};
 
 /**
  * Blocks that stick to whatever they were clicked onto.
@@ -658,6 +689,10 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return { facing: horizontalFacing(look.direction) };
   }
 
+  if (CLOCKWISE_FROM_LOOK.has(name)) {
+    return { facing: CLOCKWISE[horizontalFacing(look.direction)] };
+  }
+
   return {};
 }
 
@@ -719,6 +754,7 @@ export const ORIENTED_BLOCK_NAMES: readonly string[] = [
   ...FRONT_TO_PLAYER_ANY_AXIS,
   ...AWAY_FROM_PLAYER_ANY_AXIS,
   ...AWAY_FROM_PLAYER,
+  ...CLOCKWISE_FROM_LOOK,
   ...WALL_MOUNTED,
   ...FACE_AND_FACING,
   ...POINTS_INTO_CLICKED,
