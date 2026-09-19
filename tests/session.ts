@@ -3303,6 +3303,130 @@ console.log("\n--- a door is two blocks ---");
 }
 
 /*
+ * A double plant is two blocks, placed the way a door is.
+ *
+ * Tall grass, large fern, the four tall flowers, tall seagrass, the small
+ * dripleaf and the pitcher plant are vanilla's `DoublePlantBlock`: placing one
+ * places both halves, and a lone lower half is a tuft cut off at the top. The
+ * family is asked of the registry (`half` is `lower|upper`), so these checks
+ * name the members that would be easy to lose and the one that must stay out.
+ */
+console.log("\n--- a double plant is two blocks ---");
+{
+  const halfAt = (session: ReturnType<typeof newDocument>, y: number) => {
+    const at = getBlock(session.doc, 2, y, 2);
+    return `${at.namespacedName}:${at.properties.half ?? "-"}`;
+  };
+  const plant = (session: ReturnType<typeof newDocument>, name: string, options?: Parameters<typeof applyEdit>[2]) =>
+    applyEdit(
+      session,
+      { kind: "setBlock", x: 2, y: 1, z: 2, block: { namespacedName: name, properties: {} } },
+      options,
+    );
+
+  for (const name of ["tall_grass", "large_fern", "sunflower", "lilac", "rose_bush", "peony", "small_dripleaf", "pitcher_plant", "tall_seagrass"]) {
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    equal(`${name} places both halves`, plant(session, `minecraft:${name}`), 2);
+    equal(`...its lower half where it was clicked`, halfAt(session, 1), `minecraft:${name}:lower`);
+    equal(`...and its upper half above`, halfAt(session, 2), `minecraft:${name}:upper`);
+  }
+
+  {
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    plant(session, "minecraft:tall_grass");
+    undo(session.doc, session.history);
+    equal("one undo takes both halves of a plant", halfAt(session, 2), "minecraft:air:-");
+  }
+
+  {
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    setBlock(session.doc, 2, 2, 2, { namespacedName: "minecraft:stone", properties: {} });
+    equal("a plant with stone above it is not placed", plant(session, "minecraft:sunflower"), 0);
+    setBlock(session.doc, 2, 2, 2, { namespacedName: "minecraft:short_grass", properties: {} });
+    equal("...while short grass above it is replaced", plant(session, "minecraft:sunflower"), 2);
+    equal("...by the upper half", halfAt(session, 2), "minecraft:sunflower:upper");
+  }
+
+  {
+    // Planted as a seed; the crop grows its upper half from stage 3.
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    equal("a pitcher crop is one block", plant(session, "minecraft:pitcher_crop"), 1);
+    equal("...with nothing above it", halfAt(session, 2), "minecraft:air:-");
+  }
+
+  {
+    // An explicit upper half is somebody placing one on purpose.
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    const changed = applyEdit(session, {
+      kind: "setBlock",
+      x: 2,
+      y: 1,
+      z: 2,
+      block: { namespacedName: "minecraft:peony", properties: { half: "upper" } },
+    });
+    equal("an explicit upper half of a plant is placed alone", changed, 1);
+  }
+
+  {
+    // 1.8.8 to 1.12.2 hold the same six names, through `175:0..13`.
+    const names = legacyBlockNames(await loadLegacyBlockTable(LEGACY_BLOCKS));
+    const session = newDocument({ width: 5, height: 5, length: 5 }, "mcedit", null);
+    equal(
+      "a legacy schematic places both halves of a rose bush",
+      plant(session, "minecraft:rose_bush", { placeableNames: names, versionLabel: "1.12.2" }),
+      2,
+    );
+    equal("...upper above lower", halfAt(session, 2), "minecraft:rose_bush:upper");
+  }
+}
+
+/*
+ * Empty space made of something other than air is still empty to a bed and a
+ * door. The far half asked for the word `air`, so with barrier chosen as the
+ * empty space block every far cell read as occupied and neither could be placed.
+ */
+console.log("\n--- two-part blocks in empty space that is not air ---");
+{
+  const barrier = { namespacedName: "minecraft:barrier", properties: {} };
+  const barrierDocument = () => {
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    for (let x = 0; x < 5; x += 1)
+      for (let y = 0; y < 5; y += 1)
+        for (let z = 0; z < 5; z += 1) setBlock(session.doc, x, y, z, barrier);
+    return session;
+  };
+  const options = { voidBlock: "minecraft:barrier" };
+
+  {
+    const session = barrierDocument();
+    const changed = applyEdit(
+      session,
+      { kind: "setBlock", x: 2, y: 1, z: 2, block: { namespacedName: "minecraft:red_bed", properties: { facing: "north" } } },
+      options,
+    );
+    equal("a bed is placed in barrier empty space", changed, 2);
+    equal("...with its head in the next cell", getBlock(session.doc, 2, 1, 1).properties.part, "head");
+  }
+  {
+    const session = barrierDocument();
+    const changed = applyEdit(
+      session,
+      { kind: "setBlock", x: 2, y: 1, z: 2, block: { namespacedName: "minecraft:oak_door", properties: { facing: "north" } } },
+      options,
+    );
+    equal("...and so is a door", changed, 2);
+  }
+  {
+    const session = barrierDocument();
+    const changed = applyEdit(
+      session,
+      { kind: "setBlock", x: 2, y: 1, z: 2, block: { namespacedName: "minecraft:red_bed", properties: { facing: "north" } } },
+    );
+    equal("...while a real barrier, with air as the empty space, still blocks it", changed, 0);
+  }
+}
+
+/*
  * A block placed into water comes out waterlogged.
  *
  * That is what the game does — a fence, a slab or a stair put into a pond

@@ -9013,5 +9013,38 @@ if (pack === null) {
   check("a north-facing wall sign is against the far wall", wallBoard[2] >= 14, wallBoard.join(","));
 }
 
+/*
+ * An attached stem bends towards its fruit, and it was a cross that looked the
+ * same at every `facing`. The bent plane (`attached_<fruit>_stem`) runs from the
+ * middle of the cell to the side `facing` names: vanilla's `stem_fruit.json` is
+ * west-authored, which is the sign that is easy to get backwards.
+ */
+console.log("\n--- an attached stem bends towards its fruit ---");
+{
+  const expected: Record<string, [number, number, number, number]> = {
+    west: [0, 9, 8, 8],
+    east: [7, 16, 8, 8],
+    north: [8, 8, 0, 9],
+    south: [8, 8, 7, 16],
+  };
+  for (const fruit of ["pumpkin", "melon"]) {
+    for (const [facing, [x0, x1, z0, z1]] of Object.entries(expected)) {
+      const shape = shapeFor({ namespacedName: `minecraft:attached_${fruit}_stem`, properties: { facing } });
+      const bent =
+        shape.kind === "boxes"
+          ? shape.boxes.find((entry) => entry.texture === `attached_${fruit}_stem`)
+          : undefined;
+      const box = bent?.box;
+      equal(
+        `attached_${fruit}_stem facing ${facing} bends that way`,
+        box === undefined
+          ? null
+          : [Math.min(box[0], box[3]), Math.max(box[0], box[3]), Math.min(box[2], box[5]), Math.max(box[2], box[5])],
+        [x0, x1, z0, z1],
+      );
+    }
+  }
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

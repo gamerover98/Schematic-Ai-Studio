@@ -285,6 +285,21 @@ Ctrl+Z would take a door back a half at a time. `_trapdoor` does not end in
 `tests/session.ts` says so out loud: it is a true sentence about string endings
 that nobody would check and everybody would rely on.
 
+**A double plant is the third row, and it is asked of the registry.** Tall
+grass, large fern, the four tall flowers, tall seagrass, the small dripleaf and
+the pitcher plant are vanilla's `DoublePlantBlock` and go in as two cells, the
+upper one above, like a door. A `half` whose legal values are exactly
+`lower|upper` is that family (a slab's and a stair's is `top|bottom`), so the
+rows match on a predicate rather than a suffix. `pitcher_crop` carries the same
+`half` and is left out by name: it is planted as a seed. The pre-Flattening
+era needs nothing extra, because `legacy_blocks.json` spells `175:0..5` and
+`175:8..13` as these six names with `half=lower` and `half=upper`.
+
+**The far cell is free by the near cell's rule.** Empty space, whatever block
+it is made of, or a replaceable block. It asked for the word `air`, so with
+barrier or water as the empty space block every far cell held the void block
+and no bed or door could be placed at all.
+
 **Nothing is placed if the far half has nowhere to go.** That is the game's rule
 and it is the safe half of it: refusing over a flower is a smaller wrong than
 destroying what was there, and the block in the way is on screen, so the silence
@@ -4951,14 +4966,8 @@ knowing:
   *«the opposite from the direction the player faces while placing the small
   dripleaf»*.
 
-  **What is deliberately left is that placing one places a single half.** In
-  the game a dripleaf, a tall fern, a sunflower and tall seagrass are all
-  `DoublePlantBlock` and go in as two cells; `TWO_PART` in `services/session.ts`
-  knows only `_bed` and `_door`, both by suffix. The membership is derivable —
-  a `half` whose legal values are `lower|upper` rather than `top|bottom` is
-  exactly that family, doors included — so it is a real piece of work in
-  `session.ts` rather than a line here, and it is a family of ten rather than
-  this one block.
+  **Placing one places both halves**, which is the double-plant row of
+  `TWO_PART` (see "A bed is two blocks" above).
 - **Seagrass is four planes in a hash, and tall seagrass was a solid cube.**
   `template_seagrass` states two planes across the north-south axis at `z = 4`
   and `z = 12` and two across the east-west at `x = 4` and `x = 12`, each
@@ -4999,8 +5008,9 @@ knowing:
   stages 0 to 2 has no elements in vanilla and is `boxes()` here — a state the
   game never produces, since the upper half exists from stage 3, so it is
   reachable only from the inspector, and a cell holding it draws nothing and
-  cannot be clicked. Placing both halves at once is the double-plant family's
-  job in `TWO_PART`, and is still not done.
+  cannot be clicked. Placing one is a single cell: the crop is a seed, and it is
+  the one block with a `lower|upper` `half` that the double-plant row of
+  `TWO_PART` leaves out by name.
 - **Pointed dripstone is `block/cross`, and was a 6x16x6 column wearing the
   upward tip in every state.** `pointed_dripstone.json` states the two rescaled
   planes of `cross.json` exactly; the ten states differ only in the texture,
@@ -5127,6 +5137,13 @@ knowing:
   name, which resolved all along — the texture was right, and the shape put it
   on six faces of a solid block that sealed its cell and let a fence connect to
   it. They are in `CROSS_BLOCKS` beside `cave_vines`.
+- **An attached stem bends towards its fruit, and it was a cross.**
+  `attached_pumpkin_stem` and `attached_melon_stem` sat in `CROSS_BLOCKS`, so
+  `facing` changed nothing on screen. `stem_fruit.json` is the stem's lower
+  half as two crossed planes, rescaled and reaching a unit below the cell, plus
+  one plane of `attached_<fruit>_stem` from the middle of the cell outwards.
+  The blockstate gives `facing=west` no `y`, so it is **west-authored**, and
+  `attachedStem` turns it by `facingSteps + 2`.
 - **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
   one member.** Every other fence in the game parents `block/fence_post` and
   `block/fence_side` and paints them with a plank tile, so its UVs derive

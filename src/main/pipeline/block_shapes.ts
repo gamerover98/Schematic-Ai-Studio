@@ -3613,6 +3613,46 @@ const SUNFLOWER_TOP: readonly ShapeBox[] = [
   },
 ];
 
+/**
+ * An attached stem bends towards its fruit, and it was a plain cross that
+ * looked the same whichever way `facing` said. `stem_fruit.json` (1.21.4) is
+ * the growing stem's lower half as two crossed planes, rescaled, reaching a
+ * unit below the cell, plus one plane of `attached_<fruit>_stem` from the
+ * middle of the cell out to the west. The blockstate gives `facing=west` no
+ * `y`, so the model is west-authored and `facing` turns all three.
+ */
+const STEM_REACH = 8 * Math.SQRT2;
+const STEM_SPIN: BoxRotation = { origin: [8, 8, 8], axis: "y", angle: 45 };
+
+function attachedStem(entry: PaletteEntry): BlockShape {
+  const fruit = baseName(entry).replace(/^attached_/, "").replace(/_stem$/, "");
+  const stem = `${fruit}_stem`;
+  const upper = `attached_${fruit}_stem`;
+  return transform(
+    [
+      {
+        box: [8 - STEM_REACH, -1, 8, 8 + STEM_REACH, 7, 8],
+        rotation: STEM_SPIN,
+        texture: stem,
+        uv: { north: [0, 0, 16, 8], south: [16, 0, 0, 8] },
+      },
+      {
+        box: [8, -1, 8 - STEM_REACH, 8, 7, 8 + STEM_REACH],
+        rotation: STEM_SPIN,
+        texture: stem,
+        uv: { west: [0, 0, 16, 8], east: [16, 0, 0, 8] },
+      },
+      {
+        box: [0, 0, 8, 9, 16, 8],
+        texture: upper,
+        uv: { north: [9, 0, 0, 16], south: [0, 0, 9, 16] },
+      },
+    ],
+    facingSteps(entry) + 2,
+    false,
+  );
+}
+
 function sunflower(entry: PaletteEntry): BlockShape {
   return entry.properties.half === "upper" ? boxes(...SUNFLOWER_TOP) : { kind: "cross" };
 }
@@ -5241,6 +5281,8 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   small_dripleaf: smallDripleaf,
   pitcher_crop: pitcherCrop,
   sunflower,
+  attached_pumpkin_stem: attachedStem,
+  attached_melon_stem: attachedStem,
   big_dripleaf: () => boxes([0, 11, 0, 16, 15, 16]),
   big_dripleaf_stem: () => boxes([5, 0, 5, 11, 16, 11]),
 
@@ -5374,7 +5416,8 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   /*
    * Crops and fungi that arrived with the registry. `_stem` is emphatically not
    * a suffix rule here -- `crimson_stem` is a log and a full cube -- so the two
-   * crop stems and their attached forms are named one at a time.
+   * crop stems are named one at a time. Their attached forms bend towards
+   * the fruit and are `attachedStem`.
    */
   "crimson_fungus",
   "warped_fungus",
@@ -5382,8 +5425,6 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "hanging_roots",
   "melon_stem",
   "pumpkin_stem",
-  "attached_melon_stem",
-  "attached_pumpkin_stem",
 ]);
 
 function baseName(entry: PaletteEntry): string {

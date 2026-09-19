@@ -766,9 +766,7 @@ function useTarget(
   });
 
   const cells = [{ ...at, entry: swung(existing) }];
-  const family = TWO_PART.find((candidate) =>
-    existing.namespacedName.endsWith(candidate.suffix),
-  );
+  const family = TWO_PART.find((candidate) => candidate.matches(existing.namespacedName));
   const held = family === undefined ? undefined : existing.properties[family.property];
   if (family !== undefined && family.step !== null && (held === family.near || held === family.far)) {
     const away = held === family.near ? 1 : -1;
@@ -804,18 +802,40 @@ function useTarget(
  * whole thing".
  */
 const TWO_PART: readonly {
-  readonly suffix: string;
+  readonly matches: (name: string) => boolean;
   readonly property: string;
   readonly near: string;
   readonly far: string;
   readonly step: readonly [number, number, number] | null;
 }[] = [
-  { suffix: "_bed", property: "part", near: "foot", far: "head", step: null },
+  { matches: (name) => name.endsWith("_bed"), property: "part", near: "foot", far: "head", step: null },
   // `_trapdoor` does not end in `_door`, which is why this needs no guard --
   // `tests/session.ts` says so, because it is the kind of thing that reads as
   // true and would be relied on without ever being checked.
-  { suffix: "_door", property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
+  { matches: (name) => name.endsWith("_door"), property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
+  /*
+   * The double plants: tall grass, large fern, the four tall flowers, tall
+   * seagrass, the small dripleaf and the pitcher plant. Vanilla's
+   * `DoublePlantBlock` places both halves, and a lone lower half is a tuft cut
+   * off at the top. Asked of the registry rather than listed: a `half` whose
+   * legal values are `lower` and `upper` is exactly that family (a stair's
+   * or a slab's is `top`/`bottom`). The pitcher *crop* has the property and
+   * is not one of them: it is planted as a seed and grows its upper half from
+   * stage 3, so placing it is one cell.
+   *
+   * The pre-Flattening era needs nothing of its own: `legacy_blocks.json`
+   * maps `175:0..5` and `175:8..13` onto these same six names with
+   * `half=lower` and `half=upper`, so a 1.8.8 to 1.12.2 document holds them
+   * spelled this way and the MCEdit writer maps both halves back.
+   */
+  { matches: isDoublePlant, property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
 ];
+
+function isDoublePlant(name: string): boolean {
+  if (name.endsWith("_door") || name === "minecraft:pitcher_crop") return false;
+  const values = legalValuesFor(name, "half");
+  return values !== null && values.length === 2 && values.includes("lower") && values.includes("upper");
+}
 
 /** One cell along each horizontal facing, as `[dx, dy, dz]`. */
 const FACING_STEP: Readonly<Record<string, readonly [number, number, number]>> = {
@@ -840,6 +860,11 @@ interface TwoPartPlacement {
  * a flower is a smaller wrong than destroying whatever was there, and the block
  * in the way is on screen, so the silence says as much as a message would.
  *
+ * Free is the near cell's own rule: empty space, whatever block it is made
+ * of, or a replaceable block. It asked for the word `air`, so with barrier or
+ * water chosen as the empty space block no bed and no door could be placed at
+ * all -- every far cell held the void block and read as occupied.
+ *
  * A cell *outside* the document is not blocked. The region the growth is
  * measured against spans both, so a bed laid against the edge or a door hung at
  * the ceiling makes room for itself exactly as a single block does.
@@ -848,8 +873,9 @@ function twoPartPlacement(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number },
   entry: PaletteEntry,
+  free: (entry: PaletteEntry) => boolean,
 ): TwoPartPlacement | "blocked" | null {
-  const family = TWO_PART.find((candidate) => entry.namespacedName.endsWith(candidate.suffix));
+  const family = TWO_PART.find((candidate) => candidate.matches(entry.namespacedName));
   if (family === undefined) return null;
   if (entry.properties[family.property] === family.far) return null;
 
@@ -866,7 +892,7 @@ function twoPartPlacement(
     other.x < doc.width &&
     other.y < doc.height &&
     other.z < doc.length;
-  if (inDocument && getBlock(doc, other.x, other.y, other.z).namespacedName !== "minecraft:air") {
+  if (inDocument && !free(getBlock(doc, other.x, other.y, other.z))) {
     return "blocked";
   }
   return {
@@ -1214,7 +1240,12 @@ export function applyEdit(
      * the document, or a door hung at the ceiling, makes room for itself
      * exactly as a single block does.
      */
-    const pair = twoPartPlacement(doc, target, entry);
+    const pair = twoPartPlacement(
+      doc,
+      target,
+      entry,
+      (block) => emptiness(block) || isReplaceable(block.namespacedName),
+    );
     // The far cell has something in it. The game does not place it either, and
     // the block in the way is on screen.
     if (pair === "blocked") return 0;
