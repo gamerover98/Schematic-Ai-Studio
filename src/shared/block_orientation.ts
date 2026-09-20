@@ -665,6 +665,41 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return { facing: into === "up" ? "down" : into };
   }
 
+  /*
+   * A bell hangs from what it was clicked onto, and it was in no table at all
+   * -- so every one of them landed on the registry's `attachment=floor`,
+   * `facing=north`, whichever way the camera was pointing and whatever it was
+   * hung from.
+   *
+   * `BellBlock.getStateForPlacement` is two branches on the clicked face, and
+   * both are here:
+   *
+   * - a **vertical** face gives `floor` for a click on a top and `ceiling` for
+   *   one on an underside, with `facing` the direction the camera was looking,
+   *   which is what makes a bell on the ground turn to the player. With no
+   *   face at all -- the build grid, or a cell in mid-air -- the floor is the
+   *   answer, because that is the bell a schematic wants standing there;
+   * - a **side** gives `single_wall`, and `facing` is the **opposite** of the
+   *   clicked face rather than the face itself. That is the one number here
+   *   that reads backwards and it is vanilla's: a bell hung on a wall points
+   *   *into* it, where a wall torch points out of it. `WALL_MOUNTED` is
+   *   therefore not the rule, one value away from looking like it.
+   *
+   * `double_wall` is deliberately absent, for `hinge`'s reason: vanilla picks
+   * it when there is a block on the far side too, which is a question about
+   * the document that a click cannot answer. The inspector can say so, and a
+   * single wall bar is the half of the answer that is never wrong on its own.
+   */
+  if (name === "bell") {
+    if (look.against === null || look.against === "up") {
+      return { attachment: "floor", facing: horizontalFacing(look.direction) };
+    }
+    if (look.against === "down") {
+      return { attachment: "ceiling", facing: horizontalFacing(look.direction) };
+    }
+    return { attachment: "single_wall", facing: OPPOSITE[look.against] };
+  }
+
   if (FACE_AND_FACING.has(name) || FACE_AND_FACING_SUFFIXES.some((s) => name.endsWith(s))) {
     if (look.against === "up") return { face: "floor", facing: horizontalFacing(look.direction) };
     if (look.against === "down") {

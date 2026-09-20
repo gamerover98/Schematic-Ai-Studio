@@ -9046,5 +9046,90 @@ console.log("\n--- an attached stem bends towards its fruit ---");
   }
 }
 
+/*
+ * A bell takes its stand from the face it was clicked onto and its direction
+ * from the camera, and it was in no placement table at all -- so every one of
+ * them came out standing on the floor facing north.
+ *
+ * `BellBlock.getStateForPlacement` is the source. The wall branch is the half
+ * that reads backwards and is checked by name: `facing` there is the opposite
+ * of the clicked face, where a wall torch's is the face itself.
+ */
+console.log("\n--- a bell hangs from what it was clicked onto ---");
+{
+  const AS_VECTOR: Record<string, readonly [number, number, number]> = {
+    east: [1, 0, 0],
+    west: [-1, 0, 0],
+    south: [0, 0, 1],
+    north: [0, 0, -1],
+  };
+  const aimed = (x: number, z: number, against: PlacementLook["against"]): PlacementLook => ({
+    direction: { x, y: 0, z },
+    against,
+    cursorY: 0.5,
+    run: null,
+  });
+
+  equal(
+    "a bell set on the ground faces the way the camera was looking",
+    orientPlacement("minecraft:bell", aimed(0, -1, "up")),
+    { attachment: "floor", facing: "north" },
+  );
+  equal(
+    "...and looking east it faces east",
+    orientPlacement("minecraft:bell", aimed(1, 0, "up")),
+    { attachment: "floor", facing: "east" },
+  );
+  equal(
+    "a bell clicked onto an underside hangs from the ceiling",
+    orientPlacement("minecraft:bell", aimed(0, 1, "down")),
+    { attachment: "ceiling", facing: "south" },
+  );
+  equal(
+    "...and with no face at all it stands on the floor",
+    orientPlacement("minecraft:bell", aimed(0, 1, null)),
+    { attachment: "floor", facing: "south" },
+  );
+  /*
+   * The wall, on all four sides. `facing` is the opposite of the clicked face
+   * -- a bell points into the wall it hangs on -- which is the one value here
+   * that a `WALL_MOUNTED` reading would get backwards, and a bell turned half
+   * round still hangs.
+   */
+  for (const [clicked, faces] of [
+    ["north", "south"],
+    ["south", "north"],
+    ["east", "west"],
+    ["west", "east"],
+  ] as const) {
+    const face = AS_VECTOR[clicked];
+    equal(
+      `a bell on a wall clicked from the ${clicked} faces ${faces}`,
+      orientPlacement("minecraft:bell", aimed(-face[0], -face[2], clicked)),
+      { attachment: "single_wall", facing: faces },
+    );
+  }
+  /*
+   * And the state reaches the geometry: the three stands are different shapes,
+   * so a bell that claimed `ceiling` while drawing the floor's posts would
+   * pass every check above.
+   */
+  if (pack !== null) {
+    const stand = async (attachment: string): Promise<number> => {
+      const baked = await baker.bakeBlockstate(
+        block("bell", { attachment, facing: "north" }),
+      );
+      return allVertices(baked).filter((vertex) => vertex[1] < 0.2).length;
+    };
+    const floorPosts = await stand("floor");
+    const ceiling = await stand("ceiling");
+    check(
+      "a ceiling bell has no posts standing on the ground",
+      ceiling === 0 && floorPosts > 0,
+      `${ceiling} against ${floorPosts}`,
+    );
+  }
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

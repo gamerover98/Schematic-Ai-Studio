@@ -6044,6 +6044,18 @@ one of the four guesses. `CLOCKWISE_FROM_LOOK` is the table, and `tests/blocks.t
 checks the baked top as well as the property, because a table one quarter out
 still names four directions.
 
+**A bell hangs from what it was clicked onto, and it was in no table.** So
+every one of them landed on the registry's `attachment=floor`,
+`facing=north`, whichever way the camera pointed and whatever it was hung
+from. `BellBlock.getStateForPlacement` is two branches on the clicked face: a
+top face gives `floor` and an underside `ceiling`, both with `facing` from the
+look, and a side gives `single_wall` with `facing` the **opposite** of the
+clicked face -- a bell points *into* its wall where a wall torch points out of
+it, which is why `WALL_MOUNTED` is one value short of being the rule.
+`double_wall` is deliberately absent, for `hinge`'s reason: vanilla picks it
+from the block on the far side, which is a question about the document rather
+than about the click.
+
 **Pointed dripstone points away from where you look, vertically.** Its placement
 is vanilla's `getNearestLookingVerticalDirection()` reversed: look up at a
 ceiling and it hangs as a stalactite, look down — or straight ahead — and it
