@@ -10,10 +10,17 @@
  * ## One timeline out of two stacks
  *
  * The block edits live in main and the selections live here, and interleaving
- * them needs a shared ordering. `DocumentState.undoDepth` is that ordering: how
- * many transactions are on main's undo stack. Every selection change records
- * the depth it happened at, and the rule is a single sentence — **a selection
- * is undone only while no block edit has landed on top of it.**
+ * them needs a shared ordering. `DocumentState.undoTransactionId` is that
+ * ordering: the id of the transaction on top of main's undo stack, 0 when it is
+ * empty. Every selection change records the position it happened at, and the
+ * rule is a single sentence — **a selection is undone only while no block edit
+ * has landed on top of it.**
+ *
+ * It was `undoDepth`, the stack's length, and the stack is capped at 200. Past
+ * the cap the length stops moving, every step compares equal to the document,
+ * and Ctrl+Z walked back through the selections and never reached the blocks.
+ * Ids never repeat and only grow, so they keep ordering where a length stops.
+ * The "depth" in the names below is that position.
  *
  * That gives the behaviour without a second copy of anything. Select, select,
  * fill, select: Ctrl+Z takes back the last selection, then the fill, then the
@@ -39,7 +46,7 @@ export interface SelectionState {
 }
 
 export interface SelectionStep {
-  /** `undoDepth` when this change was made. */
+  /** Main's history position (`undoTransactionId`) when this change was made. */
   depth: number;
   before: SelectionState;
   after: SelectionState;
@@ -104,7 +111,7 @@ export function recordSelection(
  * the box back in the same press.
  *
  * Stamping the post-edit depth instead is exactly the bug this replaces. The
- * catch-all recorder in `App.svelte` reads whatever `undoDepth` says at flush
+ * catch-all recorder in `App.svelte` reads whatever the position says at flush
  * time, and the commit handlers write `selection` *after* awaiting the edit --
  * so the step came out keyed to the depth it should have been under.
  */

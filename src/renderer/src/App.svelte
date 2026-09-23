@@ -19,7 +19,14 @@
   import McpIndicator from "./lib/McpIndicator.svelte";
   import UpdateIndicator from "./lib/UpdateIndicator.svelte";
   import { showsIndicator } from "./lib/mcp_status.js";
-  import type { McpActivity, McpStatus, UpdateStatus } from "../../shared/ipc.js";
+  import type {
+    BlockSpec,
+    CameraAimRequest,
+    McpActivity,
+    McpStatus,
+    UpdateStatus,
+  } from "../../shared/ipc.js";
+  import { splitBlockInput } from "../../shared/block_input.js";
   import InspectorPanel from "./lib/InspectorPanel.svelte";
   import AboutModal from "./lib/AboutModal.svelte";
   import AnchorModal from "./lib/AnchorModal.svelte";
@@ -69,6 +76,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
   import { continuedPlacement } from "./lib/block_hover.js";
   import { movedRegion, translatedRegion } from "./lib/selection_drag.js";
+  import { ghostRequests, ghostStillWanted, grabGhost, releaseGhost } from "./lib/ghost_request.js";
 import {
   gizmoOrigin,
   scaledRegion,
@@ -243,8 +251,29 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * gesture the user experienced as one movement.
    */
   let gestureFrom: SelectionState | null = null;
-  /** Main's undo depth as of the last time it was accounted for. */
-  let lastUndoDepth = 0;
+  /** Main's history position as of the last time it was accounted for. */
+  let lastHistoryPosition = 0;
+
+  /**
+   * Where main's history stands, as the key both stacks are ordered by: the id
+   * of the transaction on top of the undo stack, 0 when there is none.
+   *
+   * **Not `undoDepth`, and that was the bug.** The undo stack is capped at 200
+   * (`createHistory`), so from the 201st transaction on its length stays at 200
+   * whatever happens. At the cap every selection step was recorded at the
+   * depth the document still had, so `undoTarget` sent every press to the
+   * selections and walked back through all of them before touching a block.
+   * The gizmo's pairing failed too (`depth > depthBefore` never true), and so
+   * did the watcher that notices an edit. In creative mode every placed block
+   * is a transaction, so 200 is an ordinary session.
+   *
+   * A transaction id has what the ordering needs and no ceiling: ids are never
+   * reused, a new edit is always higher, and an undo or a redo lands back on
+   * exactly the id that was on top before.
+   */
+  function historyPosition(): number {
+    return docState?.undoTransactionId ?? 0;
+  }
 
   /*
    * Whether there is anything at all to take back, from either stack. The
@@ -252,10 +281,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * would sit greyed out with a selection change waiting to be undone.
    */
   const canUndoAnything = $derived(
-    undoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canUndo === true) !== "none",
+    undoTarget(selectionTimeline, historyPosition(), docState?.canUndo === true) !== "none",
   );
   const canRedoAnything = $derived(
-    redoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canRedo === true) !== "none",
+    redoTarget(selectionTimeline, historyPosition(), docState?.canRedo === true) !== "none",
   );
 
   /**
@@ -282,6 +311,14 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * captured is a confusing place to start, and the mode is one click away.
    */
   let cameraMode = $state<CameraMode>("orbit");
+
+  /**
+   * The camera main last asked for, handed to the viewer as it arrived.
+   *
+   * `raw` because it is replaced whole and never mutated, and the viewer keys
+   * on the object's identity: two identical requests are two answers owed.
+   */
+  let cameraRequest = $state.raw<CameraAimRequest | null>(null);
 
   /**
    * What is in your hand: the active hotbar slot, in both camera modes.
@@ -501,13 +538,28 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * from the same `inspectBlock` the inspector uses. Its base name, not the
    * full state: picking a stair should hand you a stair, not one facing the way
    * that particular one happened to face.
+   *
+   * A banner keeps its design, though. The design is not a state -- it is what
+   * the banner *is* -- and picking one up to place copies of it is the whole
+   * reason to pick it. It travels as `banner_patterns=[...]`, which the hotbar
+   * labels and `parseBlock` places like any other held block. Built from the
+   * layers rather than from `blockData`, which on a pre-Flattening document
+   * renames a white banner after its `Base` -- a block that version cannot hold.
    */
   async function onPickMaterial(at: { x: number; y: number; z: number }): Promise<void> {
     if (busy) return;
     try {
       const response = await api().inspectBlock(at.x, at.y, at.z);
       if (!response.ok || response.block === "minecraft:air") return;
-      holdBlock(response.block.split("[")[0]);
+      const base = response.block.split("[")[0];
+      const layers = response.banner?.layers ?? [];
+      holdBlock(
+        layers.length === 0
+          ? base
+          : `${base}[banner_patterns=[${layers
+              .map((layer) => `{pattern:"${layer.pattern}",color:"${layer.color}"}`)
+              .join(",")}]]`,
+      );
     } catch (err) {
       failed(err, t("task.pickingBlock"));
     }
@@ -765,7 +817,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     look: PlacementLook,
   ): Promise<void> {
     if (busy) return;
-    const held = parseBlock(placingBlock);
+    let held: BlockSpec;
+    try {
+      held = parseBlock(placingBlock);
+    } catch (err) {
+      // A held block that cannot be read -- a pasted command cut short -- is
+      // said out loud, not thrown past the click into the failure handler.
+      failed(err, t("task.placingBlock"));
+      return;
+    }
     /*
      * A chain has no end to click, so the column is continued by the half of
      * it that was clicked. The rule and the whole argument for it are in
@@ -892,7 +952,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     gestureFrom = null;
     if (from === null) return;
     const now = selectionNow();
-    selectionTimeline = recordSelection(selectionTimeline, docState?.undoDepth ?? 0, from, now);
+    selectionTimeline = recordSelection(selectionTimeline, historyPosition(), from, now);
     lastSelection = now;
   }
 
@@ -914,7 +974,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       }
       selectionTimeline = recordSelection(
         selectionTimeline,
-        docState?.undoDepth ?? 0,
+        historyPosition(),
         lastSelection,
         now,
       );
@@ -952,17 +1012,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   });
 
   $effect(() => {
-    const depth = docState?.undoDepth ?? null;
+    const depth = docState === null ? null : (docState.undoTransactionId ?? 0);
     untrack(() => {
       if (depth === null) {
         selectionTimeline = forgetTimeline();
-        lastUndoDepth = 0;
+        lastHistoryPosition = 0;
         return;
       }
-      if (depth > lastUndoDepth) {
+      if (depth > lastHistoryPosition) {
         selectionTimeline = recordDocumentEdit(selectionTimeline, depth);
       }
-      lastUndoDepth = depth;
+      lastHistoryPosition = depth;
     });
   });
 
@@ -974,7 +1034,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   async function undoAnything(): Promise<void> {
     if (busy) return;
-    const target = undoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canUndo === true);
+    const target = undoTarget(selectionTimeline, historyPosition(), docState?.canUndo === true);
     if (target === "document") {
       await runDocument(t("task.undoing"), () => api().undo());
       /*
@@ -983,7 +1043,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        * -- after the undo -- is what makes one press take back the whole
        * gesture rather than half of it.
        */
-      const paired = takeEditUndo(selectionTimeline, docState?.undoDepth ?? 0);
+      const paired = takeEditUndo(selectionTimeline, historyPosition());
       if (paired !== null) {
         selectionTimeline = paired.timeline;
         restoreSelection(paired.state);
@@ -999,7 +1059,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   async function redoAnything(): Promise<void> {
     if (busy) return;
-    const target = redoTarget(selectionTimeline, docState?.undoDepth ?? 0, docState?.canRedo === true);
+    const target = redoTarget(selectionTimeline, historyPosition(), docState?.canRedo === true);
     if (target === "document") {
       /*
        * Taken *before* the redo, unlike its opposite number. A redo raises the
@@ -1009,7 +1069,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        * that stack, which is a fix rather than a side effect: nothing was
        * branched away from.
        */
-      const paired = takeEditRedo(selectionTimeline, docState?.undoDepth ?? 0);
+      const paired = takeEditRedo(selectionTimeline, historyPosition());
       await runDocument(t("task.redoing"), () => api().redo());
       if (paired !== null) {
         selectionTimeline = paired.timeline;
@@ -1486,9 +1546,31 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // has not come back.
       }
     })();
+    /*
+     * `capture_viewport` asking for a camera.
+     *
+     * Flight is left first, for two reasons that are one: the pointer lock
+     * steers the camera the moment the mouse moves, so a view put in place
+     * under it would be gone before the picture was taken -- and orbit is the
+     * mode that *has* a target, which is half of what was asked for. A request
+     * that only asks where the camera is moves nothing and leaves flight alone.
+     */
+    const unsubscribeCamera = api().onCameraAim((request) => {
+      if (request.camera !== null) {
+        if (document.pointerLockElement) document.exitPointerLock();
+        cameraMode = "orbit";
+      }
+      cameraRequest = request;
+    });
     const unsubscribeDocument = api().onDocumentChanged((state) => {
       docState = state;
       void refreshDocument();
+      /*
+       * An MCP client opening, saving or closing a schematic moves the recents
+       * too, and this window only ever reread them when it did those things
+       * itself -- so the start screen went on listing what it listed at launch.
+       */
+      void refreshRecents();
     });
     /*
      * The application menu, one subscription per verb.
@@ -1534,6 +1616,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       unsubscribeStartup();
       unsubscribeTrace();
       unsubscribeDocument();
+      unsubscribeCamera();
       unsubscribeMcp();
       unsubscribeUpdates();
       for (const off of unsubscribeMenu) off();
@@ -2689,6 +2772,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * left to fall out of `docState = null`, because a stale selection or
    * inspection would be re-applied to whatever is opened next.
    */
+  /** Rereads the recents, which main owns; a failure keeps the list on screen. */
+  async function refreshRecents(): Promise<void> {
+    try {
+      recentDocuments = await api().listRecentDocuments();
+    } catch {
+      // The list already shown is a better answer than an empty one.
+    }
+  }
+
   async function closeDocument(): Promise<void> {
     if (!(await mayDiscard("close"))) return;
     busy = true;
@@ -2891,7 +2983,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     };
   }
 
-  function parseBlock(text: string): { namespacedName: string; properties?: Record<string, string> } {
+  function parseBlock(text: string): BlockSpec {
     /*
      * `35:14` becomes red wool before anything else looks at it.
      *
@@ -2904,11 +2996,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * Only on a legacy document. Above 1.13 a file holds no `ID:DATA`, so
      * resolving one would answer a question the schematic cannot ask.
      */
-    const trimmed = resolveBlockInput(text, legacyForDoc).trim();
-    const name = trimmed.includes(":") ? trimmed : `minecraft:${trimmed}`;
+    /*
+     * A patterned banner is taken apart first -- and a whole `/give` command
+     * with it, which is what the banner editor hands out. Its pattern list is
+     * full of the commas and brackets the loop below splits on, so it has to
+     * be out of the way before anything reads the states. It throws a sentence
+     * naming what it could not read; every caller runs this inside a `try`.
+     */
+    const input = splitBlockInput(text);
+    const patterns = input.bannerPatterns === null ? {} : { bannerPatterns: input.bannerPatterns };
+    const trimmed = resolveBlockInput(input.block, legacyForDoc).trim();
+    const name = trimmed.split("[", 1)[0].includes(":") ? trimmed : `minecraft:${trimmed}`;
     const bracket = name.indexOf("[");
     if (bracket === -1) {
-      return { namespacedName: name };
+      return { namespacedName: name, ...patterns };
     }
     // `oak_stairs[facing=north]` typed by hand: the same spelling the palette
     // list shows, so a material can be copied straight back into the field.
@@ -2917,7 +3018,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       const eq = part.indexOf("=");
       if (eq > 0) properties[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
     }
-    return { namespacedName: name.slice(0, bracket), properties };
+    return { namespacedName: name.slice(0, bracket), properties, ...patterns };
   }
 
   /**
@@ -2972,6 +3073,31 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         }),
     );
     // No re-inspect here: `runDocument` already refreshes the inspected block.
+  }
+
+  /**
+   * Repaints the inspected banner with a whole design.
+   *
+   * The inspector's own `setState` edit, carrying the block exactly as it is and
+   * the design beside it: main keeps the state, checks the design against the
+   * document's version and writes it in the document's spelling, as one undo
+   * step. A design main refuses leaves the old one where it was, so the panel is
+   * handed the inspection it already had and its rows go back to match it.
+   */
+  async function changeBannerPatterns(patterns: string): Promise<void> {
+    if (!inspection || !inspectedAt) return;
+    const at = inspectedAt;
+    const current = inspection;
+    const outcome = await runDocument(t("task.changingBannerPatterns"), () =>
+      api().applyEdit({
+        kind: "setState",
+        x: at.x,
+        y: at.y,
+        z: at.z,
+        block: { namespacedName: current.block, properties: { ...current.properties }, bannerPatterns: patterns },
+      }),
+    );
+    if (outcome === null && inspection === current) inspection = { ...current };
   }
 
   /**
@@ -3331,6 +3457,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * destination as a box.
    */
   let moving = $state<{ region: RegionSpec; chunks: ChunkGeometry[] } | null>(null);
+  /** Which press the mesh in flight belongs to -- see `ghost_request.ts`. */
+  const ghostFetch = ghostRequests();
 
   /**
    * Which handles the gizmo is showing.
@@ -3397,6 +3525,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (selection !== null) return;
     if (pivot !== null) pivot = null;
     if (stamp !== null) stamp = null;
+    // The move ghost is released by the drag ending; this is the net under
+    // that, so a ghost can never outlive the selection it was drawn for.
+    releaseGhost(ghostFetch);
+    if (moving !== null) moving = null;
   });
 
   /**
@@ -3426,11 +3558,14 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (stamp !== null) return;
     if (!selection || moving !== null) return;
     const region = { ...selection };
+    const token = grabGhost(ghostFetch);
     try {
       const response = await api().regionMesh(forIpc(region));
       // The drag may have ended while this was in flight, and a ghost that
-      // arrived after the release would sit on the build until the next one.
-      if (!response.ok || !selection) return;
+      // arrived after the release would stand at the corner of every
+      // selection after it. Asked of the drag, not of the selection: a move
+      // takes the selection along, so that one is still there.
+      if (!response.ok || !ghostStillWanted(ghostFetch, token)) return;
       moving = { region, chunks: response.chunks };
     } catch {
       // A missing ghost costs the preview, not the gesture: the destination
@@ -3472,11 +3607,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     anchor = { x: next.minX, y: next.minY, z: next.minZ };
     const now = selectionNow();
     lastSelection = now;
-    const depth = docState?.undoDepth ?? 0;
+    const depth = historyPosition();
     selectionTimeline =
       depth > depthBefore
         ? recordEditSelection(selectionTimeline, depthBefore, before, now)
         : recordSelection(selectionTimeline, depth, before, now);
+  }
+
+  /**
+   * The gizmo drag is over, whatever it decided. Called after the commit has
+   * been dispatched, so `commitMove` has already taken its region.
+   */
+  function endGhost(): void {
+    releaseGhost(ghostFetch);
+    moving = null;
   }
 
   /** Carries the pivot along with the box whose cell it names. */
@@ -3502,7 +3646,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       const held = selection;
       if (!held) return;
       const before = selectionNow();
-      adoptEditedSelection(before, movedRegion(held, to), docState?.undoDepth ?? 0);
+      adoptEditedSelection(before, movedRegion(held, to), historyPosition());
       movePivot(held, to);
       return;
     }
@@ -3516,7 +3660,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     moving = null;
     if (!region) return;
     const before = selectionNow();
-    const depthBefore = docState?.undoDepth ?? 0;
+    const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.moving"), () =>
       api().moveRegion({ region: forIpc(region), to }),
     );
@@ -3560,7 +3704,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const region = { ...selection };
     const to = transformedRegion(region, origin, transform);
     const before = selectionNow();
-    const depthBefore = docState?.undoDepth ?? 0;
+    const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.transforming"), () =>
       api().transformRegion({
         region: forIpc(region),
@@ -3603,7 +3747,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const region = { ...selection };
     const to = scaledRegion(region, origin, spec);
     const before = selectionNow();
-    const depthBefore = docState?.undoDepth ?? 0;
+    const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.scaling"), () =>
       api().scaleRegion({ region: forIpc(region), spec, to: { x: to.minX, y: to.minY, z: to.minZ } }),
     );
@@ -3717,6 +3861,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         return;
       }
       docState = response.state;
+      // A schematic made here and then saved joins the recents on this save.
+      void refreshRecents();
       status = {
         tone: response.degraded.length > 0 || response.dropped.length > 0 ? "warn" : "ok",
         text: t("status.saved", { name: response.filePath.split(/[\\/]/).pop() ?? "" }),
@@ -4770,6 +4916,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           legacy={legacyForDoc}
           onchangeproperty={changeBlockProperty}
           onchangenbt={changeNbtValue}
+          onchangebanner={changeBannerPatterns}
         />
       </ToolWindow>
     {/if}
@@ -4803,6 +4950,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       autoGrow={settings.editing.autoGrow}
       onpivotchange={(next) => (pivot = next)}
       ongizmograb={() => void armGhost()}
+      ongizmorelease={endGhost}
       ontransform={(transform, origin) => void gizmoTransform(transform, origin)}
       onscale={(spec, origin) => void gizmoScale(spec, origin)}
       documentSize={docState?.size ?? null}
@@ -4831,6 +4979,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       ground={settings.preview.ground}
       groundColor={settings.preview.groundColor}
       theme={resolvedTheme}
+      {cameraRequest}
+      oncameraaimed={(reply) => api().reportCameraAimed(reply)}
     />
 
     <!--

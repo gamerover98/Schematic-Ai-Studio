@@ -50,6 +50,10 @@ import {
 } from "../pipeline/types.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
 import { getBlock, toStructureData, type SchematicDocument } from "../domain/document.js";
+import { readBanner } from "../pipeline/banner_nbt.js";
+import { DYE_COLOURS } from "../pipeline/block_shapes.js";
+import { bannerBlockColor, bannerFormat, isBannerBlock } from "../../shared/banner_patterns.js";
+import { documentEra } from "../../shared/mc_versions.js";
 import { breathe } from "./breathing.js";
 import {
   buildChunkedMesh,
@@ -758,6 +762,12 @@ export async function buildDocumentPreview(
    */
   const signs = signsIn(doc);
   await primeBaker(structure, cached.baker, signs);
+  /*
+   * The banners' composed cloth, for the glyphs' reason: a tile first made
+   * *during* meshing would land in an atlas the chunks already have UVs into,
+   * and the first patterned banner would come out wearing some other tile.
+   */
+  const banners = await bannersIn(doc, cached.baker);
   const { atlas, version } = cachedAtlas(cached);
 
   /*
@@ -794,6 +804,7 @@ export async function buildDocumentPreview(
     shading,
     signs,
     filled.voidIndices,
+    banners,
   );
   await warnAboutBlocksWithNoGeometry(structure, cached.baker, new Set(Object.keys(atlas.uvRects)));
   /*
@@ -938,6 +949,39 @@ function signsIn(doc: SchematicDocument): Map<number, SignText> {
     if (text !== null) signs.set(x * doc.height * doc.length + y * doc.length + z, text);
   }
   return signs;
+}
+
+/**
+ * The composed cloth of every banner whose block entity says how it looks, by
+ * flat voxel index.
+ *
+ * A banner with no design and a flat-era block entity is left out, and keeps
+ * the plain dyed cloth its block state already gives it. A **legacy** banner
+ * with a `Base` is put in even with no layers: every pre-Flattening banner is
+ * `white_banner` in the palette, and `Base` is the only place its colour is --
+ * without this a 1.12 schematic's banners were all white.
+ *
+ * Read here rather than in the pipeline for `signsIn`'s reason: this is the one
+ * place with a document, and a block entity is the document's.
+ */
+async function bannersIn(doc: SchematicDocument, baker: ModelBaker): Promise<Map<number, string>> {
+  const banners = new Map<number, string>();
+  const format = bannerFormat(documentEra(doc.format, doc.dataVersion), doc.dataVersion);
+  for (const record of doc.blockEntities.values()) {
+    const [x, y, z] = record.pos;
+    if (x < 0 || y < 0 || z < 0 || x >= doc.width || y >= doc.height || z >= doc.length) continue;
+    const entry = getBlock(doc, x, y, z);
+    if (!isBannerBlock(entry.namespacedName)) continue;
+    const look = readBanner(record.nbt, format);
+    if (look.layers.length === 0 && look.base === null) continue;
+    const base = look.base ?? bannerBlockColor(entry.namespacedName) ?? "white";
+    const key = await baker.bannerCloth(
+      DYE_COLOURS[base],
+      look.layers.map((layer) => ({ pattern: layer.pattern, hex: DYE_COLOURS[layer.color] })),
+    );
+    if (key !== null) banners.set(x * doc.height * doc.length + y * doc.length + z, key);
+  }
+  return banners;
 }
 
 /**

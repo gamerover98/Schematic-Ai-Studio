@@ -17,6 +17,7 @@
 // stay full cubes, which is the same answer as before for anything not listed.
 
 import { paletteEntryIsAir, type CellFace, type PaletteEntry } from "./types.js";
+import { DYE_HEX } from "../../shared/banner_patterns.js";
 
 /** A box in Minecraft's 1/16 units: `[x0, y0, z0, x1, y1, z1]`, each 0..16. */
 export type Box = readonly [number, number, number, number, number, number];
@@ -43,6 +44,18 @@ export interface ShapeBox {
    * cannot express that.
    */
   readonly rotation?: BoxRotation;
+  /**
+   * More tilts, applied after `rotation` and in order: a `ModelPart` chain.
+   *
+   * An entity model nests its parts, and each part turns its children about
+   * where it stands, on all three axes at once -- a copper golem statue's arm
+   * is an arm part turned 25 degrees holding a part turned -60. One tilt
+   * cannot say that. A chain of them can, once every cube is placed at rest
+   * and each part's turns are taken about the running sum of the offsets down
+   * to it, innermost first. `modelPartBoxes` is what builds these; nothing
+   * transcribed from a block model needs one.
+   */
+  readonly chain?: readonly BoxRotation[];
   /**
    * A texture other than the block's own, by plain name (`glass`). Beacons are
    * the reason: they are a glass shell around a glowing core, two textures in
@@ -283,6 +296,9 @@ function rotateShapeBox(entry: ShapeBox, steps: number): ShapeBox {
     textures: rotateFaceMap(entry.textures, steps),
     uvRotation: turnFlatFaces(rotateFaceMap(entry.uvRotation, steps), steps),
     rotation: rotateBoxRotation(entry.rotation, steps),
+    ...(entry.chain === undefined
+      ? {}
+      : { chain: entry.chain.map((tilt) => rotateBoxRotation(tilt, steps)!) }),
     omit,
   };
 }
@@ -693,6 +709,391 @@ function unwrapCube(
     east: strip(u + dz + dx, v + dz, dz, dy),
     south: strip(u + 2 * dz + dx, v + dz, dx, dy),
   };
+}
+
+// --- entity models ------------------------------------------------------------
+//
+// A block whose renderer draws an **entity model** -- the copper golem statue
+// -- is transcribed as that model's `ModelPart` tree rather than as boxes,
+// because the tree is what Java states and the boxes are not: every part
+// turns its children, on any axis, by any angle.
+
+/** One `addBox` of a `CubeListBuilder`, in the model's own units. */
+export interface ModelCube {
+  /** `texOffs(u, v)`, in texels of the sheet. */
+  readonly tex: readonly [number, number];
+  readonly from: readonly [number, number, number];
+  readonly size: readonly [number, number, number];
+  /** `CubeDeformation`: grows the box on every side and moves no UV. */
+  readonly grow?: number;
+}
+
+/** One `addOrReplaceChild`: its `PartPose` and what hangs off it. */
+export interface ModelPartDef {
+  readonly offset: readonly [number, number, number];
+  /** `xRot, yRot, zRot` in radians, Java's numbers as written. */
+  readonly rotation?: readonly [number, number, number];
+  readonly cubes?: readonly ModelCube[];
+  readonly children?: readonly ModelPartDef[];
+}
+
+/**
+ * A `ModelPart` tree as boxes, drawn the way `ModelPart.render` draws it.
+ *
+ * Java poses a part with `translate(offset / 16)` and then
+ * `rotationZYX(zRot, yRot, xRot)` -- x first, then y, then z -- and a child
+ * inherits all of it. Written as boxes, a cube is placed at rest, at its
+ * coordinates plus every offset down to it, and each part's turns are taken
+ * about the running sum of the offsets down to *that* part, innermost first.
+ * The two say the same thing; `tests/blocks.ts` builds Java's matrices and
+ * holds every vertex to them.
+ *
+ * The model's origin is the middle of the floor of the cell, `(8, 0, 8)`,
+ * which is the renderer's `translate(0.5, 0, 0.5)`.
+ *
+ * **The windows are `ModelPart.Cube`'s, restated for `boxFaces`.** Java
+ * gives each face a rectangle of the sheet and which corner lands where;
+ * `boxFaces` reads a window the vanilla-block way round on the same box. The
+ * two differ only by reversed axes on some faces -- never a quarter-turn,
+ * because both map the face's horizontal axis to U -- so each face is its
+ * rectangle with the right ends swapped. `grow` moves the box and not the
+ * rectangle, which is Java's too: the rectangle is cut from the size.
+ */
+export function modelPartBoxes(root: ModelPartDef, sheet = 64): ShapeBox[] {
+  const scale = 16 / sheet;
+  const out: ShapeBox[] = [];
+  const walk = (
+    part: ModelPartDef,
+    parent: readonly [number, number, number],
+    outer: readonly BoxRotation[],
+  ): void => {
+    const at: [number, number, number] = [
+      parent[0] + part.offset[0],
+      parent[1] + part.offset[1],
+      parent[2] + part.offset[2],
+    ];
+    const origin: [number, number, number] = [at[0] + 8, at[1], at[2] + 8];
+    const own: BoxRotation[] = [];
+    const [xRot, yRot, zRot] = part.rotation ?? [0, 0, 0];
+    for (const [axis, radians] of [
+      ["x", xRot],
+      ["y", yRot],
+      ["z", zRot],
+    ] as const) {
+      if (radians !== 0) own.push({ origin, axis, angle: (radians * 180) / Math.PI });
+    }
+    const chain = [...own, ...outer];
+    for (const cube of part.cubes ?? []) {
+      const grow = cube.grow ?? 0;
+      const [fx, fy, fz] = cube.from;
+      const [w, h, d] = cube.size;
+      const [u, v] = cube.tex;
+      const U = (n: number): number => n * scale;
+      const u0 = U(u);
+      const u1 = U(u + d);
+      const u2 = U(u + d + w);
+      const u22 = U(u + d + 2 * w);
+      const u3 = U(u + 2 * d + w);
+      const u4 = U(u + 2 * d + 2 * w);
+      const v0 = U(v);
+      const v1 = U(v + d);
+      const v2 = U(v + d + h);
+      out.push({
+        box: [
+          fx - grow + origin[0],
+          fy - grow + origin[1],
+          fz - grow + origin[2],
+          fx + w + grow + origin[0],
+          fy + h + grow + origin[1],
+          fz + d + grow + origin[2],
+        ],
+        uv: {
+          down: [u1, v0, u2, v1],
+          up: [u2, v1, u22, v0],
+          west: [u1, v2, u0, v1],
+          north: [u2, v2, u1, v1],
+          east: [u3, v2, u2, v1],
+          south: [u4, v2, u3, v1],
+        },
+        ...(chain.length === 0 ? {} : { chain }),
+      });
+    }
+    for (const child of part.children ?? []) walk(child, at, chain);
+  };
+  walk(root, [0, 0, 0], []);
+  return out;
+}
+
+/**
+ * The copper golem statue's four poses, `CopperGolemModel`'s four layers.
+ *
+ * Transcribed from the decompiled 1.21.11 client
+ * (`net/minecraft/client/model/animal/golem/CopperGolemModel.java`), and
+ * compared number for number against a 26.2 one, which is identical:
+ * `createBodyLayer` for `standing`, then `createSittingPoseBodyLayer`,
+ * `createRunningPoseBodyLayer` and `createStarPoseBodyLayer`. The parts named
+ * `*_r1` are Blockbench's rotated children and are kept as Java has them.
+ * Items and empty locator parts (`rightItem`) draw nothing and are left out.
+ *
+ * Bedrock ships the same four poses as `.geo.json`, and they are **not** the
+ * same model: the running pose in particular is a different arrangement. This
+ * app writes Java schematics, so Java is the source.
+ *
+ * `createBodyLayer`'s mesh is `translated(0, 24, 0)` for the walking golem;
+ * the statue's `setupAnim` puts `root.y` back to 0, so none of the four is
+ * lifted.
+ */
+export const COPPER_GOLEM_POSES: Readonly<Record<string, readonly ModelPartDef[]>> = {
+  standing: [
+    {
+      offset: [0, -5, 0],
+      cubes: [{ tex: [0, 15], from: [-4, -6, -3], size: [8, 6, 6] }],
+      children: [
+        {
+          offset: [0, -6, 0],
+          cubes: [
+            { tex: [0, 0], from: [-4, -5, -5], size: [8, 5, 10], grow: 0.015 },
+            { tex: [56, 0], from: [-1, -2, -6], size: [2, 3, 2] },
+            { tex: [37, 8], from: [-1, -9, -1], size: [2, 4, 2], grow: -0.015 },
+            { tex: [37, 0], from: [-2, -13, -2], size: [4, 4, 4], grow: -0.015 },
+          ],
+        },
+        { offset: [-4, -6, 0], cubes: [{ tex: [36, 16], from: [-3, -1, -2], size: [3, 10, 4] }] },
+        { offset: [4, -6, 0], cubes: [{ tex: [50, 16], from: [0, -1, -2], size: [3, 10, 4] }] },
+      ],
+    },
+    { offset: [0, -5, 0], cubes: [{ tex: [0, 27], from: [-4, 0, -2], size: [4, 5, 4] }] },
+    { offset: [0, -5, 0], cubes: [{ tex: [16, 27], from: [0, 0, -2], size: [4, 5, 4] }] },
+  ],
+  sitting: [
+    {
+      offset: [0, -3, 2.325],
+      cubes: [
+        { tex: [3, 19], from: [-3, -4, -4.525], size: [6, 1, 6] },
+        { tex: [0, 15], from: [-4, -3, -3.525], size: [8, 6, 6] },
+      ],
+      children: [
+        {
+          offset: [0, -1, -4.325],
+          rotation: [0, 0, -3.1416],
+          cubes: [{ tex: [3, 18], from: [-4, -3, -2.2], size: [8, 6, 3] }],
+        },
+        {
+          offset: [0, -6, -0.2],
+          cubes: [
+            { tex: [37, 8], from: [-1, -7, -3.3], size: [2, 4, 2], grow: -0.015 },
+            { tex: [37, 0], from: [-2, -11, -4.3], size: [4, 4, 4], grow: -0.015 },
+            { tex: [0, 0], from: [-4, -3, -7.325], size: [8, 5, 10] },
+            { tex: [56, 0], from: [-1, 0, -8.325], size: [2, 3, 2] },
+          ],
+        },
+        {
+          offset: [-4, -5.6, -1.8],
+          rotation: [0.4363, 0, 0],
+          children: [
+            {
+              offset: [0, 0.0893, 0.1198],
+              rotation: [-1.0472, 0, 0],
+              cubes: [{ tex: [36, 16], from: [-3.075, -0.9733, -1.9966], size: [3, 10, 4] }],
+            },
+          ],
+        },
+        {
+          offset: [4, -5.6, -1.7],
+          rotation: [0.4363, 0, 0],
+          children: [
+            {
+              offset: [0, -0.0015, -0.0808],
+              rotation: [-1.0472, 0, 0],
+              cubes: [{ tex: [50, 16], from: [0.075, -1.0443, -1.8997], size: [3, 10, 4] }],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      offset: [-2.1, -2.1, -2.075],
+      children: [
+        {
+          offset: [0.05, -1.9, 1.075],
+          rotation: [-1.5708, 0, 0],
+          cubes: [{ tex: [0, 27], from: [-2, 0.975, 0], size: [4, 5, 4] }],
+        },
+      ],
+    },
+    {
+      offset: [2, -2, -2.075],
+      children: [
+        {
+          offset: [0.05, -2, 1.075],
+          rotation: [-1.5708, 0, 0],
+          cubes: [{ tex: [16, 27], from: [-2, 0.975, 0], size: [4, 5, 4] }],
+        },
+      ],
+    },
+  ],
+  running: [
+    {
+      offset: [-1.064, -5, 0],
+      children: [
+        {
+          offset: [1.1, 0.1, 0.7],
+          rotation: [0.1204, -0.0064, -0.0779],
+          cubes: [{ tex: [0, 15], from: [-4.02, -6.116, -3.5], size: [8, 6, 6] }],
+        },
+        {
+          offset: [0.7, -5.6, -1.8],
+          cubes: [
+            { tex: [0, 0], from: [-4, -5.1, -5], size: [8, 5, 10] },
+            { tex: [56, 0], from: [-1.02, -2.1, -6], size: [2, 3, 2] },
+            { tex: [37, 8], from: [-1.02, -9.1, -1], size: [2, 4, 2], grow: -0.015 },
+            { tex: [37, 0], from: [-2, -13.1, -2], size: [4, 4, 4], grow: -0.015 },
+          ],
+        },
+        {
+          offset: [-4, -6, 0],
+          children: [
+            {
+              offset: [0.7, -0.248, -1.62],
+              rotation: [1.0036, 0, 0],
+              cubes: [{ tex: [36, 16], from: [-3.052, -1.11, -2.036], size: [3, 10, 4] }],
+            },
+          ],
+        },
+        {
+          offset: [4, -6, 0],
+          children: [
+            {
+              offset: [0.732, 0, 0],
+              rotation: [-0.8715, -0.0535, -0.0449],
+              cubes: [{ tex: [50, 16], from: [0.032, -1.1, -2], size: [3, 10, 4] }],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      offset: [-3.064, -5, 0],
+      children: [
+        {
+          offset: [1.048, 0, -0.9],
+          rotation: [-0.8727, 0, 0],
+          cubes: [{ tex: [0, 27], from: [-1.856, -0.1, -1.09], size: [4, 5, 4] }],
+        },
+      ],
+    },
+    {
+      offset: [0.936, -5, 0],
+      children: [
+        {
+          offset: [1, 0, 0],
+          rotation: [0.7854, 0, 0],
+          cubes: [{ tex: [16, 27], from: [-2.088, -0.1, -2], size: [4, 5, 4] }],
+        },
+      ],
+    },
+  ],
+  star: [
+    {
+      offset: [0, -5, 0],
+      cubes: [{ tex: [0, 15], from: [-4, -6, -3], size: [8, 6, 6] }],
+      children: [
+        {
+          offset: [0, -6, 0],
+          cubes: [
+            { tex: [0, 0], from: [-4, -5, -5], size: [8, 5, 10] },
+            { tex: [56, 0], from: [-1, -2, -6], size: [2, 3, 2] },
+            { tex: [37, 8], from: [-1, -9, -1], size: [2, 4, 2], grow: -0.015 },
+            { tex: [37, 0], from: [-2, -13, -2], size: [4, 4, 4], grow: -0.015 },
+          ],
+        },
+        {
+          offset: [-4, -6, 0],
+          children: [
+            {
+              offset: [1, 1, 0],
+              rotation: [0, 0, 1.9199],
+              cubes: [{ tex: [36, 16], from: [-1.5, -5, -2], size: [3, 10, 4] }],
+            },
+          ],
+        },
+        {
+          offset: [4, -6, 0],
+          children: [
+            {
+              offset: [-1, 1, 0],
+              rotation: [0, 0, -1.9199],
+              cubes: [{ tex: [50, 16], from: [-1.5, -5, -2], size: [3, 10, 4] }],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      offset: [-3, -5, 0],
+      children: [
+        {
+          offset: [0.35, 2, 0.01],
+          rotation: [0, 0, 0.2618],
+          cubes: [{ tex: [0, 27], from: [-2, -2.5, -2], size: [4, 5, 4] }],
+        },
+      ],
+    },
+    {
+      offset: [1, -5, 0],
+      children: [
+        {
+          offset: [1.65, 2, 0],
+          rotation: [0, 0, -0.2618],
+          cubes: [{ tex: [16, 27], from: [-2, -2.5, -2], size: [4, 5, 4] }],
+        },
+      ],
+    },
+  ],
+};
+
+/** `Direction.toYRot()`: south 0, west 90, north 180, east 270. */
+const TO_Y_ROT: Readonly<Record<string, number>> = { south: 0, west: 90, north: 180, east: 270 };
+const OPPOSITE_HORIZONTAL: Readonly<Record<string, string>> = {
+  north: "south",
+  south: "north",
+  east: "west",
+  west: "east",
+};
+
+/**
+ * The statue's root pose, from `CopperGolemStatueModel.setupAnim`: turned by
+ * the opposite of `facing`, and over by half a turn about z -- an entity model
+ * is written with y pointing down, and that half turn is what stands it up.
+ * The two are one `rotationZYX(pi, yRot, 0)`, so y first, then z.
+ */
+export function copperGolemStatueRoot(pose: string, facing: string): ModelPartDef {
+  const yRot = (TO_Y_ROT[OPPOSITE_HORIZONTAL[facing] ?? "south"] * Math.PI) / 180;
+  return {
+    offset: [0, 0, 0],
+    rotation: [0, yRot, Math.PI],
+    children: COPPER_GOLEM_POSES[pose] ?? COPPER_GOLEM_POSES.standing,
+  };
+}
+
+/**
+ * A copper golem statue: the golem, in one of four poses, on the floor of its
+ * cell and facing `facing`.
+ *
+ * It was one 8x14x8 box with coordinate-derived UVs over the golem's entity
+ * sheet, the same in every pose. Vanilla has no block model to read -- the
+ * blockstate names a model holding a particle and nothing else -- because the
+ * statue is a block entity drawn with the golem's own entity model, one layer
+ * per `copper_golem_pose`.
+ *
+ * **Standing, it is 24 units tall**, the antenna's knob reaching half a block
+ * into the cell above, exactly as in the game. A click on that half picks the
+ * empty cell above, which is a banner's cloth one block along.
+ */
+function copperGolemStatue(entry: PaletteEntry): BlockShape {
+  const pose = entry.properties.copper_golem_pose ?? "standing";
+  const facing = entry.properties.facing ?? "north";
+  return { kind: "boxes", boxes: modelPartBoxes(copperGolemStatueRoot(pose, facing)) };
 }
 
 /**
@@ -1263,6 +1664,70 @@ function cauldron(entry: PaletteEntry): BlockShape {
   return boxes(...CAULDRON_POT, ...(content === null ? [] : [content]));
 }
 
+// --- composter ----------------------------------------------------------------
+//
+// The cauldron's fault in wood. It was left a cube on the reasoning that "its
+// outer shell really is 16x16x16, only its inside is hollow" -- which is the
+// whole of the fault: a cube has no inside, so from above the rim there was a
+// lid of `composter_top` where vanilla shows a bin, and `level` had nowhere to
+// be drawn. `composter.json` (1.21.10) is a floor two units thick and four
+// walls two units thick; the blockstate is a multipart that adds one
+// `composter_contents<n>` model per level.
+
+const COMPOSTER_WALL: Readonly<Record<string, string>> = { up: "composter_top" };
+
+/**
+ * The bin, transcribed element for element. Vanilla states no `uv` anywhere
+ * in it, so the derived windows are its own. The faces it does not state are
+ * the `omit`s: the walls have no underside, the north and south walls no ends,
+ * and the floor no sides -- each is inside another box of the same bin.
+ */
+const COMPOSTER_BIN: readonly ShapeBox[] = [
+  {
+    box: [0, 0, 0, 16, 2, 16],
+    texture: "composter_bottom",
+    omit: ["north", "east", "south", "west"],
+  },
+  { box: [0, 0, 0, 2, 16, 16], texture: "composter_side", textures: COMPOSTER_WALL, omit: ["down"] },
+  { box: [14, 0, 0, 16, 16, 16], texture: "composter_side", textures: COMPOSTER_WALL, omit: ["down"] },
+  {
+    box: [2, 0, 0, 14, 16, 2],
+    texture: "composter_side",
+    textures: COMPOSTER_WALL,
+    omit: ["down", "east", "west"],
+  },
+  {
+    box: [2, 0, 14, 14, 16, 16],
+    texture: "composter_side",
+    textures: COMPOSTER_WALL,
+    omit: ["down", "east", "west"],
+  },
+];
+
+/**
+ * The compost's surface, or `null` for an empty bin.
+ *
+ * `composter_contents1..7` are boxes from the floor to `1 + 2 * level` with an
+ * `up` face and nothing else, so only that face is drawn here: 3 at level 1,
+ * 15 at level 7. `level=8` is `composter_contents_ready`, the same height as
+ * 7 wearing `composter_ready` -- bone meal waiting to be taken out.
+ */
+function composterContent(entry: PaletteEntry): ShapeBox | null {
+  const level = Math.trunc(Number(entry.properties.level));
+  if (!(level >= 1 && level <= 8)) return null;
+  const height = Math.min(15, 1 + 2 * level);
+  return {
+    box: [2, height, 2, 14, height, 14],
+    texture: level === 8 ? "composter_ready" : "composter_compost",
+    omit: ["down"],
+  };
+}
+
+function composter(entry: PaletteEntry): BlockShape {
+  const content = composterContent(entry);
+  return boxes(...COMPOSTER_BIN, ...(content === null ? [] : [content]));
+}
+
 // --- banners ------------------------------------------------------------------
 //
 // A banner has no block model: `blockstates/white_wall_banner.json` names
@@ -1286,39 +1751,46 @@ function cauldron(entry: PaletteEntry): BlockShape {
 const BANNER_SCALE = 2 / 3;
 const bannerUnits = (n: number): number => n * BANNER_SCALE;
 
-/** The three parts' windows on the sheet, in the sheet's own texels. */
-const BANNER_CLOTH_UV = unwrapCube(0, 0, 20, 40, 1);
+/**
+ * The flag's windows, as `BannerRenderer` puts them on the cloth.
+ *
+ * Not `unwrapCube`'s, which reads a strip bottom-up and puts the first side
+ * window on the model's north face -- right for a chest, and exactly wrong
+ * here. The flag is a `ModelPart` cube at `(-10, 0, -2)` scaled by
+ * `(2/3, -2/3, -2/3)`, so model `y` runs *down* the world and model `z` is
+ * turned round: the cube's north window, `u 1..21 v 1..41`, lands on the side
+ * facing away from the pole, which is the side the banner faces, the right way
+ * up and with `u 1` on the west.
+ *
+ * It made no difference while the cloth was one flat colour, and that is why
+ * it survived: the front wore the back's window upside down, and every texel of
+ * both was the same dye. A pattern is not symmetric, and `stripe_left` came out
+ * on the right, at the bottom. `tests/blocks.ts` states it on the front face in
+ * pixels.
+ *
+ * In sixteenths of a 64-wide sheet, so a texel is a quarter.
+ */
+const BANNER_CLOTH_UV: Readonly<Record<string, UvWindow>> = {
+  south: [1 / 4, 1 / 4, 21 / 4, 41 / 4],
+  // The back reads the mirrored window, so from behind a design is a mirror
+  // image of the front rather than a copy of it -- which is what cloth is.
+  north: [22 / 4, 1 / 4, 42 / 4, 41 / 4],
+  west: [0, 1 / 4, 1 / 4, 41 / 4],
+  east: [21 / 4, 1 / 4, 22 / 4, 41 / 4],
+  up: [1 / 4, 0, 21 / 4, 1 / 4],
+  down: [21 / 4, 0, 41 / 4, 1 / 4],
+};
+
+/** The pole's and the bar's windows, in the sheet's own texels. */
 const BANNER_POLE_UV = unwrapCube(44, 0, 2, 42, 2);
 const BANNER_BAR_UV = unwrapCube(0, 42, 20, 2, 2);
 
 /**
- * Vanilla's `DyeColor.textureDiffuseColor`, which is what the base layer is
- * multiplied by.
- *
- * Corroborated against the pack rather than trusted: every one of the sixteen
- * is within 35 of the mean of its own `<colour>_wool` texture, and every one
- * of those means is the same hue a shade darker -- which is what a wool
- * texture is. A transposed pair would show up as two colours swapping places,
- * not as a uniform offset.
+ * The dyes' tint colours. The table is in `shared/banner_patterns.ts` now, where
+ * the inspector's colour picker can read it too; re-exported so the pipeline
+ * and its checks keep one name.
  */
-const DYE_COLOURS: Readonly<Record<string, string>> = {
-  white: "f9fffe",
-  orange: "f9801d",
-  magenta: "c74ebd",
-  light_blue: "3ab3da",
-  yellow: "fed83d",
-  lime: "80c71f",
-  pink: "f38baa",
-  gray: "474f52",
-  light_gray: "9d9d97",
-  cyan: "169c9c",
-  purple: "8932b8",
-  blue: "3c44aa",
-  brown: "835432",
-  green: "5e7c16",
-  red: "b02e26",
-  black: "1d1d21",
-};
+export const DYE_COLOURS: Readonly<Record<string, string>> = DYE_HEX;
 
 /**
  * The cloth's texture: the base layer, tinted by the block's own dye.
@@ -1622,9 +2094,8 @@ const SUFFIX_SHAPES: ReadonlyArray<readonly [string, (entry: PaletteEntry) => Bl
   // A cauldron with something in it is the same iron pot, with the something
   // drawn in it.
   ["_cauldron", cauldron],
-  // The copper golem, stood still. A statue is not a cube and drawing it as one
-  // walled off whatever it was standing next to.
-  ["_golem_statue", (e) => transform([[4, 0, 4, 12, 14, 12]], facingSteps(e), false)],
+  // The copper golem, in whichever of its four poses the statue holds.
+  ["_golem_statue", copperGolemStatue],
   ["_tulip", () => ({ kind: "cross" })],
   ["_mushroom", () => ({ kind: "cross" })],
 ];
@@ -2611,29 +3082,50 @@ function lightningRod(entry: PaletteEntry): BlockShape {
 }
 
 /**
- * `template_fence_gate.json`: two posts and the bars between them, authored
- * facing south. Getting the authoring direction wrong is what made gates sit
- * across the fence line instead of in it.
+ * `template_fence_gate.json` and its three siblings: two posts and two leaves,
+ * authored facing south. Getting the authoring direction wrong is what made
+ * gates sit across the fence line instead of in it.
+ *
+ * An open gate was drawn as the two posts alone, "reading as open". It is not
+ * what vanilla draws: `template_fence_gate_open.json` swings each leaf a
+ * quarter turn onto the south side of its post, an upright at `z 13..15` and
+ * two bars from the post out to it, so an open gate is two short arms pointing
+ * the way it faces. `in_wall` was read nowhere, and the two `_wall` models are
+ * the same elements three units lower, which is what lets a gate line up with
+ * the lower top of a wall beside it. `powered` moves nothing.
+ *
+ * The bars carry no face towards what they run into: vanilla states none,
+ * and each would be coincident with a post's or an upright's side.
  */
-const FENCE_GATE_POSTS: Box[] = [
-  [0, 5, 7, 2, 16, 9],
-  [14, 5, 7, 16, 16, 9],
+const FENCE_GATE_POSTS: ShapeBox[] = [
+  { box: [0, 5, 7, 2, 16, 9] },
+  { box: [14, 5, 7, 16, 16, 9] },
 ];
-const FENCE_GATE_BARS: Box[] = [
-  [6, 6, 7, 10, 15, 9],
-  [2, 12, 7, 6, 15, 9],
-  [10, 12, 7, 14, 15, 9],
-  [2, 6, 7, 6, 9, 9],
-  [10, 6, 7, 14, 9, 9],
+const FENCE_GATE_CLOSED: ShapeBox[] = [
+  // Vanilla's two inner uprights, 6..8 and 8..10, as one box: the face between
+  // them is inside the gate.
+  { box: [6, 6, 7, 10, 15, 9] },
+  { box: [2, 6, 7, 6, 9, 9], omit: ["west", "east"] },
+  { box: [2, 12, 7, 6, 15, 9], omit: ["west", "east"] },
+  { box: [10, 6, 7, 14, 9, 9], omit: ["west", "east"] },
+  { box: [10, 12, 7, 14, 15, 9], omit: ["west", "east"] },
+];
+const FENCE_GATE_OPEN: ShapeBox[] = [
+  { box: [0, 6, 13, 2, 15, 15] },
+  { box: [14, 6, 13, 16, 15, 15] },
+  { box: [0, 6, 9, 2, 9, 13], omit: ["north", "south"] },
+  { box: [0, 12, 9, 2, 15, 13], omit: ["north", "south"] },
+  { box: [14, 6, 9, 16, 9, 13], omit: ["north", "south"] },
+  { box: [14, 12, 9, 16, 15, 13], omit: ["north", "south"] },
 ];
 
 function fenceGate(entry: PaletteEntry): BlockShape {
-  // An open gate swings its leaves flat against the posts; drawing just the
-  // posts reads as "open" and avoids modelling the swing.
-  const parts =
-    entry.properties.open === "true"
-      ? FENCE_GATE_POSTS
-      : [...FENCE_GATE_POSTS, ...FENCE_GATE_BARS];
+  const leaves = entry.properties.open === "true" ? FENCE_GATE_OPEN : FENCE_GATE_CLOSED;
+  const drop = entry.properties.in_wall === "true" ? 3 : 0;
+  const parts = [...FENCE_GATE_POSTS, ...leaves].map((part): ShapeBox => {
+    const [x0, y0, z0, x1, y1, z1] = part.box;
+    return { ...part, box: [x0, y0 - drop, z0, x1, y1 - drop, z1] };
+  });
   return transform(parts, southFacingSteps(entry), false);
 }
 
@@ -3076,6 +3568,188 @@ function pitcherLeaf(box: Box, angle: number, originY: number, texture: string):
   return { box, rotation: { origin: [8, originY, 8], axis: "y", angle }, texture, uv: PITCHER_LEAF_UV };
 }
 
+/**
+ * A sunflower's upper half is a short cross with the flower on top of it, and
+ * it was only the cross.
+ *
+ * `sunflower_bottom.json` really is `block/cross`, which is why the lower half
+ * was right. `sunflower_top.json` is not: two crossed planes eight units tall
+ * reading the lower half of `sunflower_top` -- the stem's last stretch -- and
+ * a third plane at `x = 9.6`, tilted 22.5 degrees about z, wearing
+ * `sunflower_front` on its east face and `sunflower_back` on its west. Drawn
+ * as a plain cross the head simply did not exist, which is the report: the
+ * upper half showed a stalk and no flower.
+ *
+ * All three carry `rescale: true`, so they are written already rescaled, the
+ * sculk sensor's idiom: `sqrt(2)` across the crossed planes and
+ * `1 / cos(22.5 degrees)` on the head's two axes that turn. The windows are
+ * vanilla's; the crossed planes' `[0, 8, 16, 16]` on an eight-unit plane is
+ * not something the box would derive.
+ */
+const SUNFLOWER_CROSS_REACH = 7.2 * Math.SQRT2;
+const SUNFLOWER_SPIN: BoxRotation = { origin: [8, 8, 8], axis: "y", angle: 45 };
+const SUNFLOWER_TILT_SCALE = 1 / Math.cos(Math.PI / 8);
+const sunflowerTilted = (n: number): number => 8 + (n - 8) * SUNFLOWER_TILT_SCALE;
+
+const SUNFLOWER_TOP: readonly ShapeBox[] = [
+  {
+    box: [8 - SUNFLOWER_CROSS_REACH, 0, 8, 8 + SUNFLOWER_CROSS_REACH, 8, 8],
+    rotation: SUNFLOWER_SPIN,
+    texture: "sunflower_top",
+    uv: { north: [0, 8, 16, 16], south: [0, 8, 16, 16] },
+  },
+  {
+    box: [8, 0, 8 - SUNFLOWER_CROSS_REACH, 8, 8, 8 + SUNFLOWER_CROSS_REACH],
+    rotation: SUNFLOWER_SPIN,
+    texture: "sunflower_top",
+    uv: { west: [0, 8, 16, 16], east: [0, 8, 16, 16] },
+  },
+  {
+    box: [sunflowerTilted(9.6), sunflowerTilted(-1), 1, sunflowerTilted(9.6), sunflowerTilted(15), 15],
+    rotation: { origin: [8, 8, 8], axis: "z", angle: 22.5 },
+    texture: "sunflower_front",
+    textures: { west: "sunflower_back", east: "sunflower_front" },
+    uv: { west: [0, 0, 16, 16], east: [0, 0, 16, 16] },
+  },
+];
+
+/**
+ * An attached stem bends towards its fruit, and it was a plain cross that
+ * looked the same whichever way `facing` said. `stem_fruit.json` (1.21.4) is
+ * the growing stem's lower half as two crossed planes, rescaled, reaching a
+ * unit below the cell, plus one plane of `attached_<fruit>_stem` from the
+ * middle of the cell out to the west. The blockstate gives `facing=west` no
+ * `y`, so the model is west-authored and `facing` turns all three.
+ */
+const STEM_REACH = 8 * Math.SQRT2;
+const STEM_SPIN: BoxRotation = { origin: [8, 8, 8], axis: "y", angle: 45 };
+
+function attachedStem(entry: PaletteEntry): BlockShape {
+  const fruit = baseName(entry).replace(/^attached_/, "").replace(/_stem$/, "");
+  const stem = `${fruit}_stem`;
+  const upper = `attached_${fruit}_stem`;
+  return transform(
+    [
+      {
+        box: [8 - STEM_REACH, -1, 8, 8 + STEM_REACH, 7, 8],
+        rotation: STEM_SPIN,
+        texture: stem,
+        uv: { north: [0, 0, 16, 8], south: [16, 0, 0, 8] },
+      },
+      {
+        box: [8, -1, 8 - STEM_REACH, 8, 7, 8 + STEM_REACH],
+        rotation: STEM_SPIN,
+        texture: stem,
+        uv: { west: [0, 0, 16, 8], east: [16, 0, 0, 8] },
+      },
+      {
+        box: [0, 0, 8, 9, 16, 8],
+        texture: upper,
+        uv: { north: [9, 0, 0, 16], south: [0, 0, 9, 16] },
+      },
+    ],
+    facingSteps(entry) + 2,
+    false,
+  );
+}
+
+function sunflower(entry: PaletteEntry): BlockShape {
+  return entry.properties.half === "upper" ? boxes(...SUNFLOWER_TOP) : { kind: "cross" };
+}
+
+/**
+ * A spore blossom hangs from the ceiling: a base plane a tenth under the top of
+ * the cell and four petals drooping 22.5 degrees from its edges. It was a full
+ * cube wearing `spore_blossom` on six sides, which is the petal sprite smeared
+ * over a block that also sealed its cell.
+ *
+ * Transcribed from `models/block/spore_blossom.json` (1.21.4). No `rescale`, so
+ * the petals keep their 16 units and reach past the cell, as vanilla's do. The
+ * blockstate has one variant.
+ *
+ * **The windows are verbatim and the two quarter-turns about z are not.**
+ * Vanilla's `90`/`270` on the up and down faces of the two petals tilted about
+ * z, copied as written, put each sprite's yellow base on the petal's tip
+ * instead of at the middle of the flower. That was reported from the editor
+ * with a screenshot of the game beside it. Here they are swapped, and
+ * `tests/blocks.ts` checks the base texel of all four petals. The two petals
+ * tilted about x have no rotation and were right. So on a flat face this
+ * app's direction for a quarter-turn may be the opposite of vanilla's. The
+ * other `up`/`down` quarter-turns in this file have not been checked against
+ * a picture.
+ */
+const SPORE_BLOSSOM: readonly ShapeBox[] = [
+  { box: [1, 15.9, 1, 15, 15.9, 15], texture: "spore_blossom_base", uv: { up: [1, 1, 15, 15], down: [1, 1, 15, 15] } },
+  {
+    box: [8, 15.7, 0, 24, 15.7, 16],
+    rotation: { origin: [8, 16, 0], axis: "z", angle: -22.5 },
+    texture: "spore_blossom",
+    uv: { up: [0, 0, 16, 16], down: [0, 16, 16, 0] },
+    // Vanilla writes `up: 90, down: 270` here. Copied as written, the sprite
+    // came out a half turn round, with its base at the tip. See below.
+    uvRotation: { up: 270, down: 90 },
+  },
+  {
+    box: [-8, 15.7, 0, 8, 15.7, 16],
+    rotation: { origin: [8, 16, 0], axis: "z", angle: 22.5 },
+    texture: "spore_blossom",
+    uv: { up: [0, 0, 16, 16], down: [0, 16, 16, 0] },
+    uvRotation: { up: 90, down: 270 },
+  },
+  {
+    box: [0, 15.7, 8, 16, 15.7, 24],
+    rotation: { origin: [0, 16, 8], axis: "x", angle: 22.5 },
+    texture: "spore_blossom",
+    uv: { up: [16, 16, 0, 0], down: [16, 0, 0, 16] },
+  },
+  {
+    box: [0, 15.7, -8, 16, 15.7, 8],
+    rotation: { origin: [0, 16, 8], axis: "x", angle: -22.5 },
+    texture: "spore_blossom",
+    uv: { up: [0, 0, 16, 16], down: [0, 16, 16, 0] },
+  },
+];
+
+/**
+ * Bamboo is a stalk that thickens with `age` and carries leaves by `leaves`.
+ * It was one 3x3 column for every state, so neither property showed.
+ *
+ * `blockstates/bamboo.json` (1.21.4) is a multipart: `age=0` applies one of
+ * `bamboo1..4_age0`, a 2x2 stalk at 7..9, and `age=1` one of `bamboo1..4_age1`,
+ * a 3x3 at 6.5..9.5; `leaves=small|large` adds two crossed planes wearing
+ * `bamboo_small_leaves` or `bamboo_large_leaves`. The four stalk models are a
+ * weighted *random* pick per position and differ only in which column of
+ * `bamboo_stalk.png` their sides read; a shape here is baked per state, so it
+ * is always the first. Vanilla's random offset in x and z is not reproduced
+ * either, for the same reason.
+ *
+ * `stage` is in no `when` at all: it only says whether the stalk may still
+ * grow, so it moves nothing, which is `signal_fire`'s answer.
+ */
+function bamboo(entry: PaletteEntry): BlockShape {
+  const thick = entry.properties.age === "1";
+  const [lo, hi] = thick ? [6.5, 9.5] : [7, 9];
+  const w = hi - lo;
+  const side: UvWindow = [0, 0, w, 16];
+  const parts: ShapeBox[] = [
+    {
+      box: [lo, 0, lo, hi, 16, hi],
+      texture: "bamboo_stalk",
+      uv: { up: [13, 0, 13 + w, w], down: [13, 4, 13 + w, 4 + w], north: side, south: side, west: side, east: side },
+    },
+  ];
+  const leaves = entry.properties.leaves;
+  if (leaves === "small" || leaves === "large") {
+    const texture = `bamboo_${leaves}_leaves`;
+    const whole: UvWindow = [0, 0, 16, 16];
+    parts.push(
+      { box: [0.8, 0, 8, 15.2, 16, 8], texture, uv: { north: whole, south: whole } },
+      { box: [8, 0, 0.8, 8, 16, 15.2], texture, uv: { west: whole, east: whole } },
+    );
+  }
+  return boxes(...parts);
+}
+
 function pitcherCrop(entry: PaletteEntry): BlockShape {
   const raw = Number(entry.properties.age ?? "0");
   const age = Number.isFinite(raw) ? Math.min(4, Math.max(0, Math.trunc(raw))) : 0;
@@ -3487,8 +4161,174 @@ const SHELF_PARTS: readonly ShapeBox[] = [
   },
 ];
 
+/**
+ * The shelf's back wall, between the lips, and the half the body model lacks.
+ *
+ * `template_shelf_body` states no `north` face on its panel, so on its own the
+ * shelf is hollow: from the front there is nothing between the lips, and hung
+ * on a wall -- whose face towards the panel is rightly culled -- you look
+ * straight into the inside of that block. The blockstate is a multipart, and
+ * every state applies a second model: one plane at `z = 13`, `y 4..12`, north
+ * face only. `powered` and `side_chain` choose its window on the sheet and
+ * move not one coordinate.
+ */
+const SHELF_BACK_UV: Readonly<Record<string, UvWindow>> = {
+  unpowered: [0, 2, 8, 6],
+  unconnected: [8, 12, 16, 16],
+  left: [0, 8, 8, 12],
+  center: [0, 12, 8, 16],
+  right: [8, 8, 16, 12],
+};
+
 function shelf(entry: PaletteEntry): BlockShape {
-  return transform(SHELF_PARTS, northFacingSteps(entry), false);
+  const key =
+    entry.properties.powered !== "true" ? "unpowered" : entry.properties.side_chain ?? "unconnected";
+  const back: ShapeBox = {
+    box: [0, 4, 13, 16, 12, 13],
+    uv: { north: SHELF_BACK_UV[key] ?? SHELF_BACK_UV.unconnected },
+    omit: ["south"],
+  };
+  return transform([...SHELF_PARTS, back], northFacingSteps(entry), false);
+}
+
+/**
+ * A chiseled bookshelf: a block whose front is six slots, each a book or a gap.
+ *
+ * It was a cube, and no texture is named after its front -- the slots are
+ * `chiseled_bookshelf_occupied` and `_empty`, each a sheet of all six -- so all
+ * four sides wore `chiseled_bookshelf_side`, and `facing` and the six
+ * `slot_<n>_occupied` were read nowhere.
+ *
+ * The blockstate is a multipart: `chiseled_bookshelf.json` is a full box with
+ * no `north` face, applied with `uvlock`, and every slot adds one plane at
+ * `z = 0` facing north, cut out of the occupied or the empty sheet. Slots
+ * run 0..2 along the top and 3..5 along the bottom, left to right as seen
+ * from in front -- which, looking south at a north face, is from `x = 16`
+ * down to `x = 0`.
+ *
+ * **The body is not turned, and that is the `uvlock`.** Its geometry is the
+ * whole cell whatever the facing, so turning it would change nothing but the
+ * picture on its top and bottom, and `uvlock` is vanilla saying that picture
+ * stays put. Only which side is open follows `facing`. The slot planes carry
+ * no `uvlock` and turn with the block.
+ */
+const BOOKSHELF_SLOTS: readonly (readonly [Box, UvWindow])[] = [
+  [[10, 8, 0, 16, 16, 0], [0, 0, 6, 8]],
+  [[5, 8, 0, 10, 16, 0], [6, 0, 11, 8]],
+  [[0, 8, 0, 5, 16, 0], [11, 0, 16, 8]],
+  [[10, 0, 0, 16, 8, 0], [0, 8, 6, 16]],
+  [[5, 0, 0, 10, 8, 0], [6, 8, 11, 16]],
+  [[0, 0, 0, 5, 8, 0], [11, 8, 16, 16]],
+];
+
+function chiseledBookshelf(entry: PaletteEntry): BlockShape {
+  const front = (["north", "east", "south", "west"] as const).find(
+    (face) => face === entry.properties.facing,
+  ) ?? "north";
+  const body: ShapeBox = {
+    box: [0, 0, 0, 16, 16, 16],
+    texture: "chiseled_bookshelf_side",
+    textures: { up: "chiseled_bookshelf_top", down: "chiseled_bookshelf_top" },
+    omit: [front],
+  };
+  const slots = transform(
+    BOOKSHELF_SLOTS.map(([box, window], slot): ShapeBox => ({
+      box,
+      texture:
+        entry.properties[`slot_${slot}_occupied`] === "true"
+          ? "chiseled_bookshelf_occupied"
+          : "chiseled_bookshelf_empty",
+      uv: { north: window },
+      omit: ["south"],
+    })),
+    northFacingSteps(entry),
+    false,
+  );
+  return boxes(body, ...(slots.kind === "boxes" ? slots.boxes : []));
+}
+
+const POT_BASE = "entity/decorated_pot/decorated_pot_base";
+const POT_SIDE = "entity/decorated_pot/decorated_pot_side";
+
+/**
+ * A decorated pot, which has **no block model at all**: `decorated_pot.json`
+ * names a particle and nothing else, and `DecoratedPotRenderer` draws the pot
+ * from two `ModelPart` layers. It was a 14x16x14 box wearing the base sheet on
+ * its lid and floor and the side tile on four faces -- a crate, with a whole
+ * 32-texel sheet of parts squeezed onto each flat face and no neck.
+ *
+ * The base layer is a neck, a lip under it, and a 14x14 plane at the top and
+ * at the bottom; the sides layer is four 14x16 planes carrying only their
+ * outward face. The neck is posed with `xRot = pi` about `(0, 37, 16)`, which
+ * turns it over: the 8x3x8 cube lands on top at `y 17..20` and the 6x1x6 one
+ * becomes the narrow collar between it and the lid. Both are deflated or
+ * inflated by vanilla's `CubeDeformation` (-0.1 and +0.2) while their UVs keep
+ * the undeformed sizes, so those two are not one texel per unit, and that is
+ * vanilla.
+ *
+ * The windows were not worked out by hand. The renderer's cubes, their poses
+ * and `ModelPart.Cube`'s unwrap were emulated, and each face's window and turn
+ * read back off the resulting vertices -- the flip swaps the neck's `up` and
+ * `down` patches and its `north` and `south` strips, which is exactly the part
+ * a hand transcription gets backwards. The four sides need none: a plane from
+ * 1 to 15 derives vanilla's `[1, 0, 15, 16]` on its own.
+ *
+ * The model is authored at `facing=north`, because the renderer turns it by
+ * `180 - toYRot` and that is zero there; the front is then on the **south**,
+ * facing the player who was looking north.
+ *
+ * `cracked` moves nothing. It decides whether breaking the pot drops the pot or
+ * its sherds, and the renderer never reads it -- `signal_fire`'s answer.
+ * `waterlogged` is the mesher's, like any other block.
+ *
+ * What is not done is the sherds: they are the block entity's `sherds` list,
+ * one pattern per side, which is a function of the *position* like a sign's
+ * text. Every pot is drawn with the plain brick side a pot without sherds has.
+ */
+function decoratedPot(entry: PaletteEntry): BlockShape {
+  return transform(
+    [
+      {
+        box: [4.1, 17.1, 4.1, 11.9, 19.9, 11.9],
+        texture: POT_BASE,
+        uv: {
+          up: [4, 0, 8, 4],
+          down: [8, 4, 12, 0],
+          north: [12, 4, 16, 5.5],
+          south: [4, 4, 8, 5.5],
+          west: [0, 4, 4, 5.5],
+          east: [8, 4, 12, 5.5],
+        },
+      },
+      {
+        box: [4.8, 15.8, 4.8, 11.2, 17.2, 11.2],
+        texture: POT_BASE,
+        uv: {
+          up: [3, 2.5, 6, 5.5],
+          down: [6, 5.5, 9, 2.5],
+          north: [9, 5.5, 12, 6],
+          south: [3, 5.5, 6, 6],
+          west: [0, 5.5, 3, 6],
+          east: [6, 5.5, 9, 6],
+        },
+      },
+      ...([16, 0] as const).map(
+        (y): ShapeBox => ({
+          box: [1, y, 1, 15, y, 15],
+          texture: POT_BASE,
+          uv: { up: [7, 13.5, 14, 6.5], down: [0, 6.5, 7, 13.5] },
+        }),
+      ),
+      { box: [1, 0, 1, 15, 16, 1], texture: POT_SIDE, omit: ["south"] },
+      { box: [1, 0, 15, 15, 16, 15], texture: POT_SIDE, omit: ["north"] },
+      { box: [1, 0, 1, 1, 16, 15], texture: POT_SIDE, omit: ["east"] },
+      { box: [15, 0, 1, 15, 16, 15], texture: POT_SIDE, omit: ["west"] },
+    ],
+    // `facingSteps` falls back to east, and the registry's default is north: a
+    // bare pot would otherwise come out a quarter turn round.
+    (FACING_STEPS[entry.properties.facing ?? "north"] ?? 3) + 1,
+    false,
+  );
 }
 
 /**
@@ -4127,6 +4967,158 @@ function tripwire(entry: PaletteEntry): BlockShape {
   );
 }
 
+/**
+ * A tripwire hook: a plank plate on the wall, a stick out of it, and a ring on
+ * the end of the stick. Transcribed from `tripwire_hook.json`, `_on`,
+ * `_attached` and `_attached_on`, which the blockstate chooses between by
+ * `attached` and `powered` and turns by `facing`.
+ *
+ * It was `againstWall(e, 3)`, the ladder's plate three units thick, wearing
+ * `tripwire_hook.png` -- a sheet whose art is a small ring and a hole -- over a
+ * whole face of the cell. So it drew almost nothing, and what it did draw was
+ * a plate lying on the cell boundary, which made `coversFace` answer true and
+ * took the face off the block it hung on.
+ *
+ * The model is **north-authored**: `facing=north` has no `y`, and its plate is
+ * against the *south* wall. `facing` is where the hook points, out of the wall,
+ * which is `WALL_MOUNTED`'s rule and is why the hook is in that table.
+ *
+ * What the two properties move:
+ *
+ * - **`attached`** lowers the ring from where the stick holds it up and adds
+ *   the length of string running north out of the cell. That string is written
+ *   **already rescaled**: vanilla tilts it 22.5 degrees with `rescale: true`,
+ *   which this file has no notion of, and a 22.5-degree rescale stretches the
+ *   two axes across the turn by `1 / cos(22.5)` about the origin `[8, 0, 0]`.
+ * - **`powered`** tilts the stick down and drops the ring onto its end.
+ *
+ * Every element names its own texture, because three sheets meet in one block:
+ * `#hook` is `tripwire_hook`, `#wood` is `oak_planks` and `#tripwire` is
+ * `tripwire`. The four thin planes are the inside of the ring, each with one
+ * face in vanilla, so each omits the other.
+ */
+const HOOK_RESCALE = 1 / Math.cos(Math.PI / 8);
+const HOOK_TEXTURE = "tripwire_hook";
+const HOOK_WOOD = "oak_planks";
+
+/** The ring and its four inside faces, from the ring box's own coordinates. */
+function hookRing(
+  y0: number,
+  y1: number,
+  z0: number,
+  rotation: BoxRotation | undefined,
+): ShapeBox[] {
+  const z1 = z0 + 3.6;
+  const inner0 = z0 + 1.2;
+  const inner1 = z0 + 2.4;
+  const tilt = rotation === undefined ? {} : { rotation };
+  return [
+    {
+      box: [6.2, y0, z0, 9.8, y1, z1],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: {
+        down: [5, 3, 11, 9],
+        up: [5, 3, 11, 9],
+        north: [5, 3, 11, 4],
+        south: [5, 8, 11, 9],
+        west: [5, 8, 11, 9],
+        east: [5, 3, 11, 4],
+      },
+    },
+    {
+      box: [7.4, y0, inner1, 8.6, y1, inner1],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: { north: [7, 8, 9, 9] },
+      omit: ["south"],
+    },
+    {
+      box: [7.4, y0, inner0, 8.6, y1, inner0],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: { south: [7, 3, 9, 4] },
+      omit: ["north"],
+    },
+    {
+      box: [7.4, y0, inner0, 7.4, y1, inner1],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: { east: [7, 8, 9, 9] },
+      omit: ["west"],
+    },
+    {
+      box: [8.6, y0, inner0, 8.6, y1, inner1],
+      ...tilt,
+      texture: HOOK_TEXTURE,
+      uv: { west: [7, 3, 9, 4] },
+      omit: ["east"],
+    },
+  ];
+}
+
+/** The stick; `attached` alone states no `south` face, and no tilt. */
+function hookStick(angle: number | null): ShapeBox {
+  return {
+    box: [7.4, 5.2, 10, 8.8, 6.8, 14],
+    ...(angle === null ? {} : { rotation: { origin: [8, 6, 14], axis: "x", angle } as const }),
+    texture: HOOK_WOOD,
+    uv: {
+      down: [7, 9, 9, 14],
+      up: [7, 2, 9, 7],
+      north: [7, 9, 9, 11],
+      south: [7, 9, 9, 11],
+      west: [2, 9, 7, 11],
+      east: [9, 9, 14, 11],
+    },
+    ...(angle === null ? { omit: ["south"] } : {}),
+  };
+}
+
+const HOOK_PLATE: ShapeBox = {
+  box: [6, 1, 14, 10, 9, 16],
+  texture: HOOK_WOOD,
+  uv: {
+    down: [6, 14, 10, 16],
+    up: [6, 0, 10, 2],
+    north: [6, 7, 10, 15],
+    south: [6, 7, 10, 15],
+    west: [0, 7, 2, 15],
+    east: [14, 7, 16, 15],
+  },
+};
+
+/** The string pulled taut, `height` units off the floor before the rescale. */
+function hookString(height: number): ShapeBox {
+  return {
+    box: [7.75, height * HOOK_RESCALE, 0, 8.25, height * HOOK_RESCALE, 6.7 * HOOK_RESCALE],
+    rotation: { origin: [8, 0, 0], axis: "x", angle: -22.5 },
+    texture: "tripwire",
+    uv: { down: [16, 6, 0, 8], up: [0, 6, 16, 8] },
+    uvRotation: { down: 90, up: 90 },
+  };
+}
+
+function tripwireHook(entry: PaletteEntry): BlockShape {
+  const attached = entry.properties.attached === "true";
+  const powered = entry.properties.powered === "true";
+  let parts: ShapeBox[];
+  if (!attached && !powered) {
+    parts = [...hookRing(3.8, 4.6, 7.9, { origin: [8, 6, 5.2], axis: "x", angle: -45 }), hookStick(45)];
+  } else if (!attached) {
+    parts = [...hookRing(4.2, 5, 6.7, undefined), hookStick(-22.5)];
+  } else if (!powered) {
+    parts = [
+      hookString(1.5),
+      ...hookRing(4.2, 5, 6.7, { origin: [8, 4.2, 6.7], axis: "x", angle: -22.5 }),
+      hookStick(null),
+    ];
+  } else {
+    parts = [hookString(0.5), ...hookRing(3.4, 4.2, 6.7, undefined), hookStick(-22.5)];
+  }
+  return transform([...parts, HOOK_PLATE], northFacingSteps(entry), false);
+}
+
 /** Exact block names, taking precedence over the suffix table. */
 const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>> = {
   /*
@@ -4185,14 +5177,15 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   calibrated_sculk_sensor: calibratedSculkSensor,
   sculk_shrieker: sculkShrieker,
   tripwire: tripwire,
-  tripwire_hook: (e) => againstWall(e, 3),
+  tripwire_hook: tripwireHook,
   glow_lichen: (e) => againstWall(e, 1),
 
   // Vanilla insets the cactus by 1/16 on all four sides; drawn as a full cube
   // it merges with whatever it stands next to.
   cactus: () => boxes([1, 0, 1, 15, 16, 15]),
   scaffolding: () => boxes([0, 14, 0, 16, 16, 16]),
-  bamboo: () => boxes([6.5, 0, 6.5, 9.5, 16, 9.5]),
+  bamboo,
+  spore_blossom: () => boxes(...SPORE_BLOSSOM),
   /*
    * Ahead of the `_fence` suffix, which is where it had been landing: a
    * bamboo fence is vanilla's `custom_fence`, a different model on a
@@ -4206,8 +5199,10 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   sea_pickle: () => boxes([6, 0, 6, 10, 6, 10]),
   candle: candleShape,
 
-  // Workstations that are not full blocks. `composter` is left a cube on
-  // purpose: its outer shell really is 16x16x16, only its inside is hollow.
+  // Workstations that are not full blocks. The composter is one: its shell is
+  // 16x16x16, and the inside is what a cube cannot draw.
+  composter,
+  chiseled_bookshelf: chiseledBookshelf,
   stonecutter: () => boxes([0, 0, 0, 16, 9, 16]),
   grindstone,
   brewing_stand: brewingStand,
@@ -4285,6 +5280,9 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
 
   small_dripleaf: smallDripleaf,
   pitcher_crop: pitcherCrop,
+  sunflower,
+  attached_pumpkin_stem: attachedStem,
+  attached_melon_stem: attachedStem,
   big_dripleaf: () => boxes([0, 11, 0, 16, 15, 16]),
   big_dripleaf_stem: () => boxes([5, 0, 5, 11, 16, 11]),
 
@@ -4307,7 +5305,7 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   // the same two expressions the `_skull` and `_wall_skull` suffixes already
   // reach. Two copies of one shape is how one of them comes to be corrected
   // and the other not -- and this pair very nearly was.
-  decorated_pot: () => boxes([1, 0, 1, 15, 16, 15]),
+  decorated_pot: decoratedPot,
   sniffer_egg: () => boxes([1, 0, 1, 15, 16, 15]),
   /*
    * The two bare pre-Flattening names. `SUFFIX_SHAPES` keys `_sign` and
@@ -4361,7 +5359,6 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "lily_of_the_valley",
   "wither_rose",
   "torchflower",
-  "sunflower",
   "lilac",
   "rose_bush",
   "peony",
@@ -4419,7 +5416,8 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   /*
    * Crops and fungi that arrived with the registry. `_stem` is emphatically not
    * a suffix rule here -- `crimson_stem` is a log and a full cube -- so the two
-   * crop stems and their attached forms are named one at a time.
+   * crop stems are named one at a time. Their attached forms bend towards
+   * the fruit and are `attachedStem`.
    */
   "crimson_fungus",
   "warped_fungus",
@@ -4427,8 +5425,6 @@ const CROSS_BLOCKS: ReadonlySet<string> = new Set([
   "hanging_roots",
   "melon_stem",
   "pumpkin_stem",
-  "attached_melon_stem",
-  "attached_pumpkin_stem",
 ]);
 
 function baseName(entry: PaletteEntry): string {
@@ -4514,8 +5510,8 @@ export function coversFace(entry: PaletteEntry, face: CellFace): boolean {
   const [u, v] = [0, 1, 2].filter((a) => a !== axis) as [0 | 1 | 2, 0 | 1 | 2];
 
   const rects: Array<[number, number, number, number]> = [];
-  for (const { box, rotation } of shape.boxes) {
-    if (rotation !== undefined) continue;
+  for (const { box, rotation, chain } of shape.boxes) {
+    if (rotation !== undefined || chain !== undefined) continue;
     // The box has to touch the boundary this face sits on...
     if (atMin ? box[axis] > 0 : box[axis + 3] < 16) continue;
     // ...and what it covers of the square is clipped to the square: a potted
@@ -4600,8 +5596,21 @@ export function occludesNeighbours(entry: PaletteEntry): boolean {
   if (paletteEntryIsAir(entry)) {
     return false;
   }
+  if (SOLID_BOXES.has(baseName(entry))) return true;
   return shapeFor(entry).kind === "cube" && !isSeeThrough(entry);
 }
+
+/**
+ * Blocks drawn as boxes that are still solid blocks.
+ *
+ * A chiseled bookshelf is a full block with a front made of six planes, so it
+ * has to be `boxes` to be drawn and would stop being solid for being drawn --
+ * letting light through a wall of them and fences not attach. It is a name
+ * rather than "boxes that cover all six faces" because that geometry does not
+ * decide it: measured over every offered id, the one other shape that covers
+ * all six today is the beacon, which is glass and lets light through.
+ */
+const SOLID_BOXES: ReadonlySet<string> = new Set(["chiseled_bookshelf"]);
 
 /**
  * Blocks you can see through, so they must not occlude even though their

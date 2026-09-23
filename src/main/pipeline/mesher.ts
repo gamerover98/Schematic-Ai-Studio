@@ -119,6 +119,14 @@ const FACE_SLOT: Readonly<Record<CellFace, number>> = {
  * that is not a refinement: without it every layer of a pool would stand 8/9
  * tall with a gap above, and a deep pond would be stripes.
  */
+/**
+ * Whether a face wears a banner's dyed base -- `entity/banner/base`, with or
+ * without its `#rrggbb` -- which is the one texture a design is painted onto.
+ */
+export function isBannerClothKey(textureKey: string): boolean {
+  return textureKey.split("#", 1)[0] === "minecraft:entity/banner/base";
+}
+
 function fluidHeight(entry: PaletteEntry, sameAbove: boolean): number {
   if (sameAbove) return 1;
   const level = Number(entry.properties.level ?? "0");
@@ -201,6 +209,17 @@ export async function culledFaces(
    * marks which layer the face comes out in.
    */
   voidIndices?: ReadonlySet<number>,
+  /**
+   * The cloth each patterned banner wears, by flat voxel index: a texture key
+   * `ModelBaker.bannerCloth` has already composed.
+   *
+   * A per-position overlay for the signs' reason -- two banners of one block
+   * state carry different designs -- and a *key* rather than the layers, so the
+   * async composition happens once, before the atlas is packed, and the loop
+   * below only swaps a name. Omitted means plain cloth, which is what every
+   * banner was before patterns were read.
+   */
+  banners?: ReadonlyMap<number, string>,
 ): Promise<BakedFace[]> {
   const voxels = struct.voxels;
   const [sizeX, sizeY, sizeZ] = [
@@ -586,10 +605,21 @@ export async function culledFaces(
          * neighbour can cover: a step's riser, a fence's rails, the quads of a
          * cross, a candle's flame. Those are emitted exactly as before.
          */
-        for (const face of bakedBlock.extraFaces) {
-          if (face.cullFace !== undefined && coveredBeyond(x, y, z, face.cullFace)) {
+        const cloth = banners?.get(flatIndex(x, y, z));
+        for (const baked of bakedBlock.extraFaces) {
+          if (baked.cullFace !== undefined && coveredBeyond(x, y, z, baked.cullFace)) {
             continue;
           }
+          /*
+           * A patterned banner's cloth wears its composed tile. Only the faces
+           * cut from the dyed base: the pole and the bar are wood whatever the
+           * design, and the composed tile has the base's layout, so the UVs the
+           * face already carries address it unchanged.
+           */
+          const face =
+            cloth !== undefined && isBannerClothKey(baked.textureKey)
+              ? { ...baked, textureKey: cloth }
+              : baked;
           emit(bakedFaceOffset(face, x, y, z, shadeFace(face, x, y, z)));
         }
 

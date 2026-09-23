@@ -31,6 +31,7 @@ import {
   createDocument,
   documentFromLoaded,
   getBlock,
+  getBlockEntity,
   markSaved,
   normalizeRegion,
   paletteHistogram,
@@ -80,7 +81,12 @@ import { loadStructure } from "../pipeline/loader.js";
 import type { PaletteEntry } from "../pipeline/types.js";
 import { matchesBlockPattern, paletteEntryCacheKey } from "../pipeline/types.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
-import { hasProperty, isOpenable, isReplaceable } from "../../shared/block_states.js";
+import {
+  hasProperty,
+  isOpenable,
+  isReplaceable,
+  legalValuesFor,
+} from "../../shared/block_states.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
 import { standsOn, type SupportBelow } from "../../shared/block_support.js";
 import { coversFace } from "../pipeline/block_shapes.js";
@@ -105,6 +111,21 @@ import {
   type Extent,
 } from "../domain/grow.js";
 import { peelEmptyFaces } from "../domain/shrink.js";
+import {
+  bannerFormatOf,
+  checkBannerPatterns,
+  regionCells,
+  restateBanners,
+  stampBanner,
+} from "../domain/banner_place.js";
+import {
+  BannerPatternError,
+  bannerBlockData,
+  parseBannerLayers,
+  readBanner,
+  type BannerLayer,
+} from "../pipeline/banner_nbt.js";
+import { isBannerBlock } from "../../shared/banner_patterns.js";
 
 export interface DocumentSession {
   readonly doc: SchematicDocument;
@@ -342,6 +363,11 @@ function toEntry(block: { namespacedName: string; properties?: Record<string, st
   return { namespacedName: block.namespacedName, properties: block.properties ?? {} };
 }
 
+/** The banner patterns a request carries, read, or `null` when it carries none. */
+function layersOf(block: { bannerPatterns?: string }): BannerLayer[] | null {
+  return block.bannerPatterns === undefined ? null : parseBannerLayers(block.bannerPatterns);
+}
+
 /**
  * A block that cannot exist in the version this schematic is for.
  *
@@ -377,15 +403,31 @@ export class VersionWouldLoseBlocksError extends Error {
     readonly count: number,
     readonly versionLabel: string,
     readonly replacement: string,
+    /**
+     * Banner pattern layers whose design the target does not have. Counted into
+     * the same refusal, because a banner losing its design is the same kind of
+     * loss as a block losing its existence, and one confirmation covers both.
+     */
+    readonly layers: { readonly count: number; readonly designs: readonly string[] } = {
+      count: 0,
+      designs: [],
+    },
   ) {
     const shown = blocks.slice(0, 6).join(", ");
     const rest = blocks.length - 6;
     const more = rest > 0 ? ", and " + String(rest) + " more" : "";
-    super(
-      `${count.toLocaleString()} block(s) of ${blocks.length} type(s) do not exist in ` +
-        `Minecraft ${versionLabel} and would be replaced with ${replacement}: ` +
-        `${shown}${more}. This can be undone.`,
-    );
+    const lostBlocks =
+      count === 0
+        ? ""
+        : `${count.toLocaleString()} block(s) of ${blocks.length} type(s) do not exist in ` +
+          `Minecraft ${versionLabel} and would be replaced with ${replacement}: ` +
+          `${shown}${more}. `;
+    const lostLayers =
+      layers.count === 0
+        ? ""
+        : `${layers.count.toLocaleString()} banner pattern layer(s) use a design Minecraft ` +
+          `${versionLabel} does not have and would be removed: ${layers.designs.join(", ")}. `;
+    super(`${lostBlocks}${lostLayers}This can be undone.`);
     this.name = "VersionWouldLoseBlocksError";
   }
 }
@@ -520,6 +562,48 @@ function floorUnder(
   return { name: below.namespacedName, covers: coversFace(below, "up") };
 }
 
+/**
+ * Where a vine clicked onto a vine goes: under the bottom of the column.
+ *
+ * A vine is replaceable, so the redirect below sent a vine clicked onto a vine
+ * back into the clicked cell, and a vine was written over a vine. A column
+ * could not be hung by hand at all. The chain had the same complaint and its
+ * answer is `continuedPlacement` in the renderer. That cannot serve here: a
+ * chain is recognised by its geometry, and nothing about a vine's plane says
+ * "vine" to a renderer that holds no schematic. Main can see it.
+ *
+ * So clicking any vine of a column, from any side, puts the new one in the
+ * first cell under the column that is not a vine. Chosen by the user over the
+ * cell directly below, because it lengthens the column from wherever it is
+ * clicked. What the new vine clings to is `connectedState`'s: the sides of the
+ * vine above it, and any wall beside it.
+ *
+ * `against` becomes `down`, the face of the vine above, so nothing downstream
+ * that steps back along it finds a different block. The rest of the arm is
+ * unchanged: a cell holding something that is not replaceable refuses, and one
+ * below the document grows it. A cell outside the document below the origin
+ * reads as not a vine, so the walk stops there.
+ */
+function hangingVineTarget(
+  doc: SchematicDocument,
+  request: { x: number; y: number; z: number; against?: string },
+  held: PaletteEntry,
+): { x: number; y: number; z: number; against: string } | null {
+  if (held.namespacedName !== "minecraft:vine") return null;
+  const clicked = clickedCell(request);
+  if (clicked === null) return null;
+  const inside = (y: number) =>
+    clicked.x >= 0 && clicked.x < doc.width && clicked.z >= 0 && clicked.z < doc.length && y >= 0 && y < doc.height;
+  const isVine = (y: number) =>
+    inside(y) && getBlock(doc, clicked.x, y, clicked.z).namespacedName === "minecraft:vine";
+  if (!isVine(clicked.y)) return null;
+  let y = clicked.y - 1;
+  while (isVine(y)) {
+    y -= 1;
+  }
+  return { x: clicked.x, y, z: clicked.z, against: "down" };
+}
+
 function doubleSlabTarget(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number; against?: string },
@@ -579,15 +663,15 @@ function floodedPlacement(
   return { ...entry, properties: { ...entry.properties, waterlogged: "true" } };
 }
 
-interface OpenTarget {
+interface UseTarget {
   readonly cells: readonly { x: number; y: number; z: number; entry: PaletteEntry }[];
-  /** `true` when the door is being opened; only the undo label reads it. */
-  readonly opening: boolean;
-  readonly name: string;
+  /** What the undo step is called: "Open …", "Close …", "Pose …". */
+  readonly label: string;
 }
 
 /**
- * What a right-click should **open**, or `null` when it should place instead.
+ * What a right-click should **open** or **turn**, or `null` when it should
+ * place instead.
  *
  * The gesture is the game's: right-click a door and it swings, and you have to
  * sneak to put a block on it. Here it did the second thing always, so the one
@@ -610,13 +694,21 @@ interface OpenTarget {
  *
  * The far half is only taken when it is the same block. A door with something
  * else above it is already broken, and opening half of it would not mend it.
+ *
+ * **A copper golem statue takes its next pose**, which is the game's other
+ * right-click on a block: `CopperGolemStatueBlock.useItemOn` calls
+ * `getNextPose()` with anything in hand but an axe, and places nothing.
+ * The order is the enum's, standing, sitting, running, star, and round again,
+ * and it is read off the registry's `copper_golem_pose` values, which list
+ * them in that order -- `tests/session.ts` pins it, because the order is the
+ * cycle.
  */
 /**
  * The cell that was clicked, one step back along `against`.
  *
  * `request.x/y/z` is where the block would *go*, which is the cell across the
  * face; the renderer computes it and main only ever steps back. Written out
- * here rather than reusing `openTarget`, which asks a different question and
+ * here rather than reusing `useTarget`, which asks a different question and
  * answers `null` for everything that is not a door.
  */
 function clickedCell(request: {
@@ -632,10 +724,10 @@ function clickedCell(request: {
   return { x: request.x - step.x, y: request.y - step.y, z: request.z - step.z };
 }
 
-function openTarget(
+function useTarget(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number; against?: string },
-): OpenTarget | null {
+): UseTarget | null {
   const against = request.against;
   if (against === undefined) return null;
   const step = FACE_VECTOR[against as keyof typeof FACE_VECTOR];
@@ -643,6 +735,22 @@ function openTarget(
   const at = { x: request.x - step.x, y: request.y - step.y, z: request.z - step.z };
 
   const existing = getBlock(doc, at.x, at.y, at.z);
+
+  const poses = legalValuesFor(existing.namespacedName, "copper_golem_pose");
+  if (poses !== null && poses.length > 0) {
+    const current = poses.indexOf(existing.properties.copper_golem_pose ?? "standing");
+    const pose = poses[(Math.max(0, current) + 1) % poses.length];
+    return {
+      cells: [
+        {
+          ...at,
+          entry: { ...existing, properties: { ...existing.properties, copper_golem_pose: pose } },
+        },
+      ],
+      label: `Pose ${existing.namespacedName}: ${pose}`,
+    };
+  }
+
   /*
    * The registry decides, which excludes air for free and covers every wood
    * without a list. A block carrying `open` that the registry has never heard
@@ -658,9 +766,7 @@ function openTarget(
   });
 
   const cells = [{ ...at, entry: swung(existing) }];
-  const family = TWO_PART.find((candidate) =>
-    existing.namespacedName.endsWith(candidate.suffix),
-  );
+  const family = TWO_PART.find((candidate) => candidate.matches(existing.namespacedName));
   const held = family === undefined ? undefined : existing.properties[family.property];
   if (family !== undefined && family.step !== null && (held === family.near || held === family.far)) {
     const away = held === family.near ? 1 : -1;
@@ -674,7 +780,7 @@ function openTarget(
       cells.push({ ...other, entry: swung(there) });
     }
   }
-  return { cells, opening, name: existing.namespacedName };
+  return { cells, label: `${opening ? "Open" : "Close"} ${existing.namespacedName}` };
 }
 
 /**
@@ -696,18 +802,40 @@ function openTarget(
  * whole thing".
  */
 const TWO_PART: readonly {
-  readonly suffix: string;
+  readonly matches: (name: string) => boolean;
   readonly property: string;
   readonly near: string;
   readonly far: string;
   readonly step: readonly [number, number, number] | null;
 }[] = [
-  { suffix: "_bed", property: "part", near: "foot", far: "head", step: null },
+  { matches: (name) => name.endsWith("_bed"), property: "part", near: "foot", far: "head", step: null },
   // `_trapdoor` does not end in `_door`, which is why this needs no guard --
   // `tests/session.ts` says so, because it is the kind of thing that reads as
   // true and would be relied on without ever being checked.
-  { suffix: "_door", property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
+  { matches: (name) => name.endsWith("_door"), property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
+  /*
+   * The double plants: tall grass, large fern, the four tall flowers, tall
+   * seagrass, the small dripleaf and the pitcher plant. Vanilla's
+   * `DoublePlantBlock` places both halves, and a lone lower half is a tuft cut
+   * off at the top. Asked of the registry rather than listed: a `half` whose
+   * legal values are `lower` and `upper` is exactly that family (a stair's
+   * or a slab's is `top`/`bottom`). The pitcher *crop* has the property and
+   * is not one of them: it is planted as a seed and grows its upper half from
+   * stage 3, so placing it is one cell.
+   *
+   * The pre-Flattening era needs nothing of its own: `legacy_blocks.json`
+   * maps `175:0..5` and `175:8..13` onto these same six names with
+   * `half=lower` and `half=upper`, so a 1.8.8 to 1.12.2 document holds them
+   * spelled this way and the MCEdit writer maps both halves back.
+   */
+  { matches: isDoublePlant, property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
 ];
+
+function isDoublePlant(name: string): boolean {
+  if (name.endsWith("_door") || name === "minecraft:pitcher_crop") return false;
+  const values = legalValuesFor(name, "half");
+  return values !== null && values.length === 2 && values.includes("lower") && values.includes("upper");
+}
 
 /** One cell along each horizontal facing, as `[dx, dy, dz]`. */
 const FACING_STEP: Readonly<Record<string, readonly [number, number, number]>> = {
@@ -732,6 +860,11 @@ interface TwoPartPlacement {
  * a flower is a smaller wrong than destroying whatever was there, and the block
  * in the way is on screen, so the silence says as much as a message would.
  *
+ * Free is the near cell's own rule: empty space, whatever block it is made
+ * of, or a replaceable block. It asked for the word `air`, so with barrier or
+ * water chosen as the empty space block no bed and no door could be placed at
+ * all -- every far cell held the void block and read as occupied.
+ *
  * A cell *outside* the document is not blocked. The region the growth is
  * measured against spans both, so a bed laid against the edge or a door hung at
  * the ceiling makes room for itself exactly as a single block does.
@@ -740,8 +873,9 @@ function twoPartPlacement(
   doc: SchematicDocument,
   request: { x: number; y: number; z: number },
   entry: PaletteEntry,
+  free: (entry: PaletteEntry) => boolean,
 ): TwoPartPlacement | "blocked" | null {
-  const family = TWO_PART.find((candidate) => entry.namespacedName.endsWith(candidate.suffix));
+  const family = TWO_PART.find((candidate) => candidate.matches(entry.namespacedName));
   if (family === undefined) return null;
   if (entry.properties[family.property] === family.far) return null;
 
@@ -758,7 +892,7 @@ function twoPartPlacement(
     other.x < doc.width &&
     other.y < doc.height &&
     other.z < doc.length;
-  if (inDocument && getBlock(doc, other.x, other.y, other.z).namespacedName !== "minecraft:air") {
+  if (inDocument && !free(getBlock(doc, other.x, other.y, other.z))) {
     return "blocked";
   }
   return {
@@ -938,24 +1072,25 @@ export function applyEdit(
    *
    * Both halves land in one transaction, or Ctrl+Z would take a door back a
    * half at a time -- which is the rule the placement below already keeps,
-   * arrived at from the other direction. None of these blocks carries a block
-   * entity, so `setBlock` dropping one is not a hazard here the way it is in
-   * `connect.ts`.
+   * arrived at from the other direction.
+   *
+   * **The block entity is put back by hand**, `connect.ts`'s trap for
+   * `connect.ts`'s reason: `setBlock` treats any write as displacing what was
+   * there and drops the record with it. No door carries one, and a copper
+   * golem statue does -- turning it would otherwise throw its record away.
    */
   if (request.kind === "use") {
-    const target = openTarget(doc, request);
+    const target = useTarget(doc, request);
     if (target === null) {
       return applyEdit(session, { ...request, kind: "setBlock" }, options);
     }
-    return runTransaction(
-      doc,
-      history,
-      `${target.opening ? "Open" : "Close"} ${target.name}`,
-      (tx) =>
-        target.cells.reduce(
-          (changed, cell) => changed + (tx.setBlock(cell.x, cell.y, cell.z, cell.entry) ? 1 : 0),
-          0,
-        ),
+    return runTransaction(doc, history, target.label, (tx) =>
+      target.cells.reduce((changed, cell) => {
+        const record = getBlockEntity(doc, cell.x, cell.y, cell.z);
+        const wrote = tx.setBlock(cell.x, cell.y, cell.z, cell.entry);
+        if (wrote && record !== null) tx.setBlockEntity(cell.x, cell.y, cell.z, record);
+        return changed + (wrote ? 1 : 0);
+      }, 0),
     );
   }
 
@@ -1001,11 +1136,23 @@ export function applyEdit(
      */
     const held = toEntry(request.block);
     const clicked = emptiness(held) ? null : clickedCell(request);
+    // Ahead of the redirect, which would otherwise write a vine over the vine.
+    const hanging = emptiness(held) ? null : hangingVineTarget(doc, request, held);
     const target =
-      clicked !== null && isReplaceable(getBlock(doc, clicked.x, clicked.y, clicked.z).namespacedName)
-        ? { ...request, x: clicked.x, y: clicked.y, z: clicked.z }
-        : request;
+      hanging !== null
+        ? { ...request, ...hanging }
+        : clicked !== null && isReplaceable(getBlock(doc, clicked.x, clicked.y, clicked.z).namespacedName)
+          ? { ...request, x: clicked.x, y: clicked.y, z: clicked.z }
+          : request;
     const entry = placeable(floodedPlacement(doc, target, held));
+    /*
+     * A patterned banner is checked here, before anything below can grow the
+     * document or merge a slab: a design the schematic's version does not
+     * have is refused by name, and a refusal found after a growth would have
+     * resized the box on its way out.
+     */
+    const layers = layersOf(request.block);
+    if (layers !== null) checkBannerPatterns(doc, entry, layers);
 
     /*
      * **The refusal**, and three boundaries on it.
@@ -1093,7 +1240,12 @@ export function applyEdit(
      * the document, or a door hung at the ceiling, makes room for itself
      * exactly as a single block does.
      */
-    const pair = twoPartPlacement(doc, target, entry);
+    const pair = twoPartPlacement(
+      doc,
+      target,
+      entry,
+      (block) => emptiness(block) || isReplaceable(block.namespacedName),
+    );
     // The far cell has something in it. The game does not place it either, and
     // the block in the way is on screen.
     if (pair === "blocked") return 0;
@@ -1162,6 +1314,10 @@ export function applyEdit(
         }
         const wrote = tx.setBlock(at.minX, at.minY, at.minZ, entry) ? 1 : 0;
         broke = wrote > 0 && emptiness(entry);
+        // After the block, which drops whatever block entity it displaced.
+        if (layers !== null && wrote > 0) {
+          stampBanner(doc, tx, [{ x: at.minX, y: at.minY, z: at.minZ }], entry, layers);
+        }
         return wrote;
       },
       {
@@ -1193,11 +1349,41 @@ export function applyEdit(
    */
   if (request.kind === "setState") {
     const entry = placeable(toEntry(request.block));
+    const layers = layersOf(request.block);
+    if (layers !== null) checkBannerPatterns(doc, entry, layers);
     return runTransaction(
       doc,
       history,
       `Edit ${entry.namespacedName}`,
-      (tx) => (tx.setBlock(request.x, request.y, request.z, entry) ? 1 : 0),
+      (tx) => {
+        /*
+         * A state edit is not a new block, so what the block carries stays.
+         *
+         * `setBlock` drops the block entity of any cell it writes, which is right
+         * when a chest becomes stone and wrong here: turning a patterned banner
+         * in this panel erased its design, and editing a chest's `facing` would
+         * have emptied it. Only while the name is unchanged -- a different block
+         * is a different block, and its record would describe something else.
+         */
+        const kept = getBlockEntity(doc, request.x, request.y, request.z);
+        const before = getBlock(doc, request.x, request.y, request.z);
+        // The same state again writes nothing: `setBlock` would still take the
+        // record off and this would put it back, an undo step for no change.
+        const same = paletteEntryCacheKey(before) === paletteEntryCacheKey(entry);
+        let changed = !same && tx.setBlock(request.x, request.y, request.z, entry) ? 1 : 0;
+        if (!same && kept !== null && before.namespacedName === entry.namespacedName) {
+          tx.setBlockEntity(request.x, request.y, request.z, kept);
+        }
+        // The design, after the block and its carried record, in the same undo
+        // step. A banner whose state did not move still counts as edited.
+        if (
+          layers !== null &&
+          stampBanner(doc, tx, [{ x: request.x, y: request.y, z: request.z }], entry, layers) > 0
+        ) {
+          changed = 1;
+        }
+        return changed;
+      },
       { derive: false },
     );
   }
@@ -1229,26 +1415,52 @@ export function applyEdit(
 
   if (request.kind === "fill") {
     const entry = placeable(toEntry(request.block));
+    const layers = layersOf(request.block);
+    if (layers !== null) checkBannerPatterns(doc, entry, layers);
     return runTransaction(doc, history, `Fill with ${entry.namespacedName}`, (tx) => {
       // One transaction, so growing and filling are one undo step -- and the
       // resize goes in first, because a block delta recorded before it would be
       // an index into the old shape. `history.ts` flushes on resize for exactly
       // that reason.
       if (growth !== null) tx.resize(growth.size, growth.shift);
-      return tx.fill(region, entry);
+      const changed = tx.fill(region, entry);
+      // Every banner in the box, including one that already held this state
+      // and so was not counted as changed: it was asked for with this design.
+      if (layers !== null) stampBanner(doc, tx, regionCells(region), entry, layers);
+      return changed;
     });
   }
 
   // `from` is a pattern over what is already there, so it is deliberately not
   // guarded: refusing it would make "take out the block some other tool wrote"
   // impossible, which is exactly when somebody needs it.
+  if (request.from.bannerPatterns !== undefined) {
+    throw new BannerPatternError(
+      "The block being replaced is matched by its name and states; banner patterns only go on the block that replaces it.",
+    );
+  }
   const from = toEntry(request.from);
   const to = placeable(toEntry(request.to));
+  const layers = layersOf(request.to);
+  if (layers !== null) checkBannerPatterns(doc, to, layers);
   return runTransaction(
     doc,
     history,
     `Replace ${from.namespacedName} with ${to.namespacedName}`,
-    (tx) => tx.replace(region, from, to),
+    (tx) => {
+      // The cells the replace is about to write, found before it writes them:
+      // afterwards they are indistinguishable from the ones that already held
+      // `to`, and those were not asked to change.
+      const matched =
+        layers === null
+          ? []
+          : [...regionCells(region)].filter(({ x, y, z }) =>
+              matchesBlockPattern(getBlock(doc, x, y, z), from),
+            );
+      const changed = tx.replace(region, from, to);
+      if (layers !== null) stampBanner(doc, tx, matched, to, layers);
+      return changed;
+    },
   );
 }
 
@@ -1463,8 +1675,21 @@ export function setDocumentVersion(
   const plan = new Map<string, { to: PaletteEntry; kind: Kind }>();
   const doomed: string[] = [];
 
+  /*
+   * Banners, whose look lives in a block entity the block pass cannot see.
+   * Asked first because it renames: going back past the Flattening a
+   * `magenta_banner` is a `white_banner` with a `Base`, not a block to drop.
+   */
+  const banners = restateBanners(doc, { era: info.era, dataVersion: info.dataVersion });
+
   for (const entry of doc.palette) {
     if (entry.namespacedName === AIR.namespacedName) continue;
+
+    const bannerRename = banners.renames.get(paletteEntryCacheKey(entry));
+    if (bannerRename !== undefined) {
+      plan.set(paletteEntryCacheKey(entry), { to: bannerRename, kind: "rename" });
+      continue;
+    }
 
     // 1. the name.
     const renamed = target === null ? null : renameFor(entry.namespacedName, target);
@@ -1519,13 +1744,14 @@ export function setDocumentVersion(
     else rewrittenCells += cells;
   }
 
-  if (droppedCells > 0 && options.dropUnrepresentable !== true) {
+  if ((droppedCells > 0 || banners.droppedLayers > 0) && options.dropUnrepresentable !== true) {
     const names = [...new Set(doomed)].sort();
     throw new VersionWouldLoseBlocksError(
       names,
       droppedCells,
       info.label,
       fill.namespacedName === AIR.namespacedName ? "air" : fill.namespacedName,
+      { count: banners.droppedLayers, designs: banners.droppedDesigns },
     );
   }
 
@@ -1543,12 +1769,33 @@ export function setDocumentVersion(
     history,
     `Set the Minecraft version to ${info.label}`,
     (tx) => {
+      /*
+       * The block entities of every cell the remap renames or restates, put
+       * back after it. `remap` writes through `setBlock`, which treats any
+       * write as displacing what was there -- so a rename was quietly taking
+       * the block entity with it, which for `sign` becoming `oak_sign` is the
+       * text on every sign. A dropped block keeps nothing, as before.
+       */
+      const kept = [...doc.blockEntities.values()].filter((record) => {
+        const step = plan.get(paletteEntryCacheKey(getBlock(doc, ...record.pos)));
+        return step !== undefined && step.kind !== "drop";
+      });
       // Blocks first, then the header: a run that threw half way must never
       // leave a document claiming a version its palette contradicts.
       const wrote =
         plan.size === 0
           ? 0
           : tx.remap(region, (entry) => plan.get(paletteEntryCacheKey(entry))?.to ?? null);
+      for (const record of kept) tx.setBlockEntity(...record.pos, record);
+      // Then each banner as the target spells it: its name where the colour
+      // moved in or out of it, and its block entity in the target's format.
+      for (const cell of banners.cells) {
+        const here = getBlock(doc, cell.x, cell.y, cell.z);
+        if (here.namespacedName !== cell.name) {
+          tx.setBlock(cell.x, cell.y, cell.z, { namespacedName: cell.name, properties: here.properties });
+        }
+        tx.setBlockEntity(cell.x, cell.y, cell.z, cell.record);
+      }
       tx.setHeader({ ...readHeader(doc), dataVersion: info.dataVersion });
       return wrote;
     },
@@ -1561,6 +1808,14 @@ export function setDocumentVersion(
     parts.push(
       `${droppedCells.toLocaleString()} replaced with ` +
         (fill.namespacedName === AIR.namespacedName ? "air" : fill.namespacedName),
+    );
+  }
+  if (banners.cells.length > 0) {
+    parts.push(`${banners.cells.length.toLocaleString()} banner(s) rewritten for ${info.label}`);
+  }
+  if (banners.droppedLayers > 0) {
+    parts.push(
+      `${banners.droppedLayers.toLocaleString()} pattern layer(s) removed (${banners.droppedDesigns.join(", ")})`,
     );
   }
   return {
@@ -1679,7 +1934,15 @@ export function redoEdit(session: DocumentSession): string | null {
 export function inspect(session: DocumentSession, x: number, y: number, z: number) {
   const entry = getBlock(session.doc, x, y, z);
   const blockEntity = session.doc.blockEntities.get(`${x},${y},${z}`) ?? null;
+  const banner = isBannerBlock(entry.namespacedName);
+  const look =
+    blockEntity !== null && banner ? readBanner(blockEntity.nbt, bannerFormatOf(session.doc)) : null;
   return {
+    ...(look !== null && (look.layers.length > 0 || look.base !== null)
+      ? { blockData: bannerBlockData(entry, look) }
+      : {}),
+    // Every banner, patterned or not: the inspector's editor starts from here.
+    ...(banner ? { banner: { layers: (look?.layers ?? []).map((layer) => ({ ...layer })) } } : {}),
     block: entry.namespacedName,
     properties: { ...entry.properties },
     blockEntity:

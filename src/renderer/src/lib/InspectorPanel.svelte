@@ -52,6 +52,7 @@
    */
   import type { BlockInspection } from "../../../shared/ipc.js";
   import { propertyRows } from "./inspector_rows.js";
+  import BannerPatternEditor from "./BannerPatternEditor.svelte";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import { t } from "./i18n.svelte.js";
 
@@ -67,6 +68,8 @@
     legacy?: LegacyIndex | null;
     onchangeproperty: (name: string, value: string) => void;
     onchangenbt: (path: (string | number)[], value: string) => void;
+    /** A banner's whole design, as `[{pattern:"...",color:"..."},...]`. */
+    onchangebanner: (patterns: string) => void;
   }
 
   const {
@@ -76,6 +79,7 @@
     legacy = null,
     onchangeproperty,
     onchangenbt,
+    onchangebanner,
   }: Props = $props();
 
   /** Raw NBT is worth showing, but not by default — it is long and wrapped. */
@@ -128,6 +132,22 @@
     }
     return `${pad}${String(node)}`;
   }
+
+  /**
+   * The NBT leaves worth listing one by one.
+   *
+   * On a banner the pattern list is left out: the editor above shows it as the
+   * layers it is, and `patterns[3].pattern` beside that would be the same design
+   * twice, one copy of which cannot add or remove a layer. The raw tree keeps
+   * everything.
+   */
+  const nbtFields = $derived(
+    (inspection?.blockEntity?.fields ?? []).filter(
+      (field) =>
+        inspection?.banner === undefined ||
+        (field.path[0] !== "patterns" && field.path[0] !== "Patterns"),
+    ),
+  );
 
   const nbtText = $derived(
     inspection?.blockEntity ? readable(JSON.parse(inspection.blockEntity.nbt)) : "",
@@ -199,14 +219,21 @@
       <p class="hint">{t("inspector.noBlockStates")}</p>
     {/if}
 
+    {#if inspection.banner}
+      <BannerPatternEditor layers={inspection.banner.layers} {busy} onchange={onchangebanner} />
+    {/if}
+
     {#if inspection.blockEntity}
       <div class="field">
         <label for="nbt-fields">{t("inspector.entityData", { id: inspection.blockEntity.id })}</label>
-        {#if inspection.blockEntity.fields.length === 0}
-          <p class="hint" id="nbt-fields">{t("inspector.noEntityData")}</p>
+        {#if nbtFields.length === 0}
+          <!-- On a banner whose only data is its design, the editor above already said it. -->
+          {#if inspection.banner === undefined}
+            <p class="hint" id="nbt-fields">{t("inspector.noEntityData")}</p>
+          {/if}
         {:else}
           <ul id="nbt-fields" class="props nbt">
-            {#each inspection.blockEntity.fields as field (field.label)}
+            {#each nbtFields as field (field.label)}
               <li>
                 <span class="key" title={`${field.label} · ${field.type}`}>
                   {field.label}

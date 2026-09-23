@@ -65,7 +65,7 @@ import {
   type Neighbours,
 } from "../../shared/block_connections.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
-import { occludesNeighbours } from "../pipeline/block_shapes.js";
+import { coversFace, occludesNeighbours } from "../pipeline/block_shapes.js";
 import { paletteEntryIsAir, type PaletteEntry } from "../pipeline/types.js";
 import { getBlock, getBlockEntity, type SchematicDocument } from "./document.js";
 import type { TransactionScope } from "./history.js";
@@ -185,7 +185,31 @@ function factsOf(entry: PaletteEntry): NeighbourBlock | null {
     // What a fence or a wall attaches to is a full opaque cube, which is the
     // question `occludesNeighbours` already answers for the mesher.
     solid: occludesNeighbours(entry),
+    sturdy: sturdyFaces(entry),
   };
+}
+
+/**
+ * Cube-shaped by `shapeFor` and still nothing to hang a vine on: the fluids
+ * have no collision shape, and neither do the two markers that are empty
+ * space by design. A barrier is not here -- it is solid to walk into.
+ */
+const NO_BODY: ReadonlySet<string> = new Set([
+  "water",
+  "lava",
+  "bubble_column",
+  "structure_void",
+  "light",
+]);
+
+const SIX_FACES: readonly Face[] = ["north", "south", "east", "west", "up", "down"];
+
+/** `NeighbourBlock.sturdy`: per face, `coversFace` for a block with a body. */
+function sturdyFaces(entry: PaletteEntry): Partial<Record<Face, boolean>> {
+  const faces: Partial<Record<Face, boolean>> = {};
+  const hasBody = !NO_BODY.has(bareName(entry));
+  for (const face of SIX_FACES) faces[face] = hasBody && coversFace(entry, face);
+  return faces;
 }
 
 function paletteFacts(doc: SchematicDocument): PaletteFacts {
@@ -280,13 +304,49 @@ export function deriveConnections(
   const around: Partial<Record<NeighbourKey, NeighbourBlock | null>> = {};
 
   for (const index of work) {
+    if (!rederive(index)) {
+      continue;
+    }
+    /*
+     * **A vine column is corrected all the way down**, which is the one place
+     * this pass is not a single sweep.
+     *
+     * A vine's sides are held up by the vine above it (`connectedState`), so
+     * a change to one vine changes what every vine hanging under it may
+     * keep. Pointed dripstone had the same problem and answered it with a
+     * window of three cells, because its rule looks a bounded distance. A
+     * column of vines has no bound, and `work` is in no particular order
+     * either. So when a vine is rewritten, the vines below it are asked
+     * again, one by one, until one does not move or the column ends. It only
+     * ever walks down and every step is a cell lower, so it ends.
+     */
+    if (factsAt(voxels[index])?.name !== "vine") {
+      continue;
+    }
+    // One step down is one `length` back in x*plane + y*length + z.
+    let y = Math.floor((index % plane) / length);
+    let below = index - length;
+    while (y > 0 && factsAt(voxels[below])?.name === "vine" && rederive(below)) {
+      y -= 1;
+      below -= length;
+    }
+  }
+
+  /**
+   * Derives one cell and writes it if anything moved; whether it did.
+   *
+   * No `isDependent` check here, deliberately: a vine this pass already
+   * rewrote carries a palette index past the end of `dependent`, and the
+   * column walk has to be able to correct it a second time.
+   */
+  function rederive(index: number): boolean {
     const x = Math.floor(index / plane);
     const y = Math.floor((index - x * plane) / length);
     const z = index - x * plane - y * length;
 
     const self = factsAt(voxels[index]);
     if (self === null) {
-      continue;
+      return false;
     }
     for (const [face, dx, dy, dz] of AROUND) {
       around[face] = blockAt(x + dx, y + dy, z + dz);
@@ -301,7 +361,7 @@ export function deriveConnections(
       }
     }
     if (!changed) {
-      continue;
+      return false;
     }
     /*
      * The block entity has to be put back by hand.
@@ -326,5 +386,6 @@ export function deriveConnections(
     if (record !== null) {
       tx.setBlockEntity(x, y, z, record);
     }
+    return true;
   }
 }

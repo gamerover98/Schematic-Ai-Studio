@@ -29,6 +29,7 @@
 
 import { createDocument, setBlock, type SchematicDocument } from "../domain/document.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { splitBlockInput } from "../../shared/block_input.js";
 import type { ChunkGeometry, MeshAtlas } from "../../shared/ipc.js";
 import { buildDocumentPreview, warmBaker, type DocumentPreviewOptions } from "./preview.js";
 import { breathe } from "./breathing.js";
@@ -66,8 +67,25 @@ const MAX_CACHED_ICONS = 4096;
 /** A one-block document, which is what an icon is a picture of. */
 function documentFor(block: string): SchematicDocument {
   const doc = createDocument({ width: 1, height: 1, length: 1, format: "sponge3" });
-  setBlock(doc, 0, 0, 0, parsePaletteEntry(block));
+  setBlock(doc, 0, 0, 0, parsePaletteEntry(iconBlock(block)));
   return doc;
+}
+
+/**
+ * The block an icon is a picture of, without the banner patterns a hotbar slot
+ * may carry.
+ *
+ * The icon is the plain banner, deliberately: a composed cloth is a tile of its
+ * own, and making one per slot would move the atlas every icon addresses. What
+ * must not happen is the pattern list reaching `parsePaletteEntry`, which splits
+ * on its commas and would intern a banner with a dozen nonsense states.
+ */
+function iconBlock(block: string): string {
+  try {
+    return splitBlockInput(block).block;
+  } catch {
+    return block.split("[", 1)[0];
+  }
 }
 
 /**
@@ -128,7 +146,7 @@ async function prime(
   options: DocumentPreviewOptions,
   onProgress?: (done: number, total: number) => void,
 ): Promise<void> {
-  await warmBaker(blocks.map(parsePaletteEntry), options, onProgress);
+  await warmBaker(blocks.map((block) => parsePaletteEntry(iconBlock(block))), options, onProgress);
 }
 
 /**

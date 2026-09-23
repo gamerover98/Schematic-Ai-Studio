@@ -285,6 +285,21 @@ Ctrl+Z would take a door back a half at a time. `_trapdoor` does not end in
 `tests/session.ts` says so out loud: it is a true sentence about string endings
 that nobody would check and everybody would rely on.
 
+**A double plant is the third row, and it is asked of the registry.** Tall
+grass, large fern, the four tall flowers, tall seagrass, the small dripleaf and
+the pitcher plant are vanilla's `DoublePlantBlock` and go in as two cells, the
+upper one above, like a door. A `half` whose legal values are exactly
+`lower|upper` is that family (a slab's and a stair's is `top|bottom`), so the
+rows match on a predicate rather than a suffix. `pitcher_crop` carries the same
+`half` and is left out by name: it is planted as a seed. The pre-Flattening
+era needs nothing extra, because `legacy_blocks.json` spells `175:0..5` and
+`175:8..13` as these six names with `half=lower` and `half=upper`.
+
+**The far cell is free by the near cell's rule.** Empty space, whatever block
+it is made of, or a replaceable block. It asked for the word `air`, so with
+barrier or water as the empty space block every far cell held the void block
+and no bed or door could be placed at all.
+
 **Nothing is placed if the far half has nowhere to go.** That is the game's rule
 and it is the safe half of it: refusing over a flower is a smaller wrong than
 destroying what was there, and the block in the way is on screen, so the silence
@@ -350,6 +365,24 @@ break already writes it, and an underwater build coming back full of bubbles
 would have lost exactly what `editing.voidBlock` exists to preserve. It falls
 back to air when the empty space block is itself too new for the target —
 `structure_void` being 1.10, that is a real case rather than a defensive one.
+
+**A rename keeps the block entity, and it did not.** `tx.remap` writes through
+`setBlock`, which treats any write as displacing what was there, so every cell
+the version change renamed or restated lost its block entity with nothing
+counted: a 1.13 `sign` renamed to `oak_sign` for 1.14 came out blank. The
+records of every renamed or restated cell are taken before the remap and put
+back after it; a dropped block keeps nothing, as before.
+
+**And a banner is restated as well, because what it looks like is not in the
+block.** `restateBanners` in `domain/banner_place.ts` rewrites every banner's
+block entity in the target's spelling (the table is in the banner section
+below), and past the Flattening it moves the colour too: `magenta_banner`
+becomes `white_banner` with `Base` saying magenta going back, and `Base`
+becomes the name going forward. A design the target does not have is **counted
+into the same refusal a lost block gets** -- `VersionWouldLoseBlocksError.layers`
+-- and removed only with `dropUnrepresentable`. The reader draws all three
+spellings whatever the version says, so a version change that left banners
+alone would look right here and be blank in the game it was made for.
 
 **Two tables, and which one answers is decided by the era rather than by
 merging them.** `legacy_blocks.json` enumerates the pre-Flattening set exactly;
@@ -1015,6 +1048,17 @@ the obvious rule and it is wrong: a run that fails leaves its entry in the log
 and never enters the model's memory, so counting from the renderer drifts by one
 for every error above it.
 
+**Saving is working on a file too, and only opening said so.** The recents
+list was reachable through Open alone, so a schematic created and then saved
+-- from the window or over MCP -- never appeared in it: a file you just made
+is a file you never opened. `rememberDocument` in `menu.ts` is the one call
+now, the app's list and the OS jump list together, from both opens and both
+saves; `tests/services.ts` reads the four sites out of the source and refuses
+any other module recording half of it. The window rereads the list after its
+own save and on every `docChanged`, because it used to reread it only when it
+opened or closed something itself, and an MCP client doing either left the
+start screen as it was at launch.
+
 **A checkpoint is not cropped, and is keyed on `doc.revision`.** `saveSession`
 trims to content; a snapshot must not, for the same reason autosave must not —
 coming back would hand the user the build without the room they made to build
@@ -1412,6 +1456,37 @@ which is where a run has to start anyway.
 axis the block is born with, the slab merge, `use`, and the replaceable
 redirect, which steps back along it to find what was clicked.
 
+**A vine hangs from a vine, and that rule is main's rather than the
+renderer's.** A vine is replaceable, so the redirect sent a vine clicked onto a
+vine back into the clicked cell: a vine written over itself, and a column that
+could not be hung by hand. The chain's answer could not be reused. It
+recognises a chain by its geometry, and a vine's plane says nothing to a
+renderer that holds no schematic. `hangingVineTarget` in `session.ts` runs
+ahead of the redirect. A vine clicked onto any vine of a column, from any side,
+goes into the first cell under the column that is not a vine (the user chose
+this over the cell directly below), with `against: "down"`. From there it is an
+ordinary placement: refused over a block that is not replaceable, and grows the
+document past the floor.
+
+What it clings to is `connectedState`'s, after vanilla's
+`VineBlock.canSupportAtFace`. A side is held up by a whole face of a collision
+shape on that side (`NeighbourBlock.sturdy`, not `solid`: leaves and glass hold
+a vine, beside it and overhead, as a jungle canopy does; water does not)
+**or by the vine above having that side**, so a hanging vine inherits the
+column's sides and takes any wall beside it too. `up` is not inherited; it is
+the underside of the block above, placeable since 1.13 (17w47a). A vine
+left with no support stays, as the cross, where vanilla would drop it.
+
+**That makes a vine column the one place `deriveConnections` is not a single
+sweep.** A change to one vine changes what every vine under it may keep, and a
+column has no bound, so dripstone's three-cell window is no answer here. When a
+vine is rewritten, the vines below it are derived again one by one, until one
+does not move or the column ends. `rederive` deliberately skips the
+`isDependent` check, because a vine the pass already rewrote has a palette
+index past the end of that array. Breaking the wall a four-long column hangs
+from lets go of all four in one transaction, and `tests/session.ts` fails
+without the walk.
+
 The epsilon is not a tuning knob and the rule is deliberately narrow: a tie
 means the existing answer was a coin toss, so only those change. Everything
 with a real winner keeps the answer it always had, which is why the lectern is
@@ -1441,7 +1516,7 @@ what the inventory never offered. That is the same failure the hand-written
 `DEFAULT_STATE` had, one layer down, and it is the argument for generating a set
 rather than curating one.
 
-**Seven vendored datasets, seven generators, seven skills.** The pattern is the
+**Eight vendored datasets, eight generators, eight skills.** The pattern is the
 same each time and it is the one to copy: the answers are looked up, recorded
 with where they came from, and the generator replaces only the rows between two
 markers. Running with nothing new must change no bytes — if it rewrites the file
@@ -1456,8 +1531,9 @@ every time, the ordering or the formatting has drifted and *that* is the bug.
 | `resources/litematica_versions.json` | `gen-litematica-versions.mjs` | `mc-litematic` |
 | `resources/command_syntax.json` | `gen-command-syntax.mjs` | `mc-commands` |
 | `resources/block_versions.json` | `gen-block-versions.mjs` | `mc-block-versions` |
+| `resources/banner_patterns.json` | `gen-banner-patterns.mjs` | `mc-banner-patterns` |
 
-**Every one of them now names what reads it downstream, and six of the seven
+**Every one of them now names what reads it downstream, and seven of the eight
 say «the MCP wire».** That section was missing and its absence had a cost: the
 skills described JSON → generator → table and stopped, so somebody could do
 everything `mc-versions` asked, twice, and leave `DEFAULT_SETTINGS.version`
@@ -2121,11 +2197,41 @@ push — the caller already has the value, and a selection-face drag sends an ed
 many times a second. `announceDocument` is the unasked case. Folding them into
 one function with a flag would put that decision at twenty-one call sites.
 
-**`capture_viewport` photographs the window, and cannot aim the camera.** Main
-cannot work out where the canvas is — the layout is CSS — and cannot *ask* the
-renderer anything, only be told; so the renderer reports its rect from `resize`.
-Aiming would need a request from main to the renderer and a reply channel, which
-does not exist.
+**`capture_viewport` can aim the camera, and that is main's first question to
+the renderer.** Main cannot work out where the canvas is — the layout is CSS —
+so the renderer still reports its rect from `resize`. Aiming is different: a
+picture taken before the new view is drawn is a picture of the old one, so main
+has to *ask* and wait. `IPC.cameraAim` goes out as an event with an `id`,
+`IPC.cameraAimed` comes back as one (`ipcMain.on`), and
+`services/renderer_request.ts` matches them, times out, and refuses a late
+answer rather than letting it settle the next request. Electron-free, so
+`tests/services.ts` drives it.
+
+Three things about it are load-bearing:
+
+- **the arithmetic is main's, in `shared/camera_aim.ts`.** A compass side, an
+  elevation and a distance are resolved against the document into a position
+  and a target before the renderer hears of it, so `tests/mcp.ts` states every
+  number and every refusal; the renderer only applies. `documentFraming` lives
+  there now, re-exported by `framing.ts`, because `camera: {}` is the R key's
+  shot and two copies would disagree. A distance behind the draw distance is
+  brought in and *says so* in the answer;
+- **the reply is sent after a frame is drawn**, and not only by the display.
+  `renderFrame()` is the loop's body pulled out, so `aimCamera` draws at once
+  and then waits for a frame or 250 ms, whichever comes first: a window behind
+  the terminal an agent runs in is throttled, and waiting on
+  `requestAnimationFrame` alone would photograph the old view. `aimCamera` waits
+  a `tick` first, because App leaves flight in the same breath and the
+  camera-mode effect puts the orbit target 24 blocks ahead;
+- **the camera stays where the agent put it**, which was the user's choice: the
+  person watching sees what the model looked at, and R brings the shot back. The
+  tool stays `readOnly` -- the flag is about the schematic, the undo stack and
+  the clipboard, and a permission prompt per look would make it useless.
+
+With no camera asked for, a window that does not answer is still photographed,
+as it always was; with one, not answering is a refusal. The answer carries where
+the camera stood, and `pictureContent` in `mcp/policy.ts` sends it as text
+beside the image block, which used to be sent alone.
 
 **One IPC channel per verb, all declared in `src/shared/ipc.ts`.** No generic
 dispatcher. Everything crossing must be structured-clone-safe — binary payloads
@@ -2874,6 +2980,23 @@ had already forgotten the pivot. So it is an effect on `selection === null`
 rather than an eighth line: this file's own rule about discipline at N call
 sites, applied to the one place where it had already failed at seven.
 
+**A move ghost lives as long as its drag, and it used to live until a
+commit.** `moving` was cleared by `commitMove` alone, and drawn as `moving ??
+stamp` at the corner of whatever was selected. Two ways it was never cleared,
+and both depend on timing, which is why the report called it hard to
+reproduce: press an arrow and let go without moving a whole block (no move, so
+no commit), or let go before the region's mesh arrived (the commit cleared
+it, then the late answer wrote it back). That second one was guarded, but
+with `!selection`, and a move takes the selection along with it. The ghost
+then stood over every later selection and covered a copy's stamp. Escape and
+opening another document did not clear it, only a restart did.
+
+`ghost_request.ts` gives each press a token, and a mesh is accepted only for
+the current one. `endGizmoDrag` sends `ongizmorelease` on **every** path,
+after the commit has been dispatched, so `commitMove` still reads its region
+first. The `selection === null` effect clears `moving` as well, as a safety
+net in case something else ever forgets to release it.
+
 **And a paste grows, which is `moveRegion`'s rule one verb further on.**
 `pasteClipboard` clips by letting `tx.setBlock` return `false`, so a paste over
 the edge came back with a short count and nothing anywhere saying why. That was
@@ -2952,13 +3075,29 @@ gesture rather than after it, which is the difference between a warning and a
 report; the refusal itself stays main's, because the renderer holds no schematic
 and a viewport that decided this would be a second opinion.
 
-**Ctrl+Z reaches the selection, and `undoDepth` is what makes that answerable.**
-The block edits live in main and the selection lives in the renderer;
-interleaving two stacks needs a shared ordering, and that field — main's undo
-stack depth — is it. The rule is one sentence: **a selection is undone only while
-no block edit has landed on top of it.** `selection_history.ts` holds it. A drag
-is one step rather than one per frame, which is why `Viewer.svelte` reports
-gesture boundaries at all: only it knows where the press was.
+**Ctrl+Z reaches the selection, and `undoTransactionId` is what makes that
+answerable.** The block edits live in main and the selection lives in the
+renderer; interleaving two stacks needs a shared ordering, and that field — the
+id of the transaction on top of main's undo stack, 0 when empty — is it. The
+rule is one sentence: **a selection is undone only while no block edit has
+landed on top of it.** `selection_history.ts` holds it. A drag is one step
+rather than one per frame, which is why `Viewer.svelte` reports gesture
+boundaries at all: only it knows where the press was.
+
+**The ordering was the stack's length, `undoDepth`, and the stack is capped at
+200.** `createHistory(limit = 200)` drops the oldest transaction past the cap,
+so from the 201st on the length stayed at 200 whatever was done. Every
+selection step then compared equal to the document, and `undoTarget` sent every
+press to the selections, walking back through all of them without reaching a
+block. `adoptEditedSelection` stopped pairing (`depth > depthBefore` never
+true), and the watcher that notices an edit stopped firing. In creative mode
+every placed block is a transaction, so the cap is an ordinary session, and it
+was reported as undo moving selections back and not blocks. A transaction id
+has what the ordering needs and no ceiling: never reused, higher for every new
+edit, and an undo or a redo lands back on exactly the id that was on top.
+`historyPosition()` in `App.svelte` is the one reading. `undoDepth` stays on
+`DocumentState` as a count. `tests/ui.ts` refuses any `undoDepth` left in
+`App.svelte`, with comments stripped.
 
 **A gesture that moved the blocks *and* the box is one press, and was two.**
 The gizmo's commits write `selection` only after awaiting the edit, so by then
@@ -3304,6 +3443,14 @@ nothing. What opens is `open` minus `barrel`, whose `open` means a container is
 being looked into. An **iron** door opens here, which in game it does not
 without redstone — deliberate, because this is an editor and refusing would be
 faithful and useless.
+
+**A copper golem statue takes its next pose**, the game's other right-click on
+a block: `CopperGolemStatueBlock.useItemOn` calls `getNextPose()` and places
+nothing. The order, standing, sitting, running, star and round again, is read
+from the registry's `copper_golem_pose` values, which list it that way, and
+`tests/session.ts` pins it. The statue has a block entity and `setBlock` drops
+it with every write, so `useTarget` puts it back by hand, `connect.ts`'s trap
+for `connect.ts`'s reason.
 
 **A hotbar belongs to a schematic, not to the window.** It lived in
 `UiSettings`, written with `patchUi`: one bar for the whole app, so opening the
@@ -4759,12 +4906,23 @@ knowing:
   which is `signal_fire`'s answer: what they change is behaviour and particles,
   and this file may not invent geometry for either.
 
-  Two things are deliberately left. **The connections are not derived**, so a
-  placed wire is unconnected and lies north-south, which is what the game draws
-  for an isolated one; `block_connections.ts` dispatches on fence, wall and
-  pane and has never had a wire arm. And `tripwire_hook` is still
-  `againstWall(e, 3)`, which is the lever's fault on the block that pulls this
-  one taut.
+  **The connections are derived now**, by vanilla's `shouldConnectTo`: a side
+  connects to another wire or to a hook pointing back at this one. **A wire
+  with nothing beside it keeps the run it was laid along, and that is a
+  deviation.** Vanilla's isolated wire is all `false` and lies north-south
+  whichever way the player faced, and the first wire of a run is always
+  isolated. So `orientPlacement` lays a wire along the look, east-west as
+  `east=true,west=true`, and `connectedState` keeps that pair when no side
+  connects. North-south stays all `false`, which draws the same and is what the
+  game writes. `attached` is still not derived.
+- **A tripwire hook was the ladder's plate three units thick**, wearing a sheet
+  that is mostly a hole, so it drew almost nothing and took the face off the
+  wall. It is the four `tripwire_hook*` models now: a plank plate, a stick and
+  a ring, turned by `facing` from north, where the plate is on the *south*
+  wall. `powered` tilts the stick down; `attached` lowers the ring and adds the
+  string, written already rescaled because vanilla tilts it with `rescale`.
+  `facing` is the clicked face (`WALL_MOUNTED`, as vanilla's
+  `TripWireHookBlock` places it). Legacy `131` already carries `facing`.
 - **A small dripleaf was a placeholder, and the walk that exists to catch that
   could not see it.** The pack ships `small_dripleaf_top`, `_side`, `_stem_top`
   and `_stem_bottom` and no `small_dripleaf.png` at all. At `half=lower` —
@@ -4808,14 +4966,8 @@ knowing:
   *«the opposite from the direction the player faces while placing the small
   dripleaf»*.
 
-  **What is deliberately left is that placing one places a single half.** In
-  the game a dripleaf, a tall fern, a sunflower and tall seagrass are all
-  `DoublePlantBlock` and go in as two cells; `TWO_PART` in `services/session.ts`
-  knows only `_bed` and `_door`, both by suffix. The membership is derivable —
-  a `half` whose legal values are `lower|upper` rather than `top|bottom` is
-  exactly that family, doors included — so it is a real piece of work in
-  `session.ts` rather than a line here, and it is a family of ten rather than
-  this one block.
+  **Placing one places both halves**, which is the double-plant row of
+  `TWO_PART` (see "A bed is two blocks" above).
 - **Seagrass is four planes in a hash, and tall seagrass was a solid cube.**
   `template_seagrass` states two planes across the north-south axis at `z = 4`
   and `z = 12` and two across the east-west at `x = 4` and `x = 12`, each
@@ -4856,19 +5008,142 @@ knowing:
   stages 0 to 2 has no elements in vanilla and is `boxes()` here — a state the
   game never produces, since the upper half exists from stage 3, so it is
   reachable only from the inspector, and a cell holding it draws nothing and
-  cannot be clicked. Placing both halves at once is the double-plant family's
-  job in `TWO_PART`, and is still not done.
+  cannot be clicked. Placing one is a single cell: the crop is a seed, and it is
+  the one block with a `lower|upper` `half` that the double-plant row of
+  `TWO_PART` leaves out by name.
 - **Pointed dripstone is `block/cross`, and was a 6x16x6 column wearing the
   upward tip in every state.** `pointed_dripstone.json` states the two rescaled
   planes of `cross.json` exactly; the ten states differ only in the texture,
   `pointed_dripstone_<up|down>_<thickness>`, and the `down` files are drawn
   pointing down, so nothing turns. `candidatesForName` builds the name from the
   state and falls back to the birth state for a value no file has.
+- **A shelf was hollow, and hung on a wall it was a window into the wall.**
+  `template_shelf_body` states no face on the inside of its panel; the
+  blockstate is a multipart and every state adds a second model, one plane at
+  `z = 13`, `y 4..12`, north face only. Without it there was nothing between
+  the lips, and the wall's face towards the panel is rightly culled, so what
+  showed through was the inside of the block behind. `powered` and
+  `side_chain` choose that plane's window on the sheet and move no coordinate.
+  `side_chain` is read, not derived: pairing shelves is a neighbour rule and
+  is not done.
+- **A composter was the cauldron's fault in wood.** It was left a cube on
+  purpose, "its outer shell really is 16x16x16", and that was the fault: a
+  cube has no inside, so from above the rim there was a lid where vanilla
+  shows a bin, and `level` had nowhere to be drawn. `composter.json` is a
+  two-unit floor and four two-unit walls; the multipart adds one surface per
+  level at `1 + 2 * level`, and `level=8` is the same height as 7 wearing
+  `composter_ready`. As boxes it no longer counts as solid, which is the
+  cauldron's arrangement too: light reaches in through the open top.
+- **A chiseled bookshelf's front is six planes, and it was a cube wearing its
+  side on all four sides.** No texture is named after the front, so
+  `facing` and the six `slot_<n>_occupied` were read nowhere. The multipart
+  is a full box with no `north` face, applied with `uvlock`, plus one plane
+  per slot cut from `_occupied` or `_empty`. The body is deliberately not
+  turned: its geometry is the whole cell, so turning it would only turn the
+  picture on its top, and `uvlock` says it stays put. It is the one member of
+  `SOLID_BOXES`, because being drawn as boxes would otherwise stop it
+  blocking light and taking a fence; covering all six faces does not decide
+  that, and the beacon -- glass, covering all six -- is why. It also turns
+  its front to the player now, like a furnace.
+- **A sunflower's upper half is a cross with a flower on it, and it was only
+  the cross.** `sunflower_bottom.json` really is `block/cross`;
+  `sunflower_top.json` is two crossed planes eight units tall reading the
+  lower half of `sunflower_top`, plus a head at `x = 9.6` tilted 22.5 degrees
+  about z, `sunflower_front` on its east face and `sunflower_back` on its
+  west. As a plain cross the head did not exist. All three carry `rescale`,
+  so they are written already rescaled.
+
+  **And in a legacy file the top half did not even say it was a sunflower.**
+  Pre-Flattening, `double_plant` (175) keeps the type in the bottom half's
+  `0..5`; the top half stores `0x8` and a direction nothing reads, which the
+  wiki lists as `8..11`. `legacy_blocks.json` reads those low bits as a type
+  anyway, so `175:10` is `tall_grass[half=upper]` and a sunflower, lilac,
+  rose bush or peony could come back wearing a tuft of grass. The table is
+  generated and stays as it is: `doublePlantTopKey` in `loader_formats.ts`
+  takes the type from the cell below, which the YZX walk has already
+  decoded. A top with no bottom under it keeps the table's answer. Writing
+  needs nothing: the game reads a top half's type from below as well.
+- **A decorated pot has no block model, and it was a crate.** It was a
+  14x16x14 box with the whole base sheet squeezed onto its lid and floor and
+  no neck. `DecoratedPotRenderer` draws two `ModelPart` layers: a neck turned
+  over by `xRot = pi` so the 8x3x8 cube sits on a 6x1x6 collar, a 14x14 plane
+  at the top and at the bottom, and four 14x16 sides that carry only their
+  outward face. The windows were read off an emulation of those cubes, their
+  poses and `ModelPart.Cube`'s unwrap rather than worked out by hand, because
+  the flip swaps the neck's patches. That is exactly what a transcription gets
+  backwards, and `tests/blocks.ts` checks that swap by name.
+
+  The model is `facing=north`, where the renderer's `180 - toYRot` is zero, so
+  the front is on the south. Placing one sets `facing` to where you look, not
+  to its opposite (`AWAY_FROM_PLAYER`), and that is what turns the front
+  towards you. `cracked` moves nothing: it decides what breaking the pot drops.
+  The sherds are not drawn. They are the block entity's `sherds` list, a
+  function of the position like a sign's text, so every pot wears the plain
+  side.
+- **A copper golem statue has no block model, and it was one 8x14x8 box.** Its
+  blockstate names a model holding a particle; the statue is drawn by a block
+  entity renderer with the golem's **entity model**, one layer per
+  `copper_golem_pose`. `COPPER_GOLEM_POSES` transcribes `CopperGolemModel`'s
+  four layers from a decompiled 1.21.11 client, identical number for number in
+  26.2. Bedrock ships the same four poses as `.geo.json` and they are a
+  different model, the running pose most of all, so they are not the source.
+
+  **A `ModelPart` tree is not a list of boxes.** Every part turns its children,
+  on any axis and by any angle, so `ShapeBox.chain` carries the turns:
+  `modelPartBoxes` places each cube at rest, at its coordinates plus every
+  offset down to it, and takes each part's `rotationZYX` about the running sum
+  of the offsets down to that part, innermost first. The root is the statue
+  model's `setupAnim`: the opposite of `facing`, then half a turn about z,
+  which stands up a model written with y pointing down. The windows are
+  `ModelPart.Cube`'s rectangles with some axes reversed for `boxFaces`. The
+  check does not trust any of that: `tests/blocks.ts` rebuilds Java's matrices,
+  cubes and polygons and holds every vertex's place, normal and UV to them in
+  all sixteen states.
+
+  Standing, it is 24 units tall, and the antenna's knob reaches half a block
+  into the cell above, as in the game. A click on that half picks the empty
+  cell, a banner's cloth one block along, so a right-click there places rather
+  than turns. It is placed facing the player (`FRONT_TO_PLAYER_SUFFIXES`).
+- **An open fence gate was two posts and nothing else**, on the reasoning
+  that that "reads as open". Vanilla's `template_fence_gate_open.json` swings
+  each leaf a quarter turn onto the side the gate faces: an upright at
+  `z 13..15` and two bars back to the post. `in_wall` was read nowhere, and the
+  two `_wall` models are the same elements three units lower, which is what
+  lines a gate up with a wall's lower top. `powered` moves nothing.
+  `bamboo_fence_gate` is still the ordinary template, not its own custom one.
+- **A carved pumpkin's front texture is its bare name**, which the `facing`
+  derivation cannot find: it offers `<name>_front`. So `carved_pumpkin` was
+  the only name that resolved on any face and all six wore the carved face.
+  `SpecialFaceRule.front` is for that, with `pumpkin_side` round the sides and
+  `pumpkin_top` on both ends (`orientable`). The jack o'lantern is the same.
+  A bare one is drawn facing north, the registry's default. Legacy `86` and
+  `91` already arrive with `facing` from `legacy_blocks.json`.
+- **A spore blossom was a cube wearing its petal sprite.** Vanilla is a base
+  plane at `y = 15.9` and four petals hinged at the middle and drooping 22.5
+  degrees. The windows are vanilla's. The quarter-turns on the two petals
+  tilted about z are not: copied as written, they put the sprite's yellow base
+  on the tip. This was reported against a screenshot of the game, so they are
+  swapped, and a texel check pins it. This app's quarter-turn on a flat face
+  may run the opposite way to vanilla's. The other `up`/`down` quarter-turns
+  in `block_shapes.ts` have not been checked against a picture.
+- **Bamboo was one 3x3 column in every state.** `age` picks a 2x2 or a 3x3
+  stalk and `leaves` adds two crossed planes of small or large leaves. Vanilla
+  picks one of four stalk models at random per position, and they differ only
+  in the column of `bamboo_stalk` their sides read. A shape is baked per
+  state, so this always uses the first, with no random offset. `stage` is in no
+  `when` and moves nothing.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it
   on six faces of a solid block that sealed its cell and let a fence connect to
   it. They are in `CROSS_BLOCKS` beside `cave_vines`.
+- **An attached stem bends towards its fruit, and it was a cross.**
+  `attached_pumpkin_stem` and `attached_melon_stem` sat in `CROSS_BLOCKS`, so
+  `facing` changed nothing on screen. `stem_fruit.json` is the stem's lower
+  half as two crossed planes, rescaled and reaching a unit below the cell, plus
+  one plane of `attached_<fruit>_stem` from the middle of the cell outwards.
+  The blockstate gives `facing=west` no `y`, so it is **west-authored**, and
+  `attachedStem` turns it by `facingSteps + 2`.
 - **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
   one member.** Every other fence in the game parents `block/fence_post` and
   `block/fence_side` and paints them with a plank tile, so its UVs derive
@@ -4993,11 +5268,95 @@ knowing:
   back of every banner in the build. What omitting it costs is the couple of
   units below the cloth's hem, seen from due south. The bar's south face is
   *entirely* behind the cloth, so that one is free.
-- **The patterns are still not composed, and a plain banner is not a
-  stand-in for one.** They are a stack of layers in the block entity's NBT
-  and that is a different job; what changed is that the base colour is no
-  longer a lump of wool. Shulker boxes keep the wool, because their sheet is
-  still laid out for an animated lid.
+- **The cloth wore its back, upside down, and nothing could see it.** Its
+  windows were `unwrapCube`'s, which reads a strip bottom-up and puts the first
+  side window on the model's north face -- right for a chest. The flag is a
+  `ModelPart` cube scaled by `(2/3, -2/3, -2/3)`: model `y` runs down the world
+  and `z` is turned round, so its north window (`u 1..21, v 1..41`) is the side
+  facing away from the pole, the right way up, with `u 1` on the west.
+  Invisible while the cloth was one colour; `stripe_left` came out on the right
+  at the bottom. `BANNER_CLOTH_UV` is vanilla's now, and `tests/blocks.ts`
+  states it in pixels on the front of both a standing and a wall banner.
+- **The patterns are composed, into one tile per look.** `BannerRenderer`
+  draws the tinted `entity/banner/base`, then up to sixteen
+  `entity/banner/<id>` layers tinted by their dyes with alpha blending.
+  `ModelBaker.bannerCloth` does that once into pixels rather than as coplanar
+  quads, under a key built from everything that went in -- so two banners
+  that look alike share a tile. It is a **per-position overlay**, the signs'
+  arrangement for the signs' reasons: `preview.ts`'s `bannersIn` reads the
+  block entities and composes **before the atlas is packed** (a tile made
+  during meshing is one the mesh cannot find, and `buildMesh` drops the face),
+  `culledFaces` swaps the key on faces wearing `entity/banner/base`, and
+  `chunked_mesh.ts` diffs the keys and redraws only the banner's chunk. The
+  pattern sheets are kept out of `textureCache`, which is what the atlas
+  packs: forty masks at 256 pixels would be megabytes nothing addresses.
+
+  A legacy banner is always `white_banner` in the palette and keeps its
+  colour in `Base`, so it is put in the overlay even with no layers -- before
+  this every 1.12 banner drew white. Shulker boxes keep the wool, because
+  their sheet is still laid out for an animated lid. Hotbar icons stay the
+  plain banner: a composed tile per slot would move the atlas every icon
+  addresses.
+- **Three spellings, from the game's own datafixers.** 1.8 to 1.12.2 store
+  `Patterns:[{Pattern:"moj",Color:14}]` with the colour **inverted** and a
+  `Base`; 1.13 to 1.20.4 the same list with the dye's number
+  (`BlockEntityBannerColorFix`, schema 1451); 1.20.5 on
+  `patterns:[{pattern:"minecraft:mojang",color:"orange"}]`
+  (`BannerPatternFormatFix`, schema 3818). `pipeline/banner_nbt.ts` reads all
+  three whatever the file claims and writes the one the document's version
+  reads, keeping every other key and removing the other spellings. A legacy
+  banner with no `Base` is black in the game, so one is always written, and
+  the legacy block entity id is `Banner` (MCEdit drops the namespace).
+
+  Text somebody wrote is read strictly -- an unknown design or colour is
+  refused by name -- and NBT out of a file leniently, skipping a layer it
+  cannot read (a datapack's design) and drawing the rest.
+- **A banner is named with its design, everywhere a block is named.**
+  `shared/block_input.ts`'s `splitBlockInput` takes
+  `magenta_banner[rotation=4,banner_patterns=[...]]` apart, and a whole
+  `/give @p ... 1` with it, because that is what the Planet Minecraft banner
+  editor hands out; `/setblock`'s `{patterns:[...]}` and a pre-1.20.5 `/give`'s
+  `{BlockEntityTag:{Patterns:[...]}}` are read too. It scans with a depth
+  counter, because the list is full of the commas the state splitter cuts on,
+  and **refuses** any other component or NBT key rather than dropping it.
+  `App.svelte`'s `parseBlock`, the agent tools, the build script and the block
+  icons all call it first. `BlockSpec.bannerPatterns` carries the list raw to
+  main, which checks it against the version (`checkBannerPatterns`) before any
+  growth and writes it after the block in the same transaction
+  (`stampBanner`), because `setBlock` drops the block entity it displaces. A
+  fill stamps every banner in the box; a replace only the cells it matched.
+
+  Over MCP, `list_banner_patterns` gives every design with where it sits *as
+  seen from the front*, `set_banner_patterns` repaints one already placed, and
+  `inspect_block` hands back `blockData`, a spelling `set_block` places again.
+- **A design is edited in the inspector, on the banner.** That is the answer
+  to "how do I put a design on a banner already in the document", which had
+  none: the NBT rows read `patterns[3].pattern` a leaf at a time, cannot add,
+  remove or reorder a layer, and show nothing on a banner with no block entity.
+  `BlockInspection.banner` is present on **every** banner, with no layers when
+  it carries none, and `BannerPatternEditor` is a numbered list with the sixteen
+  dyes as swatches (`DYE_HEX`, the table the cloth is tinted with, moved to
+  `shared/` so the renderer can read it) and a paste field that takes only the
+  design out of a `/give`. Every change sends the whole list through the
+  inspector's own `setState`, with `bannerPatterns` beside the state: one undo
+  step, checked against the version, written in the document's spelling. The
+  hint beside the block field sends a person there rather than telling them to
+  paste into the field, which still works and is no longer what the screen
+  teaches.
+
+  **`setState` keeps the block entity while the name is unchanged, and it did
+  not.** `setBlock` drops the record of any cell it writes, so turning a
+  patterned banner in the inspector erased its design -- and editing a chest's
+  `facing` there emptied it. A different name still takes the record away.
+
+  **A turn starts from what is drawn.** A banner placed by a fill carries no
+  `rotation`, and `transformProperties` rewrites only what an entry carries, so
+  the gizmo turned it into itself. `drawnOrientation` in `transform.ts` writes
+  the baker's own fallback first -- `rotation=0`, and `facing=east` on a wall
+  banner -- and deliberately not the 26.2 registry default of 8, which would
+  spin it half round before the turn. And the middle button picks a banner up
+  **with** its design, from `banner.layers` rather than `blockData`, which on a
+  legacy document renames a white banner after its `Base`.
 - **Redstone dust was three faults in one block, and each hid the others.**
   Vanilla ships the texture **greyscale** -- the shipped pack's palette is
   three greys and transparency, none darker than 217 -- and multiplies it by
@@ -5675,6 +6034,27 @@ every hopper landed on the registry default `down` with its spout hanging in
 mid-air beside whatever it was meant to feed. `facing` is the clicked face
 reversed, with the one exception the game states outright: there is no
 upward-facing hopper, so a click on a floor gives `down`.
+
+**An anvil is laid across the look.** `AnvilBlock.getStateForPlacement` is
+`getHorizontalDirection().getClockWise()`, and the model's long axis is on `z`
+at `facing=south`, so looking north gives `facing=east` and the horn to one
+side. It was left out of `orientPlacement` on purpose, as a guess that would
+look deliberate -- and every anvil therefore landed on `facing=north`, which is
+one of the four guesses. `CLOCKWISE_FROM_LOOK` is the table, and `tests/blocks.ts`
+checks the baked top as well as the property, because a table one quarter out
+still names four directions.
+
+**A bell hangs from what it was clicked onto, and it was in no table.** So
+every one of them landed on the registry's `attachment=floor`,
+`facing=north`, whichever way the camera pointed and whatever it was hung
+from. `BellBlock.getStateForPlacement` is two branches on the clicked face: a
+top face gives `floor` and an underside `ceiling`, both with `facing` from the
+look, and a side gives `single_wall` with `facing` the **opposite** of the
+clicked face -- a bell points *into* its wall where a wall torch points out of
+it, which is why `WALL_MOUNTED` is one value short of being the rule.
+`double_wall` is deliberately absent, for `hinge`'s reason: vanilla picks it
+from the block on the far side, which is a question about the document rather
+than about the click.
 
 **Pointed dripstone points away from where you look, vertically.** Its placement
 is vanilla's `getNearestLookingVerticalDirection()` reversed: look up at a

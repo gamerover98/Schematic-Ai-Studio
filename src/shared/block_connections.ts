@@ -58,6 +58,25 @@ export interface NeighbourBlock {
    * to. `occludesNeighbours`' answer, computed by main and passed in.
    */
   readonly solid: boolean;
+  /**
+   * Which of its faces something can hang off: the face is whole, and the
+   * block has a body to hang it on. `coversFace` minus the fluids and the
+   * markers with nothing in them, computed by main.
+   *
+   * It is not `solid`, and a vine is why. Vanilla's `MultifaceBlock.canAttachTo`
+   * asks whether the *collision* shape fills the face, so a vine clings to
+   * leaves, glass and the underside of a top slab -- none of which is a full
+   * opaque cube. Asked through `solid`, a jungle canopy held up no vines at
+   * all. Absent means "fall back to `solid`", which is what a caller that
+   * builds a neighbour by hand gets.
+   */
+  readonly sturdy?: Readonly<Partial<Record<Face, boolean>>>;
+}
+
+/** Whether `block` offers a whole face on its side `face`. */
+function sturdyAt(block: NeighbourBlock | null, face: Face): boolean {
+  if (block === null) return false;
+  return block.sturdy?.[face] ?? block.solid;
 }
 
 /**
@@ -501,6 +520,47 @@ function dripstoneThickness(
   return "frustum";
 }
 
+/**
+ * A tripwire's four connections: `TripWireBlock.shouldConnectTo`, plus one
+ * deviation for a wire with nothing to connect to.
+ *
+ * A side connects to another wire, or to a hook that points back at this one.
+ * That is vanilla's whole rule, and until it was here nothing derived it, so
+ * every wire ever placed was unconnected and lay north-south.
+ *
+ * **A wire with no neighbour keeps the axis it was laid along**, and that is
+ * the deviation. Vanilla has no answer for it: an isolated wire is all
+ * `false`, which draws north-south, whatever way the player faced. This is an
+ * editor and the first wire of a run is always isolated, so a run laid
+ * east-west came out crossways until its second wire went down.
+ * `orientPlacement` lays a wire along the look, as `east=true,west=true` for
+ * east-west, and this keeps exactly that. North-south stays vanilla's all
+ * `false`, which draws the same, so a lone wire out of a file is not rewritten
+ * into a state the game never writes.
+ */
+function tripwireSides(
+  self: { readonly properties: Readonly<Record<string, string>> },
+  neighbours: Neighbours,
+): Record<string, string> {
+  const sides: Record<string, string> = {};
+  let any = false;
+  for (const face of HORIZONTAL_FACES) {
+    const side = neighbours[face] ?? null;
+    const connects =
+      side !== null &&
+      (side.name === "tripwire" ||
+        (side.name === "tripwire_hook" && (side.properties.facing ?? "north") === OPPOSITE[face]));
+    sides[face] = connects ? "true" : "false";
+    any ||= connects;
+  }
+  if (any) return sides;
+  const p = self.properties;
+  const eastWest =
+    (p.east === "true" || p.west === "true") && p.north !== "true" && p.south !== "true";
+  const arm = eastWest ? "true" : "false";
+  return { north: "false", east: arm, south: "false", west: arm };
+}
+
 const MUSHROOM_BLOCKS: ReadonlySet<string> = new Set([
   "brown_mushroom_block",
   "red_mushroom_block",
@@ -598,11 +658,37 @@ export function connectedState(
   }
 
   if (name === "vine") {
-    // A vine clings to what is beside and above it, and has no `down`.
-    for (const face of [...HORIZONTAL_FACES, "up" as Face]) {
+    /*
+     * A vine clings to what is beside and above it, and has no `down`.
+     *
+     * **And a side is held up by the vine above it**, which is what lets a
+     * vine hang. Vanilla's `VineBlock.canSupportAtFace`: a horizontal face is
+     * supported by a full block on that side, or by the block above being a
+     * vine that has that same face. Without the second half a vine under a
+     * vine with no wall of its own came out with every face `false` and drew
+     * as the cross. `up` is not inherited: it is only ever a ceiling.
+     *
+     * A vine left with no support at all stays, as the cross, where vanilla
+     * would drop it. Removing blocks is not this pass's to decide.
+     *
+     * "A full block" is a whole face of the *collision* shape, `sturdy`, and
+     * not `solid`: a vine hangs off leaves and glass, and off the underside of
+     * any of them, which is how a jungle canopy grows its curtains. The
+     * underside is `up`, and placing a vine there is 1.13's (17w47a: "vines
+     * can now be placed on the bottom of blocks").
+     */
+    const above = neighbours.up ?? null;
+    for (const face of HORIZONTAL_FACES) {
       const side = neighbours[face] ?? null;
-      put(face, side !== null && side.solid ? "true" : "false");
+      const hung = above !== null && above.name === "vine" && above.properties[face] === "true";
+      put(face, sturdyAt(side, OPPOSITE[face]) || hung ? "true" : "false");
     }
+    put("up", sturdyAt(above, "down") ? "true" : "false");
+    return out;
+  }
+
+  if (name === "tripwire") {
+    for (const [face, value] of Object.entries(tripwireSides(block, neighbours))) put(face, value);
     return out;
   }
 
@@ -652,6 +738,7 @@ export function isNeighbourDependent(name: string): boolean {
     name === "redstone_wire" ||
     name === "chorus_plant" ||
     name === "vine" ||
+    name === "tripwire" ||
     name === "pointed_dripstone" ||
     MUSHROOM_BLOCKS.has(name) ||
     hasProperty(name, "snowy")

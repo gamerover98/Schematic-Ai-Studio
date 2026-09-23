@@ -8,6 +8,8 @@
 
 import type { SchematicFormat } from "./schematic.js";
 import type { Hotbar } from "./settings.js";
+import type { CameraPlacement, Vec3 } from "./camera_aim.js";
+import type { DyeName } from "./banner_patterns.js";
 import { SCHEMATIC_FORMAT_LABEL, SCHEMATIC_FORMATS } from "./schematic.js";
 import type {
   ExportType,
@@ -230,6 +232,23 @@ export const IPC = {
    * and has no way to ask, so the renderer says so when it changes.
    */
   pointerLock: "bgpt:viewport:pointerLock",
+  /**
+   * main → renderer: put the camera here, draw, and say where it ended up.
+   *
+   * The first request main makes *of* the renderer rather than an event it
+   * sends and forgets. `viewportRect` and `pointerLock` are the other shape --
+   * the renderer reporting what main cannot work out -- and they were written
+   * that way because main had no means of asking. `capture_viewport` needs one:
+   * a picture taken before the new view was drawn is a picture of the old view,
+   * and the model would describe the wrong side of its own build.
+   *
+   * So it is a pair of events joined by an `id`, and not an `invoke`, which
+   * only runs the other way. `services/renderer_request.ts` holds the pending
+   * ids and the timeout; `cameraAimed` is the reply.
+   */
+  cameraAim: "bgpt:viewport:camera:aim",
+  /** renderer → main: the answer to `cameraAim`, after the frame was drawn. */
+  cameraAimed: "bgpt:viewport:camera:aimed",
   /**
    * The renderer telling main it has just thrown something it did not catch.
    *
@@ -970,6 +989,15 @@ export type PreviewResponse = Result<PreviewSuccess>;
 export interface BlockSpec {
   namespacedName: string;
   properties?: Record<string, string>;
+  /**
+   * A banner's pattern layers, as the text that was typed or pasted --
+   * `[{pattern:"mojang",color:"orange"}, ...]`, out of `splitBlockInput`.
+   *
+   * Carried raw and read in main, which is where it is checked against the
+   * schematic's version and written in its spelling. Absent for every block
+   * that is not a patterned banner, which is every block but one.
+   */
+  bannerPatterns?: string;
 }
 
 /** Inclusive on both corners; the main process sorts and clips it. */
@@ -1154,6 +1182,33 @@ export type EditRequest =
  * is already failing, so anything that had to be serialised from a live object
  * is one more thing that can throw inside the error handler.
  */
+/**
+ * `IPC.cameraAim`: where to put the camera, or `null` to leave it and only
+ * report where it is.
+ *
+ * Resolved already -- a position and a point to look at. What was *asked* for
+ * (a compass side, an elevation) is main's to turn into this, in
+ * `shared/camera_aim.ts`, so the renderer has nothing to decide.
+ */
+export interface CameraAimRequest {
+  id: number;
+  camera: CameraPlacement | null;
+}
+
+/** Where the camera stands once the frame has been drawn. */
+export interface CameraState {
+  position: Vec3;
+  target: Vec3;
+  projection: "perspective" | "orthographic";
+}
+
+/** `IPC.cameraAimed`: the answer, matched to its request by `id`. */
+export interface CameraAimReply {
+  id: number;
+  /** `null` when there is no viewport to aim, which main reports by name. */
+  camera: CameraState | null;
+}
+
 export interface RendererFailure {
   message: string;
   /** A stack when there was one; `""` rather than absent, for the same reason. */
@@ -1302,6 +1357,20 @@ export interface BlockInspection {
   properties: Record<string, string>;
   /** `nbt` is JSON for display; `fields` is the same tree flattened for editing. */
   blockEntity: { id: string; nbt: string; fields: NbtFieldView[] } | null;
+  /**
+   * A patterned banner, spelled the way that places it again --
+   * `minecraft:magenta_banner[rotation=4,banner_patterns=[...]]`. Present only
+   * for a banner whose block entity says how it looks, so a model can copy the
+   * one it is looking at with `set_block`.
+   */
+  blockData?: string;
+  /**
+   * The design on a banner, bottom layer first. Present for **every** banner
+   * block, with no layers when it carries none -- including one with no block
+   * entity at all -- because the inspector's pattern editor is how a design
+   * gets onto a banner already in the document, and it needs somewhere to start.
+   */
+  banner?: { layers: { pattern: string; color: DyeName }[] };
 }
 
 /**
@@ -1931,6 +2000,10 @@ export interface BgptApi {
   reportViewportRect(rect: { x: number; y: number; width: number; height: number }): Promise<void>;
   /** Whether the keyboard is flying the camera. See `IPC.pointerLock`. */
   reportPointerLock(locked: boolean): Promise<void>;
+  /** Main asking for a camera. See `IPC.cameraAim`. */
+  onCameraAim(listener: (request: CameraAimRequest) => void): () => void;
+  /** The answer, once the frame is drawn. Fire and forget, like the request. */
+  reportCameraAimed(reply: CameraAimReply): void;
   /** Put text on the system clipboard. Main's, because the preload is sandboxed. */
   copyToClipboard(text: string): Promise<void>;
   getDefaultOutputDir(): Promise<string>;
