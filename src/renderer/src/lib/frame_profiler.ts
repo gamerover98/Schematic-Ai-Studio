@@ -329,6 +329,9 @@ export class FrameProfiler {
  * them instead.
  */
 export function readingOf(spike: Spike): string {
+  if (spike.culprit.endsWith("first upload")) {
+    return "the frame's first GPU upload waited for the GPU: the GPU is behind (resolution, MSAA, shadows, or the display it presents to)";
+  }
   if (spike.culprit !== OUTSIDE) return "the loop itself: see the culprit phase";
   const scripted = spike.longFrames.some((frame) => frame.scripts.length > 0);
   if (scripted) return "a script outside the loop: see longFrames";

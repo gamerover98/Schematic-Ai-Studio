@@ -31,6 +31,7 @@
   import type { ResolvedTheme } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
 import { antialiasSamples, fpsCap, frameDue, shaderPreset } from "./shader_modes.js";
+  import { animationsUsed } from "./atlas_animation.js";
   import {
     FrameProfiler,
     culpritOf,
@@ -3156,6 +3157,12 @@ import { isTyping } from "./typing.js";
         fpsFrames = 0;
         fpsAt = now;
       }
+      // Twice a second, only while diagnosing: has the window moved to
+      // another display? The one comparison, not one per frame.
+      if (profiler && now - displayCheckedAt >= FPS_MS) {
+        displayCheckedAt = now;
+        watchDisplay();
+      }
     }
   }
 
@@ -3317,8 +3324,9 @@ import { isTyping } from "./typing.js";
         // Clocked on wall time, not on frames: the game states its animations
         // in ticks of 50ms, and a 144Hz display must not run the water four
         // times too fast.
+        // Timed inside, split into its first upload and the rest; a lap
+        // around it as well would count the same milliseconds twice.
         playAnimations(performance.now());
-        lap("texture animations", t0);
         t0 = stamp();
         updateBuildGrid(performance.now());
         lap("build grid", t0);
@@ -4461,6 +4469,12 @@ import { isTyping } from "./typing.js";
     readonly scratch: THREE.DataTexture;
     /** The frame currently uploaded, so a tick that changes nothing does nothing. */
     shown: number;
+    /**
+     * Whether any chunk on screen draws this tile. See `refreshAnimated`: the
+     * atlas is shared and holds every animated texture there is, and one the
+     * document does not use is not worth an upload per tick.
+     */
+    active: boolean;
   }
   let playing: PlayingTexture[] = [];
 
@@ -4480,7 +4494,7 @@ import { isTyping } from "./typing.js";
       scratch.minFilter = THREE.NearestFilter;
       scratch.generateMipmaps = false;
       scratch.colorSpace = THREE.SRGBColorSpace;
-      return { animation, scratch, shown: -1 };
+      return { animation, scratch, shown: -1, active: false };
     });
   }
 
@@ -4499,7 +4513,10 @@ import { isTyping } from "./typing.js";
   function playAnimations(nowMs: number): void {
     if (!renderer || !texture || playing.length === 0) return;
     const ticks = nowMs / 50;
+    let uploads = 0;
+    let t0 = stamp();
     for (const item of playing) {
+      if (!item.active) continue;
       const { animation, scratch } = item;
       const index = Math.floor(ticks / animation.frameTime) % animation.frameCount;
       if (index === item.shown) continue;
@@ -4508,14 +4525,62 @@ import { isTyping } from "./typing.js";
         animation.frames.subarray(index * bytes, (index + 1) * bytes),
       );
       scratch.needsUpdate = true;
-      renderer.copyTextureToTexture(
-        scratch,
-        texture,
-        null,
-        new THREE.Vector2(animation.x, animation.y),
-      );
+      blitAt.set(animation.x, animation.y);
+      renderer.copyTextureToTexture(scratch, texture, null, blitAt);
       item.shown = index;
+      /*
+       * The first upload of a tick apart from the rest. Writing into a texture
+       * the GPU is still drawing with makes the driver wait for it, and that
+       * wait lands on whichever upload comes first: if this phase holds the
+       * time and the rest cost nothing, the GPU is behind; if the time grows
+       * with the count, the uploads themselves are the cost.
+       */
+      if (uploads === 0) {
+        lap("texture animations: first upload", t0);
+        t0 = stamp();
+      }
+      uploads++;
     }
+    if (uploads > 1) lap("texture animations: uploads", t0);
+    if (uploads > 0) note("animations uploaded", undefined, { count: uploads });
+  }
+
+  /** Reused by every blit: one allocation per upload was garbage per tick. */
+  const blitAt = new THREE.Vector2();
+
+  /**
+   * Marks which animations the chunks on screen draw, so `playAnimations`
+   * uploads only those.
+   *
+   * Asked of the geometry rather than sent by main, because the atlas is
+   * main's and shared: it holds every animated texture the process ever
+   * decoded, which after the block-icon warm-up is all of them. The answer is
+   * cached on each mesh against the atlas version it was worked out for, so a
+   * delta rescans only the chunks it replaced.
+   *
+   * A tile that stops being drawn forgets its frame, so it is written afresh
+   * when it comes back rather than trusted to still be in the atlas.
+   */
+  function refreshAnimated(): void {
+    if (!texture || playing.length === 0) return;
+    const tiles = playing.map((item) => item.animation);
+    const { width, height } = texture.image as { width: number; height: number };
+    const used = new Set<number>();
+    for (const mesh of chunkMeshes.values()) {
+      if (mesh.userData.animatedFor !== textureVersion) {
+        const uv = mesh.geometry.getAttribute("uv");
+        mesh.userData.animated = uv
+          ? animationsUsed(uv.array as Float32Array, tiles, width, height)
+          : [];
+        mesh.userData.animatedFor = textureVersion;
+      }
+      for (const index of mesh.userData.animated as number[]) used.add(index);
+    }
+    playing.forEach((item, index) => {
+      const active = used.has(index);
+      if (!active) item.shown = -1;
+      item.active = active;
+    });
   }
 
   /**
@@ -4828,6 +4893,44 @@ import { isTyping } from "./typing.js";
     };
   });
 
+  /**
+   * Which display the window is on, as far as a page can tell.
+   *
+   * `availLeft`/`availTop` are the screen's origin on the desktop, so they
+   * change when the window is dragged to another monitor even when the two are
+   * the same size and scale -- which is the case that was reported: smooth on
+   * the laptop panel, stuttering on the external one.
+   */
+  function displayNow(): Record<string, number | boolean | null> {
+    const screenInfo = window.screen as Screen & {
+      availLeft?: number;
+      availTop?: number;
+      isExtended?: boolean;
+    };
+    return {
+      devicePixelRatio: window.devicePixelRatio,
+      width: screenInfo.width,
+      height: screenInfo.height,
+      left: screenInfo.availLeft ?? null,
+      top: screenInfo.availTop ?? null,
+      extended: screenInfo.isExtended ?? null,
+    };
+  }
+
+  /** The last display noted, so moving to another one becomes an event. */
+  let lastDisplay = "";
+  let displayCheckedAt = 0;
+
+  /** Notes a change of display; called on the counter's half-second tick. */
+  function watchDisplay(): void {
+    if (!profiler) return;
+    const now = displayNow();
+    const key = JSON.stringify(now);
+    if (key === lastDisplay) return;
+    if (lastDisplay !== "") note("display changed", undefined, now);
+    lastDisplay = key;
+  }
+
   /** The scripts a Long Animation Frame entry names, heaviest first. */
   function longFrameScripts(entry: PerformanceEntry): LongFrame["scripts"] {
     const scripts = (entry as PerformanceEntry & { scripts?: readonly LongFrameScript[] }).scripts;
@@ -4875,6 +4978,18 @@ import { isTyping } from "./typing.js";
       textures: renderer?.info.memory.textures ?? null,
       chunks: chunkMeshes.size,
       animatedTextures: playing.length,
+      animatedTexturesDrawn: playing.filter((item) => item.active).length,
+      /*
+       * What the GPU is asked to do per frame, in one place: every sample is
+       * shaded, so pixels times MSAA samples is the budget, and a shadow map is
+       * a second pass over the geometry.
+       */
+      gpuLoad: {
+        pixels: canvas ? canvas.width * canvas.height : null,
+        msaaSamples: antialiasSamples(antialias),
+        shadows,
+      },
+      display: displayNow(),
       documentSize,
       settings: {
         maxFps,
@@ -4925,6 +5040,7 @@ import { isTyping } from "./typing.js";
         voidLoaded = null;
       }
       chunkMeshes.clear();
+      refreshAnimated();
       error = null;
       return;
     }
@@ -4964,6 +5080,7 @@ import { isTyping } from "./typing.js";
       if (payload.partial && previous !== null && previousVoid !== null) {
         applyDelta(previous, previousVoid, payload, map);
         applyWireframe(previous, wireframe);
+        refreshAnimated();
         applied("delta applied");
         error = null;
         return;
@@ -4979,6 +5096,7 @@ import { isTyping } from "./typing.js";
       target.add(built.solid);
       target.add(built.filler);
       applyWireframe(built.solid, wireframe);
+      refreshAnimated();
       applied("rebuilt");
       error = null;
     } catch (err) {

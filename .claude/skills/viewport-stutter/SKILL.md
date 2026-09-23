@@ -48,7 +48,8 @@ Each spike's `reading` is the first inference. Then:
 | `environment` + event `environment rebuilt`, periodic ~1 s | `buildEnvironment` (`pmrem.fromScene`), `ENVIRONMENT_MS`, `environmentStale` set by `applySky` | rebuild only when the daylight changed visibly (threshold on sun direction/colour), a longer interval, or a smaller cube |
 | `scene pass` | triangles/draw calls in `context`, shadows, `maxDrawDistance`, AA | shadows are a whole extra pass; check `shadowQuality`, far-plane culling, chunk count; frustum culling is per chunk already |
 | `sky pass`, `anti-aliasing copy` | `renderFrame` | resolution: `maxDpr × renderScale × canvas`; MSAA level |
-| `texture animations` | `playAnimations` (one `new THREE.Vector2` and one upload per changed animation) | reuse the vector, batch uploads |
+| `texture animations: first upload` holds the time, `: uploads` costs nothing | the first `texSubImage2D` of the tick waits for the GPU to finish with the atlas: **the GPU is behind** | not the uploads' fault. Check `gpuLoad` (pixels × MSAA samples, shadows) and `display`. Ask for a report on the other screen and with lower renderScale/MSAA before touching code. On a hybrid-GPU laptop, the external display can be the whole difference |
+| `texture animations: uploads` grows with `animations uploaded.count` | `playAnimations`: only tiles marked `active` by `refreshAnimated` (via `animationsUsed`) are uploaded | per-upload cost: fewer uploads per tick (frame-time batching), or one packed strip per tick |
 | `outside the loop` + event `mesh delta applied` / `mesh rebuilt` with large `kilobytes` | the payload `$effect`, `applyDelta`, `buildModel`, `chunkMesh` (`computeBoundingSphere/Box`) | spread chunk uploads across frames; reuse `BufferGeometry` and update attributes in place |
 | `outside the loop` + Long Animation Frame scripts | the `scripts[].fn` / `invoker` named | that function; often a Svelte `$effect` firing more often than it should |
 | `outside the loop`, no scripts, no events | GPU, compositor, GC — see `readingOf` | lower resolution/AA to test the GPU hypothesis; look for per-frame allocation for GC |
@@ -57,6 +58,18 @@ Each spike's `reading` is the first inference. Then:
 When the report does not settle it, ask for a DevTools Performance recording of
 the moment, or add a finer `lap` inside the suspect phase — temporarily if it
 is only for this investigation.
+
+## Found so far
+
+- **Report 1** (RTX 3080 Laptop, ANGLE/D3D11, window on the external HDMI/DP
+  monitor; smooth on the laptop panel): 50/50 spikes in `texture animations`,
+  85-443 ms, on an 11x12x11 document with 34 animated textures, none of them
+  in the document. Fix: only tiles the mesh draws are played
+  (`atlas_animation.ts`). The time was very likely a GPU wait surfacing at the
+  first upload, so the next report is expected either clean, or with the wait
+  moved to another phase. That will be `scene pass`, or `outside the loop`
+  with no scripts, and will point at the display or GPU load rather than at
+  the code.
 
 ## Fixing
 

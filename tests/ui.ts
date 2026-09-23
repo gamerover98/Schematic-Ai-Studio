@@ -33,6 +33,7 @@ import {
   FPS_CAPS,
   voidSources,
 } from "../src/shared/settings.js";
+import { animationsUsed } from "../src/renderer/src/lib/atlas_animation.js";
 import {
   FrameProfiler,
   OUTSIDE,
@@ -2729,6 +2730,62 @@ console.log("\n--- how the viewport is drawn ---");
       "the loop opens an interval only while diagnosing",
       loop.includes("if (profiler) profiler.beginFrame(performance.now());"),
     );
+  }
+
+  /*
+   * Only the animated tiles the geometry draws are played. The atlas holds
+   * every animated texture the process has decoded -- 34 in the first stutter
+   * report, for a document using none -- and each upload is where the loop
+   * waits for the GPU.
+   */
+  {
+    // A 64x64 atlas with three 16px tiles, and quads whose UVs are a tile's
+    // rect inset half a pixel, which is what the mesher writes.
+    const W = 64;
+    const tiles = [
+      { x: 0, y: 0, size: 16 },
+      { x: 18, y: 0, size: 16 },
+      { x: 36, y: 18, size: 16 },
+    ];
+    const quad = (tile: { x: number; y: number; size: number }): number[] => {
+      const u0 = (tile.x + 0.5) / W;
+      const v0 = (tile.y + 0.5) / W;
+      const u1 = (tile.x + tile.size - 0.5) / W;
+      const v1 = (tile.y + tile.size - 0.5) / W;
+      return [u0, v0, u1, v0, u1, v1, u0, v1];
+    };
+    const still = { x: 36, y: 0, size: 16 };
+    const used = (...quads: number[][]) => animationsUsed(new Float32Array(quads.flat()), tiles, W, W);
+    check("a quad in an animated tile marks that tile", JSON.stringify(used(quad(tiles[2]))) === "[2]");
+    check("a quad in a still tile marks nothing", used(quad(still)).length === 0);
+    check("two quads in two tiles mark both", JSON.stringify(used(quad(tiles[0]), quad(still), quad(tiles[1]))) === "[0,1]");
+    check("no geometry marks nothing", used().length === 0);
+    // The half-pixel inset is inside; the tile's own edge is the padding.
+    const edge = new Float32Array([18 / W, 0.5 / W, 0, 0, 0, 0, 0, 0]);
+    check("a UV on a tile's outer edge is the padding, not the tile", !animationsUsed(edge, tiles, W, W).includes(1));
+
+    const loop = viewer.slice(viewer.indexOf("function playAnimations("));
+    check(
+      "an animation nobody draws is not uploaded",
+      /for \(const item of playing\) \{\s*if \(!item\.active\) continue;/.test(loop),
+    );
+    const effect = viewer.slice(viewer.indexOf("applyDelta(previous, previousVoid, payload, map);"));
+    check("the tiles drawn are recounted after a delta", /applyDelta[^]*?refreshAnimated\(\);[^]*?applied\("delta applied"\)/.test(effect));
+    check("...and after a rebuild", /applyWireframe\(built\.solid, wireframe\);\s*refreshAnimated\(\);/.test(viewer));
+  }
+
+  {
+    // The first upload of a tick holding the time is the GPU being behind.
+    const profiler = new FrameProfiler();
+    let now = 0;
+    for (let i = 0; i < 40; i++) {
+      profiler.beginFrame(now);
+      profiler.phase(i === 30 ? "texture animations: first upload" : "scene pass", now, now + (i === 30 ? 300 : 1));
+      now += i === 30 ? 301 : 17;
+    }
+    profiler.beginFrame(now);
+    const spike = profiler.spikes[0];
+    check("a first-upload spike is read as the GPU", spike !== undefined && readingOf(spike).includes("GPU"));
   }
 
   {

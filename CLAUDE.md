@@ -6616,6 +6616,26 @@ Four things about it are load-bearing:
   biome's water for one instant and grey for every frame after. That is exactly
   what the position check caught.
 
+**Only the tiles the mesh draws are played, and the first stutter report is
+why.** The atlas is shared by everything the process ever meshed, and the
+block-icon warm-up decodes every block in the game. So its animation list is
+every animated texture there is, and `playAnimations` uploaded all 34 of them
+per tick for an 11×12×11 document that used none. The report measured frames
+of 85–443 ms, all 50 spikes inside those uploads, with every other phase under
+2 ms. `animationsUsed` in `atlas_animation.ts` reads which tiles each chunk
+samples (one vertex per quad, from its own UVs, cached per mesh against the
+atlas version), and `refreshAnimated` marks the union after every payload,
+including the one that empties the scene.
+
+**The time was almost certainly not the uploads' own cost.** Writing into a
+texture the GPU is still drawing with makes the driver wait for it, and that
+wait lands on the first upload of the frame. The report was taken with the
+window on an external monitor of a hybrid-GPU laptop. It was smooth on the
+laptop panel, at the same scale and the same settings. So the profiler now
+times `texture animations: first upload` apart from `: uploads`, and records
+the `display` and the `gpuLoad`. The next spike in the first phase will be
+read as the GPU falling behind rather than as this code.
+
 **The sun and the moon come out of the resource pack, as pixels.** They live
 at `textures/environment/`, nowhere near the block textures and never asked for
 by anything that meshes — so `services/sky_textures.ts` reads them directly and
