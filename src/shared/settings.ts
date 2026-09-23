@@ -113,6 +113,16 @@ export type ShaderMode = (typeof SHADER_MODES)[number];
  */
 export const AA_LEVELS = [0, 2, 4, 8] as const;
 
+/**
+ * The frame rate caps offered, in frames per second. `0` is no cap: the
+ * viewport draws once per display refresh, which is what it always did.
+ *
+ * A list rather than a slider for `AA_LEVELS`' reason -- the pane and the
+ * viewer read one set -- and because the useful values are the common
+ * refresh rates and their halves, not every integer in between.
+ */
+export const FPS_CAPS = [0, 30, 60, 90, 120, 144] as const;
+
 export interface PreviewSettings {
   projection: Projection;
   /**
@@ -123,6 +133,16 @@ export interface PreviewSettings {
    * choice somebody makes, not what an upgrade quietly does to them.
    */
   antialias: number;
+  /**
+   * The most frames the viewport draws per second; `0` follows the display.
+   * See `FPS_CAPS`.
+   *
+   * The loop still wakes on every `requestAnimationFrame` and simply skips
+   * the frames over the cap, so nothing about when a frame is presented
+   * changes -- only how many are drawn. Off by default: a cap is a trade of
+   * smoothness for GPU time, and that is a choice rather than an upgrade.
+   */
+  maxFps: number;
   /**
    * Whether the sky lights the build.
    *
@@ -139,6 +159,14 @@ export interface PreviewSettings {
   globalIllumination: boolean;
   /** Frames per second, frame time, triangles and draw calls, in a corner. */
   showFps: boolean;
+  /**
+   * Record where each frame's time goes and keep the slow ones.
+   *
+   * A diagnostic, off by default: it costs a timestamp per phase and a little
+   * allocation per frame, which is nothing next to a stutter and not nothing
+   * next to a frame. See `frame_profiler.ts`.
+   */
+  frameDiagnostics: boolean;
   /** Which look the viewport is drawn with. See `SHADER_MODES`. */
   shaderMode: ShaderMode;
   sunAzimuthDeg: number;
@@ -271,8 +299,10 @@ export interface PreviewSettings {
 export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   projection: "perspective",
   antialias: 4,
+  maxFps: 0,
   globalIllumination: false,
   showFps: false,
+  frameDiagnostics: false,
   shaderMode: "vanilla",
   sunAzimuthDeg: 60,
   sunElevationDeg: 35,

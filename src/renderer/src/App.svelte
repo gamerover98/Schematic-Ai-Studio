@@ -50,6 +50,7 @@ import StartupScreen, { type StartupStep } from "./lib/StartupScreen.svelte";
 import VersionsModal from "./lib/VersionsModal.svelte";
   import Viewer, { type CameraMode, type PickedBlock } from "./lib/Viewer.svelte";
   import { api, bridgeAvailable, forIpc, bridgeMissingMessage } from "./lib/bridge.svelte.js";
+  import { diagnosing, recordEvent } from "./lib/frame_profiler.js";
   import { applyTraceEvent } from "./lib/trace.js";
   import { primeBlockIcons } from "./lib/block_icons.svelte.js";
   import {
@@ -2613,11 +2614,19 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       meshToken = null;
       return;
     }
+    const askedAt = performance.now();
     const response = await api().getDocumentMesh({
       settings: forIpc(settings.preview),
       haveMesh: meshToken,
       haveAtlas: heldAtlas,
     });
+    // How long main took to answer. A slow answer only delays the picture --
+    // main is another process -- so the report has to tell it apart from a
+    // stall in this one.
+    if (diagnosing()) {
+      const at = performance.now();
+      recordEvent({ name: "mesh answered by main", at, ms: at - askedAt, detail: { ok: response.ok } });
+    }
     if (!response.ok) {
       /*
        * Cleared either way. Leaving the last mesh up meant deleting every block
@@ -4961,8 +4970,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       maxDrawDistance={settings.preview.maxDrawDistance}
       projection={settings.preview.projection}
       antialias={settings.preview.antialias}
+      maxFps={settings.preview.maxFps}
       globalIllumination={settings.preview.globalIllumination}
       showFps={settings.preview.showFps}
+      frameDiagnostics={settings.preview.frameDiagnostics}
       shaderMode={settings.preview.shaderMode}
       showGrid={settings.preview.showGrid}
       showBounds={settings.preview.showBounds}

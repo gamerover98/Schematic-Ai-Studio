@@ -23,6 +23,7 @@
     AA_LEVELS,
     DEFAULT_BIOME_COLOR,
     DEFAULT_WATER_COLOR,
+    FPS_CAPS,
     LANGUAGES,
     MCP_PORT,
     PREVIEW_SETTING_RANGES,
@@ -40,6 +41,8 @@
     type UpdateSettings,
   } from "../../../shared/settings.js";
   import ApiKeysSection from "./ApiKeysSection.svelte";
+  import { fpsCap } from "./shader_modes.js";
+  import { stutterReport } from "./frame_profiler.js";
   import { t, tn } from "./i18n.svelte.js";
   import type { McpActivity, McpStatus, UpdateStatus } from "../../../shared/ipc.js";
   import { dotColor, dotFor, maskToken } from "./mcp_status.js";
@@ -199,6 +202,19 @@ import {
     // could be read by somebody standing behind you.
     if (!open) revealed = false;
   });
+
+  let stutterNote = $state<string | null>(null);
+
+  async function copyStutterReport(): Promise<void> {
+    const report = stutterReport();
+    if (report === null) {
+      stutterNote = t("preview.stutterReportEmpty");
+      return;
+    }
+    await api().copyToClipboard(JSON.stringify(report, null, 2));
+    const spikes = Array.isArray(report.spikes) ? report.spikes.length : 0;
+    stutterNote = t("preview.stutterReportCopied", { count: spikes });
+  }
 
   async function copy(what: "url" | "token" | "command" | "bridge", value: string): Promise<void> {
     if (value === "") return;
@@ -790,6 +806,21 @@ import {
             <p class="hint">{t("preview.antialiasHint")}</p>
           </div>
           <div class="field">
+            <label for="max-fps">{t("preview.maxFps")}</label>
+            <select
+              id="max-fps"
+              value={String(fpsCap(preview.maxFps))}
+              onchange={(event) => onpreviewchange({ maxFps: Number(event.currentTarget.value) })}
+            >
+              {#each FPS_CAPS as cap (cap)}
+                <option value={String(cap)}>
+                  {cap === 0 ? t("preview.maxFps.off") : `${cap} FPS`}
+                </option>
+              {/each}
+            </select>
+            <p class="hint">{t("preview.maxFpsHint")}</p>
+          </div>
+          <div class="field">
             <label for="max-dpr">{t("preview.maxDpr", { value: preview.maxDpr.toFixed(1) })}</label>
             <input
               id="max-dpr"
@@ -838,6 +869,28 @@ import {
             {t("preview.showFps")}
           </label>
           <p class="hint">{t("preview.showFpsHint")}</p>
+          <!--
+            The report is built by the viewer, which registers it while it is
+            diagnosing; the pane only asks for it. See `frame_profiler.ts`.
+          -->
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={preview.frameDiagnostics}
+              onchange={(event) =>
+                onpreviewchange({ frameDiagnostics: event.currentTarget.checked })}
+            />
+            {t("preview.frameDiagnostics")}
+          </label>
+          <p class="hint">{t("preview.frameDiagnosticsHint")}</p>
+          <div class="field">
+            <button type="button" onclick={() => void copyStutterReport()}>
+              {t("preview.copyStutterReport")}
+            </button>
+            {#if stutterNote}
+              <p class="hint">{stutterNote}</p>
+            {/if}
+          </div>
           <p class="hint">{t("settings.qualityHint")}</p>
         {:else if category === "textures"}
           <p class="hint rebuilds">{t("settings.rebuildsHint")}</p>

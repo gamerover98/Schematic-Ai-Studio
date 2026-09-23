@@ -6301,7 +6301,7 @@ of the cell, but the two faces that would claim it are the degenerate ones
 `boxFaces` already drops. The guard is what will be right the day somebody
 transcribes a leaning box flush to a wall.
 
-**Four graphics settings, and every one of them is the viewer's.** Nothing
+**Five graphics settings, and every one of them is the viewer's.** Nothing
 here reaches the mesher, so none of them rebuilds a mesh -- which is the whole
 reason they could be added at all without touching the chunk cache. Two are
 not numbers or booleans, so both are read *totally*, `projection`'s rule for
@@ -6363,6 +6363,55 @@ rate, which is free and is what makes it a diagnosis rather than a number --
 and `renderer.info.autoReset` goes **off**, because `info` resets itself at
 the start of every render and a frame here is three or four of them: left
 alone it would report the compass.
+
+**The frame rate cap skips frames and keeps `requestAnimationFrame`.** The loop
+still wakes on every refresh and `frameDue` in `shader_modes.ts` decides whether
+to draw, so a frame is still presented in step with the display and only fewer
+of them are drawn. A `setTimeout` loop would draw between refreshes and tear
+or stutter for the same GPU cost. Two things about it matter. The anchor moves
+forward by one interval per drawn frame instead of jumping to `now`, so a 60
+cap on 144Hz draws 60 and not the ~48 that anchoring on each late tick gives.
+And the early return comes **before** `clock.getDelta()`: the delta then covers
+the skipped refreshes, so flight keeps its speed at any cap. Returning after it
+would make the camera slow down with the cap and fail nothing else, which is
+why `tests/ui.ts` checks the order in the source. `renderFrame` called on
+request (`aimCamera`) is not throttled, because a capture has to draw now.
+`maxFps` reads totally through `fpsCap`, `antialiasSamples`'s rule, and the
+default is no cap.
+
+**A stutter is measured before it is fixed, and `frame_profiler.ts` is the
+instrument.** The counter averages over half a second, so one 300 ms frame
+reads as a small dip and says nothing about its cause. With
+`preview.frameDiagnostics` on, the profiler records every interval between
+two drawn frames: its `gap`, the loop's own `work` split into phases, and
+`outside = gap - work`. The unit is the interval and not the loop body,
+because most of what can stall this window happens outside the loop: an
+effect applying a mesh payload, a structured clone, a garbage collection.
+The gap is the only way the loop can know that happened.
+
+What names a cause outside the loop is the browser's **Long Animation
+Frame** entries, which attribute time to scripts by function. They arrive
+after the frame they describe, so `addLongFrame` attaches them to earlier
+spikes as they land. When time was spent outside and no script ran long,
+`readingOf` says so: WebGL calls return before the GPU has done the work, so
+a GPU-bound frame shows up as the next frame arriving late with nothing to
+blame. That inference is worth more than any guess.
+
+Three rules keep it honest:
+
+- **It costs nothing when off.** Every hook in `Viewer.svelte` goes through
+  `stamp`, `lap` and `note`, each a null check first, and `tests/ui.ts` reads
+  them back from the source. A hook written around them would measure whether
+  anybody asked or not.
+- **A spike is relative and absolute.** It must exceed 3× the median gap, or a
+  30 FPS cap would be one long stream of spikes. It must also exceed 50 ms, or
+  a steady 144 Hz display would report every hiccup. A gap over 2 s is a
+  window coming back from the background, not a stutter.
+- **The report is copied, not uploaded.** The settings pane asks the viewer
+  for it through `stutterReport()` and copies it with the existing clipboard
+  channel. Help → Toggle Developer Tools (`role: "toggleDevTools"`, the one
+  Help row with a key, released in flight like the rest) opens the timeline,
+  where every phase shows up as a `viewer:*` measure.
 
 **A shader mode is a preset, and `vanilla` is the identity.** There are no
 shader packs and there must not appear to be: the renderer opens no connection
