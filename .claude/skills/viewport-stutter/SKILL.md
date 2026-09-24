@@ -70,6 +70,17 @@ is only for this investigation.
   moved to another phase. That will be `scene pass`, or `outside the loop`
   with no scripts, and will point at the display or GPU load rather than at
   the code.
+- **Report 2** (same machine and screen, after fix 1): texture animations
+  down to 1-2 ms. 50/50 spikes were now `outside the loop`, 390-800 ms, each with
+  `mesh answered by main` (6 s rising to 29.6 s) and `mesh rebuilt` with
+  `atlas: true`. The tell is that `at - ms` is the same instant for every
+  answer: a **burst** of ~50 requests left together, most likely a colour picker
+  dragged, and the window applied each stale answer with a 27 MB atlas. Fix:
+  `refreshDocument` goes through `coalesce.ts`, so one request is in flight and
+  at most one more waits behind it.
+
+  How to spot it again: `mesh answered by main` whose `ms` grows by about one
+  spike interval per spike.
 
 ## Fixing
 

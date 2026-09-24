@@ -1828,6 +1828,23 @@ carries what the window already holds. Four things about it are load-bearing:
   scene with nothing to update; refusing to be incremental there means the
   renderer never has to reason about that case.
 
+**And one request is in flight at a time, because a delta cannot help a
+burst.** Each call to `refreshDocument` used to send its own request. A
+colour picker dragged fires one `input` per movement, and each of those
+rebuilds the atlas. So about fifty requests left in the same instant, every one
+carrying the atlas version the window held *before* any of them. Main therefore
+answered each with a full rebuild and all 27 MB of atlas, one after another,
+and the window applied every answer, stale or not.
+
+The second stutter report measured it: spikes of 400–800 ms for thirty seconds
+after the drag, answers arriving up to 29.6 s late, and `at - ms` the same
+instant for all of them. That last number is the tell.
+
+`coalesce.ts` is the fix. A call during a run asks for one more run, which
+reads the state as it is then, and any number of calls in that window collapse
+into it. Each caller's promise still settles after a run that began after its
+call, which is what `await refreshDocument()` promises its twenty callers.
+
 **And the shipping was fixed while the *building* went on doing the same work
 twice.** That earlier fix made the payload a delta and said, correctly, that
 none of the stutter was the meshing. It was not the meshing then and it is not

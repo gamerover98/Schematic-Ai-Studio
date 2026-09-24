@@ -51,6 +51,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import Viewer, { type CameraMode, type PickedBlock } from "./lib/Viewer.svelte";
   import { api, bridgeAvailable, forIpc, bridgeMissingMessage } from "./lib/bridge.svelte.js";
   import { diagnosing, recordEvent } from "./lib/frame_profiler.js";
+  import { coalesce } from "./lib/coalesce.js";
   import { applyTraceEvent } from "./lib/trace.js";
   import { primeBlockIcons } from "./lib/block_icons.svelte.js";
   import {
@@ -2607,7 +2608,14 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   let meshToken = $state<string | null>(null);
   let heldAtlas = $state<number | null>(null);
 
-  async function refreshDocument(): Promise<void> {
+  /**
+   * Redraw from main, coalesced: one request in flight and at most one more
+   * behind it. See `coalesce.ts` -- a burst of calls used to send a request
+   * each, and the window then applied every stale answer in turn.
+   */
+  const refreshDocument = coalesce(fetchDocumentMesh);
+
+  async function fetchDocumentMesh(): Promise<void> {
     if (docState === null) {
       mesh = null;
       bounds = null;

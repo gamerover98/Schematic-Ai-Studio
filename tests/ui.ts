@@ -34,6 +34,7 @@ import {
   voidSources,
 } from "../src/shared/settings.js";
 import { animationsUsed } from "../src/renderer/src/lib/atlas_animation.js";
+import { coalesce } from "../src/renderer/src/lib/coalesce.js";
 import {
   FrameProfiler,
   OUTSIDE,
@@ -4891,6 +4892,53 @@ console.log("\n--- the picture a copy leaves behind ---");
   check(
     "...and says so by reading as pressed rather than by vanishing",
     bar.includes("aria-pressed={emptyIsAir || skipEmpty}"),
+  );
+}
+
+console.log("\n--- a burst of mesh requests is one request, then one more ---");
+{
+  /*
+   * The second stutter report: fifty mesh requests left at once, each answered
+   * in turn with a full rebuild and the atlas, the last one 29 s late. Only the
+   * latest state is worth drawing.
+   */
+  let runs = 0;
+  let release: () => void = () => {};
+  const refresh = coalesce(async () => {
+    runs++;
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  const first = refresh();
+  const burst = Array.from({ length: 50 }, () => refresh());
+  check("a call while one runs does not start another", runs === 1, String(runs));
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check("fifty calls during it collapse into one more run", runs === 2, String(runs));
+  release();
+  await Promise.all([first, ...burst]);
+  check("...and nothing runs after that", runs === 2, String(runs));
+  let settledEarly = false;
+  const late = refresh().then(() => (settledEarly = true));
+  check("a call after everything settled runs again", runs === 3, String(runs));
+  check("...and its promise waits for that run", !settledEarly);
+  release();
+  await late;
+
+  const failing = coalesce(async () => {
+    throw new Error("main said no");
+  });
+  let rejected = false;
+  await failing().catch(() => (rejected = true));
+  check("a failure reaches the caller", rejected);
+  let again = false;
+  await failing().catch(() => (again = true));
+  check("...and the next call starts afresh", again);
+
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf-8");
+  check(
+    "every mesh refresh goes through the coalescer",
+    app.includes("const refreshDocument = coalesce(fetchDocumentMesh);") &&
+      !/async function refreshDocument\(/.test(app),
   );
 }
 
