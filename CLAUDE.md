@@ -1477,6 +1477,20 @@ column's sides and takes any wall beside it too. `up` is not inherited; it is
 the underside of the block above, placeable since 1.13 (17w47a). A vine
 left with no support stays, as the cross, where vanilla would drop it.
 
+**And the empty space holds nothing up, whatever block it is made of.** With
+barrier as the empty space block, every empty cell around a build is a full
+collision cube, and vines clung to it on every side. Reported from creative
+mode. `connect.ts` reads the void block as air through `emptySpaceFor`, which
+`session.ts` registers once and reads live, because the answer is the
+session's and `runTransaction` is reached from some twenty call sites that
+carry only a document and a history. A barrier placed on purpose, in a document
+whose empty space is air, is a block and still holds a vine, as in the game.
+`setSessionVoidBlock` names the new block **before** its conversion runs:
+the connection pass is inside that transaction, and with the old answer the
+vine beside the converted cells would take them for walls. `tests/session.ts`
+fails without either half. A fence cannot see this: a barrier is see-through
+and was never solid to one.
+
 **That makes a vine column the one place `deriveConnections` is not a single
 sweep.** A change to one vine changes what every vine under it may keep, and a
 column has no bound, so dripstone's three-cell window is no answer here. When a

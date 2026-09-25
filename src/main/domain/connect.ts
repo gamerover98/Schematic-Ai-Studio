@@ -66,7 +66,7 @@ import {
 } from "../../shared/block_connections.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
 import { coversFace, occludesNeighbours } from "../pipeline/block_shapes.js";
-import { paletteEntryIsAir, type PaletteEntry } from "../pipeline/types.js";
+import { matchesBlockPattern, paletteEntryIsAir, type PaletteEntry } from "../pipeline/types.js";
 import { getBlock, getBlockEntity, type SchematicDocument } from "./document.js";
 import type { TransactionScope } from "./history.js";
 
@@ -175,8 +175,14 @@ interface PaletteFacts {
   readonly dependent: Uint8Array;
 }
 
-function factsOf(entry: PaletteEntry): NeighbourBlock | null {
+function factsOf(entry: PaletteEntry, empty: PaletteEntry | null): NeighbourBlock | null {
   if (paletteEntryIsAir(entry)) {
+    return null;
+  }
+  // The document's empty space is empty whatever block it is made of: a
+  // vine does not cling to it and a fence does not reach for it. See
+  // `emptySpaceFor`.
+  if (empty !== null && matchesBlockPattern(entry, empty)) {
     return null;
   }
   return {
@@ -212,11 +218,38 @@ function sturdyFaces(entry: PaletteEntry): Partial<Record<Face, boolean>> {
   return faces;
 }
 
-function paletteFacts(doc: SchematicDocument): PaletteFacts {
+/**
+ * What empty space is made of in a document, or `null` for air.
+ *
+ * With `barrier` chosen as the empty space block, every cell that reads as
+ * empty holds a barrier, and a barrier is a full collision cube: asked as a
+ * block, it held up a vine on every side that faced it and took a fence's arm.
+ * Reported as vines hanging off the empty space around a build in creative
+ * mode. It is `emptiness`' rule in `session.ts` -- empty space is empty
+ * whatever block it is made of -- reaching the one pass that did not know it.
+ *
+ * A resolver rather than an argument, because the answer is the *session's*
+ * (`DocumentSession.voidBlock`, deliberately not on the document) and this
+ * pass runs from `runTransaction`, which some twenty call sites reach with a
+ * document and a history. Threading it through each of them is the
+ * discipline-at-N-sites arrangement this file's header refuses; `session.ts`
+ * registers the one answer instead, read live, so a choice made after the
+ * session was built needs no second place to tell. A document no session owns
+ * -- the suites' own fixtures -- gets air, which is what it had before.
+ */
+let emptySpaceFor: (doc: SchematicDocument) => PaletteEntry | null = () => null;
+
+export function resolveEmptySpaceWith(
+  resolver: (doc: SchematicDocument) => PaletteEntry | null,
+): void {
+  emptySpaceFor = resolver;
+}
+
+function paletteFacts(doc: SchematicDocument, empty: PaletteEntry | null): PaletteFacts {
   const blocks: Array<NeighbourBlock | null> = new Array(doc.palette.length);
   const dependent = new Uint8Array(doc.palette.length);
   for (let i = 0; i < doc.palette.length; i += 1) {
-    const facts = factsOf(doc.palette[i]);
+    const facts = factsOf(doc.palette[i], empty);
     blocks[i] = facts;
     if (facts !== null && isNeighbourDependent(facts.name)) {
       dependent[i] = 1;
@@ -242,7 +275,8 @@ export function deriveConnections(
   tx: TransactionScope,
   indices: Iterable<number>,
 ): void {
-  const { blocks, dependent } = paletteFacts(doc);
+  const empty = emptySpaceFor(doc);
+  const { blocks, dependent } = paletteFacts(doc, empty);
   const { width, height, length } = doc;
   const plane = height * length;
   const voxels = doc.voxels;
@@ -261,7 +295,7 @@ export function deriveConnections(
   /** Memoised per palette index, filling in entries the pass itself interned. */
   const factsAt = (index: number): NeighbourBlock | null => {
     if (index >= blocks.length || blocks[index] === undefined) {
-      blocks[index] = factsOf(doc.palette[index] ?? AIR_ENTRY);
+      blocks[index] = factsOf(doc.palette[index] ?? AIR_ENTRY, empty);
     }
     return blocks[index] ?? null;
   };
