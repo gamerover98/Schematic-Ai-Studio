@@ -30,7 +30,15 @@
   } from "../../../shared/ipc.js";
   import type { ResolvedTheme } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
-import { antialiasSamples, shaderPreset } from "./shader_modes.js";
+import { antialiasSamples, fpsCap, frameDue, shaderPreset } from "./shader_modes.js";
+  import { animationsUsed } from "./atlas_animation.js";
+  import {
+    FrameProfiler,
+    culpritOf,
+    describeSpike,
+    provideStutterReport,
+    type LongFrame,
+  } from "./frame_profiler.js";
   import {
     entryFace,
     facingNormal,
@@ -238,6 +246,8 @@ import { isTyping } from "./typing.js";
      * nothing, which is the Stop button's fault in another pane.
      */
     antialias?: number;
+    /** The most frames drawn per second; `0` follows the display. */
+    maxFps?: number;
     /**
      * Whether the sky lights the build, as an environment map.
      *
@@ -247,6 +257,8 @@ import { isTyping } from "./typing.js";
     globalIllumination?: boolean;
     /** Frames per second, frame time, triangles and draw calls, in a corner. */
     showFps?: boolean;
+    /** Record where each frame's time goes; see `frame_profiler.ts`. */
+    frameDiagnostics?: boolean;
     /** Which look to draw with. `shader_modes.ts` says what each one means. */
     shaderMode?: string;
     /**
@@ -475,8 +487,10 @@ import { isTyping } from "./typing.js";
     maxDrawDistance,
     projection = "perspective",
     antialias = 4,
+    maxFps = 0,
     globalIllumination = false,
     showFps = false,
+    frameDiagnostics = false,
     shaderMode = "vanilla",
     showBounds = false,
     voidOpacity = 0.4,
@@ -2901,8 +2915,49 @@ import { isTyping } from "./typing.js";
    * A `$state` written at 60Hz would run Svelte's effects at 60Hz to move a
    * number nobody can read that fast.
    */
-  let fps = $state<{ fps: number; ms: number; triangles: number; calls: number } | null>(null);
+  let fps = $state<{
+    fps: number;
+    ms: number;
+    triangles: number;
+    calls: number;
+    /** The slowest frame of the last `WORST_WINDOW_MS`, while diagnosing. */
+    worst: { ms: number; culprit: string } | null;
+  } | null>(null);
   const FPS_MS = 500;
+
+  /**
+   * The stutter profiler, or `null` while `frameDiagnostics` is off.
+   *
+   * Every hook in this file goes through `stamp`, `lap` and `note`, and each of
+   * them does nothing but a null check when there is no profiler: diagnosing
+   * costs a timestamp per phase, and not diagnosing must cost nothing.
+   */
+  let profiler: FrameProfiler | null = null;
+
+  /** How far back the counter's "worst frame" looks. */
+  const WORST_WINDOW_MS = 2000;
+
+  /** A phase's start, or `0` when nothing is recording. */
+  function stamp(): number {
+    return profiler ? performance.now() : 0;
+  }
+
+  /** The phase that began at `t0` has ended. */
+  function lap(name: string, t0: number): void {
+    if (profiler) profiler.phase(name, t0, performance.now());
+  }
+
+  /** Something happened; `t0` makes it a piece of work that took time. */
+  function note(name: string, t0?: number, detail?: Record<string, unknown>): void {
+    if (!profiler) return;
+    const at = performance.now();
+    profiler.event({
+      name,
+      at,
+      ...(t0 === undefined ? {} : { ms: at - t0 }),
+      ...(detail === undefined ? {} : { detail }),
+    });
+  }
   let fpsFrames = 0;
   let fpsAt = 0;
 
@@ -3008,10 +3063,14 @@ import { isTyping } from "./typing.js";
        */
       if (globalIllumination && sky && skyScene) {
         if (environmentStale && performance.now() - environmentAt > ENVIRONMENT_MS) {
+          const t0 = stamp();
           buildEnvironment();
+          lap("environment", t0);
+          note("environment rebuilt", t0);
         }
       }
       if (aaTarget !== null) renderer.setRenderTarget(aaTarget);
+      let t0 = stamp();
       /*
        * The sky first, then the depth buffer cleared, then the world.
        *
@@ -3045,6 +3104,8 @@ import { isTyping } from "./typing.js";
         }
         renderer.autoClear = true;
         renderer.render(skyScene, camera);
+        lap("sky pass", t0);
+        t0 = stamp();
         renderer.autoClear = false;
         renderer.clearDepth();
         renderer.render(scene, camera);
@@ -3052,7 +3113,11 @@ import { isTyping } from "./typing.js";
       } else {
         renderer.render(scene, camera);
       }
+      lap("scene pass", t0);
+      t0 = stamp();
       drawCompass();
+      lap("compass", t0);
+      t0 = stamp();
       /*
        * ...and the whole frame, resolved, onto the canvas. The compass is
        * inside it: it is part of the picture, and a pass that landed on
@@ -3065,23 +3130,38 @@ import { isTyping } from "./typing.js";
         renderer.autoClear = false;
         renderer.render(aaScene, aaCamera);
         renderer.autoClear = wasAutoClear;
+        lap("anti-aliasing copy", t0);
       }
       fpsFrames += 1;
       const now = performance.now();
       if (fpsAt === 0) fpsAt = now;
       if (showFps && now - fpsAt >= FPS_MS) {
         const seconds = (now - fpsAt) / 1000;
+        const worst = profiler?.worst(now, WORST_WINDOW_MS) ?? null;
         fps = {
           fps: Math.round(fpsFrames / seconds),
           ms: Math.round(((now - fpsAt) / fpsFrames) * 10) / 10,
           triangles: renderer.info.render.triangles,
           calls: renderer.info.render.calls,
+          worst:
+            worst === null
+              ? null
+              : {
+                  ms: Math.round(worst.gap),
+                  culprit: culpritOf(worst.phases, worst.outside),
+                },
         };
         fpsFrames = 0;
         fpsAt = now;
       } else if (!showFps) {
         fpsFrames = 0;
         fpsAt = now;
+      }
+      // Twice a second, only while diagnosing: has the window moved to
+      // another display? The one comparison, not one per frame.
+      if (profiler && now - displayCheckedAt >= FPS_MS) {
+        displayCheckedAt = now;
+        watchDisplay();
       }
     }
   }
@@ -3180,10 +3260,31 @@ import { isTyping } from "./typing.js";
       renderer.domElement.ownerDocument.addEventListener("mousemove", onLookMove, true);
 
       let frame = 0;
+      let frameAnchor = 0;
       const clock = new THREE.Clock();
       const animate = () => {
         frame = requestAnimationFrame(animate);
+        /*
+         * The frame rate cap: the loop still wakes on every display refresh
+         * and returns here, before any work, when a frame would exceed it.
+         *
+         * Before `getDelta` rather than after, and that is load-bearing: the
+         * delta then spans every skipped refresh, so flight moves as far per
+         * second at 30 frames as at 144. Read after, it would measure one
+         * refresh and the camera would slow down with the cap.
+         *
+         * `renderFrame` called on request -- `aimCamera` -- is not throttled,
+         * because a capture has to draw now.
+         */
+        const due = frameDue(performance.now(), frameAnchor, fpsCap(maxFps));
+        frameAnchor = due.anchor;
+        if (!due.draw) return;
         const delta = clock.getDelta();
+        // Closes the interval the previous frame opened: what happened between
+        // the two, inside the loop and outside it. After the cap, so a skipped
+        // refresh is not an interval of its own.
+        if (profiler) profiler.beginFrame(performance.now());
+        let t0 = stamp();
         /*
          * A gizmo flight outranks both controllers while it lasts.
          *
@@ -3210,19 +3311,31 @@ import { isTyping } from "./typing.js";
         } else {
           controls?.update();
         }
+        lap("camera", t0);
+        t0 = stamp();
         // Before the outline and the grid, both of which read what it writes:
         // after them, each would be acting on the previous frame's hover.
         updateHover(performance.now());
+        lap("hover raycast", t0);
+        t0 = stamp();
         updateBlockHighlight(performance.now());
+        lap("block outline raycast", t0);
+        t0 = stamp();
         // Clocked on wall time, not on frames: the game states its animations
         // in ticks of 50ms, and a 144Hz display must not run the water four
         // times too fast.
+        // Timed inside, split into its first upload and the rest; a lap
+        // around it as well would count the same milliseconds twice.
         playAnimations(performance.now());
+        t0 = stamp();
         updateBuildGrid(performance.now());
+        lap("build grid", t0);
+        t0 = stamp();
         // Every frame rather than on the throttle: the gizmo is sized from the
         // distance to the camera, so it would visibly swell and shrink in steps
         // during an orbit if it only kept up twenty times a second.
         updateGizmo();
+        lap("gizmo", t0);
         renderFrame();
       };
       animate();
@@ -4356,6 +4469,12 @@ import { isTyping } from "./typing.js";
     readonly scratch: THREE.DataTexture;
     /** The frame currently uploaded, so a tick that changes nothing does nothing. */
     shown: number;
+    /**
+     * Whether any chunk on screen draws this tile. See `refreshAnimated`: the
+     * atlas is shared and holds every animated texture there is, and one the
+     * document does not use is not worth an upload per tick.
+     */
+    active: boolean;
   }
   let playing: PlayingTexture[] = [];
 
@@ -4375,7 +4494,7 @@ import { isTyping } from "./typing.js";
       scratch.minFilter = THREE.NearestFilter;
       scratch.generateMipmaps = false;
       scratch.colorSpace = THREE.SRGBColorSpace;
-      return { animation, scratch, shown: -1 };
+      return { animation, scratch, shown: -1, active: false };
     });
   }
 
@@ -4394,7 +4513,10 @@ import { isTyping } from "./typing.js";
   function playAnimations(nowMs: number): void {
     if (!renderer || !texture || playing.length === 0) return;
     const ticks = nowMs / 50;
+    let uploads = 0;
+    let t0 = stamp();
     for (const item of playing) {
+      if (!item.active) continue;
       const { animation, scratch } = item;
       const index = Math.floor(ticks / animation.frameTime) % animation.frameCount;
       if (index === item.shown) continue;
@@ -4403,14 +4525,62 @@ import { isTyping } from "./typing.js";
         animation.frames.subarray(index * bytes, (index + 1) * bytes),
       );
       scratch.needsUpdate = true;
-      renderer.copyTextureToTexture(
-        scratch,
-        texture,
-        null,
-        new THREE.Vector2(animation.x, animation.y),
-      );
+      blitAt.set(animation.x, animation.y);
+      renderer.copyTextureToTexture(scratch, texture, null, blitAt);
       item.shown = index;
+      /*
+       * The first upload of a tick apart from the rest. Writing into a texture
+       * the GPU is still drawing with makes the driver wait for it, and that
+       * wait lands on whichever upload comes first: if this phase holds the
+       * time and the rest cost nothing, the GPU is behind; if the time grows
+       * with the count, the uploads themselves are the cost.
+       */
+      if (uploads === 0) {
+        lap("texture animations: first upload", t0);
+        t0 = stamp();
+      }
+      uploads++;
     }
+    if (uploads > 1) lap("texture animations: uploads", t0);
+    if (uploads > 0) note("animations uploaded", undefined, { count: uploads });
+  }
+
+  /** Reused by every blit: one allocation per upload was garbage per tick. */
+  const blitAt = new THREE.Vector2();
+
+  /**
+   * Marks which animations the chunks on screen draw, so `playAnimations`
+   * uploads only those.
+   *
+   * Asked of the geometry rather than sent by main, because the atlas is
+   * main's and shared: it holds every animated texture the process ever
+   * decoded, which after the block-icon warm-up is all of them. The answer is
+   * cached on each mesh against the atlas version it was worked out for, so a
+   * delta rescans only the chunks it replaced.
+   *
+   * A tile that stops being drawn forgets its frame, so it is written afresh
+   * when it comes back rather than trusted to still be in the atlas.
+   */
+  function refreshAnimated(): void {
+    if (!texture || playing.length === 0) return;
+    const tiles = playing.map((item) => item.animation);
+    const { width, height } = texture.image as { width: number; height: number };
+    const used = new Set<number>();
+    for (const mesh of chunkMeshes.values()) {
+      if (mesh.userData.animatedFor !== textureVersion) {
+        const uv = mesh.geometry.getAttribute("uv");
+        mesh.userData.animated = uv
+          ? animationsUsed(uv.array as Float32Array, tiles, width, height)
+          : [];
+        mesh.userData.animatedFor = textureVersion;
+      }
+      for (const index of mesh.userData.animated as number[]) used.add(index);
+    }
+    playing.forEach((item, index) => {
+      const active = used.has(index);
+      if (!active) item.shown = -1;
+      item.active = active;
+    });
   }
 
   /**
@@ -4648,6 +4818,196 @@ import { isTyping } from "./typing.js";
     framedFor = key;
   });
 
+  /** How big a mesh payload was, for the stutter report. */
+  function payloadDetail(payload: MeshPayload): Record<string, unknown> {
+    let bytes = 0;
+    let triangles = 0;
+    for (const chunk of payload.chunks) {
+      bytes +=
+        chunk.positions.byteLength +
+        chunk.normals.byteLength +
+        chunk.uvs.byteLength +
+        chunk.indices.byteLength +
+        chunk.light.byteLength;
+      triangles += chunk.indices.length / 3;
+    }
+    return {
+      chunks: payload.chunks.length,
+      dropped: payload.dropped.length,
+      partial: payload.partial,
+      atlas: payload.atlas !== null,
+      kilobytes: Math.round(bytes / 1024),
+      triangles,
+    };
+  }
+
+  /*
+   * The stutter profiler's life, and the browser's long-frame reports with it.
+   *
+   * `long-animation-frame` is what attributes time outside the loop to a
+   * script by name; `longtask` is the older, coarser record, kept for a build
+   * of Chromium that lacks the first. Either may be unsupported, and then the
+   * report simply has no attribution -- the profiler's own numbers stand.
+   */
+  $effect(() => {
+    if (!frameDiagnostics) return;
+    const active = new FrameProfiler({
+      onSpike: (spike) => console.warn(describeSpike(spike)),
+      measure: (name, start, end) => {
+        try {
+          performance.measure(`viewer:${name}`, { start, end });
+        } catch {
+          // A measure is a convenience for DevTools; never worth a frame.
+        }
+      },
+    });
+    profiler = active;
+    const observers: PerformanceObserver[] = [];
+    const watch = (type: string, read: (entry: PerformanceEntry) => LongFrame) => {
+      if (!PerformanceObserver.supportedEntryTypes?.includes(type)) return;
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) active.addLongFrame(read(entry));
+      });
+      observer.observe({ type, buffered: false });
+      observers.push(observer);
+    };
+    watch("long-animation-frame", (entry) => ({
+      kind: "long-animation-frame",
+      start: entry.startTime,
+      duration: entry.duration,
+      scripts: longFrameScripts(entry),
+    }));
+    if (observers.length === 0) {
+      watch("longtask", (entry) => ({
+        kind: "longtask",
+        start: entry.startTime,
+        duration: entry.duration,
+        scripts: [],
+      }));
+    }
+    provideStutterReport(active, () => active.report(untrack(stutterContext)));
+    return () => {
+      for (const observer of observers) observer.disconnect();
+      provideStutterReport(null, null);
+      if (profiler === active) profiler = null;
+    };
+  });
+
+  /**
+   * Which display the window is on, as far as a page can tell.
+   *
+   * `availLeft`/`availTop` are the screen's origin on the desktop, so they
+   * change when the window is dragged to another monitor even when the two are
+   * the same size and scale -- which is the case that was reported: smooth on
+   * the laptop panel, stuttering on the external one.
+   */
+  function displayNow(): Record<string, number | boolean | null> {
+    const screenInfo = window.screen as Screen & {
+      availLeft?: number;
+      availTop?: number;
+      isExtended?: boolean;
+    };
+    return {
+      devicePixelRatio: window.devicePixelRatio,
+      width: screenInfo.width,
+      height: screenInfo.height,
+      left: screenInfo.availLeft ?? null,
+      top: screenInfo.availTop ?? null,
+      extended: screenInfo.isExtended ?? null,
+    };
+  }
+
+  /** The last display noted, so moving to another one becomes an event. */
+  let lastDisplay = "";
+  let displayCheckedAt = 0;
+
+  /** Notes a change of display; called on the counter's half-second tick. */
+  function watchDisplay(): void {
+    if (!profiler) return;
+    const now = displayNow();
+    const key = JSON.stringify(now);
+    if (key === lastDisplay) return;
+    if (lastDisplay !== "") note("display changed", undefined, now);
+    lastDisplay = key;
+  }
+
+  /** The scripts a Long Animation Frame entry names, heaviest first. */
+  function longFrameScripts(entry: PerformanceEntry): LongFrame["scripts"] {
+    const scripts = (entry as PerformanceEntry & { scripts?: readonly LongFrameScript[] }).scripts;
+    if (!scripts) return [];
+    return [...scripts]
+      .sort((a, b) => b.duration - a.duration)
+      .slice(0, 5)
+      .map((script) => ({
+        source: script.sourceURL ?? "",
+        fn: script.sourceFunctionName ?? "",
+        invoker: script.invoker ?? "",
+        ms: script.duration,
+      }));
+  }
+
+  /** The fields of a `PerformanceScriptTiming` this reads; not in the DOM lib yet. */
+  interface LongFrameScript {
+    readonly duration: number;
+    readonly sourceURL?: string;
+    readonly sourceFunctionName?: string;
+    readonly invoker?: string;
+  }
+
+  /**
+   * What the viewer knows that the profiler does not: the settings a frame is
+   * drawn with, how much there is to draw, and what draws it.
+   */
+  function stutterContext(): Record<string, unknown> {
+    let gpu = "";
+    try {
+      const gl = renderer?.getContext();
+      const info = gl?.getExtension("WEBGL_debug_renderer_info");
+      if (gl && info) gpu = String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL));
+    } catch {
+      gpu = "";
+    }
+    return {
+      gpu,
+      userAgent: navigator.userAgent,
+      canvas: canvas ? { width: canvas.width, height: canvas.height } : null,
+      pixelRatio: renderer?.getPixelRatio() ?? null,
+      triangles: renderer?.info.render.triangles ?? null,
+      drawCalls: renderer?.info.render.calls ?? null,
+      geometries: renderer?.info.memory.geometries ?? null,
+      textures: renderer?.info.memory.textures ?? null,
+      chunks: chunkMeshes.size,
+      animatedTextures: playing.length,
+      animatedTexturesDrawn: playing.filter((item) => item.active).length,
+      /*
+       * What the GPU is asked to do per frame, in one place: every sample is
+       * shaded, so pixels times MSAA samples is the budget, and a shadow map is
+       * a second pass over the geometry.
+       */
+      gpuLoad: {
+        pixels: canvas ? canvas.width * canvas.height : null,
+        msaaSamples: antialiasSamples(antialias),
+        shadows,
+      },
+      display: displayNow(),
+      documentSize,
+      settings: {
+        maxFps,
+        antialias,
+        maxDpr,
+        renderScale,
+        maxDrawDistance,
+        projection,
+        shaderMode,
+        globalIllumination,
+        sky,
+        shadows,
+        showGrid,
+        cameraMode,
+      },
+    };
+  }
+
   $effect(() => {
     const payload = mesh;
     if (!scene) return;
@@ -4680,6 +5040,7 @@ import { isTyping } from "./typing.js";
         voidLoaded = null;
       }
       chunkMeshes.clear();
+      refreshAnimated();
       error = null;
       return;
     }
@@ -4693,6 +5054,13 @@ import { isTyping } from "./typing.js";
      */
     const previous = loaded;
     const previousVoid = voidLoaded;
+    /*
+     * Applying a payload runs outside the loop, in this effect, so a spike it
+     * causes shows up there as time outside; this event is what names it.
+     */
+    const applyAt = stamp();
+    const applied = (kind: string) =>
+      note(`mesh ${kind}`, applyAt, profiler ? payloadDetail(payload) : undefined);
     try {
       if (payload.atlas === null && texture === undefined) {
         // Main only omits the atlas when the renderer is known to hold it.
@@ -4712,6 +5080,8 @@ import { isTyping } from "./typing.js";
       if (payload.partial && previous !== null && previousVoid !== null) {
         applyDelta(previous, previousVoid, payload, map);
         applyWireframe(previous, wireframe);
+        refreshAnimated();
+        applied("delta applied");
         error = null;
         return;
       }
@@ -4726,6 +5096,8 @@ import { isTyping } from "./typing.js";
       target.add(built.solid);
       target.add(built.filler);
       applyWireframe(built.solid, wireframe);
+      refreshAnimated();
+      applied("rebuilt");
       error = null;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -4745,6 +5117,9 @@ import { isTyping } from "./typing.js";
     <div class="fps" aria-hidden="true">
       <strong>{fps.fps}</strong> fps &middot; {fps.ms} ms<br />
       {fps.triangles.toLocaleString()} tris &middot; {fps.calls} draws
+      {#if fps.worst}
+        <br />{t("viewport.worstFrame", { ms: fps.worst.ms, culprit: fps.worst.culprit })}
+      {/if}
     </div>
   {/if}
   {#if error}

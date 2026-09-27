@@ -81,6 +81,7 @@ import { loadStructure } from "../pipeline/loader.js";
 import type { PaletteEntry } from "../pipeline/types.js";
 import { matchesBlockPattern, paletteEntryCacheKey } from "../pipeline/types.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { resolveEmptySpaceWith } from "../domain/connect.js";
 import {
   hasProperty,
   isOpenable,
@@ -188,6 +189,18 @@ export interface DocumentSession {
 }
 
 let current: DocumentSession | null = null;
+
+/*
+ * The connection pass asks what empty space is made of, and this is the one
+ * answer: the open session's choice, read at the moment of each transaction,
+ * for the open session's document and nobody else's. See `emptySpaceFor` in
+ * `connect.ts` -- a barrier chosen as empty space was holding up vines.
+ */
+resolveEmptySpaceWith((doc) =>
+  current !== null && current.doc === doc && current.voidBlock !== ""
+    ? parsePaletteEntry(current.voidBlock)
+    : null,
+);
 
 export class NoDocumentError extends Error {
   constructor() {
@@ -1542,6 +1555,7 @@ export function setSessionVoidBlock(
    * on a press of its own, pressing again is exactly the gesture for that.
    */
   let changed = 0;
+  const previous = session.voidBlock;
   if (options.replaceExisting === true && sources.length > 0) {
     const { doc, history } = session;
     const region = {
@@ -1559,14 +1573,27 @@ export function setSessionVoidBlock(
     // same operation rather than a special case.
     const wanted = sources.map((id) => parsePaletteEntry(id));
     const to = parsePaletteEntry(next === "" ? "minecraft:air" : next);
-    changed = runTransaction(
-      doc,
-      history,
-      `Replace ${wanted.map((entry) => entry.namespacedName).join(" and ")} with ${to.namespacedName}`,
-      // One pass whatever the number of sources, which is what `replaceAny`
-      // is for: this edit already touches most of the document.
-      (tx) => tx.replaceAny(region, wanted, to),
-    );
+    /*
+     * The choice lands *before* the rewrite, because the rewrite is followed by
+     * the connection pass and that pass asks the session what empty space is.
+     * Asked with the old answer, converting air into barrier would read the new
+     * barriers as blocks: every fence would sprout an arm towards them and every
+     * vine would cling to them, in the very step that made them empty space.
+     */
+    session.voidBlock = next;
+    try {
+      changed = runTransaction(
+        doc,
+        history,
+        `Replace ${wanted.map((entry) => entry.namespacedName).join(" and ")} with ${to.namespacedName}`,
+        // One pass whatever the number of sources, which is what `replaceAny`
+        // is for: this edit already touches most of the document.
+        (tx) => tx.replaceAny(region, wanted, to),
+      );
+    } catch (err) {
+      session.voidBlock = previous;
+      throw err;
+    }
   }
 
   session.voidBlock = next;

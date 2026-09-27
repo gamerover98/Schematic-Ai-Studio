@@ -1477,6 +1477,20 @@ column's sides and takes any wall beside it too. `up` is not inherited; it is
 the underside of the block above, placeable since 1.13 (17w47a). A vine
 left with no support stays, as the cross, where vanilla would drop it.
 
+**And the empty space holds nothing up, whatever block it is made of.** With
+barrier as the empty space block, every empty cell around a build is a full
+collision cube, and vines clung to it on every side. Reported from creative
+mode. `connect.ts` reads the void block as air through `emptySpaceFor`, which
+`session.ts` registers once and reads live, because the answer is the
+session's and `runTransaction` is reached from some twenty call sites that
+carry only a document and a history. A barrier placed on purpose, in a document
+whose empty space is air, is a block and still holds a vine, as in the game.
+`setSessionVoidBlock` names the new block **before** its conversion runs:
+the connection pass is inside that transaction, and with the old answer the
+vine beside the converted cells would take them for walls. `tests/session.ts`
+fails without either half. A fence cannot see this: a barrier is see-through
+and was never solid to one.
+
 **That makes a vine column the one place `deriveConnections` is not a single
 sweep.** A change to one vine changes what every vine under it may keep, and a
 column has no bound, so dripstone's three-cell window is no answer here. When a
@@ -1827,6 +1841,23 @@ carries what the window already holds. Four things about it are load-bearing:
   document takes the viewport's model down, and a delta would then arrive at a
   scene with nothing to update; refusing to be incremental there means the
   renderer never has to reason about that case.
+
+**And one request is in flight at a time, because a delta cannot help a
+burst.** Each call to `refreshDocument` used to send its own request. A
+colour picker dragged fires one `input` per movement, and each of those
+rebuilds the atlas. So about fifty requests left in the same instant, every one
+carrying the atlas version the window held *before* any of them. Main therefore
+answered each with a full rebuild and all 27 MB of atlas, one after another,
+and the window applied every answer, stale or not.
+
+The second stutter report measured it: spikes of 400–800 ms for thirty seconds
+after the drag, answers arriving up to 29.6 s late, and `at - ms` the same
+instant for all of them. That last number is the tell.
+
+`coalesce.ts` is the fix. A call during a run asks for one more run, which
+reads the state as it is then, and any number of calls in that window collapse
+into it. Each caller's promise still settles after a run that began after its
+call, which is what `await refreshDocument()` promises its twenty callers.
 
 **And the shipping was fixed while the *building* went on doing the same work
 twice.** That earlier fix made the payload a delta and said, correctly, that
@@ -6301,7 +6332,7 @@ of the cell, but the two faces that would claim it are the degenerate ones
 `boxFaces` already drops. The guard is what will be right the day somebody
 transcribes a leaning box flush to a wall.
 
-**Four graphics settings, and every one of them is the viewer's.** Nothing
+**Five graphics settings, and every one of them is the viewer's.** Nothing
 here reaches the mesher, so none of them rebuilds a mesh -- which is the whole
 reason they could be added at all without touching the chunk cache. Two are
 not numbers or booleans, so both are read *totally*, `projection`'s rule for
@@ -6363,6 +6394,55 @@ rate, which is free and is what makes it a diagnosis rather than a number --
 and `renderer.info.autoReset` goes **off**, because `info` resets itself at
 the start of every render and a frame here is three or four of them: left
 alone it would report the compass.
+
+**The frame rate cap skips frames and keeps `requestAnimationFrame`.** The loop
+still wakes on every refresh and `frameDue` in `shader_modes.ts` decides whether
+to draw, so a frame is still presented in step with the display and only fewer
+of them are drawn. A `setTimeout` loop would draw between refreshes and tear
+or stutter for the same GPU cost. Two things about it matter. The anchor moves
+forward by one interval per drawn frame instead of jumping to `now`, so a 60
+cap on 144Hz draws 60 and not the ~48 that anchoring on each late tick gives.
+And the early return comes **before** `clock.getDelta()`: the delta then covers
+the skipped refreshes, so flight keeps its speed at any cap. Returning after it
+would make the camera slow down with the cap and fail nothing else, which is
+why `tests/ui.ts` checks the order in the source. `renderFrame` called on
+request (`aimCamera`) is not throttled, because a capture has to draw now.
+`maxFps` reads totally through `fpsCap`, `antialiasSamples`'s rule, and the
+default is no cap.
+
+**A stutter is measured before it is fixed, and `frame_profiler.ts` is the
+instrument.** The counter averages over half a second, so one 300 ms frame
+reads as a small dip and says nothing about its cause. With
+`preview.frameDiagnostics` on, the profiler records every interval between
+two drawn frames: its `gap`, the loop's own `work` split into phases, and
+`outside = gap - work`. The unit is the interval and not the loop body,
+because most of what can stall this window happens outside the loop: an
+effect applying a mesh payload, a structured clone, a garbage collection.
+The gap is the only way the loop can know that happened.
+
+What names a cause outside the loop is the browser's **Long Animation
+Frame** entries, which attribute time to scripts by function. They arrive
+after the frame they describe, so `addLongFrame` attaches them to earlier
+spikes as they land. When time was spent outside and no script ran long,
+`readingOf` says so: WebGL calls return before the GPU has done the work, so
+a GPU-bound frame shows up as the next frame arriving late with nothing to
+blame. That inference is worth more than any guess.
+
+Three rules keep it honest:
+
+- **It costs nothing when off.** Every hook in `Viewer.svelte` goes through
+  `stamp`, `lap` and `note`, each a null check first, and `tests/ui.ts` reads
+  them back from the source. A hook written around them would measure whether
+  anybody asked or not.
+- **A spike is relative and absolute.** It must exceed 3× the median gap, or a
+  30 FPS cap would be one long stream of spikes. It must also exceed 50 ms, or
+  a steady 144 Hz display would report every hiccup. A gap over 2 s is a
+  window coming back from the background, not a stutter.
+- **The report is copied, not uploaded.** The settings pane asks the viewer
+  for it through `stutterReport()` and copies it with the existing clipboard
+  channel. Help → Toggle Developer Tools (`role: "toggleDevTools"`, the one
+  Help row with a key, released in flight like the rest) opens the timeline,
+  where every phase shows up as a `viewer:*` measure.
 
 **A shader mode is a preset, and `vanilla` is the identity.** There are no
 shader packs and there must not appear to be: the renderer opens no connection
@@ -6566,6 +6646,26 @@ Four things about it are load-bearing:
   the single source of colour, so frames that arrived untinted would show the
   biome's water for one instant and grey for every frame after. That is exactly
   what the position check caught.
+
+**Only the tiles the mesh draws are played, and the first stutter report is
+why.** The atlas is shared by everything the process ever meshed, and the
+block-icon warm-up decodes every block in the game. So its animation list is
+every animated texture there is, and `playAnimations` uploaded all 34 of them
+per tick for an 11×12×11 document that used none. The report measured frames
+of 85–443 ms, all 50 spikes inside those uploads, with every other phase under
+2 ms. `animationsUsed` in `atlas_animation.ts` reads which tiles each chunk
+samples (one vertex per quad, from its own UVs, cached per mesh against the
+atlas version), and `refreshAnimated` marks the union after every payload,
+including the one that empties the scene.
+
+**The time was almost certainly not the uploads' own cost.** Writing into a
+texture the GPU is still drawing with makes the driver wait for it, and that
+wait lands on the first upload of the frame. The report was taken with the
+window on an external monitor of a hybrid-GPU laptop. It was smooth on the
+laptop panel, at the same scale and the same settings. So the profiler now
+times `texture animations: first upload` apart from `: uploads`, and records
+the `display` and the `gpuLoad`. The next spike in the first phase will be
+read as the GPU falling behind rather than as this code.
 
 **The sun and the moon come out of the resource pack, as pixels.** They live
 at `textures/environment/`, nowhere near the block textures and never asked for

@@ -3026,6 +3026,64 @@ console.log("\n--- a vine hangs from a vine ---");
     click(session, [1, 1, 3], "up");
     equal("but water beside a vine holds nothing up", getBlock(session.doc, 1, 1, 3).properties.west, "false");
   }
+
+  {
+    /*
+     * Empty space is empty whatever block it is made of. With barrier chosen
+     * as the empty space block, the barriers around a build are the empty
+     * space itself -- and a vine clung to them on every side, which was the
+     * report. A barrier placed on purpose in a document whose empty space is
+     * air is a real block and still holds one, as in the game.
+     */
+    const put = (s: ReturnType<typeof newDocument>, x: number, y: number, z: number, name: string) =>
+      setBlock(s.doc, x, y, z, { namespacedName: `minecraft:${name}`, properties: {} });
+
+    const air = newDocument({ width: 5, height: 5, length: 5 });
+    put(air, 3, 1, 1, "barrier");
+    click(air, [2, 1, 1], "west");
+    equal("with air as empty space a barrier is a block and holds a vine", getBlock(air.doc, 2, 1, 1).properties.east, "true");
+
+    // The handler passes the session's empty space with every edit; so does this.
+    const place = (
+      s: ReturnType<typeof newDocument>,
+      at3: [number, number, number],
+      against: "up" | "down" | "north" | "south" | "east" | "west",
+      block = VINE,
+    ) =>
+      applyEdit(
+        s,
+        { kind: "setBlock", x: at3[0], y: at3[1], z: at3[2], block: { namespacedName: block, properties: {} }, against },
+        { voidBlock: s.voidBlock },
+      );
+    const barrier = newDocument({ width: 5, height: 5, length: 5 });
+    setSessionVoidBlock(barrier, "minecraft:barrier", { replaceExisting: true });
+    put(barrier, 1, 1, 1, "stone");
+    place(barrier, [2, 1, 1], "east");
+    const vine = getBlock(barrier.doc, 2, 1, 1);
+    equal("with barrier as empty space the vine clings to the stone it was placed on", vine.properties.west, "true");
+    equal("...and not to the empty space beside it", vine.properties.east, "false");
+    equal("...nor to the empty space in front", vine.properties.north, "false");
+    equal("...nor hangs from the empty space above", vine.properties.up, "false");
+
+    /*
+     * Converting air to barrier is the step that fills the space with
+     * barriers, and the connection pass runs inside it -- so the session has
+     * to name barrier as empty space *before* that pass, or the vine beside
+     * the converted cells takes them for walls in the very step that made
+     * them empty. Checked on a vine because a fence cannot see it: a barrier
+     * is see-through and never counted as solid to one.
+     */
+    const converted = newDocument({ width: 5, height: 5, length: 5 });
+    put(converted, 1, 2, 2, "stone");
+    click(converted, [2, 2, 2], "east");
+    equal("before the conversion the vine clings to its stone", getBlock(converted.doc, 2, 2, 2).properties.west, "true");
+    setSessionVoidBlock(converted, "minecraft:barrier", { replaceExisting: true });
+    equal("air converted to barrier fills the empty space with barrier", getBlock(converted.doc, 3, 2, 2).namespacedName, "minecraft:barrier");
+    const after = getBlock(converted.doc, 2, 2, 2);
+    equal("...and the vine does not cling to the new empty space", after.properties.east, "false");
+    equal("...nor hang from it", after.properties.up, "false");
+    equal("...and keeps its stone", after.properties.west, "true");
+  }
 }
 
 /*

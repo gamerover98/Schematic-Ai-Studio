@@ -266,6 +266,7 @@ export const en = {
     "WASD: move · Space/Shift: up, down · Left: break · Right: use · Shift+right: place · Esc: release",
   "viewport.hudClickToFly": "Click the viewport to fly",
   "viewport.unavailable": "Preview unavailable.",
+  "viewport.worstFrame": "worst {ms} ms · {culprit}",
   "viewport.noAtlas": "The mesh arrived without a texture atlas and none is held.",
   "viewport.bounds": "Preview bounds center: ({center}) · size: ({size})",
   "viewport.dropTitle": "Drop to open",
@@ -599,9 +600,19 @@ export const en = {
   "preview.antialias.off": "Off",
   "preview.antialiasHint":
     "Smooths the edges of blocks. Applies straight away: the scene is drawn into a multisampled buffer rather than asking the browser for it, which cannot be changed once a window is open.",
+  "preview.maxFps": "Frame rate limit",
+  "preview.maxFps.off": "Unlimited (display refresh)",
+  "preview.maxFpsHint":
+    "Draws at most this many frames per second, to spend less GPU time. Unlimited draws once per refresh of the display. Camera movement keeps its speed either way.",
   "preview.showFps": "Show the frame counter",
   "preview.showFpsHint":
     "Frames per second and frame time, with the triangles and draw calls behind them.",
+  "preview.frameDiagnostics": "Diagnose stutters",
+  "preview.frameDiagnosticsHint":
+    "Records where each frame's time goes and keeps the slow ones. The frame counter then shows the worst frame of the last two seconds and what caused it, and every stutter is logged to the developer console (Help → Toggle Developer Tools).",
+  "preview.copyStutterReport": "Copy stutter report",
+  "preview.stutterReportCopied": "Copied — {count} stutters recorded.",
+  "preview.stutterReportEmpty": "Turn on Diagnose stutters first, then reproduce the stutter.",
   "preview.maxDpr": "Max device pixel ratio — {value}",
   "preview.renderScale": "Render scale — {value}",
   "preview.maxDrawDistance": "Max draw distance — {value}",

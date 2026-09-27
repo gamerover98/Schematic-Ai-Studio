@@ -30,10 +30,25 @@ import {
   blocksInDocument,
   PANEL_SIZE,
   SHADER_MODES,
+  FPS_CAPS,
   voidSources,
 } from "../src/shared/settings.js";
+import { animationsUsed } from "../src/renderer/src/lib/atlas_animation.js";
+import { coalesce } from "../src/renderer/src/lib/coalesce.js";
+import {
+  FrameProfiler,
+  OUTSIDE,
+  PAUSE_MS,
+  culpritOf,
+  isSpike,
+  median,
+  readingOf,
+  type LongFrame,
+} from "../src/renderer/src/lib/frame_profiler.js";
 import {
   antialiasSamples,
+  fpsCap,
+  frameDue,
   shaderPreset,
 } from "../src/renderer/src/lib/shader_modes.js";
 import {
@@ -2572,7 +2587,222 @@ console.log("\n--- how the viewport is drawn ---");
   check("...and so does a string", antialiasSamples("4") === DEFAULT_PREVIEW_SETTINGS.antialias);
   check("...and the fallback is not off", antialiasSamples(undefined) !== 0);
 
+  /*
+   * The frame rate cap is read the same way, and its fallback is no cap: that
+   * is the default, and a junk value has to behave like an absent one.
+   */
+  for (const cap of FPS_CAPS) {
+    check(`a cap of ${cap} is offered and kept`, fpsCap(cap) === cap);
+  }
+  check("the default is no cap", DEFAULT_PREVIEW_SETTINGS.maxFps === 0);
+  check("a cap nobody offers falls back to none", fpsCap(75) === 0);
+  check("...and so does a negative one", fpsCap(-30) === 0);
+  check("...and so does a string", fpsCap("60") === 0);
+
+  /*
+   * The loop's decision, driven by a fake display. Counted over ten seconds so
+   * a rate that converges slowly, or drifts, shows up as a number.
+   */
+  const drawn = (hz: number, cap: number, jitter = 0): number => {
+    let anchor = 0;
+    let count = 0;
+    for (let i = 1; i <= hz * 10; i++) {
+      const wobble = jitter * (i % 2 === 0 ? 1 : -1);
+      const due = frameDue(1000 + (i * 1000) / hz + wobble, anchor, cap);
+      anchor = due.anchor;
+      if (due.draw) count++;
+    }
+    return count / 10;
+  };
+  check("no cap draws every refresh", drawn(144, 0) === 144);
+  const at60on144 = drawn(144, 60);
+  check("a cap of 60 on 144Hz draws 60 a second", Math.abs(at60on144 - 60) <= 1, String(at60on144));
+  const at30on60 = drawn(60, 30);
+  check("a cap of 30 on 60Hz draws 30 a second", Math.abs(at30on60 - 30) <= 1, String(at30on60));
+  const matched = drawn(60, 60, 0.4);
+  check("a cap equal to a jittery display drops nothing", matched === 60, String(matched));
+  const over = drawn(60, 144);
+  check("a cap above the display changes nothing", over === 60, String(over));
+  const stalled = frameDue(10_000, 1000, 60);
+  check("after a stall the anchor moves to now rather than bursting", stalled.draw && stalled.anchor === 10_000);
+
   const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+
+  /*
+   * The cap returns before `getDelta`, so the delta spans the skipped
+   * refreshes and flight keeps its speed. After it, the camera would slow down
+   * with the cap and nothing else would fail.
+   */
+  {
+    const loop = viewer.slice(viewer.indexOf("const animate = () => {"));
+    const skip = loop.indexOf("if (!due.draw) return;");
+    const delta = loop.indexOf("clock.getDelta()");
+    check("the frame cap is asked in the loop", skip > 0, "no early return in animate");
+    check("...before the clock is read", skip > 0 && delta > skip);
+  }
+
+  /*
+   * The stutter profiler. What counts as a spike is relative *and* absolute:
+   * relative, or a 30 cap would be a stream of spikes; absolute, or a steady
+   * 144Hz display would report every 21ms hiccup.
+   */
+  check("the median of an odd list is its middle", median([5, 1, 3]) === 3);
+  check("...of an even one the mean of the two middles", median([4, 1, 3, 2]) === 2.5);
+  check("a 300ms frame among 16ms ones is a spike", isSpike(300, 16.7));
+  check("a steady 33ms frame at a 30 cap is not", !isSpike(33.3, 33.3));
+  check("21ms at 144Hz is under the floor", !isSpike(21, 6.9));
+  check("a window coming back from the background is a pause", !isSpike(PAUSE_MS + 1, 16.7));
+
+  check("the heaviest phase is the culprit", culpritOf({ camera: 2, "hover raycast": 280 }, 10) === "hover raycast");
+  check("...unless more time went outside the loop", culpritOf({ camera: 2, "hover raycast": 3 }, 295) === OUTSIDE);
+
+  {
+    // A fake clock: 60 steady frames, then one interval of 300ms in which the
+    // loop measured 5ms, then steady again.
+    const found: string[] = [];
+    const profiler = new FrameProfiler({ onSpike: (spike) => found.push(spike.culprit) });
+    let now = 1000;
+    const frame = (gap: number, phases: Record<string, number>) => {
+      profiler.beginFrame(now);
+      let at = now;
+      for (const [name, ms] of Object.entries(phases)) {
+        profiler.phase(name, at, at + ms);
+        at += ms;
+      }
+      now += gap;
+    };
+    for (let i = 0; i < 60; i++) frame(16.7, { camera: 1, "scene pass": 3 });
+    frame(300, { camera: 1, "scene pass": 4 });
+    for (let i = 0; i < 10; i++) frame(16.7, { camera: 1, "scene pass": 3 });
+    profiler.beginFrame(now);
+    check("one stall makes one spike", found.length === 1, found.join(", "));
+    check("...blamed outside the loop", found[0] === OUTSIDE);
+    const spike = profiler.spikes[0];
+    check("...with the loop's own time kept apart", Math.abs(spike.work - 5) < 1e-9 && Math.abs(spike.outside - 295) < 1e-9);
+    check(
+      "...read as nobody's script when the browser named none",
+      readingOf(spike).includes("GPU"),
+      readingOf(spike),
+    );
+
+    // A long frame the browser reports late still joins the spike it overlaps,
+    // and one from a different moment does not.
+    const script: LongFrame = {
+      kind: "long-animation-frame",
+      start: spike.start + 20,
+      duration: 250,
+      scripts: [{ source: "app.js", fn: "applyDelta", invoker: "effect", ms: 240 }],
+    };
+    const elsewhere: LongFrame = { ...script, start: spike.start - 5000 };
+    profiler.addLongFrame(script);
+    profiler.addLongFrame(elsewhere);
+    check("a late long frame joins the spike it overlaps", spike.longFrames.includes(script));
+    check("...and one from another moment does not", !spike.longFrames.includes(elsewhere));
+    check("...and then names the script", readingOf(spike).includes("script"));
+
+    const report = profiler.report({ gpu: "test" }) as {
+      context: { gpu: string };
+      frames: { p50: number; max: number; count: number };
+      spikes: { culprit: string }[];
+      culprits: Record<string, number>;
+    };
+    check("the report carries its context", report.context.gpu === "test");
+    check("...percentiles of the frame time", Math.abs(report.frames.p50 - 16.7) < 0.1 && report.frames.max === 300);
+    check("...and the spikes by culprit", report.culprits[OUTSIDE] === 1 && report.spikes.length === 1);
+    check("the worst recent frame is the stall", profiler.worst(now, 10_000)?.gap === 300);
+    check("...and is gone once it is old", profiler.worst(now, 50)?.gap !== 300);
+  }
+
+  /*
+   * Not diagnosing costs nothing: every hook goes through three helpers, and
+   * each of them is a null check first. A hook written around them would be
+   * measured whether anybody asked or not.
+   */
+  {
+    const body = (name: string) => {
+      const start = viewer.indexOf(`function ${name}(`);
+      return start < 0 ? "" : viewer.slice(start, viewer.indexOf("\n  }", start));
+    };
+    check("stamp reads no clock without a profiler", /return profiler \? performance\.now\(\) : 0;/.test(body("stamp")));
+    check("lap does nothing without one", /if \(profiler\) profiler\.phase\(/.test(body("lap")));
+    check("note does nothing without one", /if \(!profiler\) return;/.test(body("note")));
+    const loop = viewer.slice(viewer.indexOf("const animate = () => {"));
+    check(
+      "the loop opens an interval only while diagnosing",
+      loop.includes("if (profiler) profiler.beginFrame(performance.now());"),
+    );
+  }
+
+  /*
+   * Only the animated tiles the geometry draws are played. The atlas holds
+   * every animated texture the process has decoded -- 34 in the first stutter
+   * report, for a document using none -- and each upload is where the loop
+   * waits for the GPU.
+   */
+  {
+    // A 64x64 atlas with three 16px tiles, and quads whose UVs are a tile's
+    // rect inset half a pixel, which is what the mesher writes.
+    const W = 64;
+    const tiles = [
+      { x: 0, y: 0, size: 16 },
+      { x: 18, y: 0, size: 16 },
+      { x: 36, y: 18, size: 16 },
+    ];
+    const quad = (tile: { x: number; y: number; size: number }): number[] => {
+      const u0 = (tile.x + 0.5) / W;
+      const v0 = (tile.y + 0.5) / W;
+      const u1 = (tile.x + tile.size - 0.5) / W;
+      const v1 = (tile.y + tile.size - 0.5) / W;
+      return [u0, v0, u1, v0, u1, v1, u0, v1];
+    };
+    const still = { x: 36, y: 0, size: 16 };
+    const used = (...quads: number[][]) => animationsUsed(new Float32Array(quads.flat()), tiles, W, W);
+    check("a quad in an animated tile marks that tile", JSON.stringify(used(quad(tiles[2]))) === "[2]");
+    check("a quad in a still tile marks nothing", used(quad(still)).length === 0);
+    check("two quads in two tiles mark both", JSON.stringify(used(quad(tiles[0]), quad(still), quad(tiles[1]))) === "[0,1]");
+    check("no geometry marks nothing", used().length === 0);
+    // The half-pixel inset is inside; the tile's own edge is the padding.
+    const edge = new Float32Array([18 / W, 0.5 / W, 0, 0, 0, 0, 0, 0]);
+    check("a UV on a tile's outer edge is the padding, not the tile", !animationsUsed(edge, tiles, W, W).includes(1));
+
+    const loop = viewer.slice(viewer.indexOf("function playAnimations("));
+    check(
+      "an animation nobody draws is not uploaded",
+      /for \(const item of playing\) \{\s*if \(!item\.active\) continue;/.test(loop),
+    );
+    const effect = viewer.slice(viewer.indexOf("applyDelta(previous, previousVoid, payload, map);"));
+    check("the tiles drawn are recounted after a delta", /applyDelta[^]*?refreshAnimated\(\);[^]*?applied\("delta applied"\)/.test(effect));
+    check("...and after a rebuild", /applyWireframe\(built\.solid, wireframe\);\s*refreshAnimated\(\);/.test(viewer));
+  }
+
+  {
+    // The first upload of a tick holding the time is the GPU being behind.
+    const profiler = new FrameProfiler();
+    let now = 0;
+    for (let i = 0; i < 40; i++) {
+      profiler.beginFrame(now);
+      profiler.phase(i === 30 ? "texture animations: first upload" : "scene pass", now, now + (i === 30 ? 300 : 1));
+      now += i === 30 ? 301 : 17;
+    }
+    profiler.beginFrame(now);
+    const spike = profiler.spikes[0];
+    check("a first-upload spike is read as the GPU", spike !== undefined && readingOf(spike).includes("GPU"));
+  }
+
+  {
+    // A slow phase is named, and the ring does not grow without end.
+    const profiler = new FrameProfiler({ frames: 50 });
+    let now = 0;
+    for (let i = 0; i < 200; i++) {
+      profiler.beginFrame(now);
+      const slow = i === 150 ? 280 : 1;
+      profiler.phase("hover raycast", now, now + slow);
+      now += slow + 15;
+    }
+    profiler.beginFrame(now);
+    check("a slow phase is the spike's culprit", profiler.spikes[0]?.culprit === "hover raycast");
+    check("the frame ring keeps its size", profiler.recorded === 50);
+  }
 
   /*
    * The context is created without its own anti-aliasing, and the scene is
@@ -4662,6 +4892,53 @@ console.log("\n--- the picture a copy leaves behind ---");
   check(
     "...and says so by reading as pressed rather than by vanishing",
     bar.includes("aria-pressed={emptyIsAir || skipEmpty}"),
+  );
+}
+
+console.log("\n--- a burst of mesh requests is one request, then one more ---");
+{
+  /*
+   * The second stutter report: fifty mesh requests left at once, each answered
+   * in turn with a full rebuild and the atlas, the last one 29 s late. Only the
+   * latest state is worth drawing.
+   */
+  let runs = 0;
+  let release: () => void = () => {};
+  const refresh = coalesce(async () => {
+    runs++;
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  const first = refresh();
+  const burst = Array.from({ length: 50 }, () => refresh());
+  check("a call while one runs does not start another", runs === 1, String(runs));
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check("fifty calls during it collapse into one more run", runs === 2, String(runs));
+  release();
+  await Promise.all([first, ...burst]);
+  check("...and nothing runs after that", runs === 2, String(runs));
+  let settledEarly = false;
+  const late = refresh().then(() => (settledEarly = true));
+  check("a call after everything settled runs again", runs === 3, String(runs));
+  check("...and its promise waits for that run", !settledEarly);
+  release();
+  await late;
+
+  const failing = coalesce(async () => {
+    throw new Error("main said no");
+  });
+  let rejected = false;
+  await failing().catch(() => (rejected = true));
+  check("a failure reaches the caller", rejected);
+  let again = false;
+  await failing().catch(() => (again = true));
+  check("...and the next call starts afresh", again);
+
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf-8");
+  check(
+    "every mesh refresh goes through the coalescer",
+    app.includes("const refreshDocument = coalesce(fetchDocumentMesh);") &&
+      !/async function refreshDocument\(/.test(app),
   );
 }
 

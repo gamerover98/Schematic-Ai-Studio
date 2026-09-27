@@ -1200,8 +1200,23 @@ console.log("\n--- application menu ---");
    * cannot be got wrong.
    */
   for (const item of helpMenu(open)) {
+    // The DevTools row is the one exception, and its key is the whole point
+    // of it: Ctrl+Shift+I is what anybody reaches for, and this menu replaced
+    // the default one it used to come from. Released in flight like the rest,
+    // which the walk further down checks for every row at once.
+    if (item.role === "toggleDevTools") continue;
     equal(`${item.label ?? "?"} has no accelerator`, item.accelerator, undefined);
   }
+
+  /*
+   * DevTools can be opened, which is what the stutter profiler's console
+   * lines and its `viewer:*` measures are for. Electron handles the role, so
+   * the row has to carry it -- a label alone would be a row that does nothing.
+   */
+  const devTools = helpMenu(empty).find((item) => item.role === "toggleDevTools");
+  equal("Help offers the developer tools", devTools?.label, "Toggle Developer Tools");
+  equal("...with nothing open as well", devTools?.enabled, true);
+  equal("...on the key everybody reaches for", devTools?.accelerator, "CmdOrCtrl+Shift+I");
 
   /*
    * No accelerator on Undo/Redo, and this is the check that keeps it that way.
