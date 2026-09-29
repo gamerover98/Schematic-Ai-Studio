@@ -5244,6 +5244,23 @@ const EXACT_SHAPES: Readonly<Record<string, (entry: PaletteEntry) => BlockShape>
   chain,
   bell,
   conduit: () => boxes([5, 5, 5, 11, 11, 11]),
+  /*
+   * `models/block/heavy_core.json`: an 8x8x8 cube on the floor, and
+   * `heavy_core.png` is a sheet -- lid, underside and side in three quarters
+   * of it -- so the windows are vanilla's and not optional.
+   */
+  heavy_core: () =>
+    boxes({
+      box: [4, 0, 4, 12, 8, 12],
+      uv: {
+        north: [0, 8, 8, 16],
+        east: [0, 8, 8, 16],
+        south: [0, 8, 8, 16],
+        west: [0, 8, 8, 16],
+        up: [0, 0, 8, 8],
+        down: [8, 0, 16, 8],
+      },
+    }),
   lily_pad: () => boxes([0, 0, 0, 16, 1, 16]),
 
   /*

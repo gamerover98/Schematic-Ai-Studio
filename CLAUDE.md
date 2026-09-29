@@ -5163,6 +5163,11 @@ knowing:
   in the column of `bamboo_stalk` their sides read. A shape is baked per
   state, so this always uses the first, with no random offset. `stage` is in no
   `when` and moves nothing.
+- **A heavy core is an 8x8x8 cube on the floor, and it was a full one.**
+  `heavy_core.png` is a sheet — lid, underside and side in three quarters of
+  it — so the full cube wore the whole sheet squeezed onto every face, and
+  sealed its cell besides. `models/block/heavy_core.json`'s one element and
+  its three windows are transcribed as written.
 - **The nether's vines were full opaque cubes.** `weeping_vines`,
   `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
   name, which resolved all along — the texture was right, and the shape put it

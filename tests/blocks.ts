@@ -1094,6 +1094,18 @@ check("a fence does not occlude", !occludesNeighbours(block("oak_fence")));
 check("a stair does not occlude", !occludesNeighbours(block("oak_stairs")));
 check("glass does not occlude", !occludesNeighbours(block("glass")));
 check("leaves do not occlude", !occludesNeighbours(block("oak_leaves")));
+{
+  // models/block/heavy_core.json (1.21.4): one 8x8x8 box on a sheet of parts.
+  const core = shapeFor(block("heavy_core"));
+  const only = core.kind === "boxes" && core.boxes.length === 1 ? core.boxes[0] : null;
+  const box = only && "box" in only ? only : null;
+  check("a heavy core is vanilla's 8x8x8 box", box !== null && box.box.join() === "4,0,4,12,8,12");
+  check(
+    "a heavy core reads its sheet through vanilla's windows",
+    box?.uv?.north?.join() === "0,8,8,16" && box?.uv?.up?.join() === "0,0,8,8" && box?.uv?.down?.join() === "8,0,16,8",
+  );
+  check("a heavy core does not occlude", !occludesNeighbours(block("heavy_core")));
+}
 
 // The one that was missing, and it cost the whole render: air is in no shape
 // table, so it fell through to CUBE and answered "yes, I cover that face" --
