@@ -123,6 +123,23 @@ export const AA_LEVELS = [0, 2, 4, 8] as const;
  */
 export const FPS_CAPS = [0, 30, 60, 90, 120, 144] as const;
 
+/**
+ * Which GPU draws the window, on a machine with two.
+ *
+ * Applied as a Chromium switch before the app is ready, so a change takes
+ * effect at the next launch and never while running. See
+ * `services/gpu_preference.ts`.
+ */
+export const GPU_PREFERENCES = ["auto", "high-performance", "low-power"] as const;
+export type GpuPreference = (typeof GPU_PREFERENCES)[number];
+
+/** Total: anything that is not a known preference is `"auto"`. */
+export function gpuPreference(value: unknown): GpuPreference {
+  return (GPU_PREFERENCES as readonly unknown[]).includes(value)
+    ? (value as GpuPreference)
+    : "auto";
+}
+
 export interface PreviewSettings {
   projection: Projection;
   /**
@@ -143,6 +160,8 @@ export interface PreviewSettings {
    * smoothness for GPU time, and that is a choice rather than an upgrade.
    */
   maxFps: number;
+  /** Which GPU to ask for at the next launch. See `GPU_PREFERENCES`. */
+  gpuPreference: GpuPreference;
   /**
    * Whether the sky lights the build.
    *
@@ -300,6 +319,7 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   projection: "perspective",
   antialias: 4,
   maxFps: 0,
+  gpuPreference: "auto",
   globalIllumination: false,
   showFps: false,
   frameDiagnostics: false,

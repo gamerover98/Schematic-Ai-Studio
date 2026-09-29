@@ -8,6 +8,7 @@
  * `core.ts`, and the renderer has no reason to hold a single Node primitive.
  */
 
+import { readFileSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -22,6 +23,11 @@ import { appIconPath } from "./services/resources.js";
 import { stopMcpServer } from "./mcp/server.js";
 import { quitConfirmed } from "./services/quit_guard.js";
 import { scheduleStartupCheck } from "./services/updates.js";
+import {
+  gpuSwitchFor,
+  readGpuPreference,
+  recordLaunchedGpuPreference,
+} from "./services/gpu_preference.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -124,6 +130,24 @@ function createWindow(): void {
   } else {
     void mainWindow.loadFile(path.join(dirname, "../renderer/index.html"));
   }
+}
+
+/*
+ * The GPU is chosen when Chromium's GPU process starts, so this has to run
+ * before ready, which is also before the settings store can be asked. See
+ * `services/gpu_preference.ts`.
+ */
+{
+  let stored: string | null = null;
+  try {
+    stored = readFileSync(path.join(app.getPath("userData"), "settings.json"), "utf8");
+  } catch {
+    stored = null;
+  }
+  const preference = readGpuPreference(stored);
+  recordLaunchedGpuPreference(preference);
+  const gpuSwitch = gpuSwitchFor(preference);
+  if (gpuSwitch !== null) app.commandLine.appendSwitch(gpuSwitch);
 }
 
 app.whenReady().then(() => {

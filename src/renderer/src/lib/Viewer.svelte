@@ -28,9 +28,15 @@
     PackTexture,
     SkyTextures,
   } from "../../../shared/ipc.js";
-  import type { ResolvedTheme } from "../../../shared/settings.js";
+  import type { GpuPreference, ResolvedTheme } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
-import { antialiasSamples, fpsCap, frameDue, shaderPreset } from "./shader_modes.js";
+  import {
+    antialiasSamples,
+    fpsCap,
+    frameDue,
+    shaderPreset,
+    webglPowerPreference,
+  } from "./shader_modes.js";
   import { animationsUsed } from "./atlas_animation.js";
   import {
     FrameProfiler,
@@ -248,6 +254,11 @@ import { isTyping } from "./typing.js";
     antialias?: number;
     /** The most frames drawn per second; `0` follows the display. */
     maxFps?: number;
+    /**
+     * Which GPU to ask the context for. Read once, when the context is made:
+     * like the Chromium switch main applies, it cannot change while running.
+     */
+    gpuPreference?: GpuPreference;
     /**
      * Whether the sky lights the build, as an environment map.
      *
@@ -488,6 +499,7 @@ import { isTyping } from "./typing.js";
     projection = "perspective",
     antialias = 4,
     maxFps = 0,
+    gpuPreference: gpuPref = "auto",
     globalIllumination = false,
     showFps = false,
     frameDiagnostics = false,
@@ -3173,7 +3185,11 @@ import { isTyping } from "./typing.js";
        * render target instead. The flag is fixed for the life of the context,
        * so a setting built on it could only ever apply at the next launch.
        */
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: false,
+        powerPreference: webglPowerPreference(untrack(() => gpuPref)),
+      });
       /*
        * The counter reports a whole frame, and a frame is three or four
        * renders. `info` resets itself at the start of every one of them
@@ -4993,6 +5009,7 @@ import { isTyping } from "./typing.js";
       documentSize,
       settings: {
         maxFps,
+        gpuPreference: gpuPref,
         antialias,
         maxDpr,
         renderScale,

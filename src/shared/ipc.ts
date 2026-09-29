@@ -7,7 +7,7 @@
  */
 
 import type { SchematicFormat } from "./schematic.js";
-import type { Hotbar } from "./settings.js";
+import type { GpuPreference, Hotbar } from "./settings.js";
 import type { CameraPlacement, Vec3 } from "./camera_aim.js";
 import type { DyeName } from "./banner_patterns.js";
 import { SCHEMATIC_FORMAT_LABEL, SCHEMATIC_FORMATS } from "./schematic.js";
@@ -364,6 +364,8 @@ export const IPC = {
   updateCheck: "bgpt:update:check",
   updateDownload: "bgpt:update:download",
   updateInstall: "bgpt:update:install",
+  /** Restart the app, for a setting that only applies at launch. */
+  relaunchApp: "bgpt:app:relaunch",
 
   /** main → renderer: one tool call the agent just made. */
   agentStep: "bgpt:agent:step",
@@ -417,6 +419,11 @@ export interface AppInfo {
   node: string;
   /** `process.platform`, as-is. */
   platform: string;
+  /**
+   * The GPU preference this process was started with. The setting may have
+   * changed since; it applies at the next launch.
+   */
+  gpuPreference: GpuPreference;
 }
 
 // ---------------------------------------------------------------------------
@@ -678,7 +685,7 @@ export interface PickFileResponse {
  * every other `Failure.message`, and the renderer does not have to keep three
  * near-identical strings in step with a dialog it cannot see.
  */
-export type DiscardIntent = "new" | "open" | "close" | "update";
+export type DiscardIntent = "new" | "open" | "close" | "update" | "restart";
 
 export interface ConfirmDiscardRequest {
   intent: DiscardIntent;
@@ -2242,5 +2249,10 @@ export interface BgptApi {
    * nothing was ready, or the unsaved-work prompt was declined.
    */
   installUpdate(): Promise<boolean>;
+  /**
+   * Restarts the app so a launch-time setting (the GPU preference) applies.
+   * `false` when the unsaved-work prompt was declined.
+   */
+  relaunchApp(): Promise<boolean>;
   onUpdateStatusChanged(listener: (status: UpdateStatus) => void): () => void;
 }

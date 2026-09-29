@@ -4979,6 +4979,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       projection={settings.preview.projection}
       antialias={settings.preview.antialias}
       maxFps={settings.preview.maxFps}
+      gpuPreference={settings.preview.gpuPreference}
       globalIllumination={settings.preview.globalIllumination}
       showFps={settings.preview.showFps}
       frameDiagnostics={settings.preview.frameDiagnostics}

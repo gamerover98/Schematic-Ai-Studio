@@ -48,6 +48,7 @@ import {
 import {
   antialiasSamples,
   fpsCap,
+  webglPowerPreference,
   frameDue,
   shaderPreset,
 } from "../src/renderer/src/lib/shader_modes.js";
@@ -2598,6 +2599,22 @@ console.log("\n--- how the viewport is drawn ---");
   check("a cap nobody offers falls back to none", fpsCap(75) === 0);
   check("...and so does a negative one", fpsCap(-30) === 0);
   check("...and so does a string", fpsCap("60") === 0);
+
+  /*
+   * The context asks for the GPU the launch switch forced, and "auto" is the
+   * browser's default rather than a guess. Read once, where it is made.
+   */
+  check("auto asks for the default GPU", webglPowerPreference("auto") === "default");
+  check("high performance asks for it", webglPowerPreference("high-performance") === "high-performance");
+  check("low power asks for it", webglPowerPreference("low-power") === "low-power");
+  check("a junk preference asks for the default", webglPowerPreference("fast") === "default");
+  {
+    const viewerText = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+    check(
+      "the viewport context is created with the GPU preference",
+      /new THREE\.WebGLRenderer\(\{[^}]*powerPreference: webglPowerPreference\(/.test(viewerText),
+    );
+  }
 
   /*
    * The loop's decision, driven by a fake display. Counted over ten seconds so

@@ -607,6 +607,13 @@ export const en = {
   "preview.showFps": "Show the frame counter",
   "preview.showFpsHint":
     "Frames per second and frame time, with the triangles and draw calls behind them.",
+  "preview.gpuPreference": "Graphics card",
+  "preview.gpuPreference.auto": "Automatic (the system decides)",
+  "preview.gpuPreference.highPerformance": "Dedicated GPU (high performance)",
+  "preview.gpuPreference.lowPower": "Integrated GPU (power saving)",
+  "preview.gpuPreferenceHint":
+    "For computers with two graphics cards. Takes effect after restarting; a stutter report names the card actually in use.",
+  "preview.gpuPreferenceRestart": "Restart now",
   "preview.frameDiagnostics": "Diagnose stutters",
   "preview.frameDiagnosticsHint":
     "Records where each frame's time goes and keeps the slow ones. The frame counter then shows the worst frame of the last two seconds and what caused it, and every stutter is logged to the developer console (Help → Toggle Developer Tools).",

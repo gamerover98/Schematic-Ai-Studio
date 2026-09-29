@@ -286,6 +286,7 @@ const api: BgptApi = {
   checkForUpdates: () => ipcRenderer.invoke(IPC.updateCheck) as Promise<UpdateStatus>,
   downloadUpdate: () => ipcRenderer.invoke(IPC.updateDownload) as Promise<UpdateStatus>,
   installUpdate: () => ipcRenderer.invoke(IPC.updateInstall) as Promise<boolean>,
+  relaunchApp: () => ipcRenderer.invoke(IPC.relaunchApp) as Promise<boolean>,
 
   onUpdateStatusChanged(listener) {
     const wrapped = (_event: unknown, payload: UpdateStatus) => listener(payload);

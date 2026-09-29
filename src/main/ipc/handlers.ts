@@ -11,6 +11,8 @@
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
 
+import { relaunchApp } from "../services/relaunch.js";
+import { launchedGpuPreference } from "../services/gpu_preference.js";
 import {
   IPC,
   NO_SHIFT,
@@ -525,6 +527,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       chrome: process.versions.chrome ?? "",
       node: process.versions.node ?? "",
       platform: process.platform,
+      gpuPreference: launchedGpuPreference(),
     }),
   );
 
@@ -538,6 +541,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.updateCheck, async (): Promise<UpdateStatus> => await checkForUpdates());
   ipcMain.handle(IPC.updateDownload, async (): Promise<UpdateStatus> => await downloadUpdate());
   ipcMain.handle(IPC.updateInstall, async (): Promise<boolean> => await installUpdate());
+  ipcMain.handle(IPC.relaunchApp, async (): Promise<boolean> => await relaunchApp(getWindow()));
 
   ipcMain.handle(IPC.settingsGet, async (): Promise<Settings> => await getSettings());
 

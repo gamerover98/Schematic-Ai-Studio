@@ -22,6 +22,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { loadStructure } from "../src/main/pipeline/loader.js";
+import { gpuSwitchFor, readGpuPreference } from "../src/main/services/gpu_preference.js";
 import { IPC, openCodeModelRequiresKey } from "../src/shared/ipc.js";
 import { createReplyTable, RendererTimeoutError } from "../src/main/services/renderer_request.js";
 import { rememberedFromIndex } from "../src/main/services/conversation_core.js";
@@ -1217,6 +1218,29 @@ console.log("\n--- application menu ---");
   equal("Help offers the developer tools", devTools?.label, "Toggle Developer Tools");
   equal("...with nothing open as well", devTools?.enabled, true);
   equal("...on the key everybody reaches for", devTools?.accelerator, "CmdOrCtrl+Shift+I");
+
+  /*
+   * The GPU preference is a Chromium switch, applied before ready from the
+   * settings file read synchronously -- so a file that cannot be read has to
+   * mean "leave it to the system", never a throw at startup.
+   */
+  equal("auto appends no GPU switch", gpuSwitchFor("auto"), null);
+  equal("high performance forces the dedicated GPU", gpuSwitchFor("high-performance"), "force_high_performance_gpu");
+  equal("low power forces the integrated GPU", gpuSwitchFor("low-power"), "force_low_power_gpu");
+  equal("no settings file reads as auto", readGpuPreference(null), "auto");
+  equal("a settings file with no preference reads as auto", readGpuPreference('{"preview":{}}'), "auto");
+  equal("a junk preference reads as auto", readGpuPreference('{"preview":{"gpuPreference":"fast"}}'), "auto");
+  equal("malformed JSON reads as auto", readGpuPreference("{"), "auto");
+  equal(
+    "a stored preference is read back",
+    readGpuPreference('{"preview":{"gpuPreference":"low-power"}}'),
+    "low-power",
+  );
+  {
+    const entry = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "index.ts"), "utf8");
+    const append = entry.indexOf("app.commandLine.appendSwitch(gpuSwitch)");
+    check("the GPU switch is appended before the app is ready", append >= 0 && append < entry.indexOf("app.whenReady()"));
+  }
 
   /*
    * No accelerator on Undo/Redo, and this is the check that keeps it that way.

@@ -1,4 +1,9 @@
-import { AA_LEVELS, DEFAULT_PREVIEW_SETTINGS, FPS_CAPS } from "../../../shared/settings.js";
+import {
+  AA_LEVELS,
+  DEFAULT_PREVIEW_SETTINGS,
+  FPS_CAPS,
+  gpuPreference,
+} from "../../../shared/settings.js";
 
 /**
  * What each shader mode does to the renderer and to the two scene lights.
@@ -137,4 +142,16 @@ export function frameDue(
   if (now - anchor < interval - FRAME_SLACK_MS) return { draw: false, anchor };
   const next = anchor + interval;
   return { draw: true, anchor: now - next > interval ? now : next };
+}
+
+/**
+ * The WebGL context's `powerPreference` for the stored GPU preference.
+ *
+ * The Chromium switch main applies at launch is what actually picks the
+ * adapter; this makes the context ask for the same one rather than for the
+ * browser's default.
+ */
+export function webglPowerPreference(value: unknown): WebGLPowerPreference {
+  const pref = gpuPreference(value);
+  return pref === "auto" ? "default" : pref;
 }

@@ -24,6 +24,7 @@
     DEFAULT_BIOME_COLOR,
     DEFAULT_WATER_COLOR,
     FPS_CAPS,
+    GPU_PREFERENCES,
     LANGUAGES,
     MCP_PORT,
     PREVIEW_SETTING_RANGES,
@@ -31,6 +32,8 @@
     SHADOW_QUALITIES,
     THEMES,
     effectiveIncludeDevBuilds,
+    gpuPreference,
+    type GpuPreference,
     type KeyStorageStatus,
     type Language,
     type PreviewSettings,
@@ -204,6 +207,28 @@ import {
   });
 
   let stutterNote = $state<string | null>(null);
+
+  /*
+   * The GPU is chosen at launch, so the pane compares the setting with what
+   * main says this process was started with -- main's answer, because the
+   * setting on screen may already have moved.
+   */
+  let launchedGpu = $state<GpuPreference | null>(null);
+  $effect(() => {
+    if (!open || launchedGpu !== null) return;
+    void api()
+      .getAppInfo()
+      .then((info) => (launchedGpu = gpuPreference(info.gpuPreference)))
+      .catch(() => undefined);
+  });
+  function gpuLabel(pref: GpuPreference): string {
+    if (pref === "high-performance") return t("preview.gpuPreference.highPerformance");
+    if (pref === "low-power") return t("preview.gpuPreference.lowPower");
+    return t("preview.gpuPreference.auto");
+  }
+  const gpuNeedsRestart = $derived(
+    launchedGpu !== null && gpuPreference(settings.preview.gpuPreference) !== launchedGpu,
+  );
 
   async function copyStutterReport(): Promise<void> {
     const report = stutterReport();
@@ -819,6 +844,25 @@ import {
               {/each}
             </select>
             <p class="hint">{t("preview.maxFpsHint")}</p>
+          </div>
+          <div class="field">
+            <label for="gpu-preference">{t("preview.gpuPreference")}</label>
+            <select
+              id="gpu-preference"
+              value={gpuPreference(preview.gpuPreference)}
+              onchange={(event) =>
+                onpreviewchange({ gpuPreference: gpuPreference(event.currentTarget.value) })}
+            >
+              {#each GPU_PREFERENCES as pref (pref)}
+                <option value={pref}>{gpuLabel(pref)}</option>
+              {/each}
+            </select>
+            <p class="hint">{t("preview.gpuPreferenceHint")}</p>
+            {#if gpuNeedsRestart}
+              <button type="button" onclick={() => void api().relaunchApp()}>
+                {t("preview.gpuPreferenceRestart")}
+              </button>
+            {/if}
           </div>
           <div class="field">
             <label for="max-dpr">{t("preview.maxDpr", { value: preview.maxDpr.toFixed(1) })}</label>

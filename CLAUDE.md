@@ -6449,6 +6449,22 @@ Three rules keep it honest:
   Help row with a key, released in flight like the rest) opens the timeline,
   where every phase shows up as a `viewer:*` measure.
 
+**The GPU preference applies at the next launch, and it cannot do better.**
+Chromium picks the adapter when its GPU process starts, and the only lever is
+a switch (`force_high_performance_gpu` / `force_low_power_gpu`) appended
+before `app.whenReady`. The settings store is async and not ready then, so
+`index.ts` reads `settings.json` synchronously through
+`services/gpu_preference.ts`, where anything unreadable means `auto`: startup
+is the least deserving place to fail. The WebGL context asks for the same
+`powerPreference`, once, when it is made. The pane compares the setting with
+what main says the process *started* with (`AppInfo.gpuPreference`) and only
+then offers a restart, which asks about unsaved work before `app.relaunch()`:
+a relaunch is scheduled for whenever the process next exits, so a declined
+close prompt would otherwise restart the app at some unrelated quit later.
+The `gpu` field of a stutter report is how to see which card was actually
+used. It came from a hybrid-GPU laptop that stuttered only on its external
+monitor.
+
 **A shader mode is a preset, and `vanilla` is the identity.** There are no
 shader packs and there must not appear to be: the renderer opens no connection
 of any kind and there is no safe way to run GLSL somebody sent you. What is
