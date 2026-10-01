@@ -481,6 +481,46 @@ the dice in the field are what change it. A block placed **by hand** from a
 mix has no set of cells to share out, so `pickAt` decides that cell alone and
 meets the shares only on average.
 
+**The distribution is a field over the document, and only its order
+matters.** `shared/noise.ts` has Perlin, simplex, ridged multifractal and
+Worley noise. Each is written as published, and `tests/session.ts` pins
+its values to the seed. `cellValues` samples each one at the centre of
+the cell, in document coordinates, so two areas filled with the same mix
+make one pattern across the seam. A fill ranks the values and cuts the
+ranking at the shares. Three things follow:
+
+- **There is no amplitude.** Multiplying every value by one number leaves
+  the ranking as it was. Inside a fractal sum, amplitude means how much
+  each finer octave counts, and that is `persistence`. The spelling takes
+  `amplitude` as another name for it, and the panel explains this beside
+  the field.
+- **The order of the entries is the order of the values.** The first block
+  gets the lowest values: the bottom of a gradient, the centre of a
+  Voronoi ring.
+- **A Voronoi patch is one value plus a hair of distance.** Without the
+  hair, the patch that a cut falls inside would be split along the walk
+  order, which is a straight line through it.
+
+`normalizeDistribution` reads a distribution from both directions: from
+the spelling, and from the wire, which never goes through the parser. A
+number out of range is clamped. A name or a choice that does not exist
+is refused by name.
+
+**By hand there is no ranking, so `pickAt` cuts at a sample.** It takes 32
+values per axis over a frame, and `App.svelte` passes the document's box
+as that frame. It cuts where the shares fall in the sample. For `random`
+the cuts are the shares themselves. The frame exists so that a gradient
+placed by hand runs from one end of the document to the other.
+
+**`writeMix` is in `domain/mix.ts`, so the agent and the panel write the
+same way.** `fill_region` and `replace_blocks` take the same spelling, and
+their `from` takes a list. A single block still goes through its old path.
+Every block of a mix is checked against the version before anything is
+written, and one the version does not have refuses the whole edit. The
+tool descriptions list each distribution and its parameters from
+`DISTRIBUTION_PARAMS`, so a parameter added there reaches MCP with no
+other edit.
+
 **The edit wire takes `regions[]`, already.** `EditRequest.fill` and `replace`
 name several boxes, which are one set of cells: `shared/regions.ts` walks their
 union once, so an overlap is written and counted once, and the gap between two

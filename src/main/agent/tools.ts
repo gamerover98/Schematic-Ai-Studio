@@ -100,6 +100,16 @@ import {
   isBannerBlock,
 } from "../../shared/banner_patterns.js";
 import { checkBannerPatterns, regionCells, stampBanner } from "../domain/banner_place.js";
+import {
+  describeMix,
+  DISTRIBUTION_KINDS,
+  DISTRIBUTION_PARAMS,
+  effectiveShares,
+  parseMix,
+  singleBlockMix,
+  type BlockMix,
+} from "../../shared/block_mix.js";
+import { writeMix } from "../domain/mix.js";
 import { MAX_DOCUMENT_VOLUME, MAX_EDIT_VOLUME } from "../services/session.js";
 import { orderRegion } from "../domain/grow.js";
 import {
@@ -205,6 +215,20 @@ function toPlacement(
   const entry = toPlacedEntry(block);
   if (layers !== null) checkBannerPatterns(context.doc, entry, layers);
   return { entry, layers };
+}
+
+/**
+ * Every block of a mix as it will be placed, each checked against the
+ * document's version before anything is written: one block the version lacks
+ * refuses the whole edit by name, as a single block always has.
+ */
+async function placeMix(
+  context: ToolContext,
+  mix: BlockMix,
+): Promise<{ entry: PaletteEntry; layers: BannerLayer[] | null }[]> {
+  const placements = mix.entries.map((entry) => toPlacement(context, entry.block));
+  for (const placement of placements) await checkBlockAllowed(context, placement.entry);
+  return placements;
 }
 
 /** A pattern to match, which banner patterns cannot be part of. */
@@ -530,6 +554,41 @@ async function checkBlockAllowed(context: ToolContext, entry: PaletteEntry): Pro
       `see what this schematic already uses, or ask the user to change the ` +
       `schematic's Minecraft version.`,
   );
+}
+
+/**
+ * Every distribution and what it takes, for the tools' descriptions.
+ *
+ * Derived from `DISTRIBUTION_PARAMS` rather than written out, so a parameter
+ * added there reaches a model with no edit here -- the rule the version enums
+ * follow, for the version enums' reason.
+ */
+function distributionsSentence(): string {
+  return DISTRIBUTION_KINDS.map(
+    (kind) => `#${kind}{${[...DISTRIBUTION_PARAMS[kind].map((spec) => spec.key), "seed"].join(",")}}`,
+  ).join(" ");
+}
+
+const MIX_SPELLING =
+  "A mix is weights and blocks in WorldEdit's spelling, 70%minecraft:stone,30%minecraft:andesite: " +
+  "the weights are shares of their sum, and a fill meets them exactly. A distribution in front " +
+  "decides where each block goes, from the cell's position and a seed: " +
+  "#perlin{frequency=0.08,seed=7}70%minecraft:stone,30%minecraft:andesite. Without one, every " +
+  "cell is on its own (salt and pepper). perlin and simplex give patches, ridged veins, voronoi " +
+  "cobbles (mode=patches), rings (distance) or seams (edges), and gradient puts the first block " +
+  "at the low end of axis and the last at the high end. The same seed is the same picture. " +
+  "Each takes: " +
+  distributionsSentence() +
+  ".";
+
+/**
+ * A block field's text as a mix. One block is a mix of one, and keeps the text
+ * exactly as it was given, so a single block goes through the path it always did.
+ */
+function readMix(text: string): BlockMix {
+  const trimmed = String(text ?? "").trim();
+  // Nothing at all is the single-block path's to refuse, in the words it always has.
+  return trimmed === "" ? singleBlockMix(trimmed) : parseMix(trimmed);
 }
 
 function describeRegion(region: Region): string {
@@ -1134,9 +1193,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "fill_region",
     description:
-      "Fill a region with one block. Defaults to the user's selection. Use minecraft:air to " +
-      "clear. The block has to exist in the schematic's Minecraft version, which " +
-      "get_schematic_info reports. A banner's banner_patterns=[...] go on every banner filled.",
+      "Fill a region with one block, or with a mix of several. Defaults to the user's selection. " +
+      "Use minecraft:air to clear. Every block has to exist in the schematic's Minecraft version, " +
+      "which get_schematic_info reports. A banner's banner_patterns=[...] go on every banner " +
+      "filled. " +
+      MIX_SPELLING,
     schema: {
       type: "object",
       properties: { ...regionSchema.properties, block: { type: "string" } },
@@ -1145,6 +1206,25 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     async run(context, args: Partial<RegionArgs> & { block: string }, id) {
       const { region, ...notes } = resolveRegion(context, args ?? {});
+      const mix = readMix(args.block);
+      if (mix.entries.length > 1) {
+        if (regionVolume(region) > MAX_EDIT_VOLUME) {
+          throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
+        }
+        const placements = await placeMix(context, mix);
+        step(context, "fill_region", `filling ${describeRegion(region)} with ${describeMix(mix)}`, id);
+        const changed = writeMix(
+          context.doc,
+          context.tx,
+          [region],
+          mix.distribution,
+          effectiveShares(mix.entries),
+          placements.map((placement) => placement.entry),
+          placements.map((placement) => placement.layers),
+          null,
+        );
+        return { changed, region, ...notes };
+      }
       const entry = toPlacedEntry(args.block);
       await checkBlockAllowed(context, entry);
       const { layers } = toPlacement(context, args.block);
@@ -1162,10 +1242,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "replace_blocks",
     description:
-      "Replace one block with another inside a region. Defaults to the user's selection. " +
-      "Naming `from` without states matches the block in every state it appears in; " +
+      "Replace blocks with others inside a region. Defaults to the user's selection. " +
+      "`from` is one block or several separated by commas, each matched on its own. " +
+      "Naming a block without states matches it in every state it appears in; " +
       "spell the states out to match only that one. get_palette shows what is there. " +
-      "`to` may be a banner with banner_patterns=[...]; `from` may not.",
+      "`to` is one block or a mix, which is shared out over the cells that matched. " +
+      "`to` may be a banner with banner_patterns=[...]; `from` may not. " +
+      MIX_SPELLING,
     schema: {
       type: "object",
       properties: {
@@ -1178,6 +1261,41 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     async run(context, args: Partial<RegionArgs> & { from: string; to: string }, id) {
       const { region, ...notes } = resolveRegion(context, args ?? {});
+      const sought = readMix(args.from).entries.map((entry) => entry.block);
+      const mix = readMix(args.to);
+      if (sought.length > 1 || mix.entries.length > 1) {
+        // Weights in `from` mean nothing -- it is a list of blocks to look for.
+        const patterns = sought.map(toPattern);
+        const placements = await placeMix(context, mix);
+        const soughtLabel = patterns.map((pattern) => pattern.namespacedName).join(", ");
+        step(
+          context,
+          "replace_blocks",
+          `replacing ${soughtLabel} with ${describeMix(mix)} in ${describeRegion(region)}`,
+          id,
+        );
+        const changed = writeMix(
+          context.doc,
+          context.tx,
+          [region],
+          mix.distribution,
+          effectiveShares(mix.entries),
+          placements.map((placement) => placement.entry),
+          placements.map((placement) => placement.layers),
+          patterns,
+        );
+        return {
+          changed,
+          region,
+          ...notes,
+          note:
+            changed === 0
+              ? `Nothing matched ${patterns.map(paletteEntryCacheKey).join(" or ")}. A name on its own ` +
+                `matches the block in every state, so none of them is in this region at all. ` +
+                `get_palette shows what the schematic actually contains.`
+              : undefined,
+        };
+      }
       // `from` is a pattern and `to` is a placement -- see `toPlacedEntry`.
       const from = toPattern(args.from);
       const to = toPlacedEntry(args.to);

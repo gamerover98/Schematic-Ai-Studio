@@ -1385,5 +1385,116 @@ console.log("\n--- making room ---");
   equal("...and nothing changed", session.doc.height, 6);
 }
 
+// --- a mix, from the agent -------------------------------------------------
+//
+// fill_region and replace_blocks take the selection panel's spelling, and
+// share it out the way the panel's own Fill does: exactly, from the seed.
+console.log("\n--- a mix, from the agent ---");
+{
+  const session = seeded();
+  const tally = () => {
+    const counts: Record<string, number> = {};
+    for (let x = 0; x < 6; x += 1)
+      for (let z = 0; z < 6; z += 1) {
+        const name = getBlock(session.doc, x, 5, z).namespacedName;
+        counts[name] = (counts[name] ?? 0) + 1;
+      }
+    return Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)));
+  };
+  const result = await runAgent({
+    ...baseRequest,
+    session,
+    selection: null,
+    prompt: "a patchy stone ceiling",
+    modelOverride: scriptedModel([
+      {
+        kind: "tool",
+        toolName: "fill_region",
+        input: {
+          minX: 0,
+          minY: 5,
+          minZ: 0,
+          maxX: 5,
+          maxY: 5,
+          maxZ: 5,
+          block: "#perlin{seed=4,frequency=0.2}2%minecraft:stone,1%minecraft:glass",
+        },
+      },
+      { kind: "text", text: "Done." },
+    ]),
+  });
+  equal("a mix fills its region exactly by its weights", tally(), { "minecraft:glass": 12, "minecraft:stone": 24 });
+  check(
+    "...and the step says it was a mix, and which",
+    (result.steps[0]?.summary ?? "").includes("67% stone, 33% glass (perlin)"),
+    result.steps[0]?.summary,
+  );
+
+  await runAgent({
+    ...baseRequest,
+    session,
+    selection: null,
+    prompt: "swap them for dirt and gravel",
+    modelOverride: scriptedModel([
+      {
+        kind: "tool",
+        toolName: "replace_blocks",
+        input: {
+          minX: 0,
+          minY: 5,
+          minZ: 0,
+          maxX: 5,
+          maxY: 5,
+          maxZ: 5,
+          from: "minecraft:stone,minecraft:glass",
+          to: "#random{seed=9}1%minecraft:cobblestone,1%minecraft:oak_planks",
+        },
+      },
+      { kind: "text", text: "Done." },
+    ]),
+  });
+  equal("a replace looks for every block it names, and shares out a mix", tally(), {
+    "minecraft:cobblestone": 18,
+    "minecraft:oak_planks": 18,
+  });
+  equal("...each request one undo step", session.history.undoStack.length, 2);
+  const refused = await runAgent({
+    ...baseRequest,
+    session,
+    selection: null,
+    prompt: "plasma",
+    modelOverride: scriptedModel([
+      { kind: "tool", toolName: "fill_region", input: { block: "#plasma{seed=1}1%minecraft:stone,1%minecraft:dirt" } },
+      { kind: "text", text: "Done." },
+    ]),
+  });
+  check(
+    "a distribution the build does not know is refused by name",
+    JSON.stringify(refused.trace).includes("#plasma is not a distribution"),
+  );
+  equal("...and writes nothing", session.history.undoStack.length, 2);
+
+  /*
+   * One block the version cannot hold refuses the whole edit by name, as a
+   * single block always has -- not a fill of the blocks that were allowed.
+   */
+  const partly = await runAgent({
+    ...baseRequest,
+    session,
+    selection: null,
+    prompt: "andesite too",
+    modelOverride: scriptedModel([
+      {
+        kind: "tool",
+        toolName: "fill_region",
+        input: { minX: 0, minY: 5, minZ: 0, maxX: 5, maxY: 5, maxZ: 5, block: "1%minecraft:stone,1%minecraft:andesite" },
+      },
+      { kind: "text", text: "Done." },
+    ]),
+  });
+  check("a mix naming a block the version lacks is refused", JSON.stringify(partly.trace).includes("minecraft:andesite"));
+  equal("...as a whole: nothing is written", session.history.undoStack.length, 2);
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exitCode = failures === 0 ? 0 : 1;

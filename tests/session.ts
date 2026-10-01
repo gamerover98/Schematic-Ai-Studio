@@ -24,13 +24,21 @@ import { DOCUMENT_SIZE } from "../src/shared/settings.js";
 import { singleMix, type MixSpec } from "../src/shared/ipc.js";
 import {
   addToMix,
+  cellValues,
+  DISTRIBUTION_KINDS,
   effectiveShares,
+  formatDistribution,
   formatMix,
+  MixSyntaxError,
+  normalizeDistribution,
   parseMix,
   pickAt,
   quotas,
   singleBlockMix,
+  type Distribution,
+  type DistributionKind,
 } from "../src/shared/block_mix.js";
+import { noiseSeed, perlin3, simplex3 } from "../src/shared/noise.js";
 import { unionVolume } from "../src/shared/regions.js";
 import { assignByQuota } from "../src/main/domain/mix.js";
 import { coerceHotbar } from "../src/main/services/settings_coerce.js";
@@ -5869,6 +5877,192 @@ console.log("\n--- what the selection is made of ---");
     })(),
   );
   closeDocument();
+}
+
+console.log("\n--- a mix shared out by a pattern ---");
+{
+  const refusedWith = (text: string, words: string): boolean => {
+    try {
+      parseMix(text);
+      return false;
+    } catch (err) {
+      return err instanceof MixSyntaxError && err.message.includes(words);
+    }
+  };
+
+  // The spelling: a distribution in front, its parameters inside.
+  const patchy = parseMix("#perlin{seed=7,frequency=0.1,octaves=4}70%stone,30%andesite");
+  equal("a distribution's parameters are read", patchy.distribution, {
+    kind: "perlin",
+    seed: 7,
+    params: { frequency: 0.1, octaves: 4 },
+  });
+  equal("...and written back as they were", formatMix(patchy), "#perlin{seed=7,frequency=0.1,octaves=4}70%stone,30%andesite");
+  equal("amplitude is another name for persistence", parseMix("#perlin{amplitude=0.7}1%a,1%b").distribution.params, {
+    persistence: 0.7,
+  });
+  equal("a number out of range is clamped into it", parseMix("#perlin{frequency=5,octaves=20}1%a,1%b").distribution.params, {
+    frequency: 1,
+    octaves: 8,
+  });
+  equal("a choice and a switch are read", parseMix("#gradient{axis=X,reverse=yes}1%a,1%b").distribution.params, {
+    axis: "x",
+    reverse: true,
+  });
+  check("a parameter the distribution does not take is refused by name", refusedWith("#perlin{size=3}1%a,1%b", "size"));
+  check("...and so is a choice it does not have", refusedWith("#voronoi{mode=hexagons}1%a,1%b", "patches, distance, edges"));
+  check("...and a number that is not one", refusedWith("#perlin{frequency=fast}1%a,1%b", "has to be a number"));
+  check("...and a distribution there is not", refusedWith("#plasma{seed=1}1%a,1%b", "#plasma is not a distribution"));
+  equal("the plain unseeded random writes no prefix at all", formatDistribution({ kind: "random", seed: 0 }), "");
+
+  /*
+   * Pinned to the seed: the same numbers in main, where a fill is written, and
+   * in the renderer, where a block is placed by hand. A change to the noise
+   * that moves these moves every pattern anybody has already built.
+   */
+  const close = (a: number, b: number) => Math.abs(a - b) < 1e-12;
+  const { perm } = noiseSeed(42);
+  check("Perlin noise is pinned to its seed", close(perlin3(perm, 1.5, 2.25, -3.75), -0.024539470672607422));
+  check("...and simplex noise", close(simplex3(perm, 1.5, 2.25, -3.75), 0.6787552083333334));
+  const pinned: Record<DistributionKind, number> = {
+    random: 0.3194502159021795,
+    perlin: 0.04076837267020556,
+    simplex: -0.2864331616031672,
+    ridged: 0.6462038432916208,
+    voronoi: 0.30481334926230164,
+    gradient: 5.214115989728534,
+  };
+  for (const kind of DISTRIBUTION_KINDS) {
+    check(
+      `the ${kind} field is pinned to its seed`,
+      close(cellValues(normalizeDistribution({ kind, seed: 42 }))(3, 4, 5), pinned[kind]),
+    );
+  }
+  let outside = 0;
+  for (let i = 0; i < 20_000; i += 1) {
+    for (const value of [perlin3(perm, i * 0.137, i * 0.071, i * 0.293), simplex3(perm, i * 0.137, i * 0.071, i * 0.293)]) {
+      if (!(value >= -1 && value <= 1)) outside += 1;
+    }
+  }
+  equal("both noises stay within [-1, 1]", outside, 0);
+
+  // A fill meets the shares exactly whatever the pattern.
+  const shared: Record<string, Record<string, number>> = {};
+  for (const kind of DISTRIBUTION_KINDS) {
+    const session = newDocument({ width: 16, height: 1, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, {
+      kind: "fill",
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 15, maxY: 0, maxZ: 15 }],
+      mix: {
+        entries: [
+          { block: { namespacedName: "minecraft:stone" }, weight: 70 },
+          { block: { namespacedName: "minecraft:andesite" }, weight: 30 },
+        ],
+        distribution: { kind, seed: 11 },
+      },
+    });
+    const counts: Record<string, number> = {};
+    for (let x = 0; x < 16; x += 1)
+      for (let z = 0; z < 16; z += 1) {
+        const name = getBlock(session.doc, x, 0, z).namespacedName;
+        counts[name] = (counts[name] ?? 0) + 1;
+      }
+    shared[kind] = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)));
+    closeDocument();
+  }
+  equal(
+    "every distribution meets 70/30 exactly over 256 cells",
+    shared,
+    Object.fromEntries(DISTRIBUTION_KINDS.map((kind) => [kind, { "minecraft:andesite": 77, "minecraft:stone": 179 }])),
+  );
+
+  /*
+   * And the patterns are patterns: across a 50/50 split, noise puts like next
+   * to like, where random scatters. Counted as neighbouring pairs that differ.
+   */
+  const seams = (kind: DistributionKind): number => {
+    const values = cellValues(normalizeDistribution({ kind, seed: 5 }));
+    const field = new Float64Array(32 * 32);
+    for (let x = 0; x < 32; x += 1) for (let z = 0; z < 32; z += 1) field[x * 32 + z] = values(x, 0, z);
+    const choice = assignByQuota(field, [0.5, 0.5]);
+    let count = 0;
+    for (let x = 0; x < 32; x += 1)
+      for (let z = 0; z < 32; z += 1) {
+        if (x + 1 < 32 && choice[x * 32 + z] !== choice[(x + 1) * 32 + z]) count += 1;
+        if (z + 1 < 32 && choice[x * 32 + z] !== choice[x * 32 + z + 1]) count += 1;
+      }
+    return count;
+  };
+  const scattered = seams("random");
+  for (const kind of ["perlin", "simplex", "voronoi", "gradient"] as const) {
+    check(`${kind} comes in patches where random scatters`, seams(kind) * 3 < scattered, `${seams(kind)} against ${scattered}`);
+  }
+
+  // A gradient puts the first block at the low end of its axis.
+  const ramp = newDocument({ width: 3, height: 10, length: 3 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  const fillRamp = (reverse: boolean) =>
+    applyEdit(ramp, {
+      kind: "fill",
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 9, maxZ: 2 }],
+      mix: {
+        entries: [
+          { block: { namespacedName: "minecraft:stone" }, weight: 1 },
+          { block: { namespacedName: "minecraft:dirt" }, weight: 1 },
+        ],
+        distribution: { kind: "gradient", seed: 1, params: { axis: "y", edge: 0, reverse } },
+      },
+    });
+  const column = () => Array.from({ length: 10 }, (_unused, y) => getBlock(ramp.doc, 1, y, 1).namespacedName.slice(10));
+  fillRamp(false);
+  equal("a gradient runs from the first block at the bottom to the last at the top", column(), [
+    "stone", "stone", "stone", "stone", "stone", "dirt", "dirt", "dirt", "dirt", "dirt",
+  ]);
+  fillRamp(true);
+  equal("...and the other way round reversed", column(), [
+    "dirt", "dirt", "dirt", "dirt", "dirt", "stone", "stone", "stone", "stone", "stone",
+  ]);
+
+  // The wire never went near the parser, so main checks what it carries.
+  check(
+    "a distribution main does not know is refused by name",
+    (() => {
+      try {
+        applyEdit(ramp, {
+          kind: "fill",
+          regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 9, maxZ: 2 }],
+          mix: {
+            entries: [
+              { block: { namespacedName: "minecraft:stone" }, weight: 1 },
+              { block: { namespacedName: "minecraft:dirt" }, weight: 1 },
+            ],
+            distribution: { kind: "plasma", seed: 1 } as unknown as Distribution,
+          },
+        });
+        return false;
+      } catch (err) {
+        return err instanceof MixSyntaxError;
+      }
+    })(),
+  );
+  closeDocument();
+
+  // By hand: the same field, cut where a sample of it over the frame says.
+  const frame = { minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 9, maxZ: 2 };
+  const handRamp = parseMix("#gradient{axis=y,edge=0}1%stone,1%dirt");
+  equal(
+    "a gradient placed by hand cuts at the middle of the frame",
+    [2, 4, 5, 7].map((y) => pickAt(handRamp, 1, y, 1, frame).block),
+    ["stone", "stone", "dirt", "dirt"],
+  );
+  const handNoise = parseMix("#perlin{seed=8}7%stone,3%dirt");
+  const wide = { minX: 0, minY: 0, minZ: 0, maxX: 47, maxY: 0, maxZ: 47 };
+  let stone = 0;
+  for (let x = 0; x < 48; x += 1) for (let z = 0; z < 48; z += 1) if (pickAt(handNoise, x, 0, z, wide).block === "stone") stone += 1;
+  check(
+    "noise placed by hand meets its shares on average",
+    Math.abs(stone / (48 * 48) - 0.7) < 0.07,
+    `${((100 * stone) / (48 * 48)).toFixed(1)}% stone`,
+  );
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

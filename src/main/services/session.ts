@@ -21,7 +21,6 @@ import type {
   DocumentState,
   EditRequest,
   MeshPayload,
-  MixSpec,
   PaletteCount,
   RegionSpec,
 } from "../../shared/ipc.js";
@@ -39,7 +38,6 @@ import {
   paletteTally,
   regionVolume,
   setBlock,
-  voxelIndex,
   type Region,
   type SchematicDocument,
 } from "../domain/document.js";
@@ -129,13 +127,13 @@ import {
 } from "../pipeline/banner_nbt.js";
 import { isBannerBlock } from "../../shared/banner_patterns.js";
 import {
-  distributionValue,
   effectiveShares,
   MAX_MIX_ENTRIES,
   MixSyntaxError,
+  normalizeDistribution,
 } from "../../shared/block_mix.js";
 import { forEachUnionCell, MAX_BOXES, unionBounds, unionVolume } from "../../shared/regions.js";
-import { assignByQuota } from "../domain/mix.js";
+import { writeMix } from "../domain/mix.js";
 
 export interface DocumentSession {
   readonly doc: SchematicDocument;
@@ -1524,6 +1522,16 @@ export function applyEdit(
   if (mix.entries.length > MAX_MIX_ENTRIES) {
     throw new MixSyntaxError(`A mix holds at most ${MAX_MIX_ENTRIES} blocks; this one names ${mix.entries.length}.`);
   }
+  if (mix.entries.some((entry) => !Number.isFinite(entry.weight) || entry.weight < 0)) {
+    throw new MixSyntaxError("A weight in the mix is not a number of zero or more.");
+  }
+  if (mix.entries.every((entry) => entry.weight === 0)) {
+    throw new MixSyntaxError("Every weight in the mix is zero, so it would place nothing.");
+  }
+  // The wire is a structured object that never went near the parser, so the
+  // distribution is checked here as well: a kind that exists, parameters it takes.
+  const distribution = normalizeDistribution(mix.distribution);
+  const shares = effectiveShares(mix.entries);
   const written = mix.entries.map((entry) => placeable(toEntry(entry.block)));
   const layers = mix.entries.map((entry) => layersOf(entry.block));
   written.forEach((entry, index) => {
@@ -1539,7 +1547,7 @@ export function applyEdit(
       // an index into the old shape. `history.ts` flushes on resize for exactly
       // that reason.
       if (growth !== null) tx.resize(growth.size, growth.shift);
-      return writeMix(doc, tx, regions, mix, written, layers, null);
+      return writeMix(doc, tx, regions, distribution, shares, written, layers, null);
     });
   }
 
@@ -1555,97 +1563,8 @@ export function applyEdit(
   const from = request.from.map(toEntry);
   const fromLabel = from.length === 1 ? from[0].namespacedName : `${from.length} blocks`;
   return runTransaction(doc, history, `Replace ${fromLabel} with ${toLabel}`, (tx) =>
-    writeMix(doc, tx, regions, mix, written, layers, from),
+    writeMix(doc, tx, regions, distribution, shares, written, layers, from),
   );
-}
-
-/**
- * Writes a mix into the union of `regions`, or into the cells of it that hold
- * one of `from`.
- *
- * Three walks over the same cells in the same order, which is
- * `forEachUnionCell`'s contract: the first decides which cells are candidates
- * and gives each a value, `assignByQuota` shares them out exactly, and the
- * last writes. The candidates are decided **before** anything is written,
- * because afterwards a replaced cell is indistinguishable from one that
- * already held the block it was replaced with -- and the palette grows under
- * the writes, which `replaceAny` already knows about.
- *
- * A banner entry is stamped on every cell it was given, including one that
- * already held that state and so was not counted as changed: it was asked for
- * with this design.
- */
-function writeMix(
-  doc: SchematicDocument,
-  tx: TransactionScope,
-  regions: readonly Region[],
-  mix: MixSpec,
-  written: readonly PaletteEntry[],
-  layers: readonly (BannerLayer[] | null)[],
-  from: readonly PaletteEntry[] | null,
-): number {
-  /*
-   * Decided once over the palette, read per cell -- `replaceAny`'s trade. A
-   * miss interns nothing, so asking to replace a block the schematic does not
-   * hold leaves no palette entry behind.
-   */
-  const wanted =
-    from === null
-      ? null
-      : Uint8Array.from(doc.palette, (entry) => (from.some((pattern) => matchesBlockPattern(entry, pattern)) ? 1 : 0));
-  if (wanted !== null && !wanted.includes(1)) return 0;
-
-  const total = unionVolume(regions);
-  const candidate = wanted === null ? null : new Uint8Array(total);
-  let candidates = total;
-  if (wanted !== null && candidate !== null) {
-    candidates = 0;
-    let at = 0;
-    forEachUnionCell(regions, (x, y, z) => {
-      if (wanted[doc.voxels[voxelIndex(doc, x, y, z)]] === 1) {
-        candidate[at] = 1;
-        candidates += 1;
-      }
-      at += 1;
-    });
-  }
-  if (candidates === 0) return 0;
-
-  let choice: Uint8Array;
-  if (written.length === 1) {
-    choice = new Uint8Array(candidates);
-  } else {
-    const values = new Float32Array(candidates);
-    let at = 0;
-    let k = 0;
-    forEachUnionCell(regions, (x, y, z) => {
-      if (candidate === null || candidate[at] === 1) {
-        values[k] = distributionValue(mix.distribution, x, y, z);
-        k += 1;
-      }
-      at += 1;
-    });
-    choice = assignByQuota(values, effectiveShares(mix.entries));
-  }
-
-  const banners = layers.map((own) => (own === null ? null : ([] as { x: number; y: number; z: number }[])));
-  let changed = 0;
-  let at = 0;
-  let k = 0;
-  forEachUnionCell(regions, (x, y, z) => {
-    if (candidate === null || candidate[at] === 1) {
-      const entry = choice[k];
-      if (tx.setBlock(x, y, z, written[entry])) changed += 1;
-      banners[entry]?.push({ x, y, z });
-      k += 1;
-    }
-    at += 1;
-  });
-  banners.forEach((cells, index) => {
-    const own = layers[index];
-    if (cells !== null && own !== null) stampBanner(doc, tx, cells, written[index], own);
-  });
-  return changed;
 }
 
 /**

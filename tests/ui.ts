@@ -177,7 +177,7 @@ import {
   writeSpelling,
 } from "../src/renderer/src/lib/block_spelling.js";
 import { documentMaterials, formatCount, materialAction } from "../src/renderer/src/lib/materials.js";
-import { tryParseMix } from "../src/shared/block_mix.js";
+import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/shared/block_mix.js";
 import {
   arcBetween,
   axisAt,
@@ -5148,6 +5148,44 @@ console.log("\n--- when a block arrived, as far as the table can see ---");
     "the hover says 'or earlier' for a block at the floor",
     /atFloor\s*\?\s*t\("blockInfo\.sinceOrEarlier"/.test(tooltip) && /atFloor\s*\?\s*t\("blockInfo\.until"/.test(tooltip),
   );
+}
+
+// --- the distribution, in the With field -------------------------------------
+//
+// Its labels are assembled from templates -- `mix.kind.${kind}` -- which the
+// catalogue's own check above cannot see, so the table is walked here: every
+// kind, every parameter and every option has its words.
+console.log("\n--- the distribution, in the With field ---");
+{
+  const catalogue = en as Record<string, string>;
+  const wanted: string[] = [];
+  for (const kind of DISTRIBUTION_KINDS) {
+    wanted.push(`mix.kind.${kind}`, `mix.kindHint.${kind}`);
+    for (const spec of DISTRIBUTION_PARAMS[kind]) {
+      wanted.push(`mix.param.${spec.key}`, `mix.paramHint.${spec.key}`);
+      if (spec.type === "choice") for (const option of spec.options) wanted.push(`mix.option.${option}`);
+    }
+  }
+  const missing = [...new Set(wanted)].filter((key) => catalogue[key] === undefined);
+  check("every distribution, parameter and option has its words", missing.length === 0, missing.join(", "));
+
+  const field = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
+  const setKind = field.slice(field.indexOf("function setKind("), field.indexOf("function setParam("));
+  check(
+    "choosing another distribution keeps the seed and drops the old one's parameters",
+    /distribution: \{ kind, seed \}/.test(setKind),
+  );
+  check(
+    "a parameter typed in goes through the same reading as the spelling",
+    /function setParam\([\s\S]{0,400}normalizeDistribution\(/.test(field),
+  );
+
+  /*
+   * A gradient by hand runs from one end of the document to the other, which
+   * is only true if the hand is told where the ends are.
+   */
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check("a block placed by hand takes its shares over the document's box", /pickAt\(mix, at\.x, at\.y, at\.z, frame\)/.test(app));
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

@@ -845,10 +845,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       /*
        * A slot holding a mix places one of its blocks, chosen by the cell --
        * so clicking the same cell twice gives the same block, and the shares
-       * hold on average across a wall built by hand.
+       * hold on average across a wall built by hand. The shares are taken over
+       * the document's box, which is what a gradient runs from end to end of.
        */
       const mix = parseMix(placingBlock);
-      held = parseBlock(pickAt(mix, at.x, at.y, at.z).block);
+      const [width, height, length] = docState?.size ?? [64, 64, 64];
+      const frame = { minX: 0, minY: 0, minZ: 0, maxX: width - 1, maxY: height - 1, maxZ: length - 1 };
+      held = parseBlock(pickAt(mix, at.x, at.y, at.z, frame).block);
     } catch (err) {
       // A held block that cannot be read -- a pasted command cut short -- is
       // said out loud, not thrown past the click into the failure handler.

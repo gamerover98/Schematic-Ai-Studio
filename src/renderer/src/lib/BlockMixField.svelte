@@ -20,15 +20,21 @@
   import {
     addToMix,
     DEFAULT_DISTRIBUTION,
+    DISTRIBUTION_KINDS,
+    DISTRIBUTION_PARAMS,
     effectiveShares,
     formatMix,
     freshSeed,
+    normalizeDistribution,
     removeFromMix,
     replaceInMix,
+    resolveParams,
     reweightMix,
     singleBlockMix,
     tryParseMix,
     type BlockMix,
+    type DistributionKind,
+    type ParamValue,
   } from "../../../shared/block_mix.js";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import { tick } from "svelte";
@@ -73,6 +79,41 @@
   });
   const shares = $derived(effectiveShares(mix.entries));
   const showWeights = $derived(weights && mix.entries.length > 1);
+
+  /** The distribution's parameters, the ones left out at their defaults. */
+  const specs = $derived(DISTRIBUTION_PARAMS[mix.distribution.kind]);
+  const params = $derived(resolveParams(mix.distribution));
+  /** Whether the parameters are open. Closed by default: most mixes need none. */
+  let tuning = $state(false);
+  const fieldId = $derived(id ?? "mix");
+
+  /**
+   * Another distribution, keeping the seed. Its parameters belong to the old
+   * kind, so they go with it -- a `size` means nothing to Perlin noise.
+   */
+  function setKind(kind: DistributionKind): void {
+    const seed = mix.distribution.seed === 0 ? freshSeed() : mix.distribution.seed;
+    emit({ ...mix, distribution: { kind, seed } });
+  }
+
+  /**
+   * One parameter, checked by the same reading the spelling gets: clamped into
+   * range, and a value that is not one at all -- an emptied number field --
+   * leaves the parameter as it was.
+   */
+  function setParam(key: string, value: ParamValue): void {
+    try {
+      emit({
+        ...mix,
+        distribution: normalizeDistribution({
+          ...mix.distribution,
+          params: { ...(mix.distribution.params ?? {}), [key]: value },
+        }),
+      });
+    } catch {
+      // Nothing to write; the field shows the value it had again.
+    }
+  }
 
   const icons = $derived(blockIcons());
   $effect(() => {
@@ -229,7 +270,30 @@
 
 {#if weights && mix.entries.length > 1}
   <div class="distribution">
-    <span>{t("mix.random")}</span>
+    <select
+      class="kind"
+      value={mix.distribution.kind}
+      title={t(`mix.kindHint.${mix.distribution.kind}`)}
+      aria-label={t("mix.distribution")}
+      onchange={(event) => setKind(event.currentTarget.value as DistributionKind)}
+    >
+      {#each DISTRIBUTION_KINDS as kind (kind)}
+        <option value={kind}>{t(`mix.kind.${kind}`)}</option>
+      {/each}
+    </select>
+    {#if specs.length > 0}
+      <button
+        type="button"
+        class="gear"
+        class:open={tuning}
+        aria-expanded={tuning}
+        title={t("mix.tune")}
+        aria-label={t("mix.tune")}
+        onclick={() => (tuning = !tuning)}
+      >
+        &#x2699;
+      </button>
+    {/if}
     <label>
       {t("mix.seed")}
       <input
@@ -250,6 +314,45 @@
       🎲
     </button>
   </div>
+  {#if tuning && specs.length > 0}
+    <div class="params">
+      {#each specs as spec (spec.key)}
+        <label for={`${fieldId}-${spec.key}`} title={t(`mix.paramHint.${spec.key}`)}>{t(`mix.param.${spec.key}`)}</label>
+        {#if spec.type === "number"}
+          <input
+            id={`${fieldId}-${spec.key}`}
+            type="number"
+            min={spec.min}
+            max={spec.max}
+            step={spec.step}
+            value={params[spec.key]}
+            title={t(`mix.paramHint.${spec.key}`)}
+            onchange={(event) => setParam(spec.key, Number(event.currentTarget.value))}
+          />
+        {:else if spec.type === "choice"}
+          <select
+            id={`${fieldId}-${spec.key}`}
+            value={params[spec.key]}
+            title={t(`mix.paramHint.${spec.key}`)}
+            onchange={(event) => setParam(spec.key, event.currentTarget.value)}
+          >
+            {#each spec.options as option (option)}
+              <option value={option}>{t(`mix.option.${option}`)}</option>
+            {/each}
+          </select>
+        {:else}
+          <input
+            id={`${fieldId}-${spec.key}`}
+            type="checkbox"
+            checked={params[spec.key] === true}
+            title={t(`mix.paramHint.${spec.key}`)}
+            onchange={(event) => setParam(spec.key, event.currentTarget.checked)}
+          />
+        {/if}
+      {/each}
+      <p class="note">{t("mix.exactNote")}</p>
+    </div>
+  {/if}
 {/if}
 
 <!--
@@ -387,10 +490,12 @@
     align-self: stretch;
   }
 
+  /* Wraps rather than overflowing: the tool window is narrow by default. */
   .distribution {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 6px;
+    gap: 4px 6px;
     margin-top: 2px;
     font-size: 11px;
     color: var(--text-dim);
@@ -404,9 +509,61 @@
   }
 
   .distribution input {
-    width: 90px;
+    width: 72px;
     padding: 1px 4px;
     font-size: 11px;
+  }
+
+  .kind {
+    flex: 1 1 96px;
+    min-width: 0;
+    padding: 1px 2px;
+    font-size: 11px;
+  }
+
+  .gear {
+    padding: 0 4px;
+    font-size: 13px;
+    line-height: 18px;
+  }
+
+  .gear.open {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .params {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 3px 8px;
+    margin-top: 4px;
+    font-size: 11px;
+  }
+
+  .params label {
+    margin: 0;
+    color: var(--text-dim);
+  }
+
+  .params input[type="number"],
+  .params select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 1px 4px;
+    font-size: 11px;
+  }
+
+  .params input[type="checkbox"] {
+    justify-self: start;
+    margin: 0;
+  }
+
+  .note {
+    grid-column: 1 / -1;
+    margin: 2px 0 0;
+    font-size: 10px;
+    color: var(--text-dim);
   }
 
   .dice {
