@@ -168,6 +168,7 @@ import {
 import { en } from "../src/renderer/src/lib/locales/en.js";
 import { BANNER_EDITOR_URL } from "../src/shared/banner_patterns.js";
 import { propertyRows } from "../src/renderer/src/lib/inspector_rows.js";
+import { canonicalBlock, readSpelling, writeSpelling } from "../src/renderer/src/lib/block_spelling.js";
 import {
   arcBetween,
   axisAt,
@@ -4957,6 +4958,64 @@ console.log("\n--- a burst of mesh requests is one request, then one more ---");
     app.includes("const refreshDocument = coalesce(fetchDocumentMesh);") &&
       !/async function refreshDocument\(/.test(app),
   );
+}
+
+// A chip holds a block's spelling as text, and the state editor rewrites one
+// property of it. A banner's design is full of the commas a naive split cuts
+// on, so the round trip is stated with one in it.
+console.log("\n--- a block field that holds several blocks ---");
+{
+  const banner = 'minecraft:red_banner[rotation=4,banner_patterns=[{pattern:"mojang",color:"white"}]]';
+  const spelling = readSpelling(banner);
+  equal("a chip's spelling is taken apart", spelling, {
+    name: "minecraft:red_banner",
+    properties: { rotation: "4" },
+    bannerPatterns: '[{pattern:"mojang",color:"white"}]',
+  });
+  check("...and put back as it was", spelling !== null && writeSpelling(spelling) === banner);
+  equal(
+    "states come back in one order, whatever order they were typed in",
+    canonicalBlock("oak_stairs[half=top,facing=east]", null),
+    "minecraft:oak_stairs[facing=east,half=top]",
+  );
+  equal("half a command is kept as typed rather than lost", readSpelling("oak_stairs[facing="), null);
+
+  const table = JSON.parse(
+    readFileSync(path.join(here, "..", "resources", "legacy_blocks.json"), "utf8"),
+  ) as { blocks: Record<string, string> };
+  equal(
+    "an ID:DATA typed on a legacy document becomes the block it means",
+    canonicalBlock("35:14", buildLegacyIndex(table.blocks)),
+    "minecraft:red_wool",
+  );
+  equal("...and on a flat one stays what was typed", canonicalBlock("35:14", null), "35:14");
+
+  /*
+   * The panel reads top to bottom the way the sentence does -- replace these
+   * with those -- and that order is the whole of what was asked for. It used to
+   * be the other way round, with a button saying "Replace with the block above".
+   */
+  const tools = readFileSync(path.join(here, "..", "src", "renderer", "src", "lib", "SelectionTools.svelte"), "utf8");
+  const replaceAt = tools.indexOf('id="tool-from-block"');
+  const withAt = tools.indexOf('id="tool-to-block"');
+  check("Replace comes before With in the selection panel", replaceAt !== -1 && withAt !== -1 && replaceAt < withAt);
+  check("...with the swap between them", tools.indexOf("onclick={onswap}") > replaceAt && tools.indexOf("onclick={onswap}") < withAt);
+  check("...and the Replace field has no weights to show", /id="tool-from-block"[\s\S]{0,80}weights=\{false\}/.test(tools));
+
+  /*
+   * A mix's text is not a block. Asking main for an icon of it would intern a
+   * block called `70%stone,30%andesite`, so the bar asks for its first block.
+   */
+  const hotbar = readFileSync(path.join(here, "..", "src", "renderer", "src", "lib", "Hotbar.svelte"), "utf8");
+  check("the hotbar asks for the icon of a mix's first block", hotbar.includes("requestBlockIcons(slots.map(iconOf))"));
+
+  /*
+   * The chips are typed into through the ordinary picker, and a choice has to
+   * reach a different place from a keystroke -- or every letter would add a
+   * chip.
+   */
+  const field = readFileSync(path.join(here, "..", "src", "renderer", "src", "lib", "BlockMixField.svelte"), "utf8");
+  check("the chip field adds a chip on a choice, not on a keystroke", /onchange=\{\(text\) => \(draft = text\)\}\s*onpick=\{add\}/.test(field));
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

@@ -10,6 +10,7 @@ import type { SchematicFormat } from "./schematic.js";
 import type { GpuPreference, Hotbar } from "./settings.js";
 import type { CameraPlacement, Vec3 } from "./camera_aim.js";
 import type { DyeName } from "./banner_patterns.js";
+import { DEFAULT_DISTRIBUTION, type Distribution } from "./block_mix.js";
 import { SCHEMATIC_FORMAT_LABEL, SCHEMATIC_FORMATS } from "./schematic.js";
 import type {
   ExportType,
@@ -1166,8 +1167,40 @@ export type EditRequest =
       block: BlockSpec;
       against?: "up" | "down" | "north" | "south" | "east" | "west";
     }
-  | { kind: "fill"; region: RegionSpec; block: BlockSpec }
-  | { kind: "replace"; region: RegionSpec; from: BlockSpec; to: BlockSpec };
+  /**
+   * Write a mix into every cell of the regions.
+   *
+   * `regions` because a selection may be several boxes; they are one set of
+   * cells, so an overlap is written once. A plain block is a mix of one --
+   * `singleMix` -- which is what Delete sends with air.
+   */
+  | { kind: "fill"; regions: RegionSpec[]; mix: MixSpec }
+  /**
+   * Rewrite the cells holding any of `from` with the mix.
+   *
+   * `from` is a list of **patterns**, each matched the way `replace` always
+   * matched one -- a bare name is the block in any state -- and a cell is
+   * replaced if it matches any of them.
+   */
+  | { kind: "replace"; regions: RegionSpec[]; from: BlockSpec[]; to: MixSpec };
+
+/**
+ * Several blocks with weights, and the rule for which cell gets which.
+ *
+ * `shared/block_mix.ts`'s `BlockMix` with each block already parsed, which is
+ * the renderer's job for the same reason it is for a single block: `35:14` and
+ * a pasted `/give` become blocks there. The distribution travels as it is,
+ * because main is where the cells are and so where it is evaluated.
+ */
+export interface MixSpec {
+  entries: { block: BlockSpec; weight: number }[];
+  distribution: Distribution;
+}
+
+/** A single block as a mix: what every edit that writes one block sends. */
+export function singleMix(block: BlockSpec): MixSpec {
+  return { entries: [{ block, weight: 1 }], distribution: DEFAULT_DISTRIBUTION };
+}
 
 /**
  * A size typed into the dimensions panel.

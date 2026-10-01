@@ -14,10 +14,11 @@
    */
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import type { ClipboardInfo, PaletteCount, RegionSpec, TransformRequest } from "../../../shared/ipc.js";
-  import BlockPicker from "./BlockPicker.svelte";
+  import BlockMixField from "./BlockMixField.svelte";
   import BannerPatternHint from "./BannerPatternHint.svelte";
   import { isBannerBlock } from "../../../shared/banner_patterns.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
+  import { tryParseMix } from "../../../shared/block_mix.js";
   import { t } from "./i18n.svelte.js";
 
   interface Props {
@@ -62,6 +63,8 @@
      * tiles behind a different scrollbar.
      */
     onbrowse: (purpose: "fill" | "replace") => void;
+    /** Exchanges the two fields, weights and all. */
+    onswap: () => void;
     onfill: (block: string) => void;
     onreplace: (from: string, to: string) => void;
     /**
@@ -89,6 +92,7 @@
     replaceFrom,
     onreplacefromchange,
     onbrowse,
+    onswap,
     onfill,
     onreplace,
     ondelete,
@@ -113,17 +117,19 @@
   const none = $derived(selection === null);
 
   /*
-   * Whether the field names a banner, however it was spelled: a bare id, one
-   * with a design already in it, or a pasted `/give` command. A half-typed or
-   * malformed one is not a banner yet, and the hint waits.
+   * Whether any block in With is a banner, however it was spelled: a bare id,
+   * one with a design already in it, or a pasted `/give` command. A half-typed
+   * or malformed one is not a banner yet, and the hint waits.
    */
-  const holdsBanner = $derived.by(() => {
-    try {
-      return isBannerBlock(splitBlockInput(block).block.split("[", 1)[0]);
-    } catch {
-      return false;
-    }
-  });
+  const holdsBanner = $derived.by(() =>
+    (tryParseMix(block)?.entries ?? []).some((entry) => {
+      try {
+        return isBannerBlock(splitBlockInput(entry.block).block.split("[", 1)[0]);
+      } catch {
+        return false;
+      }
+    }),
+  );
 </script>
 
 <div class="tools">
@@ -170,63 +176,71 @@
     </div>
   {/if}
 
+  <!--
+    Replace first, then With, so the panel reads top to bottom the way the
+    sentence does: replace these with those. It used to read the other way --
+    "Block", then "Replace" with a button saying "Replace with the block
+    above" -- which made the field nearest the button the one it did *not*
+    write.
+
+    With is also what Fill writes and what the hand places, because it is the
+    active hotbar slot: one answer to "what am I holding".
+  -->
   <div class="group">
-    <label for="tool-to-block">{t("selection.block")}</label>
-    <div class="field">
-      <BlockPicker
-        id="tool-to-block"
-        value={block}
-        placeholder="minecraft:stone"
-        {blocks}
-        {placeable}
-        {legacy}
-        onchange={onblockchange}
-      />
-      <button
-        class="icon browse"
-        onclick={() => onbrowse("fill")}
-        title={t("selection.browse")}
-        aria-label={t("selection.browse")}
-      >
-        &#x229E;
-      </button>
-    </div>
+    <label for="tool-from-block">{t("selection.replace")}</label>
+    <BlockMixField
+      id="tool-from-block"
+      value={replaceFrom}
+      weights={false}
+      placeholder="minecraft:cobblestone"
+      {blocks}
+      {placeable}
+      {legacy}
+      onchange={onreplacefromchange}
+      onbrowse={() => onbrowse("replace")}
+    />
+  </div>
+
+  <div class="swap-row">
+    <button
+      class="swap"
+      type="button"
+      onclick={onswap}
+      disabled={replaceFrom.trim() === "" && block.trim() === ""}
+      title={t("selection.swap")}
+      aria-label={t("selection.swap")}
+    >
+      &#x21C5;
+    </button>
+  </div>
+
+  <div class="group">
+    <label for="tool-to-block">{t("selection.with")}</label>
+    <BlockMixField
+      id="tool-to-block"
+      value={block}
+      placeholder="minecraft:stone"
+      {blocks}
+      {placeable}
+      {legacy}
+      onchange={onblockchange}
+      onbrowse={() => onbrowse("fill")}
+    />
     {#if holdsBanner}
       <BannerPatternHint where="place" />
     {/if}
+  </div>
+
+  <div class="row">
     <button
-      class="primary wide"
+      class="primary"
       onclick={() => onfill(block)}
       disabled={busy || none || block.trim() === ""}
       title={none ? t("selection.selectFirst") : t("selection.fillHint")}
     >
       {t("selection.fill")}
     </button>
-  </div>
-
-  <div class="group">
-    <label for="tool-from-block">{t("selection.replace")}</label>
-    <div class="field">
-      <BlockPicker
-        id="tool-from-block"
-        value={replaceFrom}
-        placeholder="minecraft:cobblestone"
-        {blocks}
-        {placeable}
-        {legacy}
-        onchange={onreplacefromchange}
-      />
-      <button
-        class="icon browse"
-        onclick={() => onbrowse("replace")}
-        title={t("selection.browse")}
-        aria-label={t("selection.browse")}
-      >
-        &#x229E;
-      </button>
-    </div>
     <button
-      class="wide"
       onclick={() => onreplace(replaceFrom, block)}
       disabled={busy || none || replaceFrom.trim() === "" || block.trim() === ""}
       title={none ? t("selection.selectFirst") : t("selection.replaceHint")}
@@ -314,27 +328,16 @@
     color: var(--danger);
   }
 
-  /* The picker takes the room; the browse button is a fixed square beside it. */
-  .field {
+  .swap-row {
     display: flex;
-    align-items: stretch;
-    gap: 4px;
+    justify-content: center;
+    margin: -4px 0;
   }
 
-  .field :global(> *:first-child) {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-
-  .browse {
-    flex: none;
-    width: 26px;
-  }
-
-  .wide {
-    width: 100%;
-    padding: 6px 8px;
-    font-size: 12px;
+  .swap {
+    padding: 0 10px;
+    font-size: 14px;
+    line-height: 20px;
   }
 
   .tools :global(.hint) {

@@ -79,8 +79,14 @@ function closing(text: string, open: number): number {
   return -1;
 }
 
-/** `text` cut at every top-level `separator`, trimmed. */
-function topLevel(text: string, separator: string): string[] {
+/**
+ * `text` cut at every top-level `separator`, trimmed.
+ *
+ * Exported for `block_mix.ts`, which cuts a mix at its commas: a banner in a
+ * mix is full of the same commas, and two copies of this scan would come to
+ * disagree about quotes.
+ */
+export function topLevel(text: string, separator: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let quote: string | null = null;

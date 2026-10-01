@@ -462,6 +462,48 @@ index cost. The palette may grow underneath the pass -- `setBlock` interns `to`
 if it is new -- and reading past the end yields `undefined`, which is falsy and
 is the right answer: a row added during the pass *is* `to`.
 
+**A block field holds a mix, and one block is a mix of one.**
+`shared/block_mix.ts` is WorldEdit's random pattern, `70%stone,30%andesite`,
+and it is the one spelling: the With field, a hotbar slot and the edit wire all
+carry it. A single block is written as the bare id, so every string stored
+before mixes existed is a mix already and nothing migrates. The number before
+`%` is a **weight**, normalised against the others, as WorldEdit has it; the
+chips show the share it comes to.
+
+**A fill meets the shares exactly, and that is what the distribution is for.**
+`domain/mix.ts` gives every cell a value from the distribution, ranks them and
+cuts the ranking at the quotas, so 70/30 over a thousand cells is 700 and 300.
+The ranking is two linear passes over a 65,536-bin histogram with only the
+cells of a cut bin sorted, because a comparator sort of eight million cells is
+seconds. The value comes from the cell's position and a **seed** and never
+from `Math.random` at write time, so the same fill twice is the same picture;
+the dice in the field are what change it. A block placed **by hand** from a
+mix has no set of cells to share out, so `pickAt` decides that cell alone and
+meets the shares only on average.
+
+**The edit wire takes `regions[]`, already.** `EditRequest.fill` and `replace`
+name several boxes, which are one set of cells: `shared/regions.ts` walks their
+union once, so an overlap is written and counted once, and the gap between two
+boxes is never touched. No bitmap over the bounding box, because two small
+areas far apart have a bounding box of hundreds of millions of cells.
+
+**Replace is a list of blocks to look for, and it comes first.** The panel
+reads top to bottom as the sentence does -- Replace these, With those -- where
+it used to read "Block", then "Replace" with a button saying "with the block
+above". `from` is a list of patterns, each matched the way a single one always
+was. The Replace field hides weights and **keeps them in its text**, so ⇅ is
+lossless: swapping twice gives back exactly what was there.
+
+**A chip's states are edited on the chip, not on the document.**
+`BlockStateModal` rewrites the spelling a fill or a placement will write; the
+neighbour rules still have the last word when it lands. On a pre-Flattening
+document it is the grid of the id's `ID:DATA` rows instead, because the modern
+state editor would offer combinations that era cannot store. The tooltip says
+which `ID:DATA` a state will be stored as from `LegacyIndex.byState`, which
+`tests/formats.ts` holds equal to the MCEdit writer's own `byState` over the
+whole table -- a tooltip promising a number the file will not contain is worse
+than none.
+
 **A search that matches the namespace matches everything, and that was the
 load behind a total freeze.** `rank` in `block_search.ts` ended with
 `id.includes(query)` on the **namespaced** id. Every block here is

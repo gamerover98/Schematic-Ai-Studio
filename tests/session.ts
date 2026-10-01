@@ -21,6 +21,19 @@ import {
   setBlockEntity,
 } from "../src/main/domain/document.js";
 import { DOCUMENT_SIZE } from "../src/shared/settings.js";
+import { singleMix, type MixSpec } from "../src/shared/ipc.js";
+import {
+  addToMix,
+  effectiveShares,
+  formatMix,
+  parseMix,
+  pickAt,
+  quotas,
+  singleBlockMix,
+} from "../src/shared/block_mix.js";
+import { unionVolume } from "../src/shared/regions.js";
+import { assignByQuota } from "../src/main/domain/mix.js";
+import { coerceHotbar } from "../src/main/services/settings_coerce.js";
 import {
   DEFAULT_LEGACY_VERSION,
   dataVersionOf,
@@ -41,6 +54,7 @@ import {
   setSessionVoidBlock,
   OutsideDocumentError,
   ResizeWouldLoseBlocksError,
+  RegionCountError,
   resizeSession,
   closeDocument,
   copySelection,
@@ -212,9 +226,9 @@ try {
     const session = requireSession();
     const changed = applyEdit(session, {
       kind: "replace",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 },
-      from: { namespacedName: "minecraft:cobblestone" },
-      to: stone,
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 }],
+      from: [{ namespacedName: "minecraft:cobblestone" }],
+      to: singleMix(stone),
     });
     equal("the replace reports how many blocks it touched", changed, 2);
 
@@ -243,8 +257,8 @@ try {
     const before = documentState(session).canUndo;
     applyEdit(session, {
       kind: "fill",
-      region: { minX: 0, minY: 2, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 },
-      block: planks,
+      regions: [{ minX: 0, minY: 2, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 }],
+      mix: singleMix(planks),
     });
     equal("a fill is one step", documentState(session).undoLabel, "Fill with minecraft:oak_planks");
     check("...on top of the previous one", before);
@@ -272,8 +286,8 @@ try {
         try {
           applyEdit(session, {
             kind: "fill",
-            region: { minX: -1000, minY: -1000, minZ: -1000, maxX: 1000, maxY: 1000, maxZ: 1000 },
-            block: stone,
+            regions: [{ minX: -1000, minY: -1000, minZ: -1000, maxX: 1000, maxY: 1000, maxZ: 1000 }],
+            mix: singleMix(stone),
           });
           return false;
         } catch (err) {
@@ -285,8 +299,8 @@ try {
 
     const changed = applyEdit(session, {
       kind: "fill",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 },
-      block: stone,
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 }],
+      mix: singleMix(stone),
     });
     equal("a fill of the whole document still works", changed, 512);
 
@@ -298,8 +312,8 @@ try {
         try {
           applyEdit(huge, {
             kind: "fill",
-            region: { minX: 0, minY: 0, minZ: 0, maxX: 255, maxY: 255, maxZ: 255 },
-            block: stone,
+            regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 255, maxY: 255, maxZ: 255 }],
+            mix: singleMix(stone),
           });
           return false;
         } catch (err) {
@@ -1344,8 +1358,8 @@ console.log("\n--- two slabs are one block ---");
   const filled = newDocument({ width: 2, height: 4, length: 2 });
   applyEdit(filled, {
     kind: "fill",
-    region: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 1, maxZ: 0 },
-    block: slab("bottom"),
+    regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 1, maxZ: 0 }],
+    mix: singleMix(slab("bottom")),
   });
   equal("a fill never merges", getBlock(filled.doc, 0, 0, 0).properties.type, "bottom");
   equal("...at either level", getBlock(filled.doc, 0, 1, 0).properties.type, "bottom");
@@ -1404,8 +1418,8 @@ console.log("\n--- connecting to the neighbours ---");
   const filled = newDocument({ width: 6, height: 2, length: 6 });
   applyEdit(filled, {
     kind: "fill",
-    region: { minX: 0, minY: 0, minZ: 2, maxX: 4, maxY: 0, maxZ: 2 },
-    block: fence(),
+    regions: [{ minX: 0, minY: 0, minZ: 2, maxX: 4, maxY: 0, maxZ: 2 }],
+    mix: singleMix(fence()),
   });
   const line = (x: number) => getBlock(filled.doc, x, 0, 2).properties;
   equal("a filled line of fence connects along itself", [line(1).east, line(1).west], ["true", "true"]);
@@ -1420,8 +1434,8 @@ console.log("\n--- connecting to the neighbours ---");
   };
   applyEdit(walls, {
     kind: "fill",
-    region: { minX: 1, minY: 0, minZ: 1, maxX: 3, maxY: 0, maxZ: 1 },
-    block: wall,
+    regions: [{ minX: 1, minY: 0, minZ: 1, maxX: 3, maxY: 0, maxZ: 1 }],
+    mix: singleMix(wall),
   });
   const middle = getBlock(walls.doc, 2, 0, 1).properties;
   equal("a wall in a run connects both ways", [middle.east, middle.west], ["low", "low"]);
@@ -2187,8 +2201,8 @@ console.log("\n--- a solid block is not replaced ---");
     setBlock(session.doc, 6, 0, 6, iron);
     applyEdit(session, {
       kind: "fill",
-      region: { minX: 6, minY: 0, minZ: 6, maxX: 6, maxY: 0, maxZ: 6 },
-      block: { namespacedName: "minecraft:stone" },
+      regions: [{ minX: 6, minY: 0, minZ: 6, maxX: 6, maxY: 0, maxZ: 6 }],
+      mix: singleMix({ namespacedName: "minecraft:stone" }),
     });
     equal(
       "a fill still writes over a solid block",
@@ -2525,8 +2539,8 @@ console.log("\n--- growing to reach a region ---");
     const session = newDocument({ width: 8, height: 8, length: 8 });
     const changed = applyEdit(session, {
       kind: "fill",
-      region: { minX: 6, minY: 0, minZ: 0, maxX: 11, maxY: 1, maxZ: 1 },
-      block: stone,
+      regions: [{ minX: 6, minY: 0, minZ: 0, maxX: 11, maxY: 1, maxZ: 1 }],
+      mix: singleMix(stone),
     });
     equal("the fill writes every cell it asked for", changed, 6 * 2 * 2);
     equal("...and the document grew to hold them", documentState(session).size, [12, 8, 8]);
@@ -2554,8 +2568,8 @@ console.log("\n--- growing to reach a region ---");
     applyEdit(session, { kind: "setBlock", x: 0, y: 0, z: 0, block: stone });
     applyEdit(session, {
       kind: "fill",
-      region: { minX: -3, minY: 0, minZ: 0, maxX: -1, maxY: 0, maxZ: 0 },
-      block: stone,
+      regions: [{ minX: -3, minY: 0, minZ: 0, maxX: -1, maxY: 0, maxZ: 0 }],
+      mix: singleMix(stone),
     });
     equal("reaching below zero grows the box", documentState(session).size, [11, 8, 8]);
     equal(
@@ -2578,14 +2592,14 @@ console.log("\n--- growing to reach a region ---");
     const session = newDocument({ width: 8, height: 8, length: 8 });
     applyEdit(session, {
       kind: "fill",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 },
-      block: stone,
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 }],
+      mix: singleMix(stone),
     });
     applyEdit(session, {
       kind: "replace",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 40, maxY: 0, maxZ: 0 },
-      from: stone,
-      to: { namespacedName: "minecraft:oak_planks", properties: {} },
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 40, maxY: 0, maxZ: 0 }],
+      from: [stone],
+      to: singleMix({ namespacedName: "minecraft:oak_planks", properties: {} }),
     });
     equal("a replace past the edge leaves the size alone", documentState(session).size, [8, 8, 8]);
     equal(
@@ -2603,8 +2617,8 @@ console.log("\n--- growing to reach a region ---");
     try {
       applyEdit(session, {
         kind: "fill",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 4000, maxY: 4000, maxZ: 4000 },
-        block: stone,
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 4000, maxY: 4000, maxZ: 4000 }],
+        mix: singleMix(stone),
       });
     } catch (err) {
       raised = err;
@@ -2625,8 +2639,8 @@ console.log("\n--- crop on save ---");
   const session = newDocument({ width: 24, height: 24, length: 24 });
   applyEdit(session, {
     kind: "fill",
-    region: { minX: 8, minY: 3, minZ: 5, maxX: 11, maxY: 4, maxZ: 9 },
-    block: { namespacedName: "minecraft:stone", properties: {} },
+    regions: [{ minX: 8, minY: 3, minZ: 5, maxX: 11, maxY: 4, maxZ: 9 }],
+    mix: singleMix({ namespacedName: "minecraft:stone", properties: {} }),
   });
 
   const target = path.join(workDir, "trimmed.schem");
@@ -2673,8 +2687,8 @@ for (const format of ["sponge3", "sponge2", "mcedit"] as const) {
   const session = newDocument({ width: 16, height: 16, length: 16 }, format);
   applyEdit(session, {
     kind: "fill",
-    region: { minX: 4, minY: 2, minZ: 4, maxX: 6, maxY: 3, maxZ: 6 },
-    block: { namespacedName: "minecraft:stone", properties: {} },
+    regions: [{ minX: 4, minY: 2, minZ: 4, maxX: 6, maxY: 3, maxZ: 6 }],
+    mix: singleMix({ namespacedName: "minecraft:stone", properties: {} }),
   });
   setWorldEditAnchor(session.doc, session.history, [5, 2, 5], "Set the anchor");
 
@@ -2716,8 +2730,8 @@ console.log("\n--- checkpoints ---");
   // exists for and the case a checkpoint must *not* apply it to.
   applyEdit(session, {
     kind: "fill",
-    region: { minX: 2, minY: 0, minZ: 2, maxX: 5, maxY: 1, maxZ: 5 },
-    block: stone,
+    regions: [{ minX: 2, minY: 0, minZ: 2, maxX: 5, maxY: 1, maxZ: 5 }],
+    mix: singleMix(stone),
   });
 
   const before = await takeCheckpoint(session, [{ role: "user", content: "the first turn" }]);
@@ -2737,8 +2751,8 @@ console.log("\n--- checkpoints ---");
   // Now change it, and go back.
   applyEdit(session, {
     kind: "fill",
-    region: { minX: 10, minY: 0, minZ: 10, maxX: 20, maxY: 5, maxZ: 20 },
-    block: stone,
+    regions: [{ minX: 10, minY: 0, minZ: 10, maxX: 20, maxY: 5, maxZ: 20 }],
+    mix: singleMix(stone),
   });
   const grown = documentState(session).blockCount;
   check("the second edit landed", grown > 4 * 2 * 4, String(grown));
@@ -3653,8 +3667,8 @@ console.log("\n--- redstone needs a floor ---");
     "a fill of dust in mid-air is not refused",
     applyEdit(filled, {
       kind: "fill",
-      region: { minX: 0, minY: 2, minZ: 0, maxX: 3, maxY: 2, maxZ: 0 },
-      block: { namespacedName: "minecraft:redstone_wire", properties: {} },
+      regions: [{ minX: 0, minY: 2, minZ: 0, maxX: 3, maxY: 2, maxZ: 0 }],
+      mix: singleMix({ namespacedName: "minecraft:redstone_wire", properties: {} }),
     }),
     4,
   );
@@ -3716,8 +3730,8 @@ console.log("\n--- dimensions ---");
       session,
       {
         kind: "fill",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 0 },
-        block: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 0 }],
+        mix: singleMix({ namespacedName: "minecraft:stone" }),
       },
       { autoGrow },
     );
@@ -3755,8 +3769,8 @@ console.log("\n--- dimensions ---");
       session,
       {
         kind: "fill",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 },
-        block: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }],
+        mix: singleMix({ namespacedName: "minecraft:stone" }),
       },
       { autoGrow: false },
     );
@@ -4908,9 +4922,9 @@ console.log("\n--- a replace names a block, not one of its states ---");
       "a bare name matches every state of that block",
       applyEdit(session, {
         kind: "replace",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
-        from: { namespacedName: "minecraft:oak_stairs" },
-        to: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 }],
+        from: [{ namespacedName: "minecraft:oak_stairs" }],
+        to: singleMix({ namespacedName: "minecraft:stone" }),
       }),
       3,
     );
@@ -4939,9 +4953,9 @@ console.log("\n--- a replace names a block, not one of its states ---");
       "a stated from matches only that state",
       applyEdit(session, {
         kind: "replace",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
-        from: stateful("north"),
-        to: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 }],
+        from: [stateful("north")],
+        to: singleMix({ namespacedName: "minecraft:stone" }),
       }),
       1,
     );
@@ -4964,9 +4978,9 @@ console.log("\n--- a replace names a block, not one of its states ---");
       "replacing something that is not there changes nothing",
       applyEdit(session, {
         kind: "replace",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 1 },
-        from: { namespacedName: "minecraft:deepslate" },
-        to: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 1 }],
+        from: [{ namespacedName: "minecraft:deepslate" }],
+        to: singleMix({ namespacedName: "minecraft:stone" }),
       }),
       0,
     );
@@ -5005,9 +5019,9 @@ console.log("\n--- a replace names a block, not one of its states ---");
       "...and the name a person types still matches them",
       applyEdit(session, {
         kind: "replace",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
-        from: { namespacedName: "minecraft:oak_fence" },
-        to: { namespacedName: "minecraft:cobblestone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 }],
+        from: [{ namespacedName: "minecraft:oak_fence" }],
+        to: singleMix({ namespacedName: "minecraft:cobblestone" }),
       }),
       4,
     );
@@ -5073,8 +5087,8 @@ console.log("\n--- a legacy schematic refuses blocks that did not exist yet ---"
           session,
           {
             kind: "fill",
-            region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 },
-            block: { namespacedName: "minecraft:deepslate" },
+            regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }],
+            mix: singleMix({ namespacedName: "minecraft:deepslate" }),
           },
           legacy,
         ),
@@ -5087,9 +5101,9 @@ console.log("\n--- a legacy schematic refuses blocks that did not exist yet ---"
           session,
           {
             kind: "replace",
-            region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 },
-            from: { namespacedName: "minecraft:stone" },
-            to: { namespacedName: "minecraft:deepslate" },
+            regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }],
+            from: [{ namespacedName: "minecraft:stone" }],
+            to: singleMix({ namespacedName: "minecraft:deepslate" }),
           },
           legacy,
         ),
@@ -5112,9 +5126,9 @@ console.log("\n--- a legacy schematic refuses blocks that did not exist yet ---"
         session,
         {
           kind: "replace",
-          region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 },
-          from: { namespacedName: "minecraft:deepslate" },
-          to: { namespacedName: "minecraft:stone" },
+          regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }],
+          from: [{ namespacedName: "minecraft:deepslate" }],
+          to: singleMix({ namespacedName: "minecraft:stone" }),
         },
         legacy,
       ),
@@ -5350,9 +5364,9 @@ console.log("\n--- a banner is placed with its design ---");
     setBlock(session.doc, 3, 0, 0, { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" } });
     applyEdit(session, {
       kind: "replace",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 },
-      from: { namespacedName: "minecraft:stone" },
-      to: { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" }, bannerPatterns: PATTERNS },
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }],
+      from: [{ namespacedName: "minecraft:stone" }],
+      to: singleMix({ namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" }, bannerPatterns: PATTERNS }),
     });
     check("a replace writes the design where it replaced", getBlockEntity(session.doc, 0, 0, 0) !== null);
     equal("...and not onto a banner that was already there", getBlockEntity(session.doc, 3, 0, 0), null);
@@ -5363,8 +5377,8 @@ console.log("\n--- a banner is placed with its design ---");
     const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_20_4"));
     applyEdit(session, {
       kind: "fill",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
-      block: { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" }, bannerPatterns: PATTERNS },
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 }],
+      mix: singleMix({ namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" }, bannerPatterns: PATTERNS }),
     });
     const both = [0, 1].map((x) => getBlockEntity(session.doc, x, 0, 0));
     check(
@@ -5617,6 +5631,187 @@ console.log("\n--- a banner already placed is repainted, turned and kept ---");
     equal("...while a block with no such property is given none", getBlock(session.doc, 2, 0, 0).properties, {});
     closeDocument();
   }
+}
+
+console.log("\n--- a mix of blocks, shared out exactly ---");
+{
+  const banner =
+    'minecraft:white_banner[banner_patterns=[{pattern:"mojang",color:"red"},{pattern:"border",color:"blue"}]]';
+  const mix = parseMix(`#random{seed=7}70%minecraft:stone,30%${banner}`);
+  equal("a weighted mix reads its weights", mix.entries.map((entry) => entry.weight), [70, 30]);
+  equal("...keeps a banner's commas inside its own entry", mix.entries[1].block, banner);
+  equal("...and its seed", mix.distribution, { kind: "random", seed: 7 });
+  equal("it is written back the way it was read", parseMix(formatMix(mix)), mix);
+  equal("a plain block is a mix of one", parseMix("minecraft:oak_stairs[facing=east]").entries, [
+    { block: "minecraft:oak_stairs[facing=east]", weight: 1 },
+  ]);
+  equal("...and comes back as itself", formatMix(singleBlockMix("minecraft:stone")), "minecraft:stone");
+  equal("a weight left out is one, as WorldEdit has it", parseMix("2%stone,dirt").entries.map((e) => e.weight), [2, 1]);
+  equal("weights are shares of their sum", effectiveShares([{ weight: 2 }, { weight: 1 }, { weight: 1 }]), [0.5, 0.25, 0.25]);
+  equal(
+    "a block added takes an equal footing",
+    effectiveShares(addToMix(parseMix("70%stone,30%dirt"), "gravel").entries).map((share) => Math.round(share * 1000)),
+    [467, 200, 333],
+  );
+  check(
+    "every weight zero is refused",
+    (() => {
+      try {
+        parseMix("0%stone,0%dirt");
+        return false;
+      } catch {
+        return true;
+      }
+    })(),
+  );
+  equal("quotas sum to the cells, largest remainder first", quotas([1 / 3, 1 / 3, 1 / 3], 10), [4, 3, 3]);
+
+  // The bins have to split exactly however lumpy the values are.
+  const values = Float64Array.from({ length: 1000 }, (_unused, i) => (i % 7 === 0 ? 0.5 : (i * 7919) % 1000));
+  const assigned = assignByQuota(values, [0.7, 0.3]);
+  equal("a ranked split meets 70/30 exactly", [0, 1].map((k) => assigned.filter((v) => v === k).length), [700, 300]);
+  const highest = [...values.keys()].sort((a, b) => values[b] - values[a] || b - a)[0];
+  equal("...giving the highest values the last share", assigned[highest], 1);
+
+  const fillMix = (session: DocumentSession, spec: MixSpec, seed: number) =>
+    applyEdit(session, {
+      kind: "fill",
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 9, maxZ: 9 }],
+      mix: { ...spec, distribution: { kind: "random", seed } },
+    });
+  const seventyThirty: MixSpec = {
+    entries: [
+      { block: { namespacedName: "minecraft:stone" }, weight: 70 },
+      { block: { namespacedName: "minecraft:andesite" }, weight: 30 },
+    ],
+    distribution: { kind: "random", seed: 0 },
+  };
+  const tally = (session: DocumentSession) => {
+    const counts: Record<string, number> = {};
+    for (let x = 0; x < 10; x += 1)
+      for (let y = 0; y < 10; y += 1)
+        for (let z = 0; z < 10; z += 1) {
+          const name = getBlock(session.doc, x, y, z).namespacedName;
+          counts[name] = (counts[name] ?? 0) + 1;
+        }
+    // Sorted, so the comparison is about the counts and not the walk order.
+    return Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)));
+  };
+  const picture = (session: DocumentSession) => {
+    const cells: string[] = [];
+    for (let x = 0; x < 10; x += 1)
+      for (let y = 0; y < 10; y += 1)
+        for (let z = 0; z < 10; z += 1) cells.push(getBlock(session.doc, x, y, z).namespacedName);
+    return cells.join(",");
+  };
+
+  const first = newDocument({ width: 10, height: 10, length: 10 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  equal("a 70/30 fill writes every cell", fillMix(first, seventyThirty, 42), 1000);
+  equal("...exactly 700 and 300", tally(first), { "minecraft:andesite": 300, "minecraft:stone": 700 });
+  equal("...as one undo step", documentState(first).undoLabel, "Fill with a mix of 2 blocks");
+  const one = picture(first);
+  closeDocument();
+
+  const second = newDocument({ width: 10, height: 10, length: 10 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  fillMix(second, seventyThirty, 42);
+  check("the same seed is the same picture", picture(second) === one);
+  closeDocument();
+
+  const third = newDocument({ width: 10, height: 10, length: 10 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  fillMix(third, seventyThirty, 43);
+  check("another seed is another picture", picture(third) !== one);
+  equal("...with the same shares", tally(third), { "minecraft:andesite": 300, "minecraft:stone": 700 });
+
+  // Replace: a list of blocks to look for, and a mix to put in their place.
+  applyEdit(third, {
+    kind: "replace",
+    regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 9, maxZ: 9 }],
+    from: [{ namespacedName: "minecraft:stone" }, { namespacedName: "minecraft:andesite" }],
+    to: {
+      entries: [
+        { block: { namespacedName: "minecraft:dirt" }, weight: 1 },
+        { block: { namespacedName: "minecraft:gravel" }, weight: 1 },
+      ],
+      distribution: { kind: "random", seed: 5 },
+    },
+  });
+  equal("a replace takes every block it was told to look for", tally(third), {
+    "minecraft:dirt": 500,
+    "minecraft:gravel": 500,
+  });
+  equal("...and says what it did", documentState(third).undoLabel, "Replace 2 blocks with a mix of 2 blocks");
+  const paletteBefore = third.doc.palette.length;
+  const missed = applyEdit(third, {
+    kind: "replace",
+    regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 9, maxZ: 9 }],
+    from: [{ namespacedName: "minecraft:diamond_block" }],
+    to: singleMix({ namespacedName: "minecraft:emerald_block" }),
+  });
+  equal("a replace that finds nothing changes nothing", missed, 0);
+  equal("...and interns nothing", third.doc.palette.length, paletteBefore);
+  closeDocument();
+
+  // Two regions that overlap are one set of cells.
+  const overlap = newDocument({ width: 8, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  const regions = [
+    { minX: 0, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 0 },
+    { minX: 3, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 },
+  ];
+  equal("overlapping regions count their shared cells once", unionVolume(regions), 8);
+  equal(
+    "a fill over them writes each cell once",
+    applyEdit(overlap, { kind: "fill", regions, mix: singleMix({ namespacedName: "minecraft:stone" }) }),
+    8,
+  );
+  closeDocument();
+  const split = newDocument({ width: 8, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  applyEdit(split, {
+    kind: "fill",
+    regions: [
+      { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+      { minX: 6, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 },
+    ],
+    mix: singleMix({ namespacedName: "minecraft:stone" }),
+  });
+  equal(
+    "...and the gap between two regions is left alone",
+    [0, 3, 7].map((x) => getBlock(split.doc, x, 0, 0).namespacedName),
+    ["minecraft:stone", "minecraft:air", "minecraft:stone"],
+  );
+  check(
+    "an edit naming no region is refused by name",
+    (() => {
+      try {
+        applyEdit(split, { kind: "fill", regions: [], mix: singleMix({ namespacedName: "minecraft:stone" }) });
+        return false;
+      } catch (err) {
+        return err instanceof RegionCountError;
+      }
+    })(),
+  );
+  closeDocument();
+
+  // One cell decided alone: the shares hold on average, and a cell is stable.
+  const handMix = parseMix("#random{seed=3}3%stone,1%dirt");
+  let stones = 0;
+  for (let x = 0; x < 40; x += 1)
+    for (let z = 0; z < 40; z += 1) if (pickAt(handMix, x, 0, z).block === "stone") stones += 1;
+  check(
+    "a block placed by hand from a mix meets its share on average",
+    Math.abs(stones / 1600 - 0.75) < 0.05,
+    String(stones),
+  );
+  check("...and the same cell always gets the same block", pickAt(handMix, 5, 6, 7) === pickAt(handMix, 5, 6, 7));
+
+  equal(
+    "a hotbar slot may hold a mix",
+    coerceHotbar({ slots: ["70%stone,30%dirt"], slot: 0 }).slots[0],
+    "70%stone,30%dirt",
+  );
+  check(
+    "...but a slot of nothing but air is still the default",
+    coerceHotbar({ slots: ["50%air,50%minecraft:air"], slot: 0 }).slots[0] !== "50%air,50%minecraft:air",
+  );
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

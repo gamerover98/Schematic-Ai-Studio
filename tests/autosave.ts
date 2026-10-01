@@ -18,6 +18,7 @@ import path from "path";
 
 import { getBlock, type SchematicDocument } from "../src/main/domain/document.js";
 import { isDirty } from "../src/main/domain/history.js";
+import { singleMix } from "../src/shared/ipc.js";
 import {
   clearAutosave,
   readAutosave,
@@ -100,8 +101,8 @@ try {
     const session = await openDocument(filePath);
     applyEdit(session, {
       kind: "fill",
-      region: { minX: 0, minY: 1, minZ: 0, maxX: 2, maxY: 1, maxZ: 2 },
-      block: stone,
+      regions: [{ minX: 0, minY: 1, minZ: 0, maxX: 2, maxY: 1, maxZ: 2 }],
+      mix: singleMix(stone),
     });
     const workInProgress = grid(session.doc);
     check("the document is dirty before the crash", isDirty(session.history));

@@ -21,6 +21,7 @@ import type {
   DocumentState,
   EditRequest,
   MeshPayload,
+  MixSpec,
   PaletteCount,
   RegionSpec,
 } from "../../shared/ipc.js";
@@ -38,6 +39,7 @@ import {
   paletteTally,
   regionVolume,
   setBlock,
+  voxelIndex,
   type Region,
   type SchematicDocument,
 } from "../domain/document.js";
@@ -115,7 +117,6 @@ import { peelEmptyFaces } from "../domain/shrink.js";
 import {
   bannerFormatOf,
   checkBannerPatterns,
-  regionCells,
   restateBanners,
   stampBanner,
 } from "../domain/banner_place.js";
@@ -127,6 +128,14 @@ import {
   type BannerLayer,
 } from "../pipeline/banner_nbt.js";
 import { isBannerBlock } from "../../shared/banner_patterns.js";
+import {
+  distributionValue,
+  effectiveShares,
+  MAX_MIX_ENTRIES,
+  MixSyntaxError,
+} from "../../shared/block_mix.js";
+import { forEachUnionCell, MAX_BOXES, unionBounds, unionVolume } from "../../shared/regions.js";
+import { assignByQuota } from "../domain/mix.js";
 
 export interface DocumentSession {
   readonly doc: SchematicDocument;
@@ -482,6 +491,24 @@ export class EditTooLargeError extends Error {
         `${MAX_EDIT_VOLUME.toLocaleString()} an edit may touch at once.`,
     );
     this.name = "EditTooLargeError";
+  }
+}
+
+/**
+ * A fill or a replace that names no region, or more than `MAX_BOXES` of them.
+ *
+ * Neither comes from the window -- the buttons need a selection, and a
+ * selection is a handful of areas -- so this is a caller's mistake, said by
+ * name rather than answered with `changed: 0`.
+ */
+export class RegionCountError extends Error {
+  constructor(count: number) {
+    super(
+      count === 0
+        ? "The edit names no region to work in. Select one first."
+        : `The edit names ${count} regions; at most ${MAX_BOXES} may be edited at once.`,
+    );
+    this.name = "RegionCountError";
   }
 }
 
@@ -1407,18 +1434,26 @@ export function applyEdit(
    * are already there, and there are none outside the box -- growing first would
    * add air and then replace nothing in it, which is a resize the user did not
    * ask for and would have to undo.
+   *
+   * The regions are one set of cells. The growth is the one their union needs,
+   * and a cell two of them share is written once -- `shared/regions.ts`.
    */
-  const asked = orderRegion(request.region);
-  const wantedGrowth = request.kind === "fill" ? growthToInclude(doc, asked) : null;
+  if (request.regions.length === 0 || request.regions.length > MAX_BOXES) {
+    throw new RegionCountError(request.regions.length);
+  }
+  const asked = request.regions.map(orderRegion);
+  const bounds = unionBounds(asked) as Region;
+  const wantedGrowth = request.kind === "fill" ? growthToInclude(doc, bounds) : null;
   if (wantedGrowth !== null && !mayGrow) throw new OutsideDocumentError();
   const growth = wantedGrowth;
 
   // In the document's coordinates *after* the resize: existing content moves by
-  // `shift`, and so does the region naming the cells to write.
-  const region =
-    growth === null ? normalizeRegion(doc, asked) : shiftRegion(asked, growth.shift);
+  // `shift`, and so do the regions naming the cells to write.
+  const regions = asked.map((region) =>
+    growth === null ? normalizeRegion(doc, region) : shiftRegion(region, growth.shift),
+  );
 
-  const volume = regionVolume(region);
+  const volume = unionVolume(regions);
   if (volume > MAX_EDIT_VOLUME) {
     throw new EditTooLargeError(volume);
   }
@@ -1426,55 +1461,133 @@ export function applyEdit(
     throw new DocumentTooLargeError(extentVolume(growth.size));
   }
 
+  const mix = request.kind === "fill" ? request.mix : request.to;
+  if (mix.entries.length === 0) throw new MixSyntaxError("Name at least one block to write.");
+  if (mix.entries.length > MAX_MIX_ENTRIES) {
+    throw new MixSyntaxError(`A mix holds at most ${MAX_MIX_ENTRIES} blocks; this one names ${mix.entries.length}.`);
+  }
+  const written = mix.entries.map((entry) => placeable(toEntry(entry.block)));
+  const layers = mix.entries.map((entry) => layersOf(entry.block));
+  written.forEach((entry, index) => {
+    const own = layers[index];
+    if (own !== null) checkBannerPatterns(doc, entry, own);
+  });
+  const toLabel = written.length === 1 ? written[0].namespacedName : `a mix of ${written.length} blocks`;
+
   if (request.kind === "fill") {
-    const entry = placeable(toEntry(request.block));
-    const layers = layersOf(request.block);
-    if (layers !== null) checkBannerPatterns(doc, entry, layers);
-    return runTransaction(doc, history, `Fill with ${entry.namespacedName}`, (tx) => {
+    return runTransaction(doc, history, `Fill with ${toLabel}`, (tx) => {
       // One transaction, so growing and filling are one undo step -- and the
       // resize goes in first, because a block delta recorded before it would be
       // an index into the old shape. `history.ts` flushes on resize for exactly
       // that reason.
       if (growth !== null) tx.resize(growth.size, growth.shift);
-      const changed = tx.fill(region, entry);
-      // Every banner in the box, including one that already held this state
-      // and so was not counted as changed: it was asked for with this design.
-      if (layers !== null) stampBanner(doc, tx, regionCells(region), entry, layers);
-      return changed;
+      return writeMix(doc, tx, regions, mix, written, layers, null);
     });
   }
 
   // `from` is a pattern over what is already there, so it is deliberately not
   // guarded: refusing it would make "take out the block some other tool wrote"
   // impossible, which is exactly when somebody needs it.
-  if (request.from.bannerPatterns !== undefined) {
+  if (request.from.length === 0) throw new MixSyntaxError("Name at least one block to replace.");
+  if (request.from.some((block) => block.bannerPatterns !== undefined)) {
     throw new BannerPatternError(
       "The block being replaced is matched by its name and states; banner patterns only go on the block that replaces it.",
     );
   }
-  const from = toEntry(request.from);
-  const to = placeable(toEntry(request.to));
-  const layers = layersOf(request.to);
-  if (layers !== null) checkBannerPatterns(doc, to, layers);
-  return runTransaction(
-    doc,
-    history,
-    `Replace ${from.namespacedName} with ${to.namespacedName}`,
-    (tx) => {
-      // The cells the replace is about to write, found before it writes them:
-      // afterwards they are indistinguishable from the ones that already held
-      // `to`, and those were not asked to change.
-      const matched =
-        layers === null
-          ? []
-          : [...regionCells(region)].filter(({ x, y, z }) =>
-              matchesBlockPattern(getBlock(doc, x, y, z), from),
-            );
-      const changed = tx.replace(region, from, to);
-      if (layers !== null) stampBanner(doc, tx, matched, to, layers);
-      return changed;
-    },
+  const from = request.from.map(toEntry);
+  const fromLabel = from.length === 1 ? from[0].namespacedName : `${from.length} blocks`;
+  return runTransaction(doc, history, `Replace ${fromLabel} with ${toLabel}`, (tx) =>
+    writeMix(doc, tx, regions, mix, written, layers, from),
   );
+}
+
+/**
+ * Writes a mix into the union of `regions`, or into the cells of it that hold
+ * one of `from`.
+ *
+ * Three walks over the same cells in the same order, which is
+ * `forEachUnionCell`'s contract: the first decides which cells are candidates
+ * and gives each a value, `assignByQuota` shares them out exactly, and the
+ * last writes. The candidates are decided **before** anything is written,
+ * because afterwards a replaced cell is indistinguishable from one that
+ * already held the block it was replaced with -- and the palette grows under
+ * the writes, which `replaceAny` already knows about.
+ *
+ * A banner entry is stamped on every cell it was given, including one that
+ * already held that state and so was not counted as changed: it was asked for
+ * with this design.
+ */
+function writeMix(
+  doc: SchematicDocument,
+  tx: TransactionScope,
+  regions: readonly Region[],
+  mix: MixSpec,
+  written: readonly PaletteEntry[],
+  layers: readonly (BannerLayer[] | null)[],
+  from: readonly PaletteEntry[] | null,
+): number {
+  /*
+   * Decided once over the palette, read per cell -- `replaceAny`'s trade. A
+   * miss interns nothing, so asking to replace a block the schematic does not
+   * hold leaves no palette entry behind.
+   */
+  const wanted =
+    from === null
+      ? null
+      : Uint8Array.from(doc.palette, (entry) => (from.some((pattern) => matchesBlockPattern(entry, pattern)) ? 1 : 0));
+  if (wanted !== null && !wanted.includes(1)) return 0;
+
+  const total = unionVolume(regions);
+  const candidate = wanted === null ? null : new Uint8Array(total);
+  let candidates = total;
+  if (wanted !== null && candidate !== null) {
+    candidates = 0;
+    let at = 0;
+    forEachUnionCell(regions, (x, y, z) => {
+      if (wanted[doc.voxels[voxelIndex(doc, x, y, z)]] === 1) {
+        candidate[at] = 1;
+        candidates += 1;
+      }
+      at += 1;
+    });
+  }
+  if (candidates === 0) return 0;
+
+  let choice: Uint8Array;
+  if (written.length === 1) {
+    choice = new Uint8Array(candidates);
+  } else {
+    const values = new Float32Array(candidates);
+    let at = 0;
+    let k = 0;
+    forEachUnionCell(regions, (x, y, z) => {
+      if (candidate === null || candidate[at] === 1) {
+        values[k] = distributionValue(mix.distribution, x, y, z);
+        k += 1;
+      }
+      at += 1;
+    });
+    choice = assignByQuota(values, effectiveShares(mix.entries));
+  }
+
+  const banners = layers.map((own) => (own === null ? null : ([] as { x: number; y: number; z: number }[])));
+  let changed = 0;
+  let at = 0;
+  let k = 0;
+  forEachUnionCell(regions, (x, y, z) => {
+    if (candidate === null || candidate[at] === 1) {
+      const entry = choice[k];
+      if (tx.setBlock(x, y, z, written[entry])) changed += 1;
+      banners[entry]?.push({ x, y, z });
+      k += 1;
+    }
+    at += 1;
+  });
+  banners.forEach((cells, index) => {
+    const own = layers[index];
+    if (cells !== null && own !== null) stampBanner(doc, tx, cells, written[index], own);
+  });
+  return changed;
 }
 
 /**

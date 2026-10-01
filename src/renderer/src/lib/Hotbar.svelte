@@ -25,6 +25,7 @@
    */
   import { HOTBAR_SLOTS } from "../../../shared/settings.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
+  import { describeMix, tryParseMix } from "../../../shared/block_mix.js";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { t } from "./i18n.svelte.js";
   import { isTyping } from "./typing.js";
@@ -61,6 +62,10 @@
    * that is `/give @p m…` under every one of them.
    */
   function label(id: string): string {
+    const mix = tryParseMix(id);
+    if (mix !== null && mix.entries.length > 1) {
+      return t("hotbar.mix", { first: label(mix.entries[0].block), more: mix.entries.length - 1 });
+    }
     let block = id;
     try {
       block = splitBlockInput(id).block;
@@ -81,11 +86,24 @@
    */
   const icons = $derived(blockIcons());
 
+  /**
+   * The block a slot is drawn as: itself, or the first block of a mix. The
+   * mix's text is not a block, and asking for an icon of it would intern a
+   * block called `70%stone,30%andesite` on the way.
+   */
+  function iconOf(id: string): string {
+    return tryParseMix(id)?.entries[0]?.block ?? id;
+  }
+
+  function isMix(id: string): boolean {
+    return (tryParseMix(id)?.entries.length ?? 1) > 1;
+  }
+
   $effect(() => {
     if (!visible) return;
     // Read, so the warm-up landing re-draws these rather than leaving them wrong.
     void iconsReady();
-    requestBlockIcons(slots);
+    requestBlockIcons(slots.map(iconOf));
   });
 
   function step(by: number): void {
@@ -151,13 +169,16 @@
           event.preventDefault();
           onedit?.(index);
         }}
-        title={`${id} — ${t("hotbar.slotHint", { key: String(index + 1) })}`}
+        title={`${isMix(id) ? describeMix(tryParseMix(id)!) : id} — ${t("hotbar.slotHint", { key: String(index + 1) })}`}
         aria-pressed={index === active}
       >
-        {#if icons.get(id)}
-          <img src={icons.get(id)} alt="" width="26" height="26" />
+        {#if icons.get(iconOf(id))}
+          <img src={icons.get(iconOf(id))} alt="" width="26" height="26" />
         {:else}
           <span class="pending" aria-hidden="true"></span>
+        {/if}
+        {#if isMix(id)}
+          <span class="mix" aria-hidden="true">{t("hotbar.mixBadge")}</span>
         {/if}
         <span class="key" aria-hidden="true">{index + 1}</span>
         <span class="name">{label(id)}</span>
@@ -256,6 +277,20 @@
     left: 4px;
     font-size: 9px;
     opacity: 0.6;
+  }
+
+  /* A slot holding several blocks says so, in the corner opposite the key. */
+  .mix {
+    position: absolute;
+    top: 2px;
+    right: 3px;
+    padding: 0 3px;
+    border-radius: 3px;
+    background: var(--accent);
+    color: var(--bg-panel);
+    font-size: 8px;
+    font-weight: 700;
+    line-height: 12px;
   }
 
   /*

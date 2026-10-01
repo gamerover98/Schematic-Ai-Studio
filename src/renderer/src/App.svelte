@@ -112,9 +112,20 @@ import {
     type RecoveryOffer,
     type ClipboardInfo,
     type MeshPayload,
+    type MixSpec,
     type RegionSpec,
     type TransformRequest,
+    singleMix,
   } from "../../shared/ipc.js";
+  import {
+    addToMix,
+    formatMix,
+    freshSeed,
+    parseMix,
+    pickAt,
+    tryParseMix,
+  } from "../../shared/block_mix.js";
+  import { canonicalBlock } from "./lib/block_spelling.js";
   import type { SchematicFormat } from "../../shared/schematic.js";
 import { schematicExtension } from "../../shared/schematic.js";
 import type { FileKind } from "../../shared/ipc.js";
@@ -533,6 +544,34 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   }
 
   /**
+   * A field's text with one more block in it, on an equal footing with the
+   * others -- what the block list does when it was opened from a field that
+   * may hold several. An empty field becomes that block alone.
+   */
+  function mixWith(text: string, block: string): string {
+    const canonical = canonicalBlock(block, legacyForDoc);
+    if (text.trim() === "") return canonical;
+    const mix = tryParseMix(text);
+    if (mix === null) return canonical;
+    const next = addToMix(mix, canonical);
+    return formatMix(
+      next.entries.length === 2 && next.distribution.seed === 0
+        ? { ...next, distribution: { ...next.distribution, seed: freshSeed() } }
+        : next,
+    );
+  }
+
+  /**
+   * Replace and With trade places, weights and all. The weights ride along
+   * hidden in Replace, so swapping twice gives back exactly what was there.
+   */
+  function swapBlockFields(): void {
+    const held = activeBlock;
+    holdBlock(replaceBlock.trim() === "" ? held : replaceBlock);
+    replaceBlock = held;
+  }
+
+  /**
    * The middle button, on a block: hold what it is made of.
    *
    * The viewer sends a coordinate because it has nothing else — the mesh is one
@@ -821,7 +860,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (busy) return;
     let held: BlockSpec;
     try {
-      held = parseBlock(placingBlock);
+      /*
+       * A slot holding a mix places one of its blocks, chosen by the cell --
+       * so clicking the same cell twice gives the same block, and the shares
+       * hold on average across a wall built by hand.
+       */
+      const mix = parseMix(placingBlock);
+      held = parseBlock(pickAt(mix, at.x, at.y, at.z).block);
     } catch (err) {
       // A held block that cannot be read -- a pasted command cut short -- is
       // said out loud, not thrown past the click into the failure handler.
@@ -3039,6 +3084,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   }
 
   /**
+   * A block field's text as the mix main fills with: each block parsed here,
+   * where `35:14` and a pasted `/give` become blocks, and the weights and the
+   * distribution carried as they are. Throws what `parseMix` and `parseBlock`
+   * throw; every caller is inside `runDocument`, which says it.
+   */
+  function mixSpecOf(text: string): MixSpec {
+    const mix = parseMix(text);
+    return {
+      entries: mix.entries.map((entry) => ({ block: parseBlock(entry.block), weight: entry.weight })),
+      distribution: { ...mix.distribution },
+    };
+  }
+
+  /**
    * Rewrites one of the inspected block's states.
    *
    * There is no "change a property" operation in the domain, and there should
@@ -3798,7 +3857,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (!selection) return;
     const region = selection;
     const outcome = await runDocument(t("task.deleting"), () =>
-      api().applyEdit({ kind: "fill", region: forIpc(region), block: { namespacedName: "minecraft:air" } }),
+      api().applyEdit({
+        kind: "fill",
+        regions: [forIpc(region)],
+        mix: singleMix({ namespacedName: "minecraft:air" }),
+      }),
     );
     reportChange(outcome?.changed ?? null);
   }
@@ -3807,7 +3870,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (!selection) return;
     const region = selection;
     const outcome = await runDocument(t("task.filling"), () =>
-      api().applyEdit({ kind: "fill", region: forIpc(region), block: parseBlock(block) }),
+      api().applyEdit({ kind: "fill", regions: [forIpc(region)], mix: mixSpecOf(block) }),
     );
     reportChange(outcome?.changed ?? null);
   }
@@ -3818,9 +3881,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     const outcome = await runDocument(t("task.replacing"), () =>
       api().applyEdit({
         kind: "replace",
-        region: forIpc(region),
-        from: parseBlock(from),
-        to: parseBlock(to),
+        regions: [forIpc(region)],
+        from: parseMix(from).entries.map((entry) => parseBlock(entry.block)),
+        to: mixSpecOf(to),
       }),
     );
     reportChange(outcome?.changed ?? null);
@@ -4272,7 +4335,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * a second block browser for the tools' two fields would be the same nine
      * hundred tiles behind a different scrollbar, and would drift.
      */
-    if (inventoryFor === "replace") replaceBlock = block;
+    if (inventoryFor === "replace") replaceBlock = mixWith(replaceBlock, block);
+    else if (inventoryFor === "fill") holdBlock(mixWith(activeBlock, block));
     else holdBlock(block);
   }}
 />
@@ -4882,6 +4946,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           replaceFrom={replaceBlock}
           onreplacefromchange={(next) => (replaceBlock = next)}
           onbrowse={browseBlocks}
+          onswap={swapBlockFields}
           palette={docState?.palette ?? []}
           onfill={fillSelection}
           onreplace={replaceInSelection}

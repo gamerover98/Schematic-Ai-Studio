@@ -53,6 +53,16 @@ import {
      */
     legacy?: LegacyIndex | null;
     onchange: (block: string) => void;
+    /**
+     * Where a *chosen* block goes, when that is not the same as the text.
+     *
+     * The chip field types into this picker and adds a chip on a choice, so
+     * the keystrokes and the choice have to arrive at different places. Enter
+     * with no row to take commits what was typed -- `35:14`, or a pasted
+     * `/give` -- which is not in any list. Absent, a choice is just text, as
+     * it always was.
+     */
+    onpick?: (block: string) => void;
   }
 
   const {
@@ -63,6 +73,7 @@ import {
     placeable = null,
     legacy = null,
     onchange,
+    onpick,
   }: Props = $props();
 
 /**
@@ -187,11 +198,17 @@ const ROW_LIMIT = 120;
   });
 
   function choose(block: string): void {
-    onchange(block);
+    if (onpick) onpick(block);
+    else onchange(block);
     open = false;
   }
 
   function onKeydown(event: KeyboardEvent): void {
+    if (onpick && event.key === "Enter" && (!open || !shown[highlighted]) && value.trim() !== "") {
+      event.preventDefault();
+      choose(value.trim());
+      return;
+    }
     if (!open) {
       if (event.key === "ArrowDown") open = true;
       return;

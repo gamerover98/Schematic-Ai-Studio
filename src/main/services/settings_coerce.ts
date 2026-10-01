@@ -14,6 +14,7 @@
  * test that fails if a field goes missing from either object.
  */
 
+import { tryParseMix } from "../../shared/block_mix.js";
 import {
   DEFAULT_HOTBAR,
   DEFAULT_MCP_SETTINGS,
@@ -134,13 +135,19 @@ function hotbarSlots(raw: unknown): string[] {
      * everywhere else in the app -- the document is mostly made of it -- but a
      * slot holding air is a slot that draws nothing and places nothing, and a
      * settings file from before this rule has one in slot nine.
+     *
+     * A slot may hold a mix (`shared/block_mix.ts`), and the rule is about
+     * the slot: a mix with some air in it places a block some of the time,
+     * which is a sparse scatter and a thing to want. One that is air through
+     * and through is the empty slot again.
      */
-    return held !== "" && !isAir(held) ? held : DEFAULT_HOTBAR[index];
+    return held !== "" && !onlyAir(held) ? held : DEFAULT_HOTBAR[index];
   });
 }
 
-function isAir(block: string): boolean {
-  return block.split("[")[0].replace(/^minecraft:/, "") === "air";
+function onlyAir(slot: string): boolean {
+  const entries = tryParseMix(slot)?.entries ?? [{ block: slot, weight: 1 }];
+  return entries.every((entry) => entry.block.split("[")[0].replace(/^minecraft:/, "") === "air");
 }
 
 /** A stored panel dimension: a number, at least the minimum, or the default. */
