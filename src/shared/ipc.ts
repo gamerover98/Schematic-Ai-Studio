@@ -210,6 +210,8 @@ export const IPC = {
   docRegionMesh: "bgpt:doc:region:mesh",
   /** The clipboard's contents as standalone geometry, for the paste ghost. */
   docClipboardMesh: "bgpt:doc:clipboard:mesh",
+  /** What the selected areas are made of, for the materials inventory. */
+  docSelectionPalette: "bgpt:doc:selection:palette",
   /**
    * renderer → main: where the 3D canvas sits in the window.
    *
@@ -1023,6 +1025,30 @@ export interface PaletteCount {
   block: string;
   count: number;
 }
+
+/** The areas whose contents to count, as one set of cells. */
+export interface SelectionPaletteRequest {
+  regions: RegionSpec[];
+}
+
+/**
+ * What a set of areas is made of, the overlaps counted once.
+ *
+ * `palette` is `DocumentState.palette`'s shape and rule -- most common first,
+ * air left out -- over the cells of the areas instead of the whole document.
+ * Air is `air` instead, because the inventory shows it as a slot of its own,
+ * last. A cell of an area that lies outside the document holds nothing, not
+ * air -- a replace never reaches it -- so it is `outside` and nothing else.
+ * `cells` is every cell of the union, inside or out.
+ */
+export interface SelectionPaletteSuccess {
+  palette: PaletteCount[];
+  air: number;
+  outside: number;
+  cells: number;
+}
+
+export type SelectionPaletteResponse = Result<SelectionPaletteSuccess>;
 
 /**
  * Everything the renderer knows about the open schematic.
@@ -2102,6 +2128,8 @@ export interface BgptApi {
    * away from the blocks -- which is the whole gesture this draws.
    */
   clipboardMesh(): Promise<RegionMeshResponse>;
+  /** What the selected areas are made of, for the materials inventory. */
+  selectionPalette(request: SelectionPaletteRequest): Promise<SelectionPaletteResponse>;
   getSkyTextures(): Promise<SkyTextures>;
   applyEdit(request: EditRequest): Promise<EditResponse>;
   /** Set the schematic's size. Refuses a lossy shrink without `confirmLoss`. */

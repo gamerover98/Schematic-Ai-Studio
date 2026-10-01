@@ -69,7 +69,8 @@ import {
   inventoryBlocks,
   OVERSCAN_ROWS,
 } from "../src/renderer/src/lib/inventory.js";
-import { blocksIn } from "../src/shared/block_versions.js";
+import { blocksIn, versionRangeOf, versionTableFloor } from "../src/shared/block_versions.js";
+import { versionNameOf } from "../src/shared/mc_versions.js";
 import { buildLegacyIndex } from "../src/shared/legacy_ids.js";
 import {
   emptyTimeline,
@@ -168,7 +169,15 @@ import {
 import { en } from "../src/renderer/src/lib/locales/en.js";
 import { BANNER_EDITOR_URL } from "../src/shared/banner_patterns.js";
 import { propertyRows } from "../src/renderer/src/lib/inspector_rows.js";
-import { canonicalBlock, readSpelling, writeSpelling } from "../src/renderer/src/lib/block_spelling.js";
+import {
+  canonicalBlock,
+  isAirBlock,
+  readSpelling,
+  withBlockAdded,
+  writeSpelling,
+} from "../src/renderer/src/lib/block_spelling.js";
+import { documentMaterials, formatCount, materialAction } from "../src/renderer/src/lib/materials.js";
+import { tryParseMix } from "../src/shared/block_mix.js";
 import {
   arcBetween,
   axisAt,
@@ -5016,6 +5025,129 @@ console.log("\n--- a block field that holds several blocks ---");
    */
   const field = readFileSync(path.join(here, "..", "src", "renderer", "src", "lib", "BlockMixField.svelte"), "utf8");
   check("the chip field adds a chip on a choice, not on a keystroke", /onchange=\{\(text\) => \(draft = text\)\}\s*onpick=\{add\}/.test(field));
+}
+
+// --- the materials, as an inventory ------------------------------------------
+//
+// What the selection is made of, as slots with an icon and a count in the
+// corner. The count is short enough for the corner and the hover has the exact
+// one; what a click means is a table, stated here rather than found in a
+// handler.
+console.log("\n--- the materials, as an inventory ---");
+{
+  equal(
+    "a count is exact while it fits the corner",
+    [0, 7, 64, 940, 9999].map(formatCount),
+    ["0", "7", "64", "940", "9999"],
+  );
+  equal(
+    "...and shortened past it",
+    [10_000, 12_345, 100_000, 999_999, 1_000_000, 1_250_000].map(formatCount),
+    ["10k", "12.3k", "100k", "999k", "1M", "1.2M"],
+  );
+  /*
+   * Rounding would send these to the next unit up -- `100.0k`, `1000k`,
+   * `10.0M` -- which is the wrong unit as well as more than there is.
+   */
+  equal(
+    "a count is truncated, never rounded up into the next unit",
+    [99_999, 999_999, 9_999_999].map(formatCount),
+    ["99.9k", "999k", "9.9M"],
+  );
+
+  const click = (button: number, ctrl = false, shift = false) => ({ button, ctrl, shift });
+  equal(
+    "a plain click puts the block in With, Ctrl adds it to the mix",
+    [materialAction(click(0), false), materialAction(click(0, true), false)],
+    ["with", "addWith"],
+  );
+  equal(
+    "Shift is Replace, Ctrl+Shift adds to it",
+    [materialAction(click(0, false, true), false), materialAction(click(0, true, true), false)],
+    ["replace", "addReplace"],
+  );
+  equal("the right button opens the block's states", materialAction(click(2), false), "state");
+  /*
+   * Air cannot be held -- `coerceHotbar` refuses a slot of it -- so a plain
+   * click means the one thing air is for in that panel.
+   */
+  equal("a plain click on air fills Replace, not the hand", materialAction(click(0), true), "replace");
+  equal("...Ctrl still adds it to With, which makes a ruin", materialAction(click(0, true), true), "addWith");
+  equal("...and air has no states to open", materialAction(click(2), true), "none");
+  // Its two-letter stand-in would read "AI", so a chip of it is an empty slot.
+  equal(
+    "a chip knows air when it holds it, and only air",
+    ["air", "minecraft:air", "minecraft:cave_air", "minecraft:stone"].map(isAirBlock),
+    [true, true, false, false],
+  );
+
+  const whole = documentMaterials(
+    [
+      { block: "minecraft:stone", count: 10 },
+      { block: "minecraft:cave_air", count: 2 },
+    ],
+    [4, 2, 2],
+  );
+  equal("with nothing selected the air is what the palette leaves over", [whole.air, whole.cells, whole.outside], [4, 16, 0]);
+
+  equal("adding to an empty field gives that block alone", withBlockAdded("", "stone", null), "minecraft:stone");
+  const two = tryParseMix(withBlockAdded("minecraft:stone", "dirt", null));
+  check(
+    "adding to one block makes a mix of two, each on an equal footing",
+    two !== null &&
+      two.entries.map((entry) => `${entry.weight}%${entry.block}`).join(",") === "1%minecraft:stone,1%minecraft:dirt",
+  );
+  check("...with a seed of its own, so two mixes are not one pattern", two !== null && two.distribution.seed !== 0);
+
+  const slots = readFileSync(path.join(RENDERER, "lib", "MaterialsInventory.svelte"), "utf8");
+  check("the corner of a slot carries the short count", slots.includes("{formatCount(slot.count)}"));
+  check("...and the hover the exact one", /count=\{hoveredSlot\?\.count \?\? null\}/.test(slots));
+  check("air is the last slot", /\.\.\.palette\.map[\s\S]{0,200}\.\.\.\(air > 0 \? \[\{ block: AIR/.test(slots));
+
+  const tools = readFileSync(path.join(RENDERER, "lib", "SelectionTools.svelte"), "utf8");
+  const stateArm = tools.slice(tools.indexOf('case "state":'), tools.indexOf('case "none":'));
+  check(
+    "a right-click puts the block in With before opening its states",
+    stateArm.indexOf("onblockchange(") !== -1 && stateArm.indexOf("onblockchange(") < stateArm.indexOf("editLast()"),
+  );
+
+  const field = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
+  check(
+    "...and the editor waits for the chip to be drawn",
+    /export function editLast\(\): void \{\s*void tick\(\)\.then/.test(field),
+  );
+
+  /*
+   * A face drag moves the selection many times a second, and a count is a walk
+   * over every cell of it -- so one count in flight, after the selection holds
+   * still.
+   */
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check("the selection's materials are counted one request at a time", app.includes("coalesce(fetchSelectionMaterials)"));
+  check(
+    "...once the selection has held still",
+    /setTimeout\(\(\) => \{[\s\S]{0,300}refreshSelectionMaterials\(\)/.test(app),
+  );
+}
+
+// --- when a block arrived, as far as the table can see -------------------------
+//
+// The version table starts at the Flattening, so a block it dates to its first
+// release may be far older. The hover said oak stairs arrived in 1.13.
+console.log("\n--- when a block arrived, as far as the table can see ---");
+{
+  const floor = versionTableFloor();
+  equal("the table starts at 1.13", versionNameOf(floor), "JE_1_13");
+  equal("oak stairs come out of it at its floor", versionRangeOf("minecraft:oak_stairs")?.since, floor);
+  check(
+    "...while a block that really arrived later does not",
+    (versionRangeOf("minecraft:pale_oak_planks")?.since ?? floor) > floor,
+  );
+  const tooltip = readFileSync(path.join(RENDERER, "lib", "BlockTooltip.svelte"), "utf8");
+  check(
+    "the hover says 'or earlier' for a block at the floor",
+    /atFloor\s*\?\s*t\("blockInfo\.sinceOrEarlier"/.test(tooltip) && /atFloor\s*\?\s*t\("blockInfo\.until"/.test(tooltip),
+  );
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

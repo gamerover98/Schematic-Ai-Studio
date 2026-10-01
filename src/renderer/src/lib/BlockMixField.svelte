@@ -31,11 +31,12 @@
     type BlockMix,
   } from "../../../shared/block_mix.js";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
+  import { tick } from "svelte";
   import BlockPicker from "./BlockPicker.svelte";
   import BlockStateModal from "./BlockStateModal.svelte";
   import BlockTooltip from "./BlockTooltip.svelte";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
-  import { canonicalBlock, shortName } from "./block_spelling.js";
+  import { canonicalBlock, isAirBlock, shortName } from "./block_spelling.js";
   import type { AnchorRect } from "./floating.js";
   import { t } from "./i18n.svelte.js";
 
@@ -136,9 +137,15 @@
     if (anchor !== null) editing = { index, anchor };
   }
 
-  /** Opens the state editor on the last chip, once it has been drawn. */
+  /**
+   * Opens the state editor on the last chip, once it has been drawn.
+   *
+   * For the materials inventory, which sets the field and opens the editor in
+   * one click: the value arrives through a prop, so the chip it names exists
+   * only after the flush `tick` waits for.
+   */
   export function editLast(): void {
-    requestAnimationFrame(() => edit(mix.entries.length - 1));
+    void tick().then(() => edit(mix.entries.length - 1));
   }
 </script>
 
@@ -162,7 +169,9 @@
         }}
       >
         <div class="tile">
-          {#if icons.get(entry.block)}
+          {#if isAirBlock(entry.block)}
+            <span class="glyph" aria-hidden="true">&#x2B1A;</span>
+          {:else if icons.get(entry.block)}
             <img src={icons.get(entry.block)} alt="" width="26" height="26" />
           {:else}
             <span class="pending" aria-hidden="true">{shortName(entry.block).slice(0, 2)}</span>
@@ -317,6 +326,11 @@
     font-size: 10px;
     color: var(--text-dim);
     text-transform: uppercase;
+  }
+
+  .glyph {
+    font-size: 16px;
+    color: var(--text-dim);
   }
 
   .remove {

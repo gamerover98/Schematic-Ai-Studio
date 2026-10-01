@@ -13,12 +13,15 @@
    * of the truth and it is in the main process.
    */
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
-  import type { ClipboardInfo, PaletteCount, RegionSpec, TransformRequest } from "../../../shared/ipc.js";
+  import type { PaletteCount, RegionSpec } from "../../../shared/ipc.js";
   import BlockMixField from "./BlockMixField.svelte";
   import BannerPatternHint from "./BannerPatternHint.svelte";
+  import MaterialsInventory from "./MaterialsInventory.svelte";
   import { isBannerBlock } from "../../../shared/banner_patterns.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
   import { tryParseMix } from "../../../shared/block_mix.js";
+  import { canonicalBlock, withBlockAdded } from "./block_spelling.js";
+  import type { MaterialAction } from "./materials.js";
   import { t } from "./i18n.svelte.js";
 
   interface Props {
@@ -38,14 +41,20 @@
     block: string;
     onblockchange: (block: string) => void;
     /**
-     * What the open document is actually made of, most common first.
+     * What the selection is made of, or the whole schematic with nothing
+     * selected; `null` while the first count is on its way.
      *
-     * It used to sit in the sidebar's document panel, which is where it was
-     * least useful: clicking a material means "use this one", and the field it
-     * fills is here. It is also only ever meaningful while a document is open,
-     * which is exactly when this window exists.
+     * It used to be the whole document's always, beside tools that act on the
+     * selection -- so it offered blocks the selection did not hold and gave no
+     * count for the ones it did. With nothing selected the whole schematic is
+     * still the useful answer: it is how you find the one stray block.
      */
-    palette: readonly PaletteCount[];
+    materials: {
+      palette: readonly PaletteCount[];
+      air: number;
+      outside: number;
+      cells: number;
+    } | null;
     /**
      * The block Replace looks for.
      *
@@ -88,7 +97,7 @@
     legacy = null,
     block,
     onblockchange,
-    palette,
+    materials,
     replaceFrom,
     onreplacefromchange,
     onbrowse,
@@ -100,11 +109,36 @@
     onselectall,
   }: Props = $props();
 
-  /** A palette key is `name[a=b,c=d]`; the base name is enough to type back. */
-  function baseName(entry: string): string {
-    return entry.split("[")[0];
-  }
+  let withField = $state<ReturnType<typeof BlockMixField> | null>(null);
 
+  /**
+   * A slot of the inventory, clicked: `materialAction` decides what the click
+   * means, and this is where each meaning lands. The state comes along -- the
+   * count on the slot is of exactly that state, and a replace naming it finds
+   * exactly those.
+   */
+  function onMaterial(material: string, action: MaterialAction): void {
+    switch (action) {
+      case "with":
+        onblockchange(canonicalBlock(material, legacy));
+        break;
+      case "addWith":
+        onblockchange(withBlockAdded(block, material, legacy));
+        break;
+      case "replace":
+        onreplacefromchange(canonicalBlock(material, legacy));
+        break;
+      case "addReplace":
+        onreplacefromchange(withBlockAdded(replaceFrom, material, legacy));
+        break;
+      case "state":
+        onblockchange(canonicalBlock(material, legacy));
+        withField?.editLast();
+        break;
+      case "none":
+        break;
+    }
+  }
 
   const volume = $derived(
     selection === null
@@ -156,23 +190,18 @@
     <p class="hint">{t("selection.hint")}</p>
   {/if}
 
-  {#if palette.length > 0}
+  {#if materials !== null && (materials.palette.length > 0 || materials.air > 0 || materials.outside > 0)}
     <div class="group">
-      <label for="tool-materials">{t("doc.materials")}</label>
-      <ul id="tool-materials" class="palette">
-        {#each palette as entry (entry.block)}
-          <li>
-            <button
-              class="link"
-              onclick={() => onblockchange(baseName(entry.block))}
-              title={t("doc.useAsBlock", { block: entry.block })}
-            >
-              {entry.block}
-            </button>
-            <span class="count">{entry.count.toLocaleString()}</span>
-          </li>
-        {/each}
-      </ul>
+      <span class="heading">{selection ? t("materials.ofSelection") : t("materials.ofDocument")}</span>
+      <MaterialsInventory
+        palette={materials.palette}
+        air={materials.air}
+        outside={materials.outside}
+        cells={materials.cells}
+        scope={selection ? "selection" : "document"}
+        {legacy}
+        onaction={onMaterial}
+      />
     </div>
   {/if}
 
@@ -217,6 +246,7 @@
   <div class="group">
     <label for="tool-to-block">{t("selection.with")}</label>
     <BlockMixField
+      bind:this={withField}
       id="tool-to-block"
       value={block}
       placeholder="minecraft:stone"
@@ -344,53 +374,7 @@
     margin: 0;
   }
 
-  /*
-   * Scrolls inside itself rather than growing the window, and the whole palette
-   * is in it now.
-   *
-   * It used to show eight and say "…and N more", over a `DocumentState` that
-   * had already been cut to 64 without saying anything -- so on any schematic
-   * with more distinct states than that, the sentence understated the palette.
-   * "The window has nowhere to grow" was the reason for the cap, and the window
-   * can be resized now, so the height is a share of it: drag the panel taller
-   * and the list gets taller with it.
-   */
-  .palette {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    max-height: max(132px, 22vh);
-    overflow-y: auto;
-    font-size: 11px;
-  }
-
-  .palette li {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 1px 0;
-  }
-
-  .palette .count {
-    flex: none;
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
-
-  button.link {
-    overflow: hidden;
-    padding: 0;
-    border: none;
-    background: none;
-    color: var(--accent);
-    cursor: pointer;
-    font: inherit;
-    text-align: left;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  button.link:hover {
-    text-decoration: underline;
+  .heading {
+    font-weight: 600;
   }
 </style>

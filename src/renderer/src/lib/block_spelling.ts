@@ -11,6 +11,7 @@
  */
 
 import { splitBlockInput } from "../../../shared/block_input.js";
+import { addToMix, formatMix, freshSeed, tryParseMix } from "../../../shared/block_mix.js";
 import { resolveBlockInput, type LegacyIndex } from "../../../shared/legacy_ids.js";
 
 export interface BlockSpelling {
@@ -69,9 +70,41 @@ export function canonicalBlock(text: string, legacy: LegacyIndex | null): string
   return spelling === null ? resolved : writeSpelling(spelling);
 }
 
+/**
+ * Whether a chip holds air, which has no icon to draw: there is nothing to
+ * mesh. Its two-letter stand-in would read "AI", which in this app is the
+ * wrong thing entirely, so the chips draw it as an empty slot instead.
+ */
+export function isAirBlock(text: string): boolean {
+  return readSpelling(text)?.name === "minecraft:air";
+}
+
 /** `oak stairs`, for a caption under an icon. */
 export function shortName(text: string): string {
   const spelling = readSpelling(text);
   const name = spelling?.name ?? text;
   return name.replace(/^minecraft:/, "").replace(/_/g, " ");
+}
+
+/**
+ * A field's text with one more block in it, on an equal footing with the
+ * others -- what the block list and the materials inventory do when asked to
+ * add to a field that may hold several. An empty field, or text that is not a
+ * mix yet, becomes that block alone.
+ *
+ * The mix gets a seed of its own the moment it becomes one, for
+ * `BlockMixField.add`'s reason: seed 0 everywhere would make every mix anybody
+ * builds the same pattern.
+ */
+export function withBlockAdded(text: string, block: string, legacy: LegacyIndex | null): string {
+  const canonical = canonicalBlock(block, legacy);
+  if (text.trim() === "") return canonical;
+  const mix = tryParseMix(text);
+  if (mix === null) return canonical;
+  const next = addToMix(mix, canonical);
+  return formatMix(
+    next.entries.length === 2 && next.distribution.seed === 0
+      ? { ...next, distribution: { ...next.distribution, seed: freshSeed() } }
+      : next,
+  );
 }

@@ -377,6 +377,64 @@ export function documentState(session: DocumentSession): DocumentState {
   };
 }
 
+/**
+ * What the selected areas are made of, for the materials inventory.
+ *
+ * The materials list was the whole document's, beside tools that act on the
+ * selection -- so "click a material to replace it" offered blocks the selection
+ * did not hold, and gave no count for the ones it did. This is the same list
+ * over the cells of the areas, each cell once however many areas cover it
+ * (`forEachUnionCell`, the walk the fill and the replace take).
+ *
+ * Each area is cut to the document first, which is the union cut to the
+ * document: a cell outside holds nothing and is counted as `outside`, not as
+ * air, because a replace of air would never reach it.
+ *
+ * Asked for, never pushed: `documentState` runs on every edit and a selection
+ * is the renderer's, so this is the renderer's question to ask when either
+ * moves.
+ */
+export function selectionPalette(
+  session: DocumentSession,
+  request: readonly RegionSpec[],
+): { palette: PaletteCount[]; air: number; outside: number; cells: number } {
+  if (request.length === 0 || request.length > MAX_BOXES) {
+    throw new RegionCountError(request.length);
+  }
+  const { doc } = session;
+  const asked = request.map(orderRegion);
+  const cells = unionVolume(asked);
+  const inside = asked
+    .map((box) => ({
+      minX: Math.max(0, box.minX),
+      minY: Math.max(0, box.minY),
+      minZ: Math.max(0, box.minZ),
+      maxX: Math.min(doc.width - 1, box.maxX),
+      maxY: Math.min(doc.height - 1, box.maxY),
+      maxZ: Math.min(doc.length - 1, box.maxZ),
+    }))
+    .filter((box) => box.minX <= box.maxX && box.minY <= box.maxY && box.minZ <= box.maxZ);
+
+  const counts = new Int32Array(doc.palette.length);
+  const plane = doc.height * doc.length;
+  let walked = 0;
+  forEachUnionCell(inside, (x, y, z) => {
+    const index = doc.voxels[x * plane + y * doc.length + z];
+    if (index >= 0 && index < counts.length) counts[index] += 1;
+    walked += 1;
+  });
+
+  const histogram = new Map<string, number>();
+  doc.palette.forEach((entry, index) => {
+    if (counts[index] === 0) return;
+    const key = paletteEntryCacheKey(entry);
+    histogram.set(key, (histogram.get(key) ?? 0) + counts[index]);
+  });
+  let air = 0;
+  for (const [key, count] of histogram) if (key.startsWith("minecraft:air")) air += count;
+  return { palette: paletteCounts(histogram), air, outside: cells - walked, cells };
+}
+
 // ---------------------------------------------------------------------------
 // Editing
 // ---------------------------------------------------------------------------

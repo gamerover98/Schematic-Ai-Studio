@@ -1823,6 +1823,31 @@ than either cap alone. Both are gone, and the cost was already paid:
 `paletteHistogram` walks every voxel on every state push either way, so dropping
 the `.slice` adds payload, not work.
 
+**And it is the selection's palette, laid out as an inventory.** Beside tools
+that act on the selection, the whole document's list offered blocks the
+selection did not hold. `selectionPalette` in `session.ts` counts the union of
+the areas, overlaps once, through `forEachUnionCell`, the walk the fill takes.
+It is **asked for, not pushed**: the selection is the renderer's, so
+`App.svelte` asks once the selection has held still for 120 ms, one request in
+flight through `coalesce`. A 256x64x256 selection is about 35 ms in main. With
+nothing selected the panel shows the whole schematic from `DocumentState`,
+which costs no request.
+
+Two rules in it are easy to undo by tidying:
+
+- **A cell outside the document is `outside`, not air.** A selection may reach
+  past the box, and a replace of air never reaches those cells, so counting
+  them as air would offer a replace that finds fewer than the slot says.
+- **The corner count is truncated, never rounded.** Rounding sends 99,960 to
+  `100.0k`, the wrong unit and more than there is. `formatCount` in
+  `renderer/lib/materials.ts`, with the exact number in the hover.
+
+What a click on a slot means is `materialAction` in the same module: With,
+Ctrl adds to the mix, Shift is Replace, the right button opens the states.
+**A plain click on air fills Replace**, because air cannot be held and
+`coerceHotbar` refuses a slot of it. A slot carries the exact state, so a
+replace of it finds exactly the cells the slot counted.
+
 **A Svelte prop may not be called `state`.** A local binding of that name makes
 every `$state(...)` in the same component parse as a store subscription to it
 (`store_rune_conflict`), and the fields silently stop being reactive.

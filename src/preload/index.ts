@@ -59,6 +59,8 @@ import {
   type PasteRequest,
   type MoveRegionRequest,
   type RegionMeshResponse,
+  type SelectionPaletteRequest,
+  type SelectionPaletteResponse,
   type SkyTextures,
   type ApplyNbtRequest,
   type PackTexture,
@@ -171,6 +173,8 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.docMove, request) as Promise<EditResponse>,
   regionMesh: (region) => ipcRenderer.invoke(IPC.docRegionMesh, region) as Promise<RegionMeshResponse>,
   clipboardMesh: () => ipcRenderer.invoke(IPC.docClipboardMesh) as Promise<RegionMeshResponse>,
+  selectionPalette: (request: SelectionPaletteRequest) =>
+    ipcRenderer.invoke(IPC.docSelectionPalette, request) as Promise<SelectionPaletteResponse>,
   getSkyTextures: () => ipcRenderer.invoke(IPC.skyTextures) as Promise<SkyTextures>,
   getAnchorTexture: () => ipcRenderer.invoke(IPC.anchorTexture) as Promise<PackTexture | null>,
   setWorldEditAnchor: (anchor: [number, number, number] | null) =>

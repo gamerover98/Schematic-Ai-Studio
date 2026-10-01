@@ -80,6 +80,7 @@ import {
   requireSession,
   saveSession,
   scaleRegion,
+  selectionPalette,
   transformRegion,
   undoEdit,
 } from "../src/main/services/session.js";
@@ -5812,6 +5813,62 @@ console.log("\n--- a mix of blocks, shared out exactly ---");
     "...but a slot of nothing but air is still the default",
     coerceHotbar({ slots: ["50%air,50%minecraft:air"], slot: 0 }).slots[0] !== "50%air,50%minecraft:air",
   );
+}
+
+console.log("\n--- what the selection is made of ---");
+{
+  const session = newDocument({ width: 8, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  applyEdit(session, {
+    kind: "fill",
+    regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 1 }],
+    mix: singleMix({ namespacedName: "minecraft:stone" }),
+  });
+  applyEdit(session, {
+    kind: "fill",
+    regions: [{ minX: 4, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 0 }],
+    mix: singleMix({ namespacedName: "minecraft:oak_stairs", properties: { facing: "east" } }),
+  });
+
+  const left = selectionPalette(session, [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }]);
+  equal("the materials are the selection's, not the document's", left.palette, [
+    { block: "minecraft:stone", count: 4 },
+  ]);
+  equal("...with the air in it counted apart", [left.air, left.outside, left.cells], [4, 0, 8]);
+
+  // x 0..4 and x 3..5 share x 3..4: twelve cells, not sixteen.
+  const both = selectionPalette(session, [
+    { minX: 0, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 1 },
+    { minX: 3, minY: 0, minZ: 0, maxX: 5, maxY: 0, maxZ: 1 },
+  ]);
+  const stairs = both.palette.find((entry) => entry.block.startsWith("minecraft:oak_stairs"));
+  equal(
+    "two areas that overlap are counted once",
+    [both.palette.find((entry) => entry.block === "minecraft:stone")?.count, stairs?.count, both.air, both.cells],
+    [8, 1, 3, 12],
+  );
+  check("...and a block keeps its state in the list, as the replace will match it", stairs?.block.includes("facing=east") === true);
+
+  /*
+   * A cell of an area past the edge holds nothing, and a replace of air would
+   * never reach it -- so it is not air.
+   */
+  const past = selectionPalette(session, [{ minX: 6, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 0 }]);
+  equal("cells outside the document are outside, not air", [past.air, past.outside, past.cells], [2, 2, 4]);
+  const away = selectionPalette(session, [{ minX: 20, minY: 0, minZ: 0, maxX: 21, maxY: 0, maxZ: 0 }]);
+  equal("...even when the whole area is", [away.palette.length, away.air, away.outside], [0, 0, 2]);
+
+  check(
+    "a count naming no area is refused by name",
+    (() => {
+      try {
+        selectionPalette(session, []);
+        return false;
+      } catch (err) {
+        return err instanceof RegionCountError;
+      }
+    })(),
+  );
+  closeDocument();
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

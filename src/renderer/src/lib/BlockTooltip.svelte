@@ -14,7 +14,7 @@
    * pointer that keeps it open.
    */
   import { defaultStateFor } from "../../../shared/block_states.js";
-  import { versionRangeOf } from "../../../shared/block_versions.js";
+  import { versionRangeOf, versionTableFloor } from "../../../shared/block_versions.js";
   import { mcVersion, versionNameOf } from "../../../shared/mc_versions.js";
   import { legacyIdForState, type LegacyIndex } from "../../../shared/legacy_ids.js";
   import { blockIcons, requestBlockIcons } from "./block_icons.svelte.js";
@@ -34,9 +34,19 @@
     share?: number | null;
     /** Its weight in a mix, beside the share it comes to. */
     weight?: number | null;
+    /** What a count's share is of: the selection, or the whole schematic. */
+    shareOf?: "selection" | "document";
   }
 
-  const { block, anchor, legacy = null, count = null, share = null, weight = null }: Props = $props();
+  const {
+    block,
+    anchor,
+    legacy = null,
+    count = null,
+    share = null,
+    weight = null,
+    shareOf = "selection",
+  }: Props = $props();
 
   let popover = $state<HTMLDivElement | null>(null);
   let placement = $state<{ x: number; y: number } | null>(null);
@@ -67,6 +77,9 @@
    * so on a 1.12 schematic it would say red wool arrived in 1.13 beside the
    * line saying which `ID:DATA` 1.12 stores it as -- true, and the wrong
    * answer for the version open.
+   *
+   * And a block the table dates to its own first release is "since 1.13 or
+   * earlier", not "since 1.13": the table starts there and oak stairs did not.
    */
   const versions = $derived.by(() => {
     if (spelling === null || legacy !== null) return null;
@@ -76,8 +89,14 @@
       const name = versionNameOf(dataVersion);
       return name === null ? String(dataVersion) : (mcVersion(name)?.label ?? name);
     };
-    return range.until === null
-      ? t("blockInfo.since", { version: label(range.since) })
+    const atFloor = range.since <= versionTableFloor();
+    if (range.until === null) {
+      return atFloor
+        ? t("blockInfo.sinceOrEarlier", { version: label(range.since) })
+        : t("blockInfo.since", { version: label(range.since) });
+    }
+    return atFloor
+      ? t("blockInfo.until", { to: label(range.until) })
       : t("blockInfo.between", { from: label(range.since), to: label(range.until) });
   });
 
@@ -145,7 +164,10 @@
       <p class="line strong">
         {share === null
           ? t("blockInfo.count", { count: count.toLocaleString() })
-          : t("blockInfo.countShare", { count: count.toLocaleString(), share: percent(share) })}
+          : t(shareOf === "document" ? "blockInfo.countShareDocument" : "blockInfo.countShare", {
+              count: count.toLocaleString(),
+              share: percent(share),
+            })}
       </p>
     {:else if weight !== null && share !== null}
       <p class="line strong">{t("blockInfo.weight", { weight: String(weight), share: percent(share) })}</p>

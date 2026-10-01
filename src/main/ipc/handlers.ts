@@ -71,6 +71,8 @@ import {
   type DocumentMeshRequest,
   type MoveRegionRequest,
   type RegionMeshResponse,
+  type SelectionPaletteRequest,
+  type SelectionPaletteResponse,
   type ApplyNbtRequest,
   type PackTexture,
   type SchematicNbtResponse,
@@ -125,6 +127,7 @@ import {
   moveRegion,
   clipboardMesh,
   regionMesh,
+  selectionPalette,
   editBlockEntityValue,
   EditTooLargeError,
   EmptyClipboardError,
@@ -1644,6 +1647,17 @@ ${report.stack}`),
           waterColor: settings.preview.waterColor,
         });
         return { ok: true, ...result };
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.docSelectionPalette,
+    async (_event, request: SelectionPaletteRequest): Promise<SelectionPaletteResponse> => {
+      try {
+        return { ok: true, ...selectionPalette(requireSession(), request.regions) };
       } catch (err) {
         return failure(err);
       }

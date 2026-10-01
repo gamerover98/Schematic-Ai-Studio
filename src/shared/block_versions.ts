@@ -1540,6 +1540,21 @@ export function versionRangeOf(id: string): { since: number; until: number | nul
   if (range === undefined) return null;
   return { since: range[0], until: range[1] };
 }
+let floor: number | null = null;
+
+/**
+ * The oldest release the table can see, which is where the flat era starts.
+ *
+ * A block it dates to this release may be far older: `oak_stairs` is in the
+ * game since Beta and comes out of this table as "since 1.13", because 1.13 is
+ * where the table begins rather than where the block did. A caller saying
+ * when a block arrived has to tell the two apart, and this is how.
+ */
+export function versionTableFloor(): number {
+  if (floor === null) floor = Math.min(...Object.values(BLOCK_RANGE).map(([since]) => since));
+  return floor;
+}
+
 /** How many blocks the table holds. For the suites, and for a sanity print. */
 export function versionedBlockCount(): number {
   return Object.keys(BLOCK_RANGE).length;

@@ -297,8 +297,6 @@ export const en = {
   "bar.editing": "Editing",
   "doc.untitled": "Untitled",
   "doc.notSaved": "Not saved yet",
-  "doc.materials": "Materials",
-  "doc.useAsBlock": "Make {block} the current block",
 
   // The New / Save As dialog. `doc.version` comes before `doc.format` on
   // screen for the reason the component explains: the version decides which
@@ -434,10 +432,18 @@ export const en = {
 
   "blockInfo.since": "In Minecraft since {version}",
   "blockInfo.between": "In Minecraft {from} – {to}",
+  "blockInfo.sinceOrEarlier": "In Minecraft since {version} or earlier",
+  "blockInfo.until": "In Minecraft until {to}",
   "blockInfo.legacyId": "Stored as {id}",
   "blockInfo.legacyApprox": "Stored as {id}: this exact state has no ID:DATA of its own",
   "blockInfo.count": "{count} blocks",
   "blockInfo.countShare": "{count} blocks · {share} of the selection",
+  "blockInfo.countShareDocument": "{count} blocks · {share} of the schematic",
+  "materials.ofSelection": "Materials in the selection",
+  "materials.ofDocument": "Materials in the schematic",
+  "materials.slot": "{block}: {count}",
+  "materials.outside": "{count} cells of the selection lie outside the schematic and hold nothing.",
+  "materials.hint": "Click: With · Ctrl: add to With · Shift: Replace · Ctrl+Shift: add to Replace · Right-click: states",
   "blockInfo.weight": "Weight {weight} · {share} of the mix",
 
   "blockState.title": "Block states",

@@ -114,18 +114,13 @@ import {
     type MeshPayload,
     type MixSpec,
     type RegionSpec,
+    type SelectionPaletteSuccess,
     type TransformRequest,
     singleMix,
   } from "../../shared/ipc.js";
-  import {
-    addToMix,
-    formatMix,
-    freshSeed,
-    parseMix,
-    pickAt,
-    tryParseMix,
-  } from "../../shared/block_mix.js";
-  import { canonicalBlock } from "./lib/block_spelling.js";
+  import { documentMaterials } from "./lib/materials.js";
+  import { parseMix, pickAt } from "../../shared/block_mix.js";
+  import { withBlockAdded } from "./lib/block_spelling.js";
   import type { SchematicFormat } from "../../shared/schematic.js";
 import { schematicExtension } from "../../shared/schematic.js";
 import type { FileKind } from "../../shared/ipc.js";
@@ -543,22 +538,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     persistHotbar();
   }
 
-  /**
-   * A field's text with one more block in it, on an equal footing with the
-   * others -- what the block list does when it was opened from a field that
-   * may hold several. An empty field becomes that block alone.
-   */
+  /** A field's text with one more block in it; see `withBlockAdded`. */
   function mixWith(text: string, block: string): string {
-    const canonical = canonicalBlock(block, legacyForDoc);
-    if (text.trim() === "") return canonical;
-    const mix = tryParseMix(text);
-    if (mix === null) return canonical;
-    const next = addToMix(mix, canonical);
-    return formatMix(
-      next.entries.length === 2 && next.distribution.seed === 0
-        ? { ...next, distribution: { ...next.distribution, seed: freshSeed() } }
-        : next,
-    );
+    return withBlockAdded(text, block, legacyForDoc);
   }
 
   /**
@@ -2659,6 +2641,62 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * each, and the window then applied every stale answer in turn.
    */
   const refreshDocument = coalesce(fetchDocumentMesh);
+
+  /**
+   * What the selection is made of, as main last counted it.
+   *
+   * Asked for rather than pushed, because the selection is the renderer's and
+   * main cannot know when it moved. A face drag moves it many times a second,
+   * so the question waits for the selection to hold still for a moment, and
+   * `coalesce` keeps it to one count in flight: on a large selection a count
+   * is a walk over millions of cells.
+   *
+   * The last answer stays on screen until the next one lands, so the slots do
+   * not blank and refill on every edit.
+   */
+  let selectionMaterials = $state<SelectionPaletteSuccess | null>(null);
+  const refreshSelectionMaterials = coalesce(fetchSelectionMaterials);
+
+  async function fetchSelectionMaterials(): Promise<void> {
+    const asked = selection;
+    if (asked === null || docState === null || !bridgeAvailable) {
+      selectionMaterials = null;
+      return;
+    }
+    const response = await api().selectionPalette({ regions: [forIpc(asked)] });
+    // Dropped meanwhile: the effect has already cleared it, and a late answer
+    // must not put back the materials of a selection that is gone.
+    if (!response.ok || selection === null || docState === null) return;
+    selectionMaterials = {
+      palette: response.palette,
+      air: response.air,
+      outside: response.outside,
+      cells: response.cells,
+    };
+  }
+
+  $effect(() => {
+    if (!toolsOpen || selection === null || docState === null) {
+      selectionMaterials = null;
+      return;
+    }
+    void docState.revision;
+    const timer = setTimeout(() => {
+      // A count that fails is no count, not a banner: nothing the user did
+      // has failed, and the slots simply keep the last answer.
+      refreshSelectionMaterials().catch(() => undefined);
+    }, 120);
+    return () => clearTimeout(timer);
+  });
+
+  /** The selection's materials, or the whole schematic's with nothing selected. */
+  const materials = $derived(
+    docState === null
+      ? null
+      : selection === null
+        ? documentMaterials(docState.palette, docState.size)
+        : selectionMaterials,
+  );
 
   async function fetchDocumentMesh(): Promise<void> {
     if (docState === null) {
@@ -4947,7 +4985,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           onreplacefromchange={(next) => (replaceBlock = next)}
           onbrowse={browseBlocks}
           onswap={swapBlockFields}
-          palette={docState?.palette ?? []}
+          {materials}
           onfill={fillSelection}
           onreplace={replaceInSelection}
           ondelete={() => void deleteSelection()}
