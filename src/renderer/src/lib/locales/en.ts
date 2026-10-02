@@ -267,6 +267,7 @@ export const en = {
   "viewport.hudClickToFly": "Click the viewport to fly",
   "viewport.unavailable": "Preview unavailable.",
   "viewport.worstFrame": "worst {ms} ms · {culprit}",
+  "viewport.fpsIdle": "idle · nothing changed",
   "viewport.noAtlas": "The mesh arrived without a texture atlas and none is held.",
   "viewport.bounds": "Preview bounds center: ({center}) · size: ({size})",
   "viewport.dropTitle": "Drop to open",
@@ -714,6 +715,9 @@ export const en = {
   "preview.frameDiagnostics": "Diagnose stutters",
   "preview.frameDiagnosticsHint":
     "Records where each frame's time goes and keeps the slow ones. The frame counter then shows the worst frame of the last two seconds and what caused it, and every stutter is logged to the developer console (Help → Toggle Developer Tools).",
+  "preview.alwaysDraw": "Always draw",
+  "preview.alwaysDrawHint":
+    "The viewport normally draws only when something changes, so a still scene leaves the GPU idle. This draws every frame instead, as it used to. Turn it on only to compare the two.",
   "preview.copyStutterReport": "Copy stutter report",
   "preview.stutterReportCopied": "Copied — {count} stutters recorded.",
   "preview.stutterReportEmpty": "Turn on Diagnose stutters first, then reproduce the stutter.",

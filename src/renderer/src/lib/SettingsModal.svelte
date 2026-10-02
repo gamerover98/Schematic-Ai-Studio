@@ -1014,6 +1014,15 @@ import {
             {t("preview.frameDiagnostics")}
           </label>
           <p class="hint">{t("preview.frameDiagnosticsHint")}</p>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={preview.alwaysDraw}
+              onchange={(event) => onpreviewchange({ alwaysDraw: event.currentTarget.checked })}
+            />
+            {t("preview.alwaysDraw")}
+          </label>
+          <p class="hint">{t("preview.alwaysDrawHint")}</p>
           <div class="field">
             <button type="button" onclick={() => void copyStutterReport()}>
               {t("preview.copyStutterReport")}

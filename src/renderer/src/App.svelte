@@ -5287,6 +5287,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       globalIllumination={settings.preview.globalIllumination}
       showFps={settings.preview.showFps}
       frameDiagnostics={settings.preview.frameDiagnostics}
+      alwaysDraw={settings.preview.alwaysDraw}
       shaderMode={settings.preview.shaderMode}
       showGrid={settings.preview.showGrid}
       showBounds={settings.preview.showBounds}

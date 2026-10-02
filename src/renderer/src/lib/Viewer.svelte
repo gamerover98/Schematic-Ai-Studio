@@ -38,6 +38,7 @@
     webglPowerPreference,
   } from "./shader_modes.js";
   import { animationsUsed } from "./atlas_animation.js";
+  import { counterIdle, shouldDraw, ViewWatch } from "./render_demand.js";
   import {
     FrameProfiler,
     culpritOf,
@@ -276,6 +277,8 @@ import { isTyping } from "./typing.js";
     showFps?: boolean;
     /** Record where each frame's time goes; see `frame_profiler.ts`. */
     frameDiagnostics?: boolean;
+    /** Draw on every refresh rather than on demand; see `render_demand.ts`. */
+    alwaysDraw?: boolean;
     /** Which look to draw with. `shader_modes.ts` says what each one means. */
     shaderMode?: string;
     /**
@@ -531,6 +534,7 @@ import { isTyping } from "./typing.js";
     globalIllumination = false,
     showFps = false,
     frameDiagnostics = false,
+    alwaysDraw = false,
     shaderMode = "vanilla",
     showBounds = false,
     voidOpacity = 0.4,
@@ -556,7 +560,7 @@ import { isTyping } from "./typing.js";
     framingKey = 0,
     theme = "dark",
     onselectionchange,
-    documentSize = null,
+    documentSize: documentSizeProp = null,
     ongridselect,
     ongridplace,
     onpickmaterial,
@@ -575,6 +579,26 @@ import { isTyping } from "./typing.js";
     cameraRequest = null,
     oncameraaimed,
   }: Props = $props();
+
+  /**
+   * The document's size, as the same array for as long as the numbers hold.
+   *
+   * The app hands down a fresh array with every `DocumentState`, which is
+   * every edit, and every effect here that reads it ran again for nothing:
+   * the grid and the cage rebuilt, the sky re-applied (and with global
+   * illumination on, the environment map rebuilt), the shadow map thrown away
+   * and reallocated. Only a different size is a different box.
+   */
+  let sizeSeen: [number, number, number] | null = null;
+  const documentSize = $derived.by((): [number, number, number] | null => {
+    const next = documentSizeProp;
+    const last = sizeSeen;
+    if (next !== null && last !== null && next[0] === last[0] && next[1] === last[1] && next[2] === last[2]) {
+      return last;
+    }
+    sizeSeen = next;
+    return next;
+  });
 
   /**
    * The `framingKey` the camera was last framed for.
@@ -2301,10 +2325,11 @@ import { isTyping } from "./typing.js";
   /**
    * The dome is built at radius one and scaled to fit the frustum.
    *
-   * Its distance is arbitrary now that it is drawn in a pass of its own: it
-   * only has to be somewhere between the near and far planes, and the scale
-   * follows `camera.far` so lowering the draw distance can never clip it away.
-   * That is exactly what it did at a fixed 3000 against a default far of 512.
+   * Its distance is arbitrary: the bodies are pushed onto the far plane in
+   * their vertex shaders (`atFarPlane`), so it only has to be somewhere
+   * between the near and far planes, and the scale follows `camera.far` so
+   * lowering the draw distance can never clip it away. That is exactly what
+   * it did at a fixed 3000 against a default far of 512.
    */
   const SKY_RADIUS = 1;
 
@@ -2338,6 +2363,30 @@ import { isTyping } from "./typing.js";
    */
   let skyArt: SkyTextures | null = null;
 
+  /**
+   * Draws a sky body behind everything in the world, in the world's own pass.
+   *
+   * The sky used to be a pass of its own, drawn first, with the depth buffer
+   * cleared before the world. Into a multisampled target that is two
+   * `render()` calls, and three resolves the target at the end of each one --
+   * a full-screen blit of colour and depth that the next pass then draws over.
+   * So the bodies are in the scene now, and kept behind it by depth instead of
+   * by order: `z = w` puts every vertex exactly on the far plane, where the
+   * cleared depth buffer is, so with three's `LessEqual` test a body is drawn
+   * only where nothing in the world has been.
+   *
+   * The sun, the moon and the stars are transparent, so three draws them after
+   * every opaque object; that is what made a single scene impossible before,
+   * and what the depth test now answers. The dome is opaque, drawn first by its
+   * `renderOrder`, writes no depth and tests none, so it needs no such help.
+   */
+  function atFarPlane(material: THREE.Material): void {
+    material.depthTest = true;
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace(/\}\s*$/, "\tgl_Position.z = gl_Position.w;\n}");
+    };
+  }
+
   function buildSky(): void {
     if (!scene) return;
     if (skyDome && skyArt === skyTextures) return;
@@ -2345,9 +2394,13 @@ import { isTyping } from "./typing.js";
     // than reach into the materials: it is two quads, once, at startup.
     if (skyDome) disposeSky();
     skyArt = skyTextures;
+    /*
+     * The group lives in the world's scene and is lent to `skyScene` only for
+     * the moment the environment map is built from it; see `buildEnvironment`.
+     */
     skyScene = new THREE.Scene();
     skyGroup = new THREE.Group();
-    skyScene.add(skyGroup);
+    scene.add(skyGroup);
     const material = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
@@ -2413,6 +2466,7 @@ import { isTyping } from "./typing.js";
       );
       mesh.renderOrder = -999;
       mesh.frustumCulled = false;
+      atFarPlane(mesh.material as THREE.Material);
       skyGroup?.add(mesh);
       return mesh;
     };
@@ -2456,6 +2510,7 @@ import { isTyping } from "./typing.js";
     );
     stars.renderOrder = -998;
     stars.frustumCulled = false;
+    atFarPlane(stars.material as THREE.Material);
     skyGroup.add(stars);
   }
 
@@ -2494,6 +2549,7 @@ import { isTyping } from "./typing.js";
     sunDisc = undefined;
     moonDisc = undefined;
     stars = undefined;
+    skyGroup?.parent?.remove(skyGroup);
     skyGroup = undefined;
     skyScene = undefined;
   }
@@ -2854,12 +2910,20 @@ import { isTyping } from "./typing.js";
   }
 
   /**
-   * The gizmo, into a scissored square in the bottom-left corner.
+   * The gizmo, into the bottom-left corner.
    *
-   * A third pass over the same renderer. The depth buffer is cleared first
-   * so the build cannot occlude an overlay that is not in the world, and the
-   * scissor is what stops the pass clearing -- or drawing into -- the rest
-   * of the frame.
+   * With anti-aliasing on it is drawn into a multisampled target of its own,
+   * the size of the square, and laid onto the canvas by the copy
+   * (`compositeCompass`). It used to be a third pass into the scene's target,
+   * and three resolves a multisampled target at the end of every `render()`:
+   * a 104-pixel gizmo cost a full-screen blit, which is the 225 ms the third
+   * stutter report blamed on "compass". Resolving its own target costs the
+   * square.
+   *
+   * Without anti-aliasing it is a scissored pass straight onto the canvas, as
+   * before. The depth buffer is cleared first so the build cannot occlude an
+   * overlay that is not in the world, and the scissor is what stops the pass
+   * clearing -- or drawing into -- the rest of the frame.
    *
    * The group takes the *inverse* of the camera's rotation, which is what
    * makes the handles hold still in world terms while the camera swings
@@ -2872,6 +2936,20 @@ import { isTyping } from "./typing.js";
   function drawCompass(): void {
     if (!renderer || !compassScene || !compassCamera || !compassGroup || !camera) return;
     compassGroup.quaternion.copy(camera.quaternion).invert();
+    if (compassTarget !== null) {
+      /*
+       * Cleared to transparent black, so what lands in it is premultiplied --
+       * three's normal blending over (0, 0, 0, 0) leaves exactly that -- and
+       * the copy lays it on with `One, OneMinusSrcAlpha`.
+       */
+      renderer.getClearColor(clearColour);
+      const clearAlpha = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(compassTarget);
+      renderer.render(compassScene, compassCamera);
+      renderer.setClearColor(clearColour, clearAlpha);
+      return;
+    }
     const wasAutoClear = renderer.autoClear;
     renderer.autoClear = false;
     renderer.clearDepth();
@@ -2880,10 +2958,23 @@ import { isTyping } from "./typing.js";
     renderer.setScissor(COMPASS_MARGIN, COMPASS_MARGIN, COMPASS_PX, COMPASS_PX);
     renderer.render(compassScene, compassCamera);
     renderer.setScissorTest(false);
-    const size = renderer.getSize(new THREE.Vector2());
-    renderer.setViewport(0, 0, size.x, size.y);
+    renderer.getSize(viewSize);
+    renderer.setViewport(0, 0, viewSize.x, viewSize.y);
     renderer.autoClear = wasAutoClear;
   }
+
+  /** Lays the compass's own target onto its square of the canvas. */
+  function compositeCompass(): void {
+    if (!renderer || compassTarget === null || !compassCopy || !aaCamera) return;
+    renderer.setViewport(COMPASS_MARGIN, COMPASS_MARGIN, COMPASS_PX, COMPASS_PX);
+    renderer.render(compassCopy, aaCamera);
+    renderer.getSize(viewSize);
+    renderer.setViewport(0, 0, viewSize.x, viewSize.y);
+  }
+
+  /** Reused: an allocation per frame was garbage per frame. */
+  const viewSize = new THREE.Vector2();
+  const clearColour = new THREE.Color();
 
   function resize(): void {
     if (!renderer || !camera || !container) return;
@@ -2891,8 +2982,31 @@ import { isTyping } from "./typing.js";
     const height = container.clientHeight || 1;
     applyProjection(width / height);
     renderer.setSize(width, height, false);
-    sizeAaTarget();
+    sizeAaTargetSoon();
     reportRect();
+    invalidate();
+  }
+
+  /**
+   * How long the multisampled targets wait after the last resize.
+   *
+   * A `ResizeObserver` fires on every step of a sidebar drag or a window
+   * resize, and reallocating a multisampled target at that rate was 148 ms of
+   * the third stutter report. The canvas follows at once; until the targets
+   * catch up, the copy stretches the old picture over it, which for a tenth of
+   * a second nobody can tell from the new one.
+   */
+  const AA_RESIZE_MS = 120;
+  let aaResizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function sizeAaTargetSoon(): void {
+    if (aaTarget === null) return;
+    if (aaResizeTimer !== null) clearTimeout(aaResizeTimer);
+    aaResizeTimer = setTimeout(() => {
+      aaResizeTimer = null;
+      sizeAaTarget();
+      invalidate();
+    }, AA_RESIZE_MS);
   }
 
   /**
@@ -2912,6 +3026,10 @@ import { isTyping } from "./typing.js";
   let aaScene: THREE.Scene | null = null;
   let aaCamera: THREE.OrthographicCamera | null = null;
   let aaQuad: THREE.Mesh | null = null;
+  /** The compass's own multisampled square, beside `aaTarget`; see `drawCompass`. */
+  let compassTarget: THREE.WebGLRenderTarget | null = null;
+  let compassCopy: THREE.Scene | null = null;
+  let compassQuad: THREE.Mesh | null = null;
 
   /**
    * Sized in *drawing buffer* pixels, not CSS ones.
@@ -2921,13 +3039,17 @@ import { isTyping } from "./typing.js";
    */
   function sizeAaTarget(): void {
     if (!renderer || aaTarget === null) return;
-    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const size = renderer.getDrawingBufferSize(viewSize);
     aaTarget.setSize(Math.max(1, size.x), Math.max(1, size.y));
+    const square = Math.max(1, Math.round(COMPASS_PX * renderer.getPixelRatio()));
+    compassTarget?.setSize(square, square);
   }
 
   function disposeAaTarget(): void {
     aaTarget?.dispose();
     aaTarget = null;
+    compassTarget?.dispose();
+    compassTarget = null;
   }
 
   /**
@@ -2944,11 +3066,25 @@ import { isTyping } from "./typing.js";
     }
     if (aaTarget !== null && aaTarget.samples === samples) return;
     disposeAaTarget();
-    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const size = renderer.getDrawingBufferSize(viewSize);
+    /*
+     * `resolveDepthBuffer: false`: the depth is never read after the frame,
+     * and resolving it doubled the blit. three also invalidates the
+     * multisampled depth after the resolve then, which on a tiler is memory it
+     * never has to write back.
+     */
     aaTarget = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
       samples,
       depthBuffer: true,
       stencilBuffer: false,
+      resolveDepthBuffer: false,
+    });
+    const square = Math.max(1, Math.round(COMPASS_PX * renderer.getPixelRatio()));
+    compassTarget = new THREE.WebGLRenderTarget(square, square, {
+      samples,
+      depthBuffer: true,
+      stencilBuffer: false,
+      resolveDepthBuffer: false,
     });
     if (aaScene === null) {
       aaScene = new THREE.Scene();
@@ -2970,6 +3106,27 @@ import { isTyping } from "./typing.js";
       aaScene.add(aaQuad);
     }
     if (aaQuad) (aaQuad.material as THREE.MeshBasicMaterial).map = aaTarget.texture;
+    if (compassCopy === null) {
+      compassCopy = new THREE.Scene();
+      /*
+       * Premultiplied in, so `One, OneMinusSrcAlpha` out -- and not three's own
+       * `premultipliedAlpha`, which multiplies by alpha in the shader and would
+       * do it a second time, darkening every edge of the gizmo.
+       */
+      compassQuad = new THREE.Mesh(
+        new THREE.PlaneGeometry(2, 2),
+        new THREE.MeshBasicMaterial({
+          depthTest: false,
+          depthWrite: false,
+          transparent: true,
+          blending: THREE.CustomBlending,
+          blendSrc: THREE.OneFactor,
+          blendDst: THREE.OneMinusSrcAlphaFactor,
+        }),
+      );
+      compassCopy.add(compassQuad);
+    }
+    if (compassQuad) (compassQuad.material as THREE.MeshBasicMaterial).map = compassTarget.texture;
   }
 
   /**
@@ -3014,7 +3171,11 @@ import { isTyping } from "./typing.js";
      */
     skyGroup.position.set(0, 0, 0);
     skyGroup.scale.setScalar(10);
+    // Lent to the sky's own scene for the cube render, then handed back: the
+    // environment is the sky alone, never the build lit by it.
+    skyScene.add(skyGroup);
     const built = pmrem.fromScene(skyScene, 0, 0.1, 100);
+    scene.add(skyGroup);
     environment?.dispose();
     environment = built;
     scene.environment = built.texture;
@@ -3035,6 +3196,8 @@ import { isTyping } from "./typing.js";
     calls: number;
     /** The slowest frame of the last `WORST_WINDOW_MS`, while diagnosing. */
     worst: { ms: number; culprit: string } | null;
+    /** Nothing has been drawn for a while, because nothing changed. */
+    idle?: boolean;
   } | null>(null);
   const FPS_MS = 500;
 
@@ -3073,6 +3236,35 @@ import { isTyping } from "./typing.js";
   }
   let fpsFrames = 0;
   let fpsAt = 0;
+
+  /**
+   * Drawing on demand: the last moment anything asked for a frame, and the
+   * last frame drawn. See `render_demand.ts`.
+   */
+  let activeAt = 0;
+  let lastDrawnAt = 0;
+  const view = new ViewWatch();
+
+  /** Something changed the picture; the loop draws for a little while. */
+  function invalidate(): void {
+    activeAt = performance.now();
+  }
+
+  /** Everything about the camera that changes the picture, as numbers. */
+  const viewScratch = new Float64Array(3 + 4 + 16 + 2);
+  function viewNumbers(of: THREE.Camera): Float64Array {
+    viewScratch[0] = of.position.x;
+    viewScratch[1] = of.position.y;
+    viewScratch[2] = of.position.z;
+    viewScratch[3] = of.quaternion.x;
+    viewScratch[4] = of.quaternion.y;
+    viewScratch[5] = of.quaternion.z;
+    viewScratch[6] = of.quaternion.w;
+    viewScratch.set(of.projectionMatrix.elements, 7);
+    viewScratch[23] = of === ortho ? 1 : 0;
+    viewScratch[24] = (of as THREE.OrthographicCamera).zoom ?? 1;
+    return viewScratch;
+  }
 
   /**
    * Gives the active camera the frustum this viewport's shape asks for.
@@ -3156,7 +3348,7 @@ import { isTyping } from "./typing.js";
   }
 
   /**
-   * Draws one frame from wherever the camera is: the sky, the world, the
+   * Draws one frame from wherever the camera is: the world with its sky, the
    * compass, and the anti-aliased copy onto the canvas.
    *
    * Out of the animation loop so a frame can be drawn *on request* as well as
@@ -3168,6 +3360,7 @@ import { isTyping } from "./typing.js";
    */
   function renderFrame(): void {
     if (renderer && scene && camera) {
+      lastDrawnAt = performance.now();
       renderer.info.reset();
       /*
        * Rebuilt here rather than in an effect, and before anything is
@@ -3182,21 +3375,15 @@ import { isTyping } from "./typing.js";
           note("environment rebuilt", t0);
         }
       }
-      if (aaTarget !== null) renderer.setRenderTarget(aaTarget);
-      let t0 = stamp();
       /*
-       * The sky first, then the depth buffer cleared, then the world.
-       *
-       * Two renders rather than one scene, because the sky has to be behind
-       * everything at every distance: the sun and the moon are transparent,
-       * and three.js draws transparent objects after every opaque one, so
-       * in a single scene they would paint over the schematic however their
-       * depth test was set.
+       * Everything in the world in one `render()`, the sky included -- see
+       * `atFarPlane`. Into a multisampled target that is one resolve per
+       * frame, where the sky's own pass and the compass made it three.
        *
        * The dome rides with the camera, which is also what makes it a sky
        * rather than a sphere you can fly out of.
        */
-      if (skyScene && skyGroup && sky) {
+      if (skyGroup && sky) {
         /*
          * Position and scale every frame rather than in an effect: both
          * follow the camera -- one its place, the other its far plane --
@@ -3215,33 +3402,27 @@ import { isTyping } from "./typing.js";
            */
           (stars.material as THREE.PointsMaterial).size = reach * 0.004;
         }
-        renderer.autoClear = true;
-        renderer.render(skyScene, camera);
-        lap("sky pass", t0);
-        t0 = stamp();
-        renderer.autoClear = false;
-        renderer.clearDepth();
-        renderer.render(scene, camera);
-        renderer.autoClear = true;
-      } else {
-        renderer.render(scene, camera);
       }
+      let t0 = stamp();
+      renderer.setRenderTarget(aaTarget);
+      renderer.render(scene, camera);
       lap("scene pass", t0);
       t0 = stamp();
       drawCompass();
       lap("compass", t0);
       t0 = stamp();
       /*
-       * ...and the whole frame, resolved, onto the canvas. The compass is
-       * inside it: it is part of the picture, and a pass that landed on
-       * the canvas after the copy would be the one unaliased thing on
-       * screen.
+       * ...and the frame, resolved, onto the canvas, with the compass's own
+       * resolved square on top. The compass is anti-aliased like the rest: a
+       * pass that landed on the canvas unaliased would be the one jagged
+       * thing on screen.
        */
       if (aaTarget !== null && aaScene && aaCamera) {
         renderer.setRenderTarget(null);
         const wasAutoClear = renderer.autoClear;
         renderer.autoClear = false;
         renderer.render(aaScene, aaCamera);
+        compositeCompass();
         renderer.autoClear = wasAutoClear;
         lap("anti-aliasing copy", t0);
       }
@@ -3297,6 +3478,13 @@ import { isTyping } from "./typing.js";
        * unless told not to, so it would otherwise report the compass.
        */
       renderer.info.autoReset = false;
+      /*
+       * The shadow map is drawn when something that casts or aims it moved,
+       * not every frame: it is a whole second pass over the geometry, and on
+       * a still scene it drew the same map sixty times a second. Every reason
+       * to redraw it goes through `shadowsStale`.
+       */
+      renderer.shadowMap.autoUpdate = false;
       scene = new THREE.Scene();
       scene.background = themeColor("--viewport-bg", 0x0b0f14);
 
@@ -3397,9 +3585,15 @@ import { isTyping } from "./typing.js";
         frameAnchor = due.anchor;
         if (!due.draw) return;
         const delta = clock.getDelta();
-        // Closes the interval the previous frame opened: what happened between
-        // the two, inside the loop and outside it. After the cap, so a skipped
-        // refresh is not an interval of its own.
+        /*
+         * Closes the interval the previous refresh opened: what happened
+         * between the two, inside the loop and outside it. After the cap, so a
+         * skipped refresh is not an interval of its own -- and before the
+         * on-demand decision, so a refresh that draws nothing still is one.
+         * The loop wakes on every refresh either way, so an idle stretch is a
+         * run of short intervals rather than one long one that reads as a
+         * stutter.
+         */
         if (profiler) profiler.beginFrame(performance.now());
         let t0 = stamp();
         /*
@@ -3429,6 +3623,40 @@ import { isTyping } from "./typing.js";
           controls?.update();
         }
         lap("camera", t0);
+        /*
+         * Whether this refresh draws at all; see `render_demand.ts`. The camera
+         * is compared rather than announced, because damping, flight and the
+         * compass all move it from inside this loop.
+         */
+        const now = performance.now();
+        if (camera && view.moved(viewNumbers(camera))) activeAt = now;
+        // Clocked on wall time, not on frames: the game states its animations
+        // in ticks of 50ms, and a 144Hz display must not run the water four
+        // times too fast.
+        // Timed inside, split into its first upload and the rest; a lap
+        // around it as well would count the same milliseconds twice.
+        const animated = playAnimations(now);
+        const pending = usingEnvironment() && environmentStale && now - environmentAt > ENVIRONMENT_MS;
+        if (!shouldDraw({ now, activeAt, animated, pending, always: alwaysDraw })) {
+          if (showFps && fps !== null && !fps.idle && counterIdle(now, lastDrawnAt, FPS_MS) && renderer) {
+            // The last frame's own counts: `info` is reset only when a frame
+            // starts, so it still describes the picture on screen.
+            fps = {
+              ...fps,
+              idle: true,
+              triangles: renderer.info.render.triangles,
+              calls: renderer.info.render.calls,
+            };
+          }
+          return;
+        }
+        // Back from a pause: the counter's window starts again rather than
+        // averaging the idle stretch into a rate nobody saw.
+        if (counterIdle(now, lastDrawnAt, FPS_MS)) {
+          fpsFrames = 0;
+          fpsAt = now;
+          if (fps?.idle) fps = { ...fps, idle: false };
+        }
         t0 = stamp();
         // Before the outline and the grid, both of which read what it writes:
         // after them, each would be acting on the previous frame's hover.
@@ -3437,13 +3665,6 @@ import { isTyping } from "./typing.js";
         t0 = stamp();
         updateBlockHighlight(performance.now());
         lap("block outline raycast", t0);
-        t0 = stamp();
-        // Clocked on wall time, not on frames: the game states its animations
-        // in ticks of 50ms, and a 144Hz display must not run the water four
-        // times too fast.
-        // Timed inside, split into its first upload and the rest; a lap
-        // around it as well would count the same milliseconds twice.
-        playAnimations(performance.now());
         t0 = stamp();
         updateBuildGrid(performance.now());
         lap("build grid", t0);
@@ -3895,7 +4116,22 @@ import { isTyping } from "./typing.js";
       renderer.domElement.addEventListener("pointerup", onPointerUp);
       renderer.domElement.addEventListener("contextmenu", onContextMenu);
 
+      /*
+       * Input wakes the loop. The camera's own movement is caught by
+       * comparison, so these are for what follows the pointer without moving
+       * the camera: the hover, the outline, the build grid, a gizmo drag.
+       */
+      const wake = () => invalidate();
+      const wakeOn = ["pointermove", "pointerdown", "pointerup", "pointerleave", "wheel"] as const;
+      for (const type of wakeOn) renderer.domElement.addEventListener(type, wake, { passive: true });
+      window.addEventListener("keydown", wake);
+      window.addEventListener("keyup", wake);
+
       return () => {
+        for (const type of wakeOn) renderer?.domElement.removeEventListener(type, wake);
+        window.removeEventListener("keydown", wake);
+        window.removeEventListener("keyup", wake);
+        if (aaResizeTimer !== null) clearTimeout(aaResizeTimer);
         cancelAnimationFrame(frame);
         observer.disconnect();
         renderer?.domElement.ownerDocument.removeEventListener("mousemove", onLookMove, true);
@@ -3928,9 +4164,10 @@ import { isTyping } from "./typing.js";
         fly?.dispose();
         controls?.dispose();
         disposeAaTarget();
-        if (aaQuad) {
-          aaQuad.geometry.dispose();
-          (aaQuad.material as THREE.Material).dispose();
+        for (const quad of [aaQuad, compassQuad]) {
+          if (!quad) continue;
+          quad.geometry.dispose();
+          (quad.material as THREE.Material).dispose();
         }
         environment?.dispose();
         pmrem?.dispose();
@@ -3943,6 +4180,65 @@ import { isTyping } from "./typing.js";
   });
 
   // --- reactive prop application -------------------------------------------
+
+  /*
+   * The one entry point for "a prop changed, draw again".
+   *
+   * Drawing on demand means a change nobody announces is a picture that
+   * stops updating, so every prop that is not a callback is read here, plus
+   * the component's own state that the loop's hover writes. `tests/ui.ts`
+   * compares this list with the props: one added and left out of it fails a
+   * check rather than leaving a stale frame on screen.
+   */
+  $effect(() => {
+    void [
+      mesh,
+      sunAzimuth,
+      sunElevation,
+      maxDpr,
+      renderScale,
+      maxDrawDistance,
+      projection,
+      antialias,
+      maxFps,
+      gpuPref,
+      globalIllumination,
+      showFps,
+      frameDiagnostics,
+      alwaysDraw,
+      shaderMode,
+      showBounds,
+      voidOpacity,
+      showGrid,
+      wireframe,
+      sky,
+      skyTextures,
+      anchor,
+      anchorTexture,
+      showAnchor,
+      timeOfDay,
+      shadows,
+      shadowQuality,
+      ground,
+      groundColor,
+      selection,
+      areas,
+      gizmoRegion,
+      cameraMode,
+      flySpeed,
+      framingKey,
+      theme,
+      documentSizeProp,
+      ghost,
+      ghostAt,
+      gizmoMode,
+      autoGrow,
+      pivot,
+      cameraRequest,
+    ];
+    void [hovered, gizmoHover, gridCell, flying, scene, deviceRatio];
+    invalidate();
+  });
 
   $effect(() => {
     if (!renderer) return;
@@ -3970,13 +4266,32 @@ import { isTyping } from "./typing.js";
     applyLook();
   });
 
+  /**
+   * The display's pixel ratio, kept current.
+   *
+   * `window.devicePixelRatio` is not reactive, so the effect below read it
+   * once and kept that answer when the window moved to a monitor with another
+   * scale: a 1.5 panel's ratio drawn on a 1.0 monitor is 2.25 times the pixels
+   * anyone can see. A media query on the current value fires when it stops
+   * being true, which is the only notice a page gets.
+   */
+  let deviceRatio = $state(typeof window === "undefined" ? 1 : window.devicePixelRatio);
+  $effect(() => {
+    const query = window.matchMedia(`(resolution: ${deviceRatio}dppx)`);
+    const changed = () => {
+      deviceRatio = window.devicePixelRatio;
+    };
+    query.addEventListener("change", changed);
+    return () => query.removeEventListener("change", changed);
+  });
+
   $effect(() => {
     if (!renderer) return;
     // The original clamped `devicePixelRatio` by `maxDPR` only; `renderScale`
     // was passed into the payload but never consumed, so its slider did
     // nothing. Both now apply, which is what the label "Clamp renderer pixel
     // ratio for performance" (component.py:323) always claimed.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxDpr) * renderScale);
+    renderer.setPixelRatio(Math.min(deviceRatio, maxDpr) * renderScale);
     resize();
   });
 
@@ -4029,18 +4344,41 @@ import { isTyping } from "./typing.js";
     renderer.shadowMap.enabled = shadows;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     sun.castShadow = shadows;
-    sun.shadow.mapSize.set(shadowQuality, shadowQuality);
     // Without these a face lit at a grazing angle shadows itself in stripes,
     // which on a flat wall of blocks is the whole wall.
     sun.shadow.bias = -0.0006;
     sun.shadow.normalBias = 0.05;
-    // The map is sized at allocation, so an existing one has to go for a new
-    // resolution to take.
-    sun.shadow.map?.dispose();
-    sun.shadow.map = null;
-    placeShadow();
+    /*
+     * The map is sized at allocation, so a new resolution needs a new map --
+     * and only a new resolution does. This used to throw the map away on
+     * every run, and the run followed `documentSize` through `placeShadow`,
+     * which is every edit: a fresh shadow map allocated per placed block.
+     */
+    if (sun.shadow.mapSize.x !== shadowQuality || sun.shadow.mapSize.y !== shadowQuality) {
+      sun.shadow.mapSize.set(shadowQuality, shadowQuality);
+      sun.shadow.map?.dispose();
+      sun.shadow.map = null;
+    }
+    untrack(placeShadow);
+    // The shadow pass draws with a depth copy of each material, which copies
+    // `wireframe` too, so the map is stale when it changes.
     if (loaded) applyWireframe(loaded, wireframe);
+    shadowsStale();
   });
+
+  /**
+   * The one way to ask for the shadow map to be drawn again.
+   *
+   * Called when the light or its box moved (`placeShadow`), when a payload
+   * changed the geometry, and when a setting changed the map. Anything else
+   * that casts a shadow and moves has to call it too, or its shadow stays
+   * where it was; `tests/ui.ts` requires this to be the only place that
+   * writes `needsUpdate`.
+   */
+  function shadowsStale(): void {
+    if (renderer) renderer.shadowMap.needsUpdate = true;
+    invalidate();
+  }
 
   /**
    * Aims the shadow camera at the structure, from wherever the light is.
@@ -4078,6 +4416,7 @@ import { isTyping } from "./typing.js";
     camera.near = fit.near;
     camera.far = fit.far;
     camera.updateProjectionMatrix();
+    shadowsStale();
   }
 
   $effect(() => {
@@ -4655,8 +4994,8 @@ import { isTyping } from "./typing.js";
    * Nothing is uploaded for a texture already showing the right frame, which is
    * most ticks for most of them.
    */
-  function playAnimations(nowMs: number): void {
-    if (!renderer || !texture || playing.length === 0) return;
+  function playAnimations(nowMs: number): boolean {
+    if (!renderer || !texture || playing.length === 0) return false;
     const ticks = nowMs / 50;
     let uploads = 0;
     let t0 = stamp();
@@ -4688,6 +5027,7 @@ import { isTyping } from "./typing.js";
     }
     if (uploads > 1) lap("texture animations: uploads", t0);
     if (uploads > 0) note("animations uploaded", undefined, { count: uploads });
+    return uploads > 0;
   }
 
   /** Reused by every blit: one allocation per upload was garbage per tick. */
@@ -5187,6 +5527,7 @@ import { isTyping } from "./typing.js";
       }
       chunkMeshes.clear();
       refreshAnimated();
+      shadowsStale();
       error = null;
       return;
     }
@@ -5227,6 +5568,7 @@ import { isTyping } from "./typing.js";
         applyDelta(previous, previousVoid, payload, map);
         applyWireframe(previous, wireframe);
         refreshAnimated();
+        shadowsStale();
         applied("delta applied");
         error = null;
         return;
@@ -5243,6 +5585,7 @@ import { isTyping } from "./typing.js";
       target.add(built.filler);
       applyWireframe(built.solid, wireframe);
       refreshAnimated();
+      shadowsStale();
       applied("rebuilt");
       error = null;
     } catch (err) {
@@ -5261,7 +5604,11 @@ import { isTyping } from "./typing.js";
   -->
   {#if showFps && fps}
     <div class="fps" aria-hidden="true">
-      <strong>{fps.fps}</strong> fps &middot; {fps.ms} ms<br />
+      {#if fps.idle}
+        {t("viewport.fpsIdle")}<br />
+      {:else}
+        <strong>{fps.fps}</strong> fps &middot; {fps.ms} ms<br />
+      {/if}
       {fps.triangles.toLocaleString()} tris &middot; {fps.calls} draws
       {#if fps.worst}
         <br />{t("viewport.worstFrame", { ms: fps.worst.ms, culprit: fps.worst.culprit })}

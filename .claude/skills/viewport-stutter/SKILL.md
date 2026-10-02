@@ -34,6 +34,11 @@ before touching code.
 
 ## Reading a report
 
+Frames that drew nothing are in the report too: the loop wakes on every
+refresh and the interval closes before it decides to draw, so a still scene is
+a run of ~16 ms intervals with no phases, not one long gap. A spike is still a
+late refresh or a long frame.
+
 Start with `culprits` (spikes counted by culprit), then `frames` (p50/p95/p99/
 max), then the individual `spikes`. Check `context.settings` — GI, shadows,
 AA, `maxDpr`, `renderScale`, sky — and `context.gpu`: a software renderer
@@ -106,7 +111,9 @@ is only for this investigation.
   2. **`compass` 225 ms and 103 ms** was not the compass. three r171 resolves
      the multisampled target at the end of every `render()`, colour and depth,
      and the frame made three calls into it (sky, scene, compass). The 104 px
-     compass paid a full-screen blit at 12 M px × 8 samples.
+     compass paid a full-screen blit at 12 M px × 8 samples. Fixed: the sky
+     is in the world's render (on the far plane), the compass has its own
+     small target, so a frame resolves once.
   3. **`mesh answered by main` 454 ms with `atlas: true`** on a tiny document:
      the atlas repacked because an edit introduced a texture, which
      invalidates every chunk and resends 27 MB.
@@ -124,6 +131,19 @@ is only for this investigation.
   unthrottled; the hover rules (`pointerOnHandle`, `hoverSource`) keep their
   answers; nothing the raycaster sees may change (`tests/ui.ts` walks every
   `intersectObject`).
+- **The viewport draws on demand** (`render_demand.ts`). Anything new that
+  changes the picture has to ask for a frame: a prop is covered by the
+  invalidation effect (and `tests/ui.ts` fails if it is not in its list), an
+  input by the wake listeners, the camera by comparison. Something that
+  changes the scene from a timer, a promise or an internal variable must call
+  `invalidate()`, or the picture freezes. "Always draw" (`preview.alwaysDraw`)
+  tells a missed invalidation from anything else: if it fixes the symptom, an
+  `invalidate()` is missing.
+- **Something that casts a shadow and moves calls `shadowsStale()`**; the map
+  is not redrawn every frame any more.
+- **One `render()` into `aaTarget` per frame.** Every further render into a
+  multisampled target is a full-screen resolve; draw extra passes into a target
+  of their own, the compass's arrangement.
 - **New work in the loop gets a `lap`**, new work outside it a `note`, through
   the existing `stamp`/`lap`/`note` helpers so diagnosing stays free when off.
 - Put the decision in a plain module when it can be tested (`frameDue`,

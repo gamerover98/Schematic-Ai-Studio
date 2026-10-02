@@ -53,6 +53,7 @@ import {
   shaderPreset,
 } from "../src/renderer/src/lib/shader_modes.js";
 import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "../src/renderer/src/lib/gpu_choice.js";
+import { counterIdle, SETTLE_MS, shouldDraw, ViewWatch } from "../src/renderer/src/lib/render_demand.js";
 import {
   continuedPlacement,
   entryFace,
@@ -1998,7 +1999,7 @@ console.log("\n--- a camera asked for over MCP ---");
   check("...after the camera-mode effects have run", aim.indexOf("await tick()") >= 0 && aim.indexOf("await tick()") < drawn);
   check(
     "the render loop draws through the same function",
-    /frame = requestAnimationFrame\(animate\);[\s\S]{0,4000}renderFrame\(\);/.test(viewer),
+    /frame = requestAnimationFrame\(animate\);[\s\S]{0,8000}renderFrame\(\);/.test(viewer),
   );
   const subscription = app.slice(app.indexOf("api().onCameraAim("), app.indexOf("api().onDocumentChanged("));
   check(
@@ -2913,11 +2914,12 @@ console.log("\n--- how the viewport is drawn ---");
   check("...and the samples go on a render target", viewer.includes("new THREE.WebGLRenderTarget("));
 
   /*
-   * The copy to the canvas happens after the compass, so the compass is inside
-   * the multisampled picture. Drawn after it, it would be the one unaliased
-   * thing on screen.
+   * The compass is drawn into its own multisampled square before the copy and
+   * laid on by it, so it is anti-aliased like the rest. A pass that landed on
+   * the canvas after the copy would be the one unaliased thing on screen.
    */
-  check("the frame is copied out after the compass is in it", viewer.indexOf("renderer.render(aaScene") > viewer.indexOf("drawCompass();"));
+  check("the compass is drawn before the frame is copied out", viewer.indexOf("renderer.render(aaScene") > viewer.indexOf("drawCompass();"));
+  check("...and laid on by the copy", viewer.indexOf("compositeCompass();") > viewer.indexOf("renderer.render(aaScene"));
 
   /*
    * The counter reports a whole frame, and a frame is three or four renders.
@@ -5384,6 +5386,118 @@ console.log("\n--- Delete leaves the document's empty space ---");
   const body = from === -1 ? "" : app.slice(from, from + 700);
   check("Delete fills with the empty space block", /parseBlock\(docState\?\.voidBlock \|\| "minecraft:air"\)/.test(body));
   check("...and not with air written out", !body.includes('singleMix({ namespacedName: "minecraft:air" })'));
+}
+
+// --- the frame costs less ----------------------------------------------------
+//
+// The third stutter report: a still scene drew sixty frames a second, each one
+// resolving a multisampled target three times (sky, scene, compass) and
+// redrawing the shadow map, and every edit threw the shadow map away. The
+// decision is `render_demand.ts`; the rest is read from the source, because
+// the loop runs from `requestAnimationFrame`, which this harness has no
+// frames from.
+console.log("\n--- the frame costs less ---");
+{
+  const base = { now: 10_000, activeAt: 0, animated: false, pending: false, always: false };
+  check("a still scene draws nothing", !shouldDraw(base));
+  check("activity draws", shouldDraw({ ...base, activeAt: 10_000 }));
+  check("...for a little while after it", shouldDraw({ ...base, activeAt: 10_000 - SETTLE_MS + 1 }));
+  check("...and then stops", !shouldDraw({ ...base, activeAt: 10_000 - SETTLE_MS }));
+  check("an animated texture's new frame draws", shouldDraw({ ...base, animated: true }));
+  check("work left for a later frame draws", shouldDraw({ ...base, pending: true }));
+  check("always draw draws", shouldDraw({ ...base, always: true }));
+
+  const watch = new ViewWatch();
+  check("the first view counts as a move", watch.moved([1, 2, 3]));
+  check("the same view does not", !watch.moved([1, 2, 3]));
+  check("any number differing does", watch.moved([1, 2, 3.0000001]));
+  check("...once", !watch.moved([1, 2, 3.0000001]));
+  check("a view of another length does", watch.moved([1, 2]));
+
+  check("the counter is idle once nothing has drawn for its window", counterIdle(1000, 400, 500));
+  check("...not before", !counterIdle(1000, 600, 500));
+  check("...and not before the first frame", !counterIdle(1000, 0, 500));
+
+  // The working copy may be CRLF, and every pattern below spells a newline.
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const stripped = viewer.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+  const between = (from: string, to: string): string => {
+    const start = stripped.indexOf(from);
+    return start === -1 ? "" : stripped.slice(start, stripped.indexOf(to, start + from.length));
+  };
+
+  /*
+   * One resolve per frame. three resolves a multisampled target at the end of
+   * every `render()` into it, so the world -- sky included -- is one render,
+   * and the compass has a target of its own.
+   */
+  const frame = between("function renderFrame(): void {", "onMount(");
+  check("the frame binds the scene's target once", (frame.match(/setRenderTarget\(aaTarget\)/g) ?? []).length === 1);
+  check("...and draws the world in one render", (frame.match(/renderer\.render\(scene, camera\)/g) ?? []).length === 1);
+  check("...with no pass of the sky's own", frame.length > 0 && !frame.includes("render(skyScene"));
+  check("the compass draws into its own target when anti-aliased", /setRenderTarget\(compassTarget\)/.test(between("function drawCompass", "function compositeCompass")));
+  check("the targets do not resolve their depth", (stripped.match(/resolveDepthBuffer: false/g) ?? []).length === 2);
+  /*
+   * In the world's pass the sun, the moon and the stars are drawn after every
+   * opaque object, being transparent, so they are kept behind the world by
+   * depth: on the far plane, tested against what the world wrote.
+   */
+  const farPlane = between("function atFarPlane", "function buildSky");
+  check("a sky body is pushed onto the far plane", farPlane.includes("gl_Position.z = gl_Position.w;"));
+  check("...and depth-tested there", farPlane.includes("material.depthTest = true"));
+  check("...which is all three of them", (between("function buildSky", "function skyImage").match(/atFarPlane\(/g) ?? []).length === 2);
+  check("the environment is still built from the sky alone", /skyScene\.add\(skyGroup\);\s*const built = pmrem\.fromScene\(skyScene/.test(stripped));
+
+  /*
+   * The shadow map is drawn on request, through one function, and kept across
+   * edits: only a new resolution reallocates it.
+   */
+  check("the shadow map does not redraw itself", stripped.includes("renderer.shadowMap.autoUpdate = false"));
+  check(
+    "...and one function asks for it",
+    (stripped.match(/shadowMap\.needsUpdate = true/g) ?? []).length === 1 &&
+      /function shadowsStale\(\): void \{\s*if \(renderer\) renderer\.shadowMap\.needsUpdate = true;/.test(stripped),
+  );
+  check("aiming the light asks for it", /camera\.updateProjectionMatrix\(\);\s*shadowsStale\(\);\s*\}/.test(between("function placeShadow", "$effect")));
+  check("every payload asks for it", (between("const payload = mesh;", "</script>").match(/shadowsStale\(\)/g) ?? []).length === 3);
+  const shadowEffect = between("renderer.shadowMap.enabled = shadows;", "function shadowsStale");
+  check("the map is reallocated only for a new resolution", /if \(sun\.shadow\.mapSize\.x !== shadowQuality[\s\S]*sun\.shadow\.map\?\.dispose\(\);/.test(shadowEffect));
+  check("...and the effect does not follow the document's size", shadowEffect.includes("untrack(placeShadow)"));
+  check("the document's size is one array while its numbers hold", /const documentSize = \$derived\.by/.test(stripped) && stripped.includes("documentSize: documentSizeProp = null"));
+
+  const resizeBody = between("function resize(): void {", "const AA_RESIZE_MS");
+  check("a resize reallocates the targets later, not at once", resizeBody.includes("sizeAaTargetSoon();") && !resizeBody.includes("sizeAaTarget();"));
+  check(
+    "the pixel ratio follows the display it is on",
+    stripped.includes("renderer.setPixelRatio(Math.min(deviceRatio, maxDpr) * renderScale)") &&
+      stripped.includes("window.matchMedia(`(resolution: ${deviceRatio}dppx)`)"),
+  );
+  check("no vector is allocated per frame for the viewport", !between("function drawCompass", "function compositeCompass").includes("new THREE.Vector2"));
+
+  /*
+   * The loop: the interval is closed before the decision, so a refresh that
+   * draws nothing is still a short interval rather than part of one long one;
+   * and nothing that follows the pointer runs unless the frame is drawn.
+   */
+  const loop = between("const animate = () => {", "animate();");
+  const opened = loop.indexOf("profiler.beginFrame");
+  const decided = loop.indexOf("shouldDraw(");
+  check("the profiler's interval closes before the decision", opened > 0 && decided > opened);
+  check("...which comes before the hover and the frame", decided > 0 && loop.indexOf("updateHover(") > decided && loop.indexOf("renderFrame();") > decided);
+  check("the camera is compared, not announced", /view\.moved\(viewNumbers\(camera\)\)/.test(loop));
+
+  /*
+   * Every prop that is not a callback asks for a frame. A prop added and left
+   * out of the list is a picture that stops updating, which is the failure
+   * drawing on demand invites.
+   */
+  const props = viewer.slice(viewer.indexOf("  const {\n    mesh,"), viewer.indexOf("}: Props = $props();"));
+  const locals = [...props.matchAll(/^\s{4}(\w+)(?::\s*(\w+))?(?:\s*=[^,\n]*)?,$/gm)]
+    .map((match) => match[2] ?? match[1])
+    .filter((name) => !/^on[a-z]/.test(name));
+  const invalidation = between("void [\n      mesh,", "invalidate();\n  });");
+  const missing = locals.filter((name) => !new RegExp(`\\b${name}\\b`).test(invalidation));
+  check("every prop is read by the invalidation effect", locals.length > 30 && missing.length === 0, `${locals.length} props; missing: ${missing.join(", ")}`);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

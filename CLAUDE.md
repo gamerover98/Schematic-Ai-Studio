@@ -4053,15 +4053,25 @@ inverse for the four horizontal ones, so `tests/blocks.ts` requires the pair to
 round-trip, which is what catches the only mistake a table of six unit vectors
 ever makes: a transposed sign.
 
-**The compass is drawn in a third pass over the same renderer, and clicked
-through an element on top of it.** Both halves are the design.
+**The compass is drawn by the same renderer into a square of its own, and
+clicked through an element on top of it.** Both halves are the design.
 
-A pass rather than a second `WebGLRenderer`, because a browser gives a page on
-the order of sixteen live contexts before it silently drops the oldest —
-already the reason `block_icons.svelte.ts` shares one, and spending a context on
-an ornament would be the worst possible use of it. The depth buffer is cleared
-first so the build cannot occlude an overlay that is not in the world, and the
-scissor is what stops the pass clearing or drawing into the rest of the frame.
+The same renderer rather than a second `WebGLRenderer`, because a browser gives
+a page on the order of sixteen live contexts before it silently drops the
+oldest — already the reason `block_icons.svelte.ts` shares one, and spending a
+context on an ornament would be the worst possible use of it.
+
+**With anti-aliasing on it has a multisampled target of its own**, the size of
+the square, and the copy lays it on the canvas (`compositeCompass`). It used to
+be a third pass into the scene's target, and three resolves a multisampled
+target at the end of *every* `render()` into it: the 104-pixel gizmo cost a
+full-screen blit of colour and depth, which is the 225 ms the third stutter
+report blamed on "compass". Its target is cleared to transparent black, so what
+lands in it is premultiplied, and the copy uses `One, OneMinusSrcAlpha` by hand:
+three's own `premultipliedAlpha` multiplies by alpha in the shader and would do
+it a second time, darkening every edge. Without anti-aliasing it is a scissored
+pass straight onto the canvas, with the depth buffer cleared first so the build
+cannot occlude an overlay that is not in the world.
 
 An element rather than a branch in the canvas's pointer handling, because the
 left button in that canvas is `THREE.MOUSE.PAN`: *every* gesture there has to be
@@ -6536,8 +6546,18 @@ is *on*: three applies tone mapping only when it is drawing to the canvas, so
 with a target bound the scene pass emits linear colour and the copy is where
 the curve belongs. Either way it happens exactly once, which is the property
 that has to hold -- turning anti-aliasing on must not change how the picture
-is graded. **The compass is drawn before the copy**, so it is inside the
-multisampled picture rather than the one unaliased thing on screen.
+is graded. **The compass is anti-aliased too**, in its own small target laid on
+by the copy, rather than the one unaliased thing on screen.
+
+**And there is one resolve per frame.** three resolves a multisampled target
+at the end of every `render()` into it, so the frame is *one* render into
+`aaTarget` -- the world with its sky -- and the compass resolves only its
+square. Both targets say `resolveDepthBuffer: false`, because nothing reads the
+depth after the frame. Measured on the RTX with the scene drawing every frame,
+the three resolves were about 39% GPU and 16.5 W, and one is about 33% and
+15.4 W. The targets are reallocated 120 ms after the last resize rather than on
+every `ResizeObserver` callback, which was 148 ms of the same report; meanwhile
+the copy stretches the old picture.
 
 The default is **4**, not 0. The context used to be created with `antialias:
 true` and no way to say otherwise, so off has to be a choice somebody makes
@@ -6570,8 +6590,57 @@ assigned at 60Hz would run Svelte's effects at 60Hz to move a number nobody
 can read that fast. It carries the triangles and the draw calls beside the
 rate, which is free and is what makes it a diagnosis rather than a number --
 and `renderer.info.autoReset` goes **off**, because `info` resets itself at
-the start of every render and a frame here is three or four of them: left
-alone it would report the compass.
+the start of every render and a frame here is up to four of them: left
+alone it would report the compass. Once nothing has been drawn for half a
+second it says **idle** instead of a rate, with the last frame's counts: a still
+scene is not a slow one, and a rate averaged over the idle stretch would read
+like the stutter it is not.
+
+**The viewport draws on demand.** The loop still wakes on every refresh, and
+`render_demand.ts` decides whether that refresh draws. A still scene used to
+draw sixty identical frames a second, which on a laptop iGPU is the whole
+budget; measured on the RTX with two blocks on screen, drawing every frame was
+33% GPU and 15.4 W, and on demand it is 0% and 9.2 W. Four things ask for a
+frame:
+
+- **activity** -- `invalidate()` -- after which the loop draws for
+  `SETTLE_MS`. Input events on the canvas and the window call it, and so does
+  one `$effect` that reads **every prop that is not a callback**, plus the
+  state the hover writes. `tests/ui.ts` compares that list with the props, so
+  a prop added and left out fails a check instead of leaving a stale picture.
+  The settle window is what lets the throttled parts of the loop (hover,
+  outline, build grid: 50 ms) catch up, and lets a state change a frame made
+  reach the scene through an effect a microtask later;
+- **the camera**, compared rather than announced (`ViewWatch`): damping,
+  flight and a compass flight all move it from inside the loop;
+- **an animated texture** that uploaded a frame;
+- **work left over**, such as an environment map held back by its one-second
+  floor.
+
+The profiler's interval closes **before** the decision, so an idle refresh is a
+short interval of its own rather than part of one long one that would read as
+a stutter. `preview.alwaysDraw` is the old behaviour, under the diagnostics,
+for telling a missed invalidation from anything else. `aimCamera` still draws
+at once.
+
+**The shadow map is drawn on request.** `shadowMap.autoUpdate` is off, and
+`shadowsStale()` is the one place that sets `needsUpdate`: aiming the light
+(`placeShadow`, which the sun's movement goes through), every payload, and the
+shadow settings. Anything else that casts a shadow and moves has to call it,
+or its shadow stays behind. The map is reallocated only for a new resolution:
+the effect used to dispose of it on every run, and through `placeShadow` it ran
+on every `documentSize`, which is every edit.
+
+**`documentSize` is one array while its numbers hold.** The app hands down a
+fresh one with every `DocumentState`, and every effect reading it ran again:
+the grid and the cage rebuilt, the sky re-applied (with global illumination,
+the environment map rebuilt). The Viewer's own `documentSize` is a `$derived`
+over the prop that keeps the old array when the numbers match.
+
+**The pixel ratio follows the display.** `window.devicePixelRatio` is not
+reactive, so a window moved from a 1.5 panel to a 1.0 monitor kept drawing
+2.25 times the pixels anyone could see. A `(resolution: Xdppx)` media query on
+the current value fires when it stops being true.
 
 **The frame rate cap skips frames and keeps `requestAnimationFrame`.** The loop
 still wakes on every refresh and `frameDue` in `shader_modes.ts` decides whether
@@ -6949,22 +7018,31 @@ the texel grid rotates with it. It would have been complexity that reads as a
 fix. If the box ever starts following the camera rather than the document, it is
 the first thing to add back.
 
-**The sky is drawn in a pass of its own, and both halves of that are a fix.**
-It was a sphere of radius 3000 in the main scene while `maxDrawDistance` — and
-so `camera.far` — defaults to **512**: every vertex outside the frustum, clipped,
-nothing drawn, and the viewport showing the renderer's clear colour. Black, with
-no sky in it. `skyDistance` therefore derives the dome's radius from the near and
-far planes and **clamps** — the clamp is the guarantee, and `tests/ui.ts` fails
-three checks without it.
+**The sky is sized to the frustum and drawn on the far plane.** It was a
+sphere of radius 3000 while `maxDrawDistance` — and so `camera.far` — defaults
+to **512**: every vertex outside the frustum, clipped, nothing drawn, and the
+viewport showing the renderer's clear colour. Black, with no sky in it.
+`skyDistance` therefore derives the dome's radius from the near and far planes
+and **clamps** — the clamp is the guarantee, and `tests/ui.ts` fails three
+checks without it.
 
-The separate pass is the other half. The sun and the moon are transparent, and
-three.js draws transparent objects *after* every opaque one, so in a single
-scene they would have painted over the schematic however their depth test was
-set. Sky, then `clearDepth()`, then the world: nothing in the sky can occlude
-anything, whatever its distance. The dome rides with the camera, which is also
-what stops it being a sphere you can fly out of.
+It was then a pass of its own, for a reason that still holds: the sun, the moon
+and the stars are transparent, and three draws transparent objects *after*
+every opaque one, so in one scene with no depth test they paint over the
+schematic. But a pass of its own into a multisampled target is a second
+`render()`, and three resolves the target at the end of each one. So the sky is
+in the world's scene now, and kept behind it by **depth**: `atFarPlane` sets
+`gl_Position.z = gl_Position.w` in each body's vertex shader, which puts it
+exactly where the cleared depth buffer is, and with three's `LessEqual` test a
+body is drawn only where nothing in the world has been. Checked in this app's
+Chromium on ANGLE with 4x MSAA: a box in front of a full-screen "sun" stays red
+with the trick and turns yellow without it. The dome is opaque, first by its
+`renderOrder`, and tests no depth. `skyScene` survives only because the
+environment map is built from the sky alone: the group is lent to it for the
+cube render and handed back. The dome rides with the camera, which is also what
+stops it being a sphere you can fly out of.
 
-With the sky off there is no second pass and `scene.background` is the theme
+With the sky off nothing of it is drawn and `scene.background` is the theme
 colour again, exactly as before any of this.
 
 **The virtual floor is not a block.** A plane at y=0, twenty thousand across,
@@ -6994,7 +7072,7 @@ a surface turns edge-on. It applies to filled polygons only, and that is what
 makes it exact here: the floor is the only polygon of the three, so pushing it
 one step away wins the argument for both sets of lines at every distance. Pushing
 the base rather than pulling the decals is safe because nothing is behind the
-floor — the sky is a separate pass that clears the depth buffer first.
+floor but the sky, which sits on the far plane (`atFarPlane`).
 
 `depth.ts` holds the arithmetic and `tests/ui.ts` states it from both ends: an
 epsilon is resolvable at 16 blocks and gone by 64, at every draw distance the

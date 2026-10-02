@@ -208,6 +208,13 @@ export interface PreviewSettings {
    * next to a frame. See `frame_profiler.ts`.
    */
   frameDiagnostics: boolean;
+  /**
+   * Draw on every display refresh, as the viewport did before it drew on
+   * demand. A diagnostic beside `frameDiagnostics`, off by default: a picture
+   * that stops updating where it should not is a missed invalidation, and
+   * this is how to tell one from anything else. See `render_demand.ts`.
+   */
+  alwaysDraw: boolean;
   /** Which look the viewport is drawn with. See `SHADER_MODES`. */
   shaderMode: ShaderMode;
   sunAzimuthDeg: number;
@@ -346,6 +353,7 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   globalIllumination: false,
   showFps: false,
   frameDiagnostics: false,
+  alwaysDraw: false,
   shaderMode: "vanilla",
   sunAzimuthDeg: 60,
   sunElevationDeg: 35,
