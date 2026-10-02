@@ -20,51 +20,17 @@ import path from "path";
 import { app, safeStorage } from "electron";
 
 import {
-  DEFAULT_SETTINGS,
   PROVIDERS,
   type KeyStorageStatus,
   type Provider,
   type Settings,
 } from "../../shared/settings.js";
-import { coerceRecents, forgetRecent, rememberRecent } from "./recent_documents.js";
+import { forgetRecent, rememberRecent } from "./recent_documents.js";
 import { coerceSettings } from "./settings_coerce.js";
+import { emptyPersistedFile, parsePersistedFile, type PersistedFile } from "./settings_file.js";
 import { orphanedProfile } from "./legacy_profile.js";
 import { legacyUserDataDir } from "./resources.js";
 import type { RecentDocument } from "../../shared/ipc.js";
-
-interface PersistedFile {
-  settings: Settings;
-  /** provider -> base64 ciphertext. Never plaintext. */
-  encryptedKeys: Record<string, string>;
-  /**
-   * Recently opened schematics, most recent first.
-   *
-   * Beside `settings` rather than inside it, and for the same reason
-   * `encryptedKeys` is: the renderer round-trips the whole `Settings` object on
-   * every save. It holds a snapshot taken at startup, so a list that grew in
-   * main since then would be overwritten by the stale one the moment the user
-   * changed a preview slider — the file opened five minutes ago would silently
-   * vanish from the list. Only main writes this.
-   */
-  recentDocuments: RecentDocument[];
-  /**
-   * The MCP server's bearer token.
-   *
-   * Beside `settings` for the same reason `recentDocuments` is: the renderer
-   * round-trips the whole `Settings` object on every save from a snapshot taken
-   * when it started, so a token regenerated in main since then would be
-   * overwritten by the stale copy the moment somebody moved a slider.
-   *
-   * **Plaintext, deliberately.** The API keys next to it are encrypted because
-   * they are credentials for a remote service that nothing else should ever
-   * read. This one is displayed in the UI on purpose and written in the clear to
-   * `mcp.json` so the stdio bridge — a dependency-free Node script with no way
-   * to reach `safeStorage` — can send it. Encrypting one copy while another sits
-   * in plaintext beside it would be theatre. What protects it is that it
-   * authorises a loopback server and can be rotated in one click.
-   */
-  mcpToken: string | null;
-}
 
 /** Windows reaches the same file through paths differing only in case. */
 const RECENTS_ARE_CASE_SENSITIVE = process.platform !== "win32";
@@ -85,17 +51,8 @@ async function load(): Promise<PersistedFile> {
     return cache;
   }
   try {
-    const text = await readFile(settingsPath(), "utf-8");
-    const parsed = JSON.parse(text) as Partial<PersistedFile>;
-    cache = {
-      settings: coerceSettings(parsed.settings),
-      encryptedKeys:
-        parsed.encryptedKeys && typeof parsed.encryptedKeys === "object" ? parsed.encryptedKeys : {},
-      recentDocuments: coerceRecents(parsed.recentDocuments),
-      // An empty string is treated as absent by `chooseToken`, so a file edited
-      // by hand into `""` heals into a fresh token rather than serving one.
-      mcpToken: typeof parsed.mcpToken === "string" ? parsed.mcpToken : null,
-    };
+    // The one reading of the file, shared with the GPU choice at startup.
+    cache = parsePersistedFile(await readFile(settingsPath(), "utf-8"));
   } catch (err: unknown) {
     // RULEBOOK.md §1 "Standard library I/O": catch-ENOENT, rethrow-else. A
     // corrupt JSON file is also recoverable-by-reset here (SyntaxError), since
@@ -104,12 +61,7 @@ async function load(): Promise<PersistedFile> {
     if (code !== "ENOENT" && !(err instanceof SyntaxError)) {
       throw err;
     }
-    cache = {
-      settings: { ...DEFAULT_SETTINGS },
-      encryptedKeys: {},
-      recentDocuments: [],
-      mcpToken: null,
-    };
+    cache = emptyPersistedFile();
   }
   return cache;
 }

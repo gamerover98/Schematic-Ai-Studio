@@ -6623,20 +6623,74 @@ Three rules keep it honest:
   where every phase shows up as a `viewer:*` measure.
 
 **The GPU preference applies at the next launch, and it cannot do better.**
-Chromium picks the adapter when its GPU process starts, and the only lever is
-a switch (`force_high_performance_gpu` / `force_low_power_gpu`) appended
-before `app.whenReady`. The settings store is async and not ready then, so
-`index.ts` reads `settings.json` synchronously through
-`services/gpu_preference.ts`, where anything unreadable means `auto`: startup
-is the least deserving place to fail. The WebGL context asks for the same
-`powerPreference`, once, when it is made. The pane compares the setting with
-what main says the process *started* with (`AppInfo.gpuPreference`) and only
-then offers a restart, which asks about unsaved work before `app.relaunch()`:
-a relaunch is scheduled for whenever the process next exits, so a declined
-close prompt would otherwise restart the app at some unrelated quit later.
-The `gpu` field of a stutter report is how to see which card was actually
-used. It came from a hybrid-GPU laptop that stuttered only on its external
-monitor.
+Chromium picks the adapter when its GPU process starts, and the levers are
+switches appended before `app.whenReady`. The settings store is async and not
+ready then, so `index.ts` reads `settings.json` synchronously, where anything
+unreadable means `auto`: startup is the least deserving place to fail. The
+WebGL context asks for the same `powerPreference`, once, when it is made. The
+pane offers a restart only when the choice differs from what main says the
+process *started* with (`GpuStatus.launch`). The restart asks about unsaved
+work before `app.relaunch()`, because a relaunch is scheduled for whenever the
+process next exits: a declined close prompt would otherwise restart the app at
+some unrelated quit later. In development `app.relaunch()` is useless: electron-vite exits when its
+electron does and takes the dev server with it, so the new process opened a
+grey window. `relaunch.ts` therefore spawns the new process itself under
+`ELECTRON_RENDERER_URL`, destroys its own window and stays alive until the
+child exits, after stopping the MCP server so the child can bind the port.
+
+**Where the cards can be chosen, the select lists the cards** and only
+Automatic beside them: the two presets would name one of them twice. A preset
+stored earlier is shown as the card it lands on.
+
+**For weeks the preference was never applied, and every screen said it
+was.** `gpu_preference.ts` parsed the file itself and looked for `preview` at
+the top. The store writes it under `settings`. So every launch read `auto`
+and appended nothing, and a laptop set to high performance drew with its AMD
+iGPU while the pane showed the choice saved. The check written for it built
+`{"preview": ...}` by hand: it agreed with the parser instead of with the
+file, so it passed. Both readers now go through `settings_file.ts`. The test
+writes a `PersistedFile` and requires the store's `load` to call
+`parsePersistedFile`. Reading `preview` from the top again fails three checks.
+
+It surfaced as a stutter report naming the AMD with `gpuPreference:
+high-performance` in its settings. That field is the choice on screen, which
+cannot tell "not restarted yet" from "asked for and ignored". A copied report
+therefore now carries `gpuLaunch` (what main asked for), `gpuActive` (what
+Chromium draws with) and `gpuHonoured`. Report 1, on the same machine, had
+shown the RTX: the window was on the external monitor, which the dGPU drives.
+
+**One card is chosen by LUID, and a LUID is not a name.**
+`--use-adapter-luid=<high>,<low>` is the only lever that names the third of
+three cards. It is in Electron 33's binary, `ui/gl/gl_display.cc` parses it
+(high part signed, low part unsigned), and it was verified on this app's own
+Electron: the RTX drew with it, and a LUID that names nothing fell back to the
+default adapter with WebGL still on. That last fact is what makes a stale
+LUID harmless.
+
+But Windows assigns LUIDs at boot, and Electron exposes none.
+`app.getGPUInfo` enumerates vendor, device, revision, subsystem, `active`
+(false for every device, measured) and a power preference. So:
+- the setting stores a stable key, `vendor:device:subsys:rev#n`;
+- `services/gpu_adapters.ts` reads the LUIDs from DXGI, through PowerShell
+  and some C# compiled at run time;
+- the list is cached per boot in `userData/gpu-adapters.json`.
+
+The enumeration costs about a second, paid only at the first launch of a boot
+with a card chosen. No native dependency.
+
+A preference stays on Chromium's own switch. Measured, `force_high_performance_gpu`
+does move this laptop to its RTX, and it costs no enumeration.
+
+**What draws is checked, not assumed.**
+`app.getGPUInfo("complete").auxAttributes.glRenderer` is the same ANGLE string
+WebGL reports, device id included (`(0x0000249C)`). So `gpu_runtime.ts` tells
+main which card draws without asking the window.
+- A LUID that was passed and did not take goes into the cache's `badLuids`,
+  and the next launch reads the list again.
+- The list is refreshed in the background after every start.
+- The pane says which card draws, and warns when the choice was not honoured.
+- Where DXGI does not exist (Linux), the cards Chromium saw are listed as
+  information, and only a preference can be chosen.
 
 **A shader mode is a preset, and `vanilla` is the identity.** There are no
 shader packs and there must not appear to be: the renderer opens no connection

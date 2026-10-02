@@ -699,8 +699,18 @@ export const en = {
   "preview.gpuPreference.highPerformance": "Dedicated GPU (high performance)",
   "preview.gpuPreference.lowPower": "Integrated GPU (power saving)",
   "preview.gpuPreferenceHint":
-    "For computers with two graphics cards. Takes effect after restarting; a stutter report names the card actually in use.",
+    "For computers with more than one graphics card: by power, or one card by name. Takes effect after restarting.",
   "preview.gpuPreferenceRestart": "Restart now",
+  "preview.gpuInUse": "Drawing with: {name}",
+  "preview.gpuDetected": "Cards found: {names}. On this system the card is chosen by power, or by the driver.",
+  "preview.gpuNotHonoured":
+    "{name} was asked for, but another card is drawing. Check the card's driver, or choose by power instead.",
+  "preview.gpuAdapterMissing":
+    "The card chosen is no longer on this computer, so the system decides. Choose another one.",
+  "preview.gpuEnumerationFailed":
+    "The list of cards could not be read, so the system decides. Choose by power instead.",
+  "preview.pixelLoad":
+    "Each frame fills {pixels} million pixels × {samples} samples. On an integrated GPU, lower this or the anti-aliasing first.",
   "preview.frameDiagnostics": "Diagnose stutters",
   "preview.frameDiagnosticsHint":
     "Records where each frame's time goes and keeps the slow ones. The frame counter then shows the worst frame of the last two seconds and what caused it, and every stutter is logged to the developer console (Help → Toggle Developer Tools).",

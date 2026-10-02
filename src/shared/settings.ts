@@ -124,10 +124,11 @@ export const AA_LEVELS = [0, 2, 4, 8] as const;
 export const FPS_CAPS = [0, 30, 60, 90, 120, 144] as const;
 
 /**
- * Which GPU draws the window, on a machine with two.
+ * Which GPU draws the window, on a machine with more than one.
  *
  * Applied as a Chromium switch before the app is ready, so a change takes
- * effect at the next launch and never while running. See
+ * effect at the next launch and never while running. A particular adapter is
+ * chosen with `gpuAdapter` instead, which outranks this. See
  * `services/gpu_preference.ts`.
  */
 export const GPU_PREFERENCES = ["auto", "high-performance", "low-power"] as const;
@@ -138,6 +139,19 @@ export function gpuPreference(value: unknown): GpuPreference {
   return (GPU_PREFERENCES as readonly unknown[]).includes(value)
     ? (value as GpuPreference)
     : "auto";
+}
+
+/**
+ * The adapter key a stored `gpuAdapter` names, or `null`.
+ *
+ * Total, `projection`'s rule: `preview` is spread over the defaults without
+ * validation, so a junk value has to read exactly like an absent one. A key
+ * is short and printable (`10de:249c:151e1025:a1#0`); anything else is `null`.
+ */
+export function gpuAdapterKey(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+#\d+$/.test(value)
+    ? value
+    : null;
 }
 
 export interface PreviewSettings {
@@ -162,6 +176,14 @@ export interface PreviewSettings {
   maxFps: number;
   /** Which GPU to ask for at the next launch. See `GPU_PREFERENCES`. */
   gpuPreference: GpuPreference;
+  /**
+   * One adapter, named by its stable key, to draw with at the next launch; or
+   * `null` to go by `gpuPreference`.
+   *
+   * A key and never a LUID: Windows hands an adapter a new LUID at every boot,
+   * so the LUID is looked up at launch. See `services/gpu_adapters.ts`.
+   */
+  gpuAdapter: string | null;
   /**
    * Whether the sky lights the build.
    *
@@ -320,6 +342,7 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   antialias: 4,
   maxFps: 0,
   gpuPreference: "auto",
+  gpuAdapter: null,
   globalIllumination: false,
   showFps: false,
   frameDiagnostics: false,

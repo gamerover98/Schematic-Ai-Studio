@@ -22,7 +22,20 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { loadStructure } from "../src/main/pipeline/loader.js";
-import { gpuSwitchFor, readGpuPreference } from "../src/main/services/gpu_preference.js";
+import { gpuSwitchFor, readGpuChoice } from "../src/main/services/gpu_preference.js";
+import {
+  adapterForPreference,
+  bootTime,
+  cacheForBoot,
+  enumerateAdaptersSync,
+  gpuStatusFrom,
+  launchHonoured,
+  parseDxgiOutput,
+  planGpuLaunch,
+  rendererDeviceId,
+  type AdapterList,
+} from "../src/main/services/gpu_adapters.js";
+import { parsePersistedFile, type PersistedFile } from "../src/main/services/settings_file.js";
 import { IPC, openCodeModelRequiresKey } from "../src/shared/ipc.js";
 import { createReplyTable, RendererTimeoutError } from "../src/main/services/renderer_request.js";
 import { rememberedFromIndex } from "../src/main/services/conversation_core.js";
@@ -155,6 +168,9 @@ import {
   DEFAULT_UPDATE_SETTINGS,
   effectiveIncludeDevBuilds,
   type UpdateSettings,
+  gpuAdapterKey,
+  type GpuPreference,
+  type PreviewSettings,
 } from "../src/shared/settings.js";
 import { MC_VERSIONS, eraOf, resolveVersionName } from "../src/shared/mc_versions.js";
 import {
@@ -1227,19 +1243,219 @@ console.log("\n--- application menu ---");
   equal("auto appends no GPU switch", gpuSwitchFor("auto"), null);
   equal("high performance forces the dedicated GPU", gpuSwitchFor("high-performance"), "force_high_performance_gpu");
   equal("low power forces the integrated GPU", gpuSwitchFor("low-power"), "force_low_power_gpu");
-  equal("no settings file reads as auto", readGpuPreference(null), "auto");
-  equal("a settings file with no preference reads as auto", readGpuPreference('{"preview":{}}'), "auto");
-  equal("a junk preference reads as auto", readGpuPreference('{"preview":{"gpuPreference":"fast"}}'), "auto");
-  equal("malformed JSON reads as auto", readGpuPreference("{"), "auto");
-  equal(
-    "a stored preference is read back",
-    readGpuPreference('{"preview":{"gpuPreference":"low-power"}}'),
-    "low-power",
-  );
+
+  /*
+   * **The file is built the way the store writes it, and that is the check.**
+   * The old reader looked for `preview` at the top while the store writes it
+   * under `settings`, so every launch read "auto" -- and the old checks wrote
+   * `{"preview": ...}` by hand, agreeing with the reader instead of the file.
+   * A laptop set to high performance drew with its integrated GPU while every
+   * check passed. Here the text comes from a `PersistedFile`, and the store's
+   * own reading is required to be the same function.
+   */
+  {
+    const stored = (preview: Record<string, unknown>): string =>
+      JSON.stringify({
+        settings: { ...DEFAULT_SETTINGS, preview: { ...DEFAULT_SETTINGS.preview, ...preview } as PreviewSettings },
+        encryptedKeys: {},
+        recentDocuments: [],
+        mcpToken: null,
+      } satisfies PersistedFile);
+    equal("no settings file reads as auto", readGpuChoice(null), { preference: "auto", adapter: null });
+    equal("malformed JSON reads as auto", readGpuChoice("{"), { preference: "auto", adapter: null });
+    equal(
+      "a stored preference is read back from where the store writes it",
+      readGpuChoice(stored({ gpuPreference: "high-performance" })).preference,
+      "high-performance",
+    );
+    equal(
+      "...and a stored adapter with it",
+      readGpuChoice(stored({ gpuAdapter: "10de:249c:151e1025:a1#0" })).adapter,
+      "10de:249c:151e1025:a1#0",
+    );
+    equal("a junk preference reads as auto", readGpuChoice(stored({ gpuPreference: "fast" })).preference, "auto");
+    equal("a junk adapter reads as none", readGpuChoice(stored({ gpuAdapter: "the big one" })).adapter, null);
+    equal(
+      "a preference at the top of the file is not where the store writes it",
+      readGpuChoice('{"preview":{"gpuPreference":"low-power"}}').preference,
+      "auto",
+    );
+    equal(
+      "a byte-order mark in front of the file is not a corrupt file",
+      readGpuChoice(`\uFEFF${stored({ gpuPreference: "low-power" })}`).preference,
+      "low-power",
+    );
+    equal(
+      "the store and startup read one file one way",
+      parsePersistedFile(stored({ gpuPreference: "low-power" })).settings.preview.gpuPreference,
+      "low-power",
+    );
+    const store = readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "services", "settings-store.ts"),
+      "utf8",
+    );
+    check("the settings store reads its file through parsePersistedFile", /parsePersistedFile\(await readFile/.test(store));
+    check("...and parses nothing of its own", !/JSON\.parse\(/.test(store));
+  }
+
+  /*
+   * The adapter list. The fixture is this machine's own DXGI answer, taken
+   * while the LUID switch was being verified: an AMD iGPU, an RTX 3080 and the
+   * Basic Render Driver, in bus order, and the two power orders.
+   */
+  {
+    const dxgi = JSON.stringify({
+      adapters: [
+        { name: "AMD Radeon(TM) Graphics", vendorId: 4098, deviceId: 5688, subSysId: 354291749, revision: 197, dedicatedMemory: 519847936, luid: "0,72997", flags: 0 },
+        { name: "NVIDIA GeForce RTX 3080 Laptop GPU", vendorId: 4318, deviceId: 9372, subSysId: 354291749, revision: 161, dedicatedMemory: 8405385216, luid: "0,76739", flags: 0 },
+        { name: "Microsoft Basic Render Driver", vendorId: 5140, deviceId: 140, subSysId: 0, revision: 0, dedicatedMemory: 0, luid: "0,76645", flags: 2 },
+      ],
+      highPerformance: ["0,76739", "0,72997", "0,76645"],
+      lowPower: ["0,72997", "0,76739", "0,76645"],
+    });
+    const list = parseDxgiOutput(dxgi);
+    equal("the software adapter is never a choice", list?.adapters.map((adapter) => adapter.name), [
+      "AMD Radeon(TM) Graphics",
+      "NVIDIA GeForce RTX 3080 Laptop GPU",
+    ]);
+    equal("a key is the ids in hex, never the LUID", list?.adapters[1]?.key, "10de:249c:151e1025:a1#0");
+    equal("...and is what the setting accepts", gpuAdapterKey(list?.adapters[1]?.key), list?.adapters[1]?.key);
+    equal("the power orders drop what is not listed", list?.highPerformance, ["0,76739", "0,72997"]);
+    equal(
+      "high performance lands on the RTX",
+      list === null ? null : adapterForPreference(list, "high-performance")?.name,
+      "NVIDIA GeForce RTX 3080 Laptop GPU",
+    );
+    equal(
+      "low power lands on the AMD",
+      list === null ? null : adapterForPreference(list, "low-power")?.name,
+      "AMD Radeon(TM) Graphics",
+    );
+    const twins = parseDxgiOutput(
+      JSON.stringify({
+        adapters: [1, 2, 3].map((n) => ({ name: "Twin", vendorId: 0x10de, deviceId: 1, subSysId: 2, revision: 3, luid: `0,${n}`, flags: 0 })),
+      }),
+    );
+    equal("identical cards are told apart by order", twins?.adapters.map((adapter) => adapter.key), [
+      "10de:1:2:3#0",
+      "10de:1:2:3#1",
+      "10de:1:2:3#2",
+    ]);
+    equal("PowerShell noise is not an adapter list", parseDxgiOutput("Add-Type : boom"), null);
+    equal(
+      "a LUID the switch cannot parse is dropped",
+      parseDxgiOutput(JSON.stringify({ adapters: [{ name: "x", luid: "0;1", flags: 0 }] }))?.adapters.length,
+      0,
+    );
+
+    // The per-boot cache.
+    const boot = bootTime(1_700_000_000_000, 3600);
+    equal("boot time is the clock minus the uptime", boot, 1_700_000_000 - 3600);
+    const cache = JSON.stringify({ boot, list, badLuids: ["0,1"] });
+    equal("a cache from this boot is read back", cacheForBoot(cache, boot + 2)?.list.adapters.length, 2);
+    equal("...with its bad LUIDs", cacheForBoot(cache, boot)?.badLuids, ["0,1"]);
+    equal("a cache from another boot is not", cacheForBoot(cache, boot + 600), null);
+    equal("a corrupt cache is not", cacheForBoot("{", boot), null);
+
+    // The launch plan.
+    let enumerations = 0;
+    const enumerate = (): AdapterList | null => {
+      enumerations += 1;
+      return list;
+    };
+    const plan = (
+      choice: { preference: GpuPreference; adapter: string | null },
+      cachedText: string | null = null,
+      platform = "win32",
+    ) => planGpuLaunch({ choice, platform, boot, cachedText, enumerate });
+    const byKey = plan({ preference: "auto", adapter: "10de:249c:151e1025:a1#0" });
+    equal("a chosen adapter is asked for by its LUID", byKey.switches, [{ name: "use-adapter-luid", value: "0,76739" }]);
+    equal("...recorded as such", [byKey.launch.method, byKey.launch.adapterName], ["luid", "NVIDIA GeForce RTX 3080 Laptop GPU"]);
+    check("...and the list read for it is kept for the boot", byKey.cacheToWrite?.boot === boot && enumerations === 1);
+    const cached = plan({ preference: "auto", adapter: "10de:249c:151e1025:a1#0" }, JSON.stringify(byKey.cacheToWrite));
+    check("a second launch in the same boot reads no list", enumerations === 1 && cached.cacheToWrite === null);
+    equal("...and passes the same LUID", cached.switches[0]?.value, "0,76739");
+    const distrusted = plan(
+      { preference: "auto", adapter: "10de:249c:151e1025:a1#0" },
+      JSON.stringify({ ...byKey.cacheToWrite, badLuids: ["0,76739"] }),
+    );
+    check(
+      "a LUID that did not take sends the next launch back to the list",
+      enumerations === 2 && distrusted.cacheToWrite !== null,
+    );
+    const gone = plan({ preference: "high-performance", adapter: "1:2:3:4#0" });
+    equal("a card no longer there falls back to the preference", gone.switches, [{ name: "force_high_performance_gpu" }]);
+    equal("...and says why", gone.launch.note, "adapter-missing");
+    const broken = planGpuLaunch({
+      choice: { preference: "auto", adapter: "10de:249c:151e1025:a1#0" },
+      platform: "win32",
+      boot,
+      cachedText: null,
+      enumerate: () => null,
+    });
+    equal("a list that cannot be read falls back too", [broken.switches.length, broken.launch.note], [0, "enumeration-failed"]);
+    equal(
+      "outside Windows an adapter cannot be named, so the preference applies",
+      plan({ preference: "low-power", adapter: "10de:249c:151e1025:a1#0" }, null, "linux").switches,
+      [{ name: "force_low_power_gpu" }],
+    );
+    const before = enumerations;
+    const preference = plan({ preference: "high-performance", adapter: null });
+    equal("a preference stays on Chromium's switch", preference.switches, [{ name: "force_high_performance_gpu" }]);
+    check("...and costs no list", enumerations === before);
+
+    // What actually draws.
+    const nvidia = "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Laptop GPU (0x0000249C) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+    const amd = "ANGLE (AMD, AMD Radeon(TM) Graphics (0x00001638) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+    equal("the device id is read out of the ANGLE string", rendererDeviceId(nvidia), 0x249c);
+    equal("...or nothing when it is not there", rendererDeviceId("SwiftShader"), null);
+    const rtx = list?.adapters[1] ?? null;
+    equal("the RTX drawing honours a launch that asked for it", launchHonoured(byKey.launch, rtx, nvidia), true);
+    equal("the AMD drawing does not", launchHonoured(byKey.launch, rtx, amd), false);
+    equal("a launch that named no card cannot be dishonoured", launchHonoured(preference.launch, rtx, amd), null);
+    const windows = gpuStatusFrom({ platform: "win32", launch: byKey.launch, list, devices: [], renderer: amd });
+    equal("the status lists the cards", windows.adapters?.length, 2);
+    equal("...says which one draws", windows.active?.adapter, "1002:1638:151e1025:c5#0");
+    equal("...and that the choice was not honoured", windows.honoured, false);
+    equal("...with the preferences resolved to cards", [windows.highPerformance, windows.lowPower], [
+      "10de:249c:151e1025:a1#0",
+      "1002:1638:151e1025:c5#0",
+    ]);
+    const linux = gpuStatusFrom({
+      platform: "linux",
+      launch: preference.launch,
+      list: null,
+      devices: [
+        { vendorId: 0x8086, deviceId: 0x9a49, gpuPreference: 2 },
+        { vendorId: 0x10de, deviceId: 0x2520, gpuPreference: 3, deviceString: "GeForce RTX 3060" },
+        { vendorId: 0x1414, deviceId: 0x8c },
+      ],
+      renderer: null,
+    });
+    equal("elsewhere the cards come from Chromium, software ones left out", linux.adapters?.map((adapter) => adapter.name), [
+      "Intel 0x9a49",
+      "GeForce RTX 3060",
+    ]);
+    check(
+      "...and only a preference can be chosen",
+      !linux.choosable && linux.highPerformance === (linux.adapters?.[1]?.key ?? "missing"),
+    );
+
+    if (process.platform === "win32") {
+      // The script itself, on the machine running the suite: a typo in the C#
+      // fails here rather than as a silent fallback at somebody's launch.
+      const real = enumerateAdaptersSync(30_000);
+      check("the DXGI script runs and answers on Windows", real !== null, "enumerateAdaptersSync returned null");
+    }
+  }
   {
     const entry = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "index.ts"), "utf8");
-    const append = entry.indexOf("app.commandLine.appendSwitch(gpuSwitch)");
-    check("the GPU switch is appended before the app is ready", append >= 0 && append < entry.indexOf("app.whenReady()"));
+    const ready = entry.indexOf("app.whenReady()");
+    const planned = entry.indexOf("planGpuLaunch(");
+    const append = entry.indexOf("app.commandLine.appendSwitch(name");
+    check("the GPU plan is made before the app is ready", planned >= 0 && planned < ready);
+    check("...and its switches appended before it", append >= 0 && append < ready);
+    check("which adapter draws is checked once it is up", entry.indexOf("startGpuCheck()") > ready);
   }
 
   /*

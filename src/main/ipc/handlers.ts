@@ -12,7 +12,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
 
 import { relaunchApp } from "../services/relaunch.js";
-import { launchedGpuPreference } from "../services/gpu_preference.js";
+import { gpuStatus } from "../services/gpu_runtime.js";
 import {
   IPC,
   NO_SHIFT,
@@ -38,6 +38,7 @@ import {
   type ConversationList,
   type RestoreResponse,
   type AppInfo,
+  type GpuStatus,
   type UpdateStatus,
   type Failure,
   type FailureKind,
@@ -530,9 +531,9 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       chrome: process.versions.chrome ?? "",
       node: process.versions.node ?? "",
       platform: process.platform,
-      gpuPreference: launchedGpuPreference(),
     }),
   );
+  ipcMain.handle(IPC.gpuStatus, async (): Promise<GpuStatus> => await gpuStatus());
 
   /*
    * Updates. Thin like the rest, and with no `Failure` to map: every one of

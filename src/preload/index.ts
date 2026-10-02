@@ -285,6 +285,7 @@ const api: BgptApi = {
   onMenuCheckUpdates: (listener) => subscribe(IPC.menuCheckUpdates, listener),
 
   getAppInfo: () => ipcRenderer.invoke(IPC.appInfo),
+  getGpuStatus: () => ipcRenderer.invoke(IPC.gpuStatus),
 
   getUpdateStatus: () => ipcRenderer.invoke(IPC.updateStatus) as Promise<UpdateStatus>,
   checkForUpdates: () => ipcRenderer.invoke(IPC.updateCheck) as Promise<UpdateStatus>,

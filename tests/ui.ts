@@ -52,6 +52,7 @@ import {
   frameDue,
   shaderPreset,
 } from "../src/renderer/src/lib/shader_modes.js";
+import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "../src/renderer/src/lib/gpu_choice.js";
 import {
   continuedPlacement,
   entryFace,
@@ -2651,6 +2652,49 @@ console.log("\n--- how the viewport is drawn ---");
       "the viewport context is created with the GPU preference",
       /new THREE\.WebGLRenderer\(\{[^}]*powerPreference: webglPowerPreference\(/.test(viewerText),
     );
+  }
+
+  /*
+   * One select, two settings: a preference by power, or one card by key. The
+   * option value says which, so a key can never be read as a preference and
+   * picking a preference clears the card.
+   */
+  {
+    const key = "10de:249c:151e1025:a1#0";
+    check("a stored card is the select's value", choiceValue("high-performance", key) === `adapter:${key}`);
+    check("...and a preference without one", choiceValue("low-power", null) === "low-power");
+    check("a junk card is not a value", choiceValue("auto", "the big one") === "auto");
+    const picked = parseChoiceValue(`adapter:${key}`);
+    check("picking a card stores it", picked.gpuAdapter === key && picked.gpuPreference === "auto");
+    const pref = parseChoiceValue("high-performance");
+    check("picking a preference clears the card", pref.gpuAdapter === null && pref.gpuPreference === "high-performance");
+    const launch = {
+      preference: "auto" as const,
+      adapter: key,
+      method: "luid" as const,
+      luid: "0,1",
+      adapterName: "RTX",
+      note: null,
+    };
+    check("the launched card needs no restart", !gpuNeedsRestart("auto", key, launch));
+    check("...and a different preference under it changes nothing", !gpuNeedsRestart("low-power", key, launch));
+    check("another card does", gpuNeedsRestart("auto", "1002:1638:151e1025:c5#0", launch));
+    check("...and so does going back to a preference", gpuNeedsRestart("high-performance", null, launch));
+    check("memory reads in GB", formatMemory(8405385216) === "8 GB");
+    check("...or MB under one", formatMemory(519847936) === "496 MB");
+    check("...and says nothing when unknown", formatMemory(0) === "");
+    check(
+      "the pixel load follows the viewer's own sizing",
+      pixelLoad(1707, 960, 1.5, 1.6, 2) === Math.floor(1707 * 3) * Math.floor(960 * 3),
+    );
+    check("max DPR caps the device ratio", pixelLoad(100, 100, 3, 1, 1) === 10000);
+    const pane = readFileSync(path.join(RENDERER, "lib", "SettingsModal.svelte"), "utf8");
+    check("the select's value is the stored choice", pane.includes("value={gpuSelectValue}") && pane.includes("return choiceValue(pref, gpuAdapter)"));
+    check("...and a change writes both fields", pane.includes("onpreviewchange(parseChoiceValue(event.currentTarget.value))"));
+    check("the cards are listed only where one can be chosen", pane.includes("{#if gpuChoosable && gpu?.adapters}"));
+    check("...and there they replace the two presets", pane.includes('gpuChoosable ? (["auto"] as const) : GPU_PREFERENCES'));
+    check("the restart is offered from main's launch, not from the setting alone", pane.includes("gpuNeedsRestart(settings.preview.gpuPreference, settings.preview.gpuAdapter, gpu.launch)"));
+    check("the copied report carries what main launched and what draws", /gpuLaunch: status\?\.launch/.test(pane) && /gpuActive: status\?\.active/.test(pane));
   }
 
   /*

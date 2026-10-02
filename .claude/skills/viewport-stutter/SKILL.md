@@ -40,6 +40,17 @@ AA, `maxDpr`, `renderScale`, sky — and `context.gpu`: a software renderer
 (`SwiftShader`, `Microsoft Basic Render Driver`) explains everything and is
 fixed by the GPU driver, not by code.
 
+**Then check which card drew, before anything else.** `context.gpu` is the
+card that drew. `context.gpuLaunch` is what main asked Chromium for, and
+`context.gpuHonoured` is `false` when a particular card was asked for and
+another one drew. `settings.gpuPreference` is only the choice on screen: it
+cannot tell "not restarted yet" from "ignored", and it once hid a startup
+that never applied the choice at all (Report 3). An integrated GPU in
+`context.gpu` on a machine with a discrete one is the first thing to fix, in
+the pane (Settings → Quality → Graphics card), before reading any phase.
+`gpuLoad.pixels × msaaSamples` is the other half: 12 M px × 8 on an iGPU is a
+slideshow whatever the code does.
+
 Each spike's `reading` is the first inference. Then:
 
 | culprit / evidence | where to look | usual fix |
@@ -81,6 +92,28 @@ is only for this investigation.
 
   How to spot it again: `mesh answered by main` whose `ms` grows by about one
   spike interval per spike.
+
+- **Report 3** (same laptop, window on the **laptop panel**, which the AMD
+  iGPU drives; 21x24x22 document): p50 67 ms, `gpu` = AMD Radeon with
+  `gpuPreference: high-performance` in the settings. Three causes in one
+  report:
+  1. **The preference was never applied.** `gpu_preference.ts` read
+     `preview` from the top of `settings.json`, and the store writes it under
+     `settings`, so every launch read `auto`. The test agreed with the parser,
+     not with the file. Now one reader, `settings_file.ts`, is shared with the
+     store, and a card can be chosen by name (`--use-adapter-luid`, DXGI list
+     through PowerShell). `gpu_runtime.ts` checks which card draws.
+  2. **`compass` 225 ms and 103 ms** was not the compass. three r171 resolves
+     the multisampled target at the end of every `render()`, colour and depth,
+     and the frame made three calls into it (sky, scene, compass). The 104 px
+     compass paid a full-screen blit at 12 M px × 8 samples.
+  3. **`mesh answered by main` 454 ms with `atlas: true`** on a tiny document:
+     the atlas repacked because an edit introduced a texture, which
+     invalidates every chunk and resends 27 MB.
+
+  Lesson for reading: ask which screen the window was on. Report 1 was the
+  external monitor, which the dGPU drives, and looked like a different
+  machine.
 
 ## Fixing
 

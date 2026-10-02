@@ -47,7 +47,8 @@
   import { fpsCap } from "./shader_modes.js";
   import { stutterReport } from "./frame_profiler.js";
   import { t, tn } from "./i18n.svelte.js";
-  import type { McpActivity, McpStatus, UpdateStatus } from "../../../shared/ipc.js";
+  import type { GpuStatus, McpActivity, McpStatus, UpdateStatus } from "../../../shared/ipc.js";
+  import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "./gpu_choice.js";
   import { dotColor, dotFor, maskToken } from "./mcp_status.js";
 import {
   bindAddressRefusal,
@@ -211,23 +212,63 @@ import {
   /*
    * The GPU is chosen at launch, so the pane compares the setting with what
    * main says this process was started with -- main's answer, because the
-   * setting on screen may already have moved.
+   * setting on screen may already have moved -- and with what Chromium
+   * reports drawing with, which is the only answer that is not a wish.
+   * Asked each time the pane opens: the first answer may still be reading
+   * the adapter list.
    */
-  let launchedGpu = $state<GpuPreference | null>(null);
+  let gpu = $state<GpuStatus | null>(null);
   $effect(() => {
-    if (!open || launchedGpu !== null) return;
+    if (!open) return;
     void api()
-      .getAppInfo()
-      .then((info) => (launchedGpu = gpuPreference(info.gpuPreference)))
+      .getGpuStatus()
+      .then((status) => (gpu = status))
       .catch(() => undefined);
   });
-  function gpuLabel(pref: GpuPreference): string {
-    if (pref === "high-performance") return t("preview.gpuPreference.highPerformance");
-    if (pref === "low-power") return t("preview.gpuPreference.lowPower");
-    return t("preview.gpuPreference.auto");
+  function adapterName(key: string | null): string | null {
+    if (key === null) return null;
+    return gpu?.adapters?.find((adapter) => adapter.key === key)?.name ?? null;
   }
-  const gpuNeedsRestart = $derived(
-    launchedGpu !== null && gpuPreference(settings.preview.gpuPreference) !== launchedGpu,
+  function gpuLabel(pref: GpuPreference): string {
+    const base =
+      pref === "high-performance"
+        ? t("preview.gpuPreference.highPerformance")
+        : pref === "low-power"
+          ? t("preview.gpuPreference.lowPower")
+          : t("preview.gpuPreference.auto");
+    const lands = adapterName(
+      pref === "high-performance" ? (gpu?.highPerformance ?? null) : pref === "low-power" ? (gpu?.lowPower ?? null) : null,
+    );
+    return lands === null ? base : `${base} — ${lands}`;
+  }
+  /*
+   * Where the cards can be listed and chosen, the list is the cards: the two
+   * presets would only name one of them a second time. A preset stored before
+   * that is shown as the card it lands on, and stays stored until changed.
+   */
+  const gpuChoosable = $derived(gpu?.choosable === true && (gpu.adapters?.length ?? 0) > 0);
+  const gpuSelectValue = $derived.by(() => {
+    const { gpuPreference: pref, gpuAdapter } = settings.preview;
+    if (!gpuChoosable || gpuAdapter !== null || pref === "auto") return choiceValue(pref, gpuAdapter);
+    const lands = pref === "high-performance" ? gpu?.highPerformance : pref === "low-power" ? gpu?.lowPower : null;
+    return lands ? choiceValue(null, lands) : "auto";
+  });
+  const gpuRestart = $derived(
+    gpu !== null && gpuNeedsRestart(settings.preview.gpuPreference, settings.preview.gpuAdapter, gpu.launch),
+  );
+  /*
+   * What a frame costs in pixels, so 12 million pixels times eight samples is
+   * visible without a stutter report. The viewport is most of the window, so
+   * the window's size stands in for it.
+   */
+  const loadMegapixels = $derived(
+    pixelLoad(
+      window.innerWidth,
+      window.innerHeight,
+      window.devicePixelRatio,
+      settings.preview.maxDpr,
+      settings.preview.renderScale,
+    ) / 1e6,
   );
 
   async function copyStutterReport(): Promise<void> {
@@ -236,7 +277,24 @@ import {
       stutterNote = t("preview.stutterReportEmpty");
       return;
     }
-    await api().copyToClipboard(JSON.stringify(report, null, 2));
+    /*
+     * The GPU as main sees it, beside the renderer string the viewer reads.
+     * `settings.gpuPreference` alone is the choice on screen, which cannot
+     * tell "not restarted yet" from "asked for and ignored"; these can.
+     */
+    const status = gpu ?? (await api().getGpuStatus().catch(() => null));
+    const context = typeof report.context === "object" && report.context !== null ? report.context : {};
+    const full = {
+      ...report,
+      context: {
+        ...context,
+        gpuChoice: { preference: settings.preview.gpuPreference, adapter: settings.preview.gpuAdapter },
+        gpuLaunch: status?.launch ?? null,
+        gpuActive: status?.active ?? null,
+        gpuHonoured: status?.honoured ?? null,
+      },
+    };
+    await api().copyToClipboard(JSON.stringify(full, null, 2));
     const spikes = Array.isArray(report.spikes) ? report.spikes.length : 0;
     stutterNote = t("preview.stutterReportCopied", { count: spikes });
   }
@@ -849,16 +907,39 @@ import {
             <label for="gpu-preference">{t("preview.gpuPreference")}</label>
             <select
               id="gpu-preference"
-              value={gpuPreference(preview.gpuPreference)}
-              onchange={(event) =>
-                onpreviewchange({ gpuPreference: gpuPreference(event.currentTarget.value) })}
+              value={gpuSelectValue}
+              onchange={(event) => onpreviewchange(parseChoiceValue(event.currentTarget.value))}
             >
-              {#each GPU_PREFERENCES as pref (pref)}
+              {#each gpuChoosable ? (["auto"] as const) : GPU_PREFERENCES as pref (pref)}
                 <option value={pref}>{gpuLabel(pref)}</option>
               {/each}
+              {#if gpuChoosable && gpu?.adapters}
+                {#each gpu.adapters as adapter (adapter.key)}
+                  <option value={choiceValue(null, adapter.key)}>
+                    {[adapter.name, formatMemory(adapter.dedicatedMemory)].filter((part) => part !== "").join(" · ")}
+                  </option>
+                {/each}
+              {/if}
             </select>
             <p class="hint">{t("preview.gpuPreferenceHint")}</p>
-            {#if gpuNeedsRestart}
+            {#if gpu?.active}
+              <p class="hint">
+                {t("preview.gpuInUse", { name: adapterName(gpu.active.adapter) ?? gpu.active.renderer })}
+              </p>
+            {/if}
+            {#if gpu && !gpu.choosable && gpu.adapters && gpu.adapters.length > 1}
+              <p class="hint">
+                {t("preview.gpuDetected", { names: gpu.adapters.map((adapter) => adapter.name).join(", ") })}
+              </p>
+            {/if}
+            {#if gpu?.honoured === false}
+              <p class="hint warn">{t("preview.gpuNotHonoured", { name: gpu.launch.adapterName ?? "" })}</p>
+            {:else if gpu?.launch.note === "adapter-missing"}
+              <p class="hint warn">{t("preview.gpuAdapterMissing")}</p>
+            {:else if gpu?.launch.note === "enumeration-failed"}
+              <p class="hint warn">{t("preview.gpuEnumerationFailed")}</p>
+            {/if}
+            {#if gpuRestart}
               <button type="button" onclick={() => void api().relaunchApp()}>
                 {t("preview.gpuPreferenceRestart")}
               </button>
@@ -889,6 +970,12 @@ import {
               value={preview.renderScale}
               oninput={(event) => onpreviewchange({ renderScale: num(event) })}
             />
+            <p class="hint">
+              {t("preview.pixelLoad", {
+                pixels: loadMegapixels.toFixed(1),
+                samples: Math.max(1, preview.antialias),
+              })}
+            </p>
           </div>
           <div class="field">
             <label for="max-distance">

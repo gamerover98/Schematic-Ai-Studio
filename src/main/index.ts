@@ -8,7 +8,8 @@
  * `core.ts`, and the renderer has no reason to hold a single Node primitive.
  */
 
-import { readFileSync } from "fs";
+import { mkdirSync, readFileSync, writeFileSync } from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -23,11 +24,9 @@ import { appIconPath } from "./services/resources.js";
 import { stopMcpServer } from "./mcp/server.js";
 import { quitConfirmed } from "./services/quit_guard.js";
 import { scheduleStartupCheck } from "./services/updates.js";
-import {
-  gpuSwitchFor,
-  readGpuPreference,
-  recordLaunchedGpuPreference,
-} from "./services/gpu_preference.js";
+import { readGpuChoice, recordLaunchedGpu } from "./services/gpu_preference.js";
+import { bootTime, enumerateAdaptersSync, planGpuLaunch } from "./services/gpu_adapters.js";
+import { gpuCachePath, startGpuCheck } from "./services/gpu_runtime.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -135,19 +134,36 @@ function createWindow(): void {
 /*
  * The GPU is chosen when Chromium's GPU process starts, so this has to run
  * before ready, which is also before the settings store can be asked. See
- * `services/gpu_preference.ts`.
+ * `services/gpu_preference.ts` and `services/gpu_adapters.ts`.
  */
 {
-  let stored: string | null = null;
-  try {
-    stored = readFileSync(path.join(app.getPath("userData"), "settings.json"), "utf8");
-  } catch {
-    stored = null;
+  const readText = (file: string): string | null => {
+    try {
+      return readFileSync(file, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  const plan = planGpuLaunch({
+    choice: readGpuChoice(readText(path.join(app.getPath("userData"), "settings.json"))),
+    platform: process.platform,
+    boot: bootTime(Date.now(), os.uptime()),
+    cachedText: readText(gpuCachePath()),
+    enumerate: () => enumerateAdaptersSync(),
+  });
+  for (const { name, value } of plan.switches) {
+    if (value === undefined) app.commandLine.appendSwitch(name);
+    else app.commandLine.appendSwitch(name, value);
   }
-  const preference = readGpuPreference(stored);
-  recordLaunchedGpuPreference(preference);
-  const gpuSwitch = gpuSwitchFor(preference);
-  if (gpuSwitch !== null) app.commandLine.appendSwitch(gpuSwitch);
+  recordLaunchedGpu(plan.launch);
+  if (plan.cacheToWrite !== null) {
+    try {
+      mkdirSync(path.dirname(gpuCachePath()), { recursive: true });
+      writeFileSync(gpuCachePath(), JSON.stringify(plan.cacheToWrite), "utf8");
+    } catch {
+      // The next launch in this boot reads the list again; nothing worse.
+    }
+  }
 }
 
 app.whenReady().then(() => {
@@ -164,6 +180,12 @@ app.whenReady().then(() => {
    * window, so the check never competes with the first paint.
    */
   scheduleStartupCheck();
+  /*
+   * Which adapter actually draws, checked against what was asked for above,
+   * and the adapter list refreshed for the next launch. In the background:
+   * nothing waits for it but the pane.
+   */
+  startGpuCheck();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

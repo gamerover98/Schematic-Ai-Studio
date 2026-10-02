@@ -352,6 +352,8 @@ export const IPC = {
 
   /** What the app is: name, version, and the runtime under it. */
   appInfo: "bgpt:app:info",
+  /** The graphics adapters, the one launched with, and the one drawing. */
+  gpuStatus: "bgpt:gpu:status",
 
   /**
    * Whether a newer build exists, and the two things to do about it.
@@ -422,11 +424,65 @@ export interface AppInfo {
   node: string;
   /** `process.platform`, as-is. */
   platform: string;
+}
+
+// ---------------------------------------------------------------------------
+// Which GPU draws
+// ---------------------------------------------------------------------------
+
+/**
+ * What this process asked Chromium for at launch. The setting may have moved
+ * since; it applies at the next launch.
+ */
+export interface GpuLaunch {
+  preference: GpuPreference;
+  /** The adapter key that was asked for, or `null`. */
+  adapter: string | null;
   /**
-   * The GPU preference this process was started with. The setting may have
-   * changed since; it applies at the next launch.
+   * How it was asked: `luid` names one adapter (`--use-adapter-luid`),
+   * `switch` asks by power (`force_*_gpu`), `default` asks nothing.
    */
-  gpuPreference: GpuPreference;
+  method: "default" | "switch" | "luid";
+  /** The LUID passed, for this boot only. */
+  luid: string | null;
+  adapterName: string | null;
+  /**
+   * Why an adapter that was asked for is not what was launched with:
+   * gone from the machine, the list could not be read, or not Windows.
+   */
+  note: "adapter-missing" | "enumeration-failed" | "unsupported-platform" | null;
+}
+
+/** One adapter, as the pane lists it. */
+export interface GpuAdapterInfo {
+  key: string;
+  name: string;
+  vendorId: number;
+  deviceId: number;
+  /** Bytes of its own memory, `0` when unknown. */
+  dedicatedMemory: number;
+}
+
+/** Everything the pane and the stutter report say about the GPU. */
+export interface GpuStatus {
+  /** The adapters, or `null` while they are still being read. */
+  adapters: GpuAdapterInfo[] | null;
+  /** Whether one adapter can be chosen here (Windows) or only a preference. */
+  choosable: boolean;
+  /** The adapter each preference lands on, when the system says. */
+  highPerformance: string | null;
+  lowPower: string | null;
+  launch: GpuLaunch;
+  /**
+   * What Chromium reports drawing with: the ANGLE renderer string, and the
+   * adapter it matches. `null` until the GPU process has answered.
+   */
+  active: { renderer: string; adapter: string | null } | null;
+  /**
+   * `false` when a particular adapter was asked for and another one draws.
+   * `null` when nothing particular was asked, or it cannot be told.
+   */
+  honoured: boolean | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2312,6 +2368,8 @@ export interface BgptApi {
 
   /** Name, version and runtime. Asked once, when the About box is opened. */
   getAppInfo(): Promise<AppInfo>;
+  /** The adapters and which one draws. The first call may read the list. */
+  getGpuStatus(): Promise<GpuStatus>;
 
   /** What the updater knows right now. Never a network request. */
   getUpdateStatus(): Promise<UpdateStatus>;
@@ -2328,7 +2386,7 @@ export interface BgptApi {
    */
   installUpdate(): Promise<boolean>;
   /**
-   * Restarts the app so a launch-time setting (the GPU preference) applies.
+   * Restarts the app so a launch-time setting (the GPU choice) applies.
    * `false` when the unsaved-work prompt was declined.
    */
   relaunchApp(): Promise<boolean>;
