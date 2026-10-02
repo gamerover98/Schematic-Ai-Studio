@@ -77,7 +77,20 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { blocksIn } from "../../shared/block_versions.js";
   import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
   import { continuedPlacement } from "./lib/block_hover.js";
-  import { movedRegion, translatedRegion } from "./lib/selection_drag.js";
+  import { translatedRegion } from "./lib/selection_drag.js";
+  import {
+    activated,
+    areaAt,
+    areaBounds,
+    areaCells,
+    areaList,
+    activeIndex,
+    mapAreas,
+    single,
+    withArea,
+    withoutArea,
+    type AreaSet,
+  } from "./lib/selection_set.js";
   import { ghostRequests, ghostStillWanted, grabGhost, releaseGhost } from "./lib/ghost_request.js";
 import {
   gizmoOrigin,
@@ -235,9 +248,40 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * that comes back.
    */
   let docState = $state<DocumentState | null>(null);
+  /** The active area of the selection -- see `selection_set.ts`. */
   let selection = $state<RegionSpec | null>(null);
+  /**
+   * The other selected areas, and where the active one sits among them.
+   *
+   * Beside `selection` rather than replacing it, which is what let several
+   * areas arrive without rewriting every place that reads the selection: those
+   * go on meaning the box being worked on, and only the verbs that act on the
+   * whole selection -- fill, replace, copy, the gizmo, the materials -- ask for
+   * every area. With `selection` null these are empty; the effect that drops
+   * the pivot drops them too.
+   */
+  let otherAreas = $state<RegionSpec[]>([]);
+  let areaSlot = $state(0);
   /** The first corner of a selection being built, before Shift-click extends it. */
   let anchor = $state<{ x: number; y: number; z: number } | null>(null);
+
+  const areaSet = $derived<AreaSet>({ active: selection, others: otherAreas, slot: areaSlot });
+  /** Every selected area, in the panel's order. What whole-selection verbs send. */
+  const selectionAreas = $derived(areaList(areaSet));
+  /** The box around every area: where the gizmo stands and a paste lands. */
+  const selectionBounds = $derived(areaBounds(areaSet));
+
+  /** Puts a whole set of areas on screen. */
+  function setAreas(set: AreaSet): void {
+    selection = set.active === null ? null : { ...set.active };
+    otherAreas = set.others.map((area) => ({ ...area }));
+    areaSlot = set.slot;
+  }
+
+  /** Every area, ready for the wire. */
+  function areasForIpc(): RegionSpec[] {
+    return selectionAreas.map((area) => forIpc(area));
+  }
 
   /**
    * Undo and redo that reach the selection as well as the blocks.
@@ -249,7 +293,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   let selectionTimeline = $state<Timeline>(emptyTimeline());
   /** The selection as it was when the timeline last agreed with the screen. */
-  let lastSelection: SelectionState = { selection: null, anchor: null };
+  let lastSelection: SelectionState = { selection: null, anchor: null, others: [], slot: 0 };
   /** True while a step is being put back, so restoring is not itself recorded. */
   /**
    * Where a drag started, or `null` when no drag is in progress.
@@ -933,16 +977,58 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * started at all. This is one block tall at the base, which is what a
    * footprint is -- drag the top face upwards afterwards to give it height.
    */
-  function onGridSelect(region: RegionSpec): void {
-    selection = region;
+  function onGridSelect(region: RegionSpec, add: boolean): void {
+    sweptArea(region, add ? "add" : "replace");
     anchor = null;
   }
 
-  /** The selection as a plain value — `$state` proxies do not compare. */
+  /**
+   * Whether the gesture in progress has already added its area.
+   *
+   * A Shift+Alt sweep reports its box on every pointer move, and only the first
+   * report may add an area: every later one is the same area growing. Reset at
+   * each gesture's start.
+   */
+  let gestureAddedArea = false;
+
+  /**
+   * A selection drag reported a box, and what it means for the other areas.
+   *
+   * `resize` is a face of the active area, and the rest stay as they are.
+   * `replace` is a plain Shift-sweep, which starts the selection over. `add`
+   * is Shift+Alt: the first report puts a new area beside the others, and the
+   * rest of the drag grows it.
+   */
+  function sweptArea(region: RegionSpec, mode: "resize" | "replace" | "add"): void {
+    if (mode === "resize") {
+      selection = region;
+      return;
+    }
+    if (mode === "replace") {
+      setAreas(single(region));
+      return;
+    }
+    if (!gestureAddedArea) {
+      gestureAddedArea = true;
+      setAreas(withArea(areaSet, region));
+      return;
+    }
+    selection = region;
+  }
+
+  /**
+   * The selection as a plain value — `$state` proxies do not compare.
+   *
+   * With no active area the others are written empty whatever they hold: they
+   * are dropped by an effect a microtask later, and a step that recorded them
+   * in between would be a state the selection can never be put back into.
+   */
   function selectionNow(): SelectionState {
     return {
       selection: selection === null ? null : { ...selection },
       anchor: anchor === null ? null : { ...anchor },
+      others: selection === null ? [] : otherAreas.map((area) => ({ ...area })),
+      slot: selection === null ? 0 : areaSlot,
     };
   }
 
@@ -962,7 +1048,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * returns the timeline untouched.
    */
   function restoreSelection(state: SelectionState): void {
-    selection = state.selection === null ? null : { ...state.selection };
+    setAreas({ active: state.selection, others: state.others ?? [], slot: state.slot ?? 0 });
     anchor = state.anchor === null ? null : { ...state.anchor };
     lastSelection = state;
   }
@@ -978,6 +1064,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   function onSelectionGesture(phase: "start" | "end"): void {
     if (phase === "start") {
       gestureFrom = lastSelection;
+      gestureAddedArea = false;
       return;
     }
     const from = gestureFrom;
@@ -2661,12 +2748,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   const refreshSelectionMaterials = coalesce(fetchSelectionMaterials);
 
   async function fetchSelectionMaterials(): Promise<void> {
-    const asked = selection;
-    if (asked === null || docState === null || !bridgeAvailable) {
+    if (selection === null || docState === null || !bridgeAvailable) {
       selectionMaterials = null;
       return;
     }
-    const response = await api().selectionPalette({ regions: [forIpc(asked)] });
+    // Every area, a cell two of them share counted once -- main walks the union.
+    const response = await api().selectionPalette({ regions: areasForIpc() });
     // Dropped meanwhile: the effect has already cleared it, and a late answer
     // must not put back the materials of a selection that is gone.
     if (!response.ok || selection === null || docState === null) return;
@@ -2684,6 +2771,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       return;
     }
     void docState.revision;
+    void selectionAreas;
     const timer = setTimeout(() => {
       // A count that fails is no count, not a banner: nothing the user did
       // has failed, and the slots simply keep the last answer.
@@ -2782,6 +2870,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   function followShift(shift: readonly [number, number, number]): void {
     if (shift[0] === 0 && shift[1] === 0 && shift[2] === 0) return;
     if (selection !== null) selection = translatedRegion(selection, shift);
+    if (otherAreas.length > 0) otherAreas = otherAreas.map((area) => translatedRegion(area, shift));
     if (anchor !== null) {
       anchor = { x: anchor.x + shift[0], y: anchor.y + shift[1], z: anchor.z + shift[2] };
     }
@@ -3026,6 +3115,32 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       inspectedAt = null;
       return;
     }
+    /*
+     * Alt is about which areas: it changes the set and asks nothing of the
+     * inspector, because the click was aimed at an area rather than at a block.
+     */
+    if (block.area === "remove") {
+      const index = areaAt(areaSet, block);
+      if (index !== -1) setAreas(withoutArea(areaSet, index));
+      return;
+    }
+    if (block.area === "add") {
+      const index = areaAt(areaSet, block);
+      setAreas(
+        index !== -1
+          ? activated(areaSet, index)
+          : withArea(areaSet, {
+              minX: block.x,
+              minY: block.y,
+              minZ: block.z,
+              maxX: block.x,
+              maxY: block.y,
+              maxZ: block.z,
+            }),
+      );
+      anchor = { x: block.x, y: block.y, z: block.z };
+      return;
+    }
     void inspectBlock(block.x, block.y, block.z);
     /*
      * The tools no longer reappear here.
@@ -3049,14 +3164,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       return;
     }
     anchor = { x: block.x, y: block.y, z: block.z };
-    selection = {
-      minX: block.x,
-      minY: block.y,
-      minZ: block.z,
-      maxX: block.x,
-      maxY: block.y,
-      maxZ: block.z,
-    };
+    // A plain click starts the selection over: one block, no other areas.
+    setAreas(
+      single({
+        minX: block.x,
+        minY: block.y,
+        minZ: block.z,
+        maxX: block.x,
+        maxY: block.y,
+        maxZ: block.z,
+      }),
+    );
   }
 
   /**
@@ -3068,22 +3186,38 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * is rather than from wherever it was first clicked — otherwise resizing a
    * selection and then extending it would jump somewhere unrelated.
    */
-  function onSelectionDragged(region: RegionSpec): void {
-    selection = region;
+  function onSelectionDragged(region: RegionSpec, mode: "resize" | "replace" | "add"): void {
+    sweptArea(region, mode);
     anchor = { x: region.minX, y: region.minY, z: region.minZ };
+  }
+
+  /** Makes another area the active one, from the panel's list. */
+  function activateArea(index: number): void {
+    setAreas(activated(areaSet, index));
+    const active = selection;
+    if (active !== null) anchor = { x: active.minX, y: active.minY, z: active.minZ };
+  }
+
+  /** Takes one area away, from the panel's list. */
+  function removeArea(index: number): void {
+    setAreas(withoutArea(areaSet, index));
+    if (selection === null) anchor = null;
   }
 
   function selectAll(): void {
     if (!docState) return;
     anchor = { x: 0, y: 0, z: 0 };
-    selection = {
-      minX: 0,
-      minY: 0,
-      minZ: 0,
-      maxX: docState.size[0] - 1,
-      maxY: docState.size[1] - 1,
-      maxZ: docState.size[2] - 1,
-    };
+    // One area the size of the document: the others are inside it anyway.
+    setAreas(
+      single({
+        minX: 0,
+        minY: 0,
+        minZ: 0,
+        maxX: docState.size[0] - 1,
+        maxY: docState.size[1] - 1,
+        maxZ: docState.size[2] - 1,
+      }),
+    );
   }
 
   function parseBlock(text: string): BlockSpec {
@@ -3499,12 +3633,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   async function copySelection(cut: boolean): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    // Every area, keeping their arrangement: a paste puts them down the same way.
+    const regions = areasForIpc();
     busy = true;
     try {
-      const response = await (cut
-        ? api().cutRegion(forIpc(region))
-        : api().copyRegion(forIpc(region)));
+      const response = await (cut ? api().cutRegion(regions) : api().copyRegion(regions));
       if (!response.ok) {
         status = { tone: "error", text: response.message };
         return;
@@ -3535,8 +3668,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * and it makes pasting back into the place something was cut from exact.
    */
   async function pasteHere(): Promise<void> {
-    if (!selection) return;
-    const at = { x: selection.minX, y: selection.minY, z: selection.minZ };
+    if (!selectionBounds) return;
+    // The corner of every area's bounds, which is the clipboard's own corner
+    // when the copy was of several areas -- so pasting back lands exactly.
+    const at = { x: selectionBounds.minX, y: selectionBounds.minY, z: selectionBounds.minZ };
     const outcome = await runDocument(t("task.pasting"), () =>
       api().pasteClipboard({ ...at, skipEmpty: pasteKeepsUnder }),
     );
@@ -3552,9 +3687,24 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   async function transformSelection(transform: TransformRequest["transform"]): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    /*
+     * Several areas go through the gizmo's path, about the middle of their
+     * bounds. Turned in place they would land inside the bounds somewhere else
+     * than they were -- two areas side by side swap under a mirror -- and only
+     * that path carries the boxes along with the blocks.
+     */
+    if (otherAreas.length > 0 && selectionBounds !== null) {
+      await gizmoTransform(
+        transform.kind === "mirror"
+          ? { kind: "mirror", axis: transform.axis }
+          : { kind: "rotate", axis: "y", steps: transform.steps },
+        gizmoOrigin(selectionBounds, null),
+      );
+      return;
+    }
+    const regions = areasForIpc();
     const outcome = await runDocument(t("task.transforming"), () =>
-      api().transformRegion({ region: forIpc(region), transform }),
+      api().transformRegion({ regions, transform }),
     );
     reportChange(outcome?.changed ?? null);
   }
@@ -3573,7 +3723,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * gesture does not wait for it; until it lands the viewport draws the
    * destination as a box.
    */
-  let moving = $state<{ region: RegionSpec; chunks: ChunkGeometry[] } | null>(null);
+  let moving = $state<{ region: RegionSpec; areas: RegionSpec[]; chunks: ChunkGeometry[] } | null>(null);
   /** Which press the mesh in flight belongs to -- see `ghost_request.ts`. */
   const ghostFetch = ghostRequests();
 
@@ -3642,6 +3792,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (selection !== null) return;
     if (pivot !== null) pivot = null;
     if (stamp !== null) stamp = null;
+    // The other areas go with the active one: every site that drops the
+    // selection writes `selection = null` and nothing else, and a set of areas
+    // with none active is not a state any gesture can work from.
+    if (otherAreas.length > 0) otherAreas = [];
+    if (areaSlot !== 0) areaSlot = 0;
     // The move ghost is released by the drag ending; this is the net under
     // that, so a ghost can never outlive the selection it was drawn for.
     releaseGhost(ghostFetch);
@@ -3673,17 +3828,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     // A stamp is already the ghost, and it is what the arrows drag: the move
     // about to happen is the box's, so there is no region to fetch.
     if (stamp !== null) return;
-    if (!selection || moving !== null) return;
-    const region = { ...selection };
+    if (!selectionBounds || moving !== null) return;
+    // Every area, meshed from the corner of their bounds -- which is where the
+    // viewport stands the ghost and where the move puts that corner down.
+    const region = { ...selectionBounds };
+    const areas = selectionAreas.map((area) => ({ ...area }));
     const token = grabGhost(ghostFetch);
     try {
-      const response = await api().regionMesh(forIpc(region));
+      const response = await api().regionMesh(areas.map((area) => forIpc(area)));
       // The drag may have ended while this was in flight, and a ghost that
       // arrived after the release would stand at the corner of every
       // selection after it. Asked of the drag, not of the selection: a move
       // takes the selection along, so that one is still there.
       if (!response.ok || !ghostStillWanted(ghostFetch, token)) return;
-      moving = { region, chunks: response.chunks };
+      moving = { region, areas, chunks: response.chunks };
     } catch {
       // A missing ghost costs the preview, not the gesture: the destination
       // box is drawn either way, and the move itself is main's.
@@ -3717,11 +3875,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   function adoptEditedSelection(
     before: SelectionState,
-    next: RegionSpec,
+    next: AreaSet,
     depthBefore: number,
   ): void {
-    selection = { ...next };
-    anchor = { x: next.minX, y: next.minY, z: next.minZ };
+    setAreas(next);
+    anchor = next.active === null ? null : { x: next.active.minX, y: next.active.minY, z: next.active.minZ };
     const now = selectionNow();
     lastSelection = now;
     const depth = historyPosition();
@@ -3760,10 +3918,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * for itself by comparing the two.
      */
     if (stamp !== null) {
-      const held = selection;
+      const held = selectionBounds;
       if (!held) return;
       const before = selectionNow();
-      adoptEditedSelection(before, movedRegion(held, to), historyPosition());
+      const by = [to.x - held.minX, to.y - held.minY, to.z - held.minZ] as const;
+      adoptEditedSelection(before, mapAreas(areaSet, (area) => translatedRegion(area, by)), historyPosition());
       movePivot(held, to);
       return;
     }
@@ -3773,13 +3932,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * big region commits before its mesh does. Losing the picture is fine;
      * losing the move because the picture was slow is not.
      */
-    const region = moving?.region ?? selection;
+    const region = moving?.region ?? selectionBounds;
+    const areas = moving?.areas ?? selectionAreas.map((area) => ({ ...area }));
     moving = null;
     if (!region) return;
     const before = selectionNow();
+    const set = areaSet;
     const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.moving"), () =>
-      api().moveRegion({ region: forIpc(region), to }),
+      api().moveRegion({ regions: areas.map((area) => forIpc(area)), to }),
     );
     if (outcome !== null) {
       /*
@@ -3789,7 +3950,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        * this is the destination being restated in the same frame, or the box
        * would land back where the blocks used to be.
        */
-      adoptEditedSelection(before, translatedRegion(movedRegion(region, to), outcome.shift), depthBefore);
+      const by = [
+        to.x - region.minX + outcome.shift[0],
+        to.y - region.minY + outcome.shift[1],
+        to.z - region.minZ + outcome.shift[2],
+      ] as const;
+      adoptEditedSelection(before, mapAreas(set, (area) => translatedRegion(area, by)), depthBefore);
       // The pivot moved with the blocks, or it would name a cell the region
       // has left -- and the next turn would swing it round empty space. The
       // delta is the same in either frame, so this composes with the shift
@@ -3818,13 +3984,21 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * spelling for. A staircase turned about X would have to face up.
      */
     if (transform.kind === "rotate" && transform.axis !== "y") return;
-    const region = { ...selection };
+    if (selectionBounds === null) return;
+    /*
+     * Every area through the same rigid map, about the same origin, so they
+     * keep their places relative to each other; main is told the corner the
+     * bounds land on, and each box below lands where the map sends it.
+     */
+    const region = { ...selectionBounds };
+    const set = areaSet;
+    const regions = areasForIpc();
     const to = transformedRegion(region, origin, transform);
     const before = selectionNow();
     const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.transforming"), () =>
       api().transformRegion({
-        region: forIpc(region),
+        regions,
         transform:
           transform.kind === "mirror"
             ? { kind: "mirror", axis: transform.axis }
@@ -3837,7 +4011,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       // on the space they came from would make the next operation act on air.
       // ...and follows the *document* too, where the turn made room below the
       // origin and moved everything up.
-      adoptEditedSelection(before, translatedRegion(to, outcome.shift), depthBefore);
+      adoptEditedSelection(
+        before,
+        mapAreas(set, (area) => translatedRegion(transformedRegion(area, origin, transform), outcome.shift)),
+        depthBefore,
+      );
     }
     reportChange(outcome?.changed ?? null);
   }
@@ -3851,8 +4029,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * not a drag and so never passed through one.
    */
   async function mirrorSelection(axis: Axis): Promise<void> {
-    if (!selection || busy) return;
-    await gizmoTransform({ kind: "mirror", axis }, gizmoOrigin(selection, pivot));
+    if (!selectionBounds || busy) return;
+    await gizmoTransform({ kind: "mirror", axis }, gizmoOrigin(selectionBounds, pivot));
   }
 
   /** A scale handle was released. */
@@ -3860,16 +4038,22 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     spec: ScaleSpec,
     origin: { x: number; y: number; z: number },
   ): Promise<void> {
-    if (!selection || busy) return;
-    const region = { ...selection };
+    if (!selectionBounds || busy) return;
+    const region = { ...selectionBounds };
+    const set = areaSet;
+    const regions = areasForIpc();
     const to = scaledRegion(region, origin, spec);
     const before = selectionNow();
     const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.scaling"), () =>
-      api().scaleRegion({ region: forIpc(region), spec, to: { x: to.minX, y: to.minY, z: to.minZ } }),
+      api().scaleRegion({ regions, spec, to: { x: to.minX, y: to.minY, z: to.minZ } }),
     );
     if (outcome !== null) {
-      adoptEditedSelection(before, translatedRegion(to, outcome.shift), depthBefore);
+      adoptEditedSelection(
+        before,
+        mapAreas(set, (area) => translatedRegion(scaledRegion(area, origin, spec), outcome.shift)),
+        depthBefore,
+      );
     }
     reportChange(outcome?.changed ?? null);
   }
@@ -3896,11 +4080,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   async function deleteSelection(): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    const regions = areasForIpc();
     const outcome = await runDocument(t("task.deleting"), () =>
       api().applyEdit({
         kind: "fill",
-        regions: [forIpc(region)],
+        regions,
         mix: singleMix({ namespacedName: "minecraft:air" }),
       }),
     );
@@ -3909,20 +4093,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   async function fillSelection(block: string): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    const regions = areasForIpc();
     const outcome = await runDocument(t("task.filling"), () =>
-      api().applyEdit({ kind: "fill", regions: [forIpc(region)], mix: mixSpecOf(block) }),
+      api().applyEdit({ kind: "fill", regions, mix: mixSpecOf(block) }),
     );
     reportChange(outcome?.changed ?? null);
   }
 
   async function replaceInSelection(from: string, to: string): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    const regions = areasForIpc();
     const outcome = await runDocument(t("task.replacing"), () =>
       api().applyEdit({
         kind: "replace",
-        regions: [forIpc(region)],
+        regions,
         from: parseMix(from).entries.map((entry) => parseBlock(entry.block)),
         to: mixSpecOf(to),
       }),
@@ -4231,6 +4415,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         requestId: id,
         prompt,
         selection: selection ? forIpc(selection) : null,
+        otherAreas: selection ? otherAreas.map((area) => forIpc(area)) : [],
       });
       // Both branches carry the log, because a stopped or failed run is a
       // turn too and main has already written it.
@@ -4759,6 +4944,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         live={liveTrace}
         progress={progress !== null && progress.requestId === buildRequestId ? progress : null}
         {selection}
+        otherAreas={selection === null ? 0 : otherAreas.length}
         {remembered}
         {rememberedFrom}
         {conversations}
@@ -4978,6 +5164,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       >
         <SelectionTools
           {selection}
+          areas={selectionAreas}
+          activeArea={activeIndex(areaSet)}
+          cells={areaCells(areaSet)}
+          onactivatearea={activateArea}
+          onremovearea={removeArea}
           {busy}
           blocks={blockRegistry}
           placeable={placeableBlocks}
@@ -5055,6 +5246,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       {sunAzimuth}
       {sunElevation}
       selection={docState ? selection : null}
+      areas={docState ? otherAreas : []}
+      gizmoRegion={docState ? selectionBounds : null}
       onpick={docState ? onPick : undefined}
       {cameraMode}
       flySpeed={settings.preview.flySpeed}
@@ -5064,8 +5257,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       onselectiongesture={docState ? onSelectionGesture : undefined}
       onpickmaterial={docState ? onPickMaterial : undefined}
       ghost={moving ?? stamp}
-      ghostAt={selection
-        ? { x: selection.minX, y: selection.minY, z: selection.minZ }
+      ghostAt={selectionBounds
+        ? { x: selectionBounds.minX, y: selectionBounds.minY, z: selectionBounds.minZ }
         : null}
       onghostcommit={(to) => void commitMove(to)}
       {gizmoMode}

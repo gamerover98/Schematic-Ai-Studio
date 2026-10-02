@@ -1583,7 +1583,7 @@ ${report.stack}`),
        * up through five return types.
        */
       const before = session.history.nextId;
-      const result = scaleRegion(session, request.region, request.spec, {
+      const result = scaleRegion(session, request.regions, request.spec, {
         ...options,
         to: request.to ?? null,
       });
@@ -1622,7 +1622,7 @@ ${report.stack}`),
        * up through five return types.
        */
       const before = session.history.nextId;
-      const changed = moveRegion(session, request.region, request.to, options);
+      const changed = moveRegion(session, request.regions, request.to, options);
       return {
         ok: true,
         changed,
@@ -1636,10 +1636,10 @@ ${report.stack}`),
 
   ipcMain.handle(
     IPC.docRegionMesh,
-    async (_event, region: RegionSpec): Promise<RegionMeshResponse> => {
+    async (_event, regions: RegionSpec[]): Promise<RegionMeshResponse> => {
       try {
         const settings = await getSettings();
-        const result = await regionMesh(requireSession(), region, {
+        const result = await regionMesh(requireSession(), regions, {
           resourcePackPath: null,
           fallbackResourcePackPath: await defaultResourcePackPath(),
           biomeColor: settings.preview.biomeColor,
@@ -1702,7 +1702,7 @@ ${report.stack}`),
        * up through five return types.
        */
       const before = session.history.nextId;
-      const changed = transformRegion(session, request.region, request.transform, {
+      const changed = transformRegion(session, request.regions, request.transform, {
         ...options,
         to: request.to ?? null,
       });
@@ -1724,19 +1724,19 @@ ${report.stack}`),
     blocks: held.blocks,
   });
 
-  ipcMain.handle(IPC.docCopy, async (_event, region: RegionSpec): Promise<ClipboardResponse> => {
+  ipcMain.handle(IPC.docCopy, async (_event, regions: RegionSpec[]): Promise<ClipboardResponse> => {
     try {
       const session = requireSession();
-      return { ok: true, clipboard: clipboardInfo(copySelection(session, region)), state: shellState(session) };
+      return { ok: true, clipboard: clipboardInfo(copySelection(session, regions)), state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
   });
 
-  ipcMain.handle(IPC.docCut, async (_event, region: RegionSpec): Promise<ClipboardResponse> => {
+  ipcMain.handle(IPC.docCut, async (_event, regions: RegionSpec[]): Promise<ClipboardResponse> => {
     try {
       const session = requireSession();
-      return { ok: true, clipboard: clipboardInfo(cutSelection(session, region)), state: shellState(session) };
+      return { ok: true, clipboard: clipboardInfo(cutSelection(session, regions)), state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
@@ -2082,6 +2082,7 @@ ${report.stack}`),
           // shorten what gets stored.
           history: conversationMessages() as Parameters<typeof runAgent>[0]["history"],
           selection: req.selection,
+          otherAreas: req.otherAreas ?? [],
           signal: controller.signal,
           allowedBlocks: await loadAllowedBlocks(resourcesDir()),
           legacyBlocksPath: legacyBlocksPath(),

@@ -521,11 +521,64 @@ tool descriptions list each distribution and its parameters from
 `DISTRIBUTION_PARAMS`, so a parameter added there reaches MCP with no
 other edit.
 
-**The edit wire takes `regions[]`, already.** `EditRequest.fill` and `replace`
+**The edit wire takes `regions[]`.** `EditRequest.fill` and `replace`
 name several boxes, which are one set of cells: `shared/regions.ts` walks their
 union once, so an overlap is written and counted once, and the gap between two
 boxes is never touched. No bitmap over the bounding box, because two small
 areas far apart have a bounding box of hundreds of millions of cells.
+
+**A selection may be several areas, and the gap between them is nobody's.**
+Shift+Alt+drag adds an area and Alt+click removes one. Shift+Alt+click inside
+an area makes it the active one. A plain Shift-drag or a click starts the
+selection over.
+
+In the renderer, `selection` stays the **active** area. That is what let the
+other areas arrive without rewriting the dozens of places that read it: they
+go on meaning the box being worked on, with the face handles and the
+inspector. The other areas sit beside it in `otherAreas`, with `areaSlot` for
+the panel's order. `selection_set.ts` holds the rules. Only the verbs that act
+on the whole selection ask for every area: fill, replace, delete, copy, cut,
+the materials, and the gizmo.
+
+**One gizmo, rigid, on the bounds of every area.** Move, turn, mirror and
+scale carry all the areas as one shape about one origin. Main is told the
+corner where the bounds land, and each box lands where the same map sends it.
+`moveRegion`, `transformRegion`, `scaleRegion`, `copySelection`, `cutSelection`
+and `regionMesh` take `Areas`, which is one box or several. The transform
+passes the boxes down as a **mask**. A cell outside the mask is not read,
+cleared or written from. Two consequences are easy to undo by tidying:
+
+- **With a mask a transform is never in place.** A turn of the bounds is a
+  bijection on the bounds, not on the areas inside them. So a cell can land
+  on the gap, and the cell it left would keep its block unless the mask is
+  cleared first.
+- **A clipboard of several areas carries the mask.** `includeAir` clears the
+  destination before writing. Clearing the whole bounding box there would
+  wipe, at the destination, the same gap nobody selected at the source.
+
+`tests/session.ts` puts a block in the gap for exactly this reason. With the
+gap empty, a verb working on the bounds passes every check. Sabotaging the
+mask fails six of them.
+
+**The other areas are dropped by an effect, so a step must not record them.**
+Every site that drops the selection writes `selection = null` and nothing
+else. The effect that drops the pivot also empties `otherAreas`, a microtask
+later. In between, a recorder flush would store "no active area, two others",
+a state no gesture can work from. So `selectionNow` writes the others empty
+whenever there is no active area.
+
+**Alt+click must keep its release from the menu bar.** On Windows, releasing
+a lone Alt focuses the menu bar. Electron decides "lone" from the keyboard
+alone, so a mouse click in between does not count. Every Alt+click on an area
+would leave the next keystroke opening a menu. Electron acts only on key
+events the page did not handle, so the viewer calls `preventDefault` on that
+one release, armed by a press with Alt. Alt pressed and released on its own
+still reaches the menu.
+
+**The agent is told every area and defaults to the active one.** Each tool
+takes one box, and the model has to be able to name each area. An explicit
+region on another selected area is inside the selection, so the "outside the
+user's selection" note asks the union.
 
 **Replace is a list of blocks to look for, and it comes first.** The panel
 reads top to bottom as the sentence does -- Replace these, With those -- where

@@ -50,6 +50,8 @@
      */
     progress: ProgressEvent | null;
     selection: RegionSpec | null;
+    /** How many areas are selected beside `selection`; see `ChatComposer`. */
+    otherAreas?: number;
     /** Exchanges the agent is carrying into the next question. */
     remembered: number;
     /**
@@ -123,6 +125,7 @@
     live,
     progress,
     selection,
+    otherAreas = 0,
     remembered,
     rememberedFrom,
     hasDocument,
@@ -375,6 +378,7 @@
   <footer>
     <ChatComposer
       {selection}
+      {otherAreas}
       {busy}
       {running}
       {hasDocument}

@@ -71,6 +71,7 @@ import {
   dragFace,
   moveDestination,
   plateScale,
+  translatedRegion,
   type Axis,
   type Side,
 } from "./selection_drag.js";
@@ -146,6 +147,11 @@ import { isTyping } from "./typing.js";
     z: number;
     /** True when the click carried Ctrl — the gesture that grows a selection. */
     extend: boolean;
+    /**
+     * A click with Alt, which is about *which areas* are selected: with Shift
+     * it adds one (or makes the one clicked active), without it takes one away.
+     */
+    area?: "add" | "remove";
     /**
      * The empty cell on the outside of the face that was hit — where a new
      * block goes. `null` when that cell falls outside the schematic, which is
@@ -322,8 +328,23 @@ import { isTyping } from "./typing.js";
     /** A virtual floor at y=0, and its colour (empty follows the theme). */
     ground: boolean;
     groundColor: string;
-    /** Drawn as a wire box; `null` hides it. */
+    /** The active area, drawn as a wire box with face handles; `null` hides it. */
     selection?: Region | null;
+    /**
+     * The other selected areas, drawn as dimmer wire boxes with no handles.
+     *
+     * Resizing stays the active area's alone: six plates on every area would
+     * be a field of handles, and a press would have to guess which box it meant.
+     */
+    areas?: readonly Region[];
+    /**
+     * The box the gizmo stands on and carries: the bounds of every area.
+     *
+     * One gizmo for all of them, rigid, because the areas move together and
+     * keep their places relative to each other -- the same reason a copy keeps
+     * their arrangement. `null` falls back to the active area.
+     */
+    gizmoRegion?: Region | null;
     /**
      * A click in orbit mode. `null` means the ray hit nothing — clicking empty
      * space, which clears the selection rather than doing nothing.
@@ -356,8 +377,15 @@ import { isTyping } from "./typing.js";
       at: { x: number; y: number; z: number },
       look: PlacementLook,
     ) => void;
-    /** A face was dragged; the region is already snapped and clamped. */
-    onselectionchange?: (region: Region) => void;
+    /**
+     * The selection was dragged; the region is already snapped and clamped.
+     *
+     * `mode` says what the drag means for the other areas: a face drag resizes
+     * the active one (`resize`), a Shift-sweep replaces the whole selection
+     * (`replace`), and a Shift+Alt sweep adds an area beside the others
+     * (`add`). Only this component knows which of the three the press was.
+     */
+    onselectionchange?: (region: Region, mode: "resize" | "replace" | "add") => void;
     /**
      * A selection *gesture* began or ended.
      *
@@ -382,7 +410,7 @@ import { isTyping } from "./typing.js";
      * neither a selection nor a placement had anything to aim at. This is the
      * selection half; `onbuild` already carries the placement half.
      */
-    ongridselect?: (region: Region) => void;
+    ongridselect?: (region: Region, add: boolean) => void;
     /** A click on the build grid in creative mode, meaning "put a block here". */
     ongridplace?: (at: { x: number; y: number; z: number }, look: PlacementLook) => void;
     /**
@@ -519,6 +547,8 @@ import { isTyping } from "./typing.js";
     ground,
     groundColor,
     selection = null,
+    areas = [],
+    gizmoRegion = null,
     onpick,
     cameraMode = "orbit",
     flySpeed = 12,
@@ -1037,6 +1067,25 @@ import { isTyping } from "./typing.js";
   let blockAnchor: { x: number; y: number; z: number } | null = null;
   let blockReach: { x: number; y: number; z: number } | null = null;
   let lastGridAt = 0;
+  /**
+   * Whether the sweep in progress adds an area rather than replacing the
+   * selection: Alt was held at the press. Read at the press and kept, because
+   * letting go of Alt half way through a drag is not a change of mind.
+   */
+  let sweepAdds = false;
+  /**
+   * Whether Alt took part in a click since it went down -- and so whether its
+   * release must be kept from the window.
+   *
+   * On Windows a lone Alt released focuses the menu bar, and Electron decides
+   * "lone" from the keyboard alone: a mouse click in between does not count.
+   * So every Alt+click to add or remove an area would leave the menu bar
+   * holding the keyboard, and the next keystroke would open a menu. Electron
+   * acts only on key events the page did not handle, so `preventDefault` on
+   * that one release is the whole fix -- and Alt pressed and released on its
+   * own still reaches the menu as it always did.
+   */
+  let altClicked = false;
 
   /**
    * Keys held down, by `event.code` — physical position, not the character
@@ -1543,7 +1592,7 @@ import { isTyping } from "./typing.js";
     // Null means there was no usable answer -- an axis pointed at the camera,
     // or a ray that missed the plane. Leave the selection where it is rather
     // than move it somewhere the user did not indicate.
-    if (next !== null) onselectionchange(next);
+    if (next !== null) onselectionchange(next, "resize");
   }
 
   /** The ray under the pointer, in the shape `build_grid.ts` takes. */
@@ -1744,6 +1793,8 @@ import { isTyping } from "./typing.js";
     origin: THREE.Vector3;
     grab: number;
     region: Region;
+    /** Every area, frozen with `region`, so the preview draws each one. */
+    areas: Region[];
   } | null = null;
 
   /** What the drag has decided so far: drawn, not yet written. */
@@ -1754,7 +1805,15 @@ import { isTyping } from "./typing.js";
     | { kind: "scale"; spec: ScaleSpec; region: Region }
     | null = null;
 
-  let gizmoPreviewBox: THREE.LineSegments | null = null;
+  let gizmoPreviewBox: THREE.Group | null = null;
+
+  /**
+   * What the gizmo carries: the bounds of every area, or the active one alone.
+   * One rigid gizmo for all of them -- see the `gizmoRegion` prop.
+   */
+  const gizmoBox = $derived(gizmoRegion ?? selection);
+  /** Every area, the active one first; the preview draws a box per area. */
+  const allAreas = $derived(selection === null ? [] : [selection, ...areas]);
 
   function axisColour(axis: Axis): THREE.Color {
     const fallback = axis === "x" ? 0xe05260 : axis === "y" ? 0x6fbf5f : 0x5b8dd9;
@@ -1823,7 +1882,7 @@ import { isTyping } from "./typing.js";
    */
   function buildGizmo(): void {
     disposeGizmo();
-    if (!scene || selection === null) return;
+    if (!scene || gizmoBox === null) return;
     const group = new THREE.Group();
     group.renderOrder = 1000;
     const kind: GizmoHandle["kind"] =
@@ -1858,12 +1917,12 @@ import { isTyping } from "./typing.js";
    */
   function updateGizmo(): void {
     if (gizmoGroup === null) return;
-    if (selection === null || cameraMode !== "orbit" || !camera) {
+    if (gizmoBox === null || cameraMode !== "orbit" || !camera) {
       gizmoGroup.visible = false;
       return;
     }
     gizmoGroup.visible = true;
-    const origin = gizmoOrigin(selection, pivot);
+    const origin = gizmoOrigin(gizmoBox, pivot);
     gizmoOrigin3.set(origin.x, origin.y, origin.z);
     gizmoGroup.position.copy(gizmoOrigin3);
 
@@ -1902,49 +1961,59 @@ import { isTyping } from "./typing.js";
     });
   }
 
-  /** Draws the box a drag would land on, in the warning colour when it cannot. */
-  function showGizmoPreview(region: Region | null): void {
+  /**
+   * Draws the boxes a drag would land on, one per area, in the warning colour
+   * when they cannot.
+   */
+  function showGizmoPreview(regions: readonly Region[] | null): void {
     if (gizmoPreviewBox !== null) {
       scene?.remove(gizmoPreviewBox);
-      gizmoPreviewBox.geometry.dispose();
-      (gizmoPreviewBox.material as THREE.Material).dispose();
+      disposeObject(gizmoPreviewBox);
       gizmoPreviewBox = null;
     }
-    if (region === null || !scene) return;
-    const size = new THREE.Vector3(
-      region.maxX - region.minX + 1,
-      region.maxY - region.minY + 1,
-      region.maxZ - region.minZ + 1,
-    );
+    if (regions === null || regions.length === 0 || !scene) return;
     /*
      * Red when the destination leaves the schematic and automatic resizing is
      * off, because then the release will be refused -- said during the gesture
      * rather than after it, which is the whole difference between a warning
-     * and a report.
+     * and a report. Asked of all the areas together, because main refuses the
+     * whole gesture when any of them leaves.
      */
     const beyond =
       !autoGrow &&
       documentSize !== null &&
-      !regionFits(region, {
-        width: documentSize[0],
-        height: documentSize[1],
-        length: documentSize[2],
-      });
-    const box = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
-      new THREE.LineBasicMaterial({
-        color: beyond ? themeColor("--danger", 0xe05260) : themeColor("--selection", 0x6ea8fe),
-        depthTest: false,
-      }),
-    );
-    box.position.set(
-      region.minX + size.x / 2,
-      region.minY + size.y / 2,
-      region.minZ + size.z / 2,
-    );
-    box.renderOrder = 999;
-    gizmoPreviewBox = box;
-    scene.add(box);
+      regions.some(
+        (region) =>
+          !regionFits(region, {
+            width: documentSize[0],
+            height: documentSize[1],
+            length: documentSize[2],
+          }),
+      );
+    const group = new THREE.Group();
+    for (const region of regions) {
+      const size = new THREE.Vector3(
+        region.maxX - region.minX + 1,
+        region.maxY - region.minY + 1,
+        region.maxZ - region.minZ + 1,
+      );
+      const box = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+        new THREE.LineBasicMaterial({
+          color: beyond ? themeColor("--danger", 0xe05260) : themeColor("--selection", 0x6ea8fe),
+          depthTest: false,
+        }),
+      );
+      box.position.set(
+        region.minX + size.x / 2,
+        region.minY + size.y / 2,
+        region.minZ + size.z / 2,
+      );
+      box.renderOrder = 999;
+      group.add(box);
+    }
+    gizmoPreviewBox = group;
+    scene.add(group);
   }
 
   /** One frame of a gizmo drag: decide, and draw what was decided. */
@@ -1952,7 +2021,7 @@ import { isTyping } from "./typing.js";
     if (gizmoDrag === null) return;
     const ray = rayThrough(clientX, clientY);
     if (ray === null) return;
-    const { handle, region } = gizmoDrag;
+    const { handle, region, areas: dragged } = gizmoDrag;
     const origin = {
       x: gizmoDrag.origin.x,
       y: gizmoDrag.origin.y,
@@ -1967,7 +2036,9 @@ import { isTyping } from "./typing.js";
       const steps = quartersBetween(gizmoDrag.grab, angle);
       const transform: RegionTransform = { kind: "rotate", axis: handle.axis, steps };
       gizmoResult = steps === 0 ? null : { kind: "transform", transform, region };
-      showGizmoPreview(steps === 0 ? region : transformedRegion(region, origin, transform));
+      showGizmoPreview(
+        steps === 0 ? dragged : dragged.map((area) => transformedRegion(area, origin, transform)),
+      );
       return;
     }
 
@@ -1978,7 +2049,7 @@ import { isTyping } from "./typing.js";
       if (Math.abs(start) < 1e-6) return;
       const spec = scaleFromRatio((along - originComponent(origin, handle.axis)) / start);
       gizmoResult = spec === null ? null : { kind: "scale", spec, region };
-      showGizmoPreview(spec === null ? region : scaledRegion(region, origin, spec));
+      showGizmoPreview(spec === null ? dragged : dragged.map((area) => scaledRegion(area, origin, spec)));
       return;
     }
 
@@ -2010,15 +2081,7 @@ import { isTyping } from "./typing.js";
 
     const to = { x: region.minX + step.x, y: region.minY + step.y, z: region.minZ + step.z };
     gizmoResult = delta === 0 ? null : { kind: "move", to, region };
-    const moved: Region = {
-      minX: to.x,
-      minY: to.y,
-      minZ: to.z,
-      maxX: to.x + (region.maxX - region.minX),
-      maxY: to.y + (region.maxY - region.minY),
-      maxZ: to.z + (region.maxZ - region.minZ),
-    };
-    showGizmoPreview(moved);
+    showGizmoPreview(dragged.map((area) => translatedRegion(area, [step.x, step.y, step.z])));
     ghostGroup?.position.set(to.x, to.y, to.z);
   }
 
@@ -2118,6 +2181,44 @@ import { isTyping } from "./typing.js";
     box.getCenter(selectionBox.position);
     selectionBox.renderOrder = 999;
     scene.add(selectionBox);
+  }
+
+  /**
+   * The other selected areas, as wire boxes in the same colour at half
+   * strength -- selected, plainly, and plainly not the one the face handles
+   * and the inspector belong to.
+   */
+  let otherAreaBoxes: THREE.Group | undefined;
+  function updateOtherAreaBoxes(): void {
+    if (!scene) return;
+    if (otherAreaBoxes) {
+      scene.remove(otherAreaBoxes);
+      disposeObject(otherAreaBoxes);
+      otherAreaBoxes = undefined;
+    }
+    if (selection === null || areas.length === 0) return;
+    const group = new THREE.Group();
+    for (const area of areas) {
+      const size = new THREE.Vector3(
+        area.maxX - area.minX + 1,
+        area.maxY - area.minY + 1,
+        area.maxZ - area.minZ + 1,
+      );
+      const box = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+        new THREE.LineBasicMaterial({
+          color: themeColor("--selection", 0x6ea8fe),
+          transparent: true,
+          opacity: 0.45,
+          depthTest: false,
+        }),
+      );
+      box.position.set(area.minX + size.x / 2, area.minY + size.y / 2, area.minZ + size.z / 2);
+      box.renderOrder = 998;
+      group.add(box);
+    }
+    otherAreaBoxes = group;
+    scene.add(group);
   }
 
 
@@ -3357,11 +3458,19 @@ import { isTyping } from "./typing.js";
       animate();
 
       const onKeyDown = (event: KeyboardEvent) => {
+        // A fresh Alt starts a fresh question: see `altClicked`.
+        if (event.key === "Alt" && !event.repeat) altClicked = false;
         if (fly?.isLocked) {
           held.add(event.code);
         }
       };
-      const onKeyUp = (event: KeyboardEvent) => held.delete(event.code);
+      const onKeyUp = (event: KeyboardEvent) => {
+        held.delete(event.code);
+        if (event.key === "Alt" && altClicked) {
+          altClicked = false;
+          event.preventDefault();
+        }
+      };
       window.addEventListener("keydown", onKeyDown);
       window.addEventListener("keyup", onKeyUp);
 
@@ -3395,6 +3504,7 @@ import { isTyping } from "./typing.js";
           event.button === 0 || event.button === 1
             ? { x: event.clientX, y: event.clientY, button: event.button }
             : null;
+        if (event.altKey) altClicked = true;
 
         /*
          * The right button rotates, so this is the moment to decide what it
@@ -3447,9 +3557,9 @@ import { isTyping } from "./typing.js";
          * falling through to `clickIntent` and collapsing the selection to
          * whatever block is behind the handle.
          */
-        const handle = selection === null ? null : gizmoAt(event.clientX, event.clientY);
+        const handle = gizmoBox === null ? null : gizmoAt(event.clientX, event.clientY);
         if (handle !== null) {
-          const origin = gizmoOrigin(selection as Region, pivot);
+          const origin = gizmoOrigin(gizmoBox as Region, pivot);
           const ray = rayThrough(event.clientX, event.clientY);
           const grab = ray === null ? null : gizmoGrabAt(handle, origin, ray);
           if (grab !== null) {
@@ -3457,7 +3567,8 @@ import { isTyping } from "./typing.js";
               handle,
               origin: new THREE.Vector3(origin.x, origin.y, origin.z),
               grab,
-              region: selection as Region,
+              region: gizmoBox as Region,
+              areas: allAreas.map((area) => ({ ...area })),
             };
             gizmoResult = null;
             draggedThisGesture = true;
@@ -3508,6 +3619,7 @@ import { isTyping } from "./typing.js";
           const hit = pickBlockAt(event.clientX, event.clientY);
           if (hit !== null) {
             blockAnchor = { x: hit.x, y: hit.y, z: hit.z };
+            sweepAdds = event.altKey;
             blockReach = blockAnchor;
             draggedThisGesture = true;
             onselectiongesture?.("start");
@@ -3525,6 +3637,7 @@ import { isTyping } from "./typing.js";
           const cell = gridCellAt(event.clientX, event.clientY);
           if (cell === null) return;
           gridAnchor = cell;
+          sweepAdds = event.altKey;
           gridCell = cell;
           draggedThisGesture = true;
           onselectiongesture?.("start");
@@ -3573,7 +3686,7 @@ import { isTyping } from "./typing.js";
           const hit = pickBlockAt(event.clientX, event.clientY);
           if (hit !== null) blockReach = { x: hit.x, y: hit.y, z: hit.z };
           if (blockReach !== null) {
-            onselectionchange?.(regionBetween(blockAnchor, blockReach));
+            onselectionchange?.(regionBetween(blockAnchor, blockReach), sweepAdds ? "add" : "replace");
           }
           return;
         }
@@ -3584,7 +3697,7 @@ import { isTyping } from "./typing.js";
           const cell = gridCellAt(event.clientX, event.clientY);
           if (cell !== null) {
             gridCell = cell;
-            ongridselect?.(regionBetween(gridAnchor, cell));
+            ongridselect?.(regionBetween(gridAnchor, cell), sweepAdds);
           }
         }
       };
@@ -3663,7 +3776,7 @@ import { isTyping } from "./typing.js";
            * means "select", down to a single cell.
            */
           if (stayed) {
-            ongridselect?.(regionBetween(anchor, anchor));
+            ongridselect?.(regionBetween(anchor, anchor), sweepAdds);
           }
           onselectiongesture?.("end");
           draggedThisGesture = false;
@@ -3745,12 +3858,19 @@ import { isTyping } from "./typing.js";
             hit: picked !== null,
             shift: event.shiftKey,
             ctrl: event.ctrlKey || event.metaKey,
+            alt: event.altKey,
           })
         ) {
           case "ignore":
             return;
           case "clear":
             onpick(null);
+            return;
+          case "add":
+            if (picked) onpick({ ...picked, extend: false, area: "add" });
+            return;
+          case "remove":
+            if (picked) onpick({ ...picked, extend: false, area: "remove" });
             return;
           case "extend":
             if (picked) onpick({ ...picked, extend: true });
@@ -3992,6 +4112,15 @@ import { isTyping } from "./typing.js";
     void scene;
     void theme;
     updateSelectionBox();
+  });
+
+  $effect(() => {
+    // The other areas' boxes, on the same terms as the active one's above.
+    void selection;
+    void areas;
+    void scene;
+    void theme;
+    updateOtherAreaBoxes();
   });
 
   $effect(() => {

@@ -52,6 +52,19 @@ export function boxContains(box: Box, x: number, y: number, z: number): boolean 
   );
 }
 
+/** The cells two boxes share, as a box. `null` when they share none. */
+export function intersectBox(a: Box, b: Box): Box | null {
+  const out = {
+    minX: Math.max(a.minX, b.minX),
+    minY: Math.max(a.minY, b.minY),
+    minZ: Math.max(a.minZ, b.minZ),
+    maxX: Math.min(a.maxX, b.maxX),
+    maxY: Math.min(a.maxY, b.maxY),
+    maxZ: Math.min(a.maxZ, b.maxZ),
+  };
+  return out.minX > out.maxX || out.minY > out.maxY || out.minZ > out.maxZ ? null : out;
+}
+
 /** The smallest box holding every one of `boxes`. `null` for none. */
 export function unionBounds(boxes: readonly Box[]): Box | null {
   if (boxes.length === 0) return null;

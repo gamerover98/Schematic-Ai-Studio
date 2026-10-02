@@ -112,6 +112,7 @@ import {
 import { writeMix } from "../domain/mix.js";
 import { MAX_DOCUMENT_VOLUME, MAX_EDIT_VOLUME } from "../services/session.js";
 import { orderRegion } from "../domain/grow.js";
+import { intersectBox, unionVolume } from "../../shared/regions.js";
 import {
   defaultStateFor,
   isKnownBlock,
@@ -348,8 +349,14 @@ function toPlacedEntry(block: string): PaletteEntry {
 export interface ToolContext {
   doc: SchematicDocument;
   tx: TransactionScope;
-  /** The user's current selection, when they have one. */
+  /** The user's current selection -- its active area -- when they have one. */
   selection: Region | null;
+  /**
+   * The other areas selected beside it. Not a default for anything; they
+   * count as selected when a tool asks whether it strayed outside the
+   * selection, which is the question they would otherwise get wrong.
+   */
+  otherAreas?: readonly Region[];
   allowedBlocks: ReadonlySet<string>;
   /**
    * Called for each tool invocation, so the UI can narrate progress.
@@ -403,16 +410,6 @@ interface ResolvedRegion {
   outsideSelection?: string;
 }
 
-function overlapVolume(a: Region, b: Region): number {
-  const span = (aMin: number, aMax: number, bMin: number, bMax: number) =>
-    Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin) + 1);
-  return (
-    span(a.minX, a.maxX, b.minX, b.maxX) *
-    span(a.minY, a.maxY, b.minY, b.maxY) *
-    span(a.minZ, a.maxZ, b.minZ, b.maxZ)
-  );
-}
-
 function resolveRegion(context: ToolContext, args: Partial<RegionArgs>): ResolvedRegion {
   const { doc, selection } = context;
   const hasExplicit =
@@ -456,8 +453,13 @@ function resolveRegion(context: ToolContext, args: Partial<RegionArgs>): Resolve
       `${describeRegion(region)}. Use resize_document first if you need the room.`;
   }
   if (selection) {
-    const inSelection = overlapVolume(region, normalizeRegion(doc, selection));
-    const outside = regionVolume(region) - inSelection;
+    // Every selected area counts, overlaps once: an explicit region naming one
+    // of the other areas is inside the user's selection, not outside it.
+    const selected = [selection, ...(context.otherAreas ?? [])].flatMap((area) => {
+      const clipped = intersectBox(region, normalizeRegion(doc, area));
+      return clipped === null ? [] : [clipped];
+    });
+    const outside = regionVolume(region) - unionVolume(selected);
     if (outside > 0) {
       resolved.outsideSelection =
         `${outside.toLocaleString()} of the ${regionVolume(region).toLocaleString()} cells this touched are ` +
@@ -762,6 +764,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         coordinates:
           "x is 0..width-1, y is 0..height-1 (y up), z is 0..length-1. All coordinates are inclusive.",
         selection: selection ? normalizeRegion(doc, selection) : null,
+        otherSelectedAreas: (context.otherAreas ?? []).map((area) => normalizeRegion(doc, area)),
       };
     },
   },

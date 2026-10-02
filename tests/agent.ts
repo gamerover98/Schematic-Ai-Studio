@@ -16,7 +16,7 @@ import type {
 } from "@ai-sdk/provider";
 import { MockLanguageModelV3 } from "ai/test";
 
-import { AgentCancelledError, runAgent } from "../src/main/agent/agent.js";
+import { AgentCancelledError, describeDocument, runAgent } from "../src/main/agent/agent.js";
 import { LlmError } from "../src/main/services/llm.js";
 import { getBlock, setBlock, type SchematicDocument } from "../src/main/domain/document.js";
 import { canUndo, runTransaction, undo } from "../src/main/domain/history.js";
@@ -1494,6 +1494,53 @@ console.log("\n--- a mix, from the agent ---");
   });
   check("a mix naming a block the version lacks is refused", JSON.stringify(partly.trace).includes("minecraft:andesite"));
   equal("...as a whole: nothing is written", session.history.undoStack.length, 2);
+}
+
+
+// --- several areas selected ---------------------------------------------------
+//
+// The model is told about every area, and tools default to the active one. An
+// explicit region naming another selected area is inside the selection, so it
+// is not reported as leaving it -- the note exists to catch an edit straying
+// somewhere nobody pointed, and here somebody did.
+console.log("\n--- several areas selected ---");
+{
+  const session = seeded();
+  const active = { minX: 0, minY: 1, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 };
+  const other = { minX: 4, minY: 1, minZ: 4, maxX: 5, maxY: 1, maxZ: 5 };
+  const described = describeDocument(session, active, [other]);
+  check("the summary says how many areas are selected", described.includes("2 areas"), described);
+  check(
+    "...lists the other one by its coordinates",
+    described.includes("Also selected, area 2: (4,1,4) to (5,1,5)"),
+    described,
+  );
+  check("...and says it is flat, as it does for the active one", described.includes("single flat layer at y=1."));
+
+  const fillOther = (otherAreas: (typeof other)[]) =>
+    runAgent({
+      ...baseRequest,
+      session,
+      selection: active,
+      otherAreas,
+      prompt: "fill the other area",
+      modelOverride: scriptedModel([
+        { kind: "tool", toolName: "fill_region", input: { ...other, block: "minecraft:stone" } },
+        { kind: "text", text: "Done." },
+      ]),
+    });
+  const inside = (await fillOther([other])).trace.find((item) => item.name === "fill_region")!;
+  check(
+    "a region naming another selected area is not outside the selection",
+    !(inside.output ?? "").includes("outside the user's selection"),
+    inside.output,
+  );
+  const outside = (await fillOther([])).trace.find((item) => item.name === "fill_region")!;
+  check(
+    "...and without that area selected, it is",
+    (outside.output ?? "").includes("outside the user's selection"),
+    outside.output,
+  );
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

@@ -38,6 +38,7 @@ import {
 import type { TransactionScope } from "./history.js";
 import type { BlockEntityRecord, PaletteEntry } from "../pipeline/types.js";
 import { matchesBlockPattern, paletteEntryIsAir } from "../pipeline/types.js";
+import { forEachUnionCell, unionBounds, type Box } from "../../shared/regions.js";
 
 /** One cell of a copied region, offset from the region's own corner. */
 interface ClipboardCell {
@@ -56,6 +57,15 @@ export interface Clipboard {
   cells: ClipboardCell[];
   /** How many blocks were taken, for the UI to report. */
   blocks: number;
+  /**
+   * The areas it was taken from, relative to its corner, when there were
+   * several. `null` for one box, which is the whole of its own box.
+   *
+   * Only `includeAir` asks: it clears the destination before writing, and
+   * clearing the whole bounding box would wipe the gap between two areas --
+   * cells nobody selected, at the destination as at the source.
+   */
+  mask: Box[] | null;
 }
 
 export interface PasteOptions {
@@ -87,41 +97,65 @@ export interface PasteOptions {
 
 /** Snapshots a region, by value. */
 export function copyRegion(doc: SchematicDocument, region: Region): Clipboard {
-  const cells: ClipboardCell[] = [];
-  for (let x = region.minX; x <= region.maxX; x += 1) {
-    for (let y = region.minY; y <= region.maxY; y += 1) {
-      for (let z = region.minZ; z <= region.maxZ; z += 1) {
-        const entry = getBlock(doc, x, y, z);
-        const entity = doc.blockEntities.get(`${x},${y},${z}`) ?? null;
-        if (paletteEntryIsAir(entry) && entity === null) {
-          // Air with nothing attached carries no information a paste could
-          // use, and keeping it would make every clipboard the size of its
-          // bounding box rather than of the thing in it.
-          continue;
-        }
-        cells.push({
-          dx: x - region.minX,
-          dy: y - region.minY,
-          dz: z - region.minZ,
-          // Copied by value rather than by reference. Nothing in the app
-          // mutates a palette entry in place today — an edit interns a new one
-          // — so this is not fixing a live bug; it is severing the last thread
-          // between a clipboard and a document it is expected to outlive, so
-          // that holding one cannot keep the other's palette alive or expose it
-          // to a future edit that does mutate.
-          entry: { namespacedName: entry.namespacedName, properties: { ...entry.properties } },
-          entity: entity === null ? null : { ...entity, nbt: structuredClone(entity.nbt) },
-        });
-      }
-    }
+  return copyRegions(doc, [region]);
+}
+
+/**
+ * Snapshots several areas as one, by value, from the corner of their bounds.
+ *
+ * The areas keep where they were relative to each other, so a paste puts them
+ * down in the same arrangement, and a cell inside two of them is taken once.
+ * The gap between them is **not** taken: nobody selected it, so a paste must
+ * not carry it along -- the air in it is never stored anyway, and a block
+ * standing in it is exactly what would turn up somewhere nobody asked for.
+ */
+export function copyRegions(doc: SchematicDocument, regions: readonly Region[]): Clipboard {
+  const bounds = unionBounds(regions);
+  if (bounds === null) {
+    return { width: 1, height: 1, length: 1, cells: [], blocks: 0, mask: null };
   }
+  const cells: ClipboardCell[] = [];
+  forEachUnionCell(regions, (x, y, z) => {
+    const entry = getBlock(doc, x, y, z);
+    const entity = doc.blockEntities.get(`${x},${y},${z}`) ?? null;
+    if (paletteEntryIsAir(entry) && entity === null) {
+      // Air with nothing attached carries no information a paste could
+      // use, and keeping it would make every clipboard the size of its
+      // bounding box rather than of the thing in it.
+      return;
+    }
+    cells.push({
+      dx: x - bounds.minX,
+      dy: y - bounds.minY,
+      dz: z - bounds.minZ,
+      // Copied by value rather than by reference. Nothing in the app
+      // mutates a palette entry in place today — an edit interns a new one
+      // — so this is not fixing a live bug; it is severing the last thread
+      // between a clipboard and a document it is expected to outlive, so
+      // that holding one cannot keep the other's palette alive or expose it
+      // to a future edit that does mutate.
+      entry: { namespacedName: entry.namespacedName, properties: { ...entry.properties } },
+      entity: entity === null ? null : { ...entity, nbt: structuredClone(entity.nbt) },
+    });
+  });
 
   return {
-    width: region.maxX - region.minX + 1,
-    height: region.maxY - region.minY + 1,
-    length: region.maxZ - region.minZ + 1,
+    width: bounds.maxX - bounds.minX + 1,
+    height: bounds.maxY - bounds.minY + 1,
+    length: bounds.maxZ - bounds.minZ + 1,
     cells,
     blocks: cells.filter((cell) => !paletteEntryIsAir(cell.entry)).length,
+    mask:
+      regions.length < 2
+        ? null
+        : regions.map((box) => ({
+            minX: box.minX - bounds.minX,
+            minY: box.minY - bounds.minY,
+            minZ: box.minZ - bounds.minZ,
+            maxX: box.maxX - bounds.minX,
+            maxY: box.maxY - bounds.minY,
+            maxZ: box.maxZ - bounds.minZ,
+          })),
   };
 }
 
@@ -147,17 +181,24 @@ export function pasteClipboard(
   // it spans — and clearing first reaches the same result for the one case that
   // wants it, stamping a hollow room into solid rock.
   if (options.includeAir) {
-    changed += tx.fill(
-      normalizeRegion(doc, {
-        minX: at.x,
-        minY: at.y,
-        minZ: at.z,
-        maxX: at.x + clipboard.width - 1,
-        maxY: at.y + clipboard.height - 1,
-        maxZ: at.z + clipboard.length - 1,
-      }),
-      { namespacedName: "minecraft:air", properties: {} },
-    );
+    // The areas it came from, not their bounds: the gap between two areas was
+    // never selected, so clearing it here would wipe cells nobody pointed at.
+    const boxes = clipboard.mask ?? [
+      { minX: 0, minY: 0, minZ: 0, maxX: clipboard.width - 1, maxY: clipboard.height - 1, maxZ: clipboard.length - 1 },
+    ];
+    for (const box of boxes) {
+      changed += tx.fill(
+        normalizeRegion(doc, {
+          minX: at.x + box.minX,
+          minY: at.y + box.minY,
+          minZ: at.z + box.minZ,
+          maxX: at.x + box.maxX,
+          maxY: at.y + box.maxY,
+          maxZ: at.z + box.maxZ,
+        }),
+        { namespacedName: "minecraft:air", properties: {} },
+      );
+    }
   }
 
   const keepUnder = options.keepUnder ?? null;

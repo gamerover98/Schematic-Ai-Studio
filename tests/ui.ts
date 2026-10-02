@@ -125,6 +125,20 @@ import {
   grabGhost,
   releaseGhost,
 } from "../src/renderer/src/lib/ghost_request.js";
+import {
+  activated,
+  activeIndex,
+  areaAt,
+  areaBounds,
+  areaCells,
+  areaList,
+  mapAreas,
+  NO_AREAS,
+  single,
+  withArea,
+  withoutArea,
+} from "../src/renderer/src/lib/selection_set.js";
+import { MAX_BOXES } from "../src/shared/regions.js";
 import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
 
@@ -947,8 +961,10 @@ console.log("\n--- moving a region ---");
    * selection, its anchor and the pivot are carried there -- and each of the
    * four commits that *replace* the selection afterwards has to restate its
    * destination in the new frame, or the box lands back where the blocks used
-   * to be. Four sites, so four is the number checked: three commits translate
-   * their own destination and `commitMove` translates a `movedRegion`.
+   * to be. Each commit is named and its own body asked, rather than counting
+   * `translatedRegion` across the file: several areas brought that call into
+   * places that are not commits at all, and a count is exactly the check that
+   * goes on passing when one commit loses it and another site gains one.
    */
   const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
   const run = app.slice(app.indexOf("async function runDocument"));
@@ -960,10 +976,21 @@ console.log("\n--- moving a region ---");
     "...before the document is redrawn from it",
     runBody.indexOf("followShift(response.shift)") < runBody.indexOf("await refreshDocument()"),
   );
-  equal(
-    "the four commits restate their destination in the new frame",
-    (app.match(/translatedRegion\(/g) ?? []).length,
-    4,
+  const bodyOf = (name: string): string => {
+    const from = app.indexOf(name);
+    if (from === -1) return "";
+    const rest = app.slice(from);
+    return rest.slice(0, rest.search(/\n {2}\}\r?\n/));
+  };
+  for (const commit of ["async function commitMove", "async function gizmoTransform", "async function gizmoScale"]) {
+    check(
+      `${commit.split(" ").pop()} restates its destination in the new frame`,
+      bodyOf(commit).includes("outcome.shift"),
+    );
+  }
+  check(
+    "...and the other areas are carried by the same edit as the active one",
+    /otherAreas = otherAreas\.map\(\(area\) => translatedRegion\(area, shift\)\)/.test(bodyOf("function followShift")),
   );
   /*
    * And the timeline is **not** carried. Its entries are in the frame the
@@ -1208,7 +1235,7 @@ console.log("\n--- the gizmo takes the press, and gives the camera back ---");
    * `clickIntent` -- which picks whatever block is behind the gizmo and
    * collapses the selection the user was about to transform.
    */
-  const grabAt = viewer.indexOf("const handle = selection === null ? null : gizmoAt(");
+  const grabAt = viewer.indexOf("const handle = gizmoBox === null ? null : gizmoAt(");
   const shiftGate = viewer.indexOf("if (!event.shiftKey) return;");
   const grab = viewer.slice(grabAt, shiftGate);
   check("the gizmo grab is found at all", grab.length > 0);
@@ -5186,6 +5213,117 @@ console.log("\n--- the distribution, in the With field ---");
    */
   const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
   check("a block placed by hand takes its shares over the document's box", /pickAt\(mix, at\.x, at\.y, at\.z, frame\)/.test(app));
+}
+
+
+// --- several areas, one selection --------------------------------------------
+//
+// The active area is `selection` and the rest sit beside it, in an order that
+// does not reshuffle: making the third area active leaves it third.
+console.log("\n--- several areas, one selection ---");
+{
+  const box = (x: number, width = 1) => ({ minX: x, minY: 0, minZ: 0, maxX: x + width - 1, maxY: 0, maxZ: 0 });
+  const xs = (list: readonly { minX: number }[]) => list.map((area) => area.minX);
+
+  let set = single(box(0, 4));
+  set = withArea(set, box(10));
+  set = withArea(set, box(20));
+  equal("an added area goes at the end of the list", xs(areaList(set)), [0, 10, 20]);
+  equal("...and becomes the active one", [set.active?.minX, activeIndex(set)], [20, 2]);
+
+  const first = activated(set, 0);
+  equal("activating an area leaves the list in its order", xs(areaList(first)), [0, 10, 20]);
+  equal("...and moves only which one is active", [first.active?.minX, activeIndex(first)], [0, 0]);
+
+  // Removing the active area hands the role to the one listed before it.
+  const dropped = withoutArea(set, 2);
+  equal("removing the active area keeps the rest", xs(areaList(dropped)), [0, 10]);
+  equal("...and the one before it becomes active", dropped.active?.minX, 10);
+  const other = withoutArea(first, 1);
+  equal("removing another area leaves the active one active", [other.active?.minX, xs(areaList(other))], [
+    0,
+    [0, 20],
+  ]);
+  equal("removing the last area leaves no selection", withoutArea(single(box(0)), 0), NO_AREAS);
+
+  // Nested areas: the click means the small one drawn inside the large one.
+  const nested = withArea(single(box(0, 10)), box(3));
+  equal("a click inside nested areas finds the smallest", areaAt(nested, { x: 3, y: 0, z: 0 }), 1);
+  equal("...and one only the large area holds finds that", areaAt(nested, { x: 7, y: 0, z: 0 }), 0);
+  equal("...and a click outside every area finds none", areaAt(nested, { x: 30, y: 0, z: 0 }), -1);
+
+  equal("the bounds hold every area", areaBounds(set), { minX: 0, minY: 0, minZ: 0, maxX: 20, maxY: 0, maxZ: 0 });
+  equal("cells are counted over the union", areaCells(withArea(single(box(0, 4)), box(2, 4))), 6);
+  equal(
+    "a translation moves every area and keeps the active one",
+    [xs(areaList(mapAreas(set, (area) => ({ ...area, minX: area.minX + 1, maxX: area.maxX + 1 })))), activeIndex(set)],
+    [[1, 11, 21], 2],
+  );
+
+  // Main refuses an edit naming more than MAX_BOXES, so the set stops there.
+  let full = single(box(0));
+  for (let i = 1; i <= MAX_BOXES + 5; i += 1) full = withArea(full, box(i * 2));
+  equal("the set never holds more areas than an edit may name", areaList(full).length, MAX_BOXES);
+
+  /*
+   * A rigid map about one origin: two areas mirrored about the middle of
+   * their bounds trade places, and that is what main does with the mask.
+   */
+  const pair = [box(0, 2), box(6, 2)];
+  const bounds = { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 };
+  equal(
+    "two areas mirrored about their bounds trade places",
+    xs(pair.map((area) => transformedRegion(area, gizmoOrigin(bounds, null), { kind: "mirror", axis: "x" }))),
+    [6, 0],
+  );
+
+  // Alt is about which areas, and a miss with it does nothing.
+  const intent = (hit: boolean, shift: boolean, alt: boolean) => clickIntent({ hit, shift, ctrl: false, alt });
+  equal("Shift+Alt on a block adds an area", intent(true, true, true), "add");
+  equal("Alt on a block takes one away", intent(true, false, true), "remove");
+  equal("...and a miss with Alt clears nothing", [intent(false, true, true), intent(false, false, true)], [
+    "ignore",
+    "ignore",
+  ]);
+  equal("without Alt a click is what it was", [intent(true, false, false), intent(false, true, false)], [
+    "pick",
+    "clear",
+  ]);
+
+  /*
+   * The wiring, read from the source because the gestures run from a viewport
+   * this harness cannot drive.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  check(
+    "Alt released after an Alt+click is kept from the menu bar",
+    /event\.key === "Alt" && altClicked\)[\s\S]{0,80}event\.preventDefault\(\)/.test(viewer),
+  );
+  check("...and a press with Alt is what arms that", /if \(event\.altKey\) altClicked = true;/.test(viewer));
+  check(
+    "a sweep decides at the press whether it adds",
+    (viewer.match(/sweepAdds = event\.altKey;/g) ?? []).length === 2,
+  );
+  check(
+    "a face drag resizes the active area and leaves the others",
+    /onselectionchange\(next, "resize"\)/.test(viewer),
+  );
+
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const now = app.slice(app.indexOf("function selectionNow"), app.indexOf("function restoreSelection"));
+  check(
+    "with no active area a step records no other areas",
+    /others: selection === null \? \[\]/.test(now),
+  );
+  const dropping = app.slice(app.indexOf("if (selection !== null) return;"));
+  check(
+    "dropping the selection drops the other areas with it",
+    /if \(otherAreas\.length > 0\) otherAreas = \[\];/.test(dropping.slice(0, 900)),
+  );
+  for (const verb of ["async function fillSelection", "async function replaceInSelection", "async function deleteSelection", "async function copySelection"]) {
+    const from = app.indexOf(verb);
+    check(`${verb.split(" ").pop()} sends every area`, from !== -1 && app.slice(from, from + 600).includes("areasForIpc()"));
+  }
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

@@ -59,7 +59,7 @@ import {
 } from "../domain/history.js";
 
 import {
-  copyRegion,
+  copyRegions,
   pasteClipboard,
   type Clipboard,
   type PasteOptions,
@@ -566,6 +566,34 @@ export class RegionCountError extends Error {
     );
     this.name = "RegionCountError";
   }
+}
+
+/**
+ * What a region edit acts on: one box, or several meaning their union.
+ *
+ * Both spellings, because the window sends the selection's areas and every
+ * other caller -- the agent, MCP, the suites -- names a single box, and making
+ * those wrap it in an array would be churn that buys nothing.
+ */
+export type Areas = RegionSpec | readonly RegionSpec[];
+
+function isOneBox(request: Areas): request is RegionSpec {
+  return !Array.isArray(request);
+}
+
+/**
+ * The areas clipped to the document, their bounds, and the mask a move, a turn
+ * or a scale passes down -- `null` for one box, which is its own bounds.
+ */
+function resolveAreas(
+  doc: SchematicDocument,
+  request: Areas,
+): { region: Region; boxes: Region[]; mask: Region[] | null } {
+  const list: readonly RegionSpec[] = isOneBox(request) ? [request] : request;
+  if (list.length === 0 || list.length > MAX_BOXES) throw new RegionCountError(list.length);
+  const boxes = list.map((box) => normalizeRegion(doc, box));
+  const region = unionBounds(boxes) as Region;
+  return { region, boxes, mask: boxes.length > 1 ? boxes : null };
 }
 
 /**
@@ -2103,9 +2131,12 @@ export function currentClipboard(): Clipboard | null {
   return clipboard;
 }
 
-/** Copies a region out. Reads only, so no transaction. */
-export function copySelection(session: DocumentSession, request: RegionSpec): Clipboard {
-  clipboard = copyRegion(session.doc, normalizeRegion(session.doc, request));
+/**
+ * Copies a region out -- or several, keeping where they were relative to each
+ * other. Reads only, so no transaction.
+ */
+export function copySelection(session: DocumentSession, request: Areas): Clipboard {
+  clipboard = copyRegions(session.doc, resolveAreas(session.doc, request).boxes);
   return clipboard;
 }
 
@@ -2118,14 +2149,16 @@ export function copySelection(session: DocumentSession, request: RegionSpec): Cl
  */
 export function cutSelection(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   options: RegionEditOptions = {},
 ): Clipboard {
   const { doc, history } = session;
-  const region = normalizeRegion(doc, request);
-  clipboard = copyRegion(doc, region);
+  const { boxes } = resolveAreas(doc, request);
+  clipboard = copyRegions(doc, boxes);
+  // Box by box: a cell two areas share is written twice with the same block,
+  // and `setBlock` answers the second write with nothing changed.
   runTransaction(doc, history, "Cut the selection", (tx) =>
-    tx.fill(region, emptyEntry(options.voidBlock)),
+    boxes.reduce((changed, box) => changed + tx.fill(box, emptyEntry(options.voidBlock)), 0),
   );
   return clipboard;
 }
@@ -2325,13 +2358,15 @@ function transformedBox(
 
 export function moveRegion(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   to: { x: number; y: number; z: number },
   options: RegionEditOptions = {},
 ): number {
   const { doc, history } = session;
-  const region = normalizeRegion(doc, request);
-  const volume = regionVolume(region);
+  // `to` is where the corner of the areas' *bounds* lands: they move together
+  // and keep their places relative to each other, so one corner says it all.
+  const { region, boxes } = resolveAreas(doc, request);
+  const volume = unionVolume(boxes);
   if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
 
   const landing: Region = {
@@ -2343,7 +2378,7 @@ export function moveRegion(
     maxZ: to.z + (region.maxZ - region.minZ),
   };
   const growth = growthFor(doc, landing, options.autoGrow !== false);
-  const held = copyRegion(doc, region);
+  const held = copyRegions(doc, boxes);
   const empty = emptyEntry(options.voidBlock);
 
   return runTransaction(doc, history, "Move the selection", (tx) => {
@@ -2354,8 +2389,13 @@ export function moveRegion(
      */
     if (growth !== null) tx.resize(growth.size, growth.shift);
     const shift = growth?.shift ?? ([0, 0, 0] as const);
-    const source = growth === null ? region : shiftRegion(region, growth.shift);
-    let changed = tx.fill(source, empty);
+    // The areas, not their bounds: the gap between two of them stays exactly
+    // as it was, which is what keeps a move of two walls from also moving the
+    // garden between them.
+    let changed = 0;
+    for (const box of boxes) {
+      changed += tx.fill(growth === null ? box : shiftRegion(box, growth.shift), empty);
+    }
     changed += pasteClipboard(
       doc,
       tx,
@@ -2382,11 +2422,11 @@ export function moveRegion(
  */
 export async function regionMesh(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   options: DocumentPreviewOptions,
 ): Promise<{ chunks: ChunkGeometry[]; atlasVersion: number }> {
-  const region = normalizeRegion(session.doc, request);
-  return meshDetached(copyRegion(session.doc, region), session.doc.format, options);
+  const { boxes } = resolveAreas(session.doc, request);
+  return meshDetached(copyRegions(session.doc, boxes), session.doc.format, options);
 }
 
 /**
@@ -2461,13 +2501,13 @@ async function meshDetached(
  */
 export function transformRegion(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   transform: RegionTransform,
   options: RegionEditOptions & { to?: { x: number; y: number; z: number } | null } = {},
 ): number {
   const { doc, history } = session;
-  const region = normalizeRegion(doc, request);
-  const volume = regionVolume(region);
+  const { region, boxes, mask } = resolveAreas(doc, request);
+  const volume = unionVolume(boxes);
   if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
 
   const to = options.to ?? null;
@@ -2485,6 +2525,7 @@ export function transformRegion(
     return applyRegionTransform(doc, tx, source, transform, {
       to: corner,
       empty: emptyEntry(options.voidBlock),
+      mask: mask === null ? null : mask.map((box) => shiftRegion(box, shift)),
     });
   });
 }
@@ -2522,14 +2563,14 @@ export interface ScaleResult {
  */
 export function scaleRegion(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   spec: ScaleSpec,
   options: RegionEditOptions & {
     to?: { x: number; y: number; z: number } | null;
   } = {},
 ): ScaleResult {
   const { doc, history } = session;
-  const region = normalizeRegion(doc, request);
+  const { region, mask } = resolveAreas(doc, request);
   const size = {
     width: region.maxX - region.minX + 1,
     height: region.maxY - region.minY + 1,
@@ -2549,7 +2590,7 @@ export function scaleRegion(
    * pass because after it the source cells have already been overwritten and
    * there is nothing left to count.
    */
-  const dropped = scaleWouldDrop(doc, region, spec);
+  const dropped = scaleWouldDrop(doc, region, spec, mask);
 
   const to = options.to ?? { x: region.minX, y: region.minY, z: region.minZ };
   const landing: Region = {
@@ -2570,6 +2611,7 @@ export function scaleRegion(
     return applyRegionScale(doc, tx, source, spec, {
       to: { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] },
       empty: emptyEntry(options.voidBlock),
+      mask: mask === null ? null : mask.map((box) => shiftRegion(box, shift)),
     });
   });
 

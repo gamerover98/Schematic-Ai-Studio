@@ -20,6 +20,12 @@
 
   interface Props {
     selection: RegionSpec | null;
+    /**
+     * How many areas are selected beside the active one. The chip measures
+     * the active area, because that is what the tools default to; the others
+     * are said as a count, because the agent is told about them too.
+     */
+    otherAreas?: number;
     busy: boolean;
     /**
      * Whether there is a run that `onstop` can actually stop.
@@ -75,6 +81,7 @@
 
   const {
     selection,
+    otherAreas = 0,
     busy,
     running,
     hasDocument,
@@ -193,6 +200,9 @@
             1}
           · {volume.toLocaleString()}
         </em>
+        {#if otherAreas > 0}
+          <em title={t("chat.otherAreas", { count: otherAreas })}>+{otherAreas}</em>
+        {/if}
       </span>
     {:else}
       <span class="chip dim" title={t("chat.actsOnAll")}>#whole-schematic</span>

@@ -25,7 +25,19 @@
   import { t } from "./i18n.svelte.js";
 
   interface Props {
+    /** The active area: the one the readout below describes. */
     selection: RegionSpec | null;
+    /**
+     * Every selected area in order, the active one among them. Listed only
+     * when there are several -- one area is what the readout already says.
+     */
+    areas?: readonly RegionSpec[];
+    /** Which of `areas` is active. */
+    activeArea?: number;
+    /** Blocks the areas cover together, a block in two of them counted once. */
+    cells?: number;
+    onactivatearea?: (index: number) => void;
+    onremovearea?: (index: number) => void;
     busy: boolean;
     /** The registry to search — the same set the agent is judged against. */
     blocks: readonly string[];
@@ -91,6 +103,11 @@
 
   const {
     selection,
+    areas = [],
+    activeArea = 0,
+    cells = 0,
+    onactivatearea,
+    onremovearea,
     busy,
     blocks,
     placeable = null,
@@ -186,6 +203,45 @@
         volume: volume.toLocaleString(),
       })}
     </p>
+    {#if areas.length > 1}
+      <!--
+        The areas, in a fixed order: activating one leaves it where it is in
+        the list, so the numbers mean the same boxes from one click to the next.
+      -->
+      <p class="coords">{t("selection.areas", { count: areas.length, cells: cells.toLocaleString() })}</p>
+      <ul class="areas">
+        {#each areas as area, index (index)}
+          <li class:active={index === activeArea}>
+            <button
+              type="button"
+              class="area"
+              onclick={() => onactivatearea?.(index)}
+              aria-pressed={index === activeArea}
+              title={t("selection.areaActivate")}
+            >
+              {t("selection.area", { n: index + 1 })}
+              <span class="dim">
+                {t("selection.size", {
+                  width: area.maxX - area.minX + 1,
+                  height: area.maxY - area.minY + 1,
+                  length: area.maxZ - area.minZ + 1,
+                })}
+              </span>
+            </button>
+            <button
+              type="button"
+              class="remove"
+              onclick={() => onremovearea?.(index)}
+              title={t("selection.areaRemove")}
+              aria-label={t("selection.areaRemove")}
+            >
+              &#x2715;
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    <p class="hint">{t("selection.areasHint")}</p>
   {:else}
     <p class="hint">{t("selection.hint")}</p>
   {/if}
@@ -333,6 +389,48 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
+  }
+
+  .areas {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .areas li {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .areas li.active {
+    border-color: var(--selection);
+  }
+
+  .areas button {
+    border: 0;
+    border-radius: 0;
+    padding: 2px 6px;
+    font-size: 11px;
+    background: transparent;
+  }
+
+  .areas li.active .area {
+    font-weight: 600;
+  }
+
+  .areas .dim {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .areas .remove {
+    padding: 2px 5px;
+    color: var(--text-dim);
   }
 
   .group label {

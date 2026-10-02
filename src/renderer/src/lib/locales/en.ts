@@ -407,6 +407,11 @@ export const en = {
     "Click a block in the viewport to select it, Shift-click another to extend the box.",
   "selection.range":
     "({minX}, {minY}, {minZ}) → ({maxX}, {maxY}, {maxZ}) · {volume} blocks",
+  "selection.areas": "{count} areas · {cells} blocks in all",
+  "selection.area": "Area {n}",
+  "selection.areaActivate": "Make this the active area: the one with face handles",
+  "selection.areaRemove": "Remove this area from the selection (Alt+click it in the viewport)",
+  "selection.areasHint": "Shift+Alt+drag adds an area · Alt+click removes one",
   "selection.all": "Select all",
   "selection.clear": "Deselect",
   "selection.clearHint": "Drop the selection (Esc)",
@@ -575,6 +580,8 @@ export const en = {
   "chat.failed": "Failed",
   "chat.stopped": "Stopped",
   "chat.actsOnSelection": "Acts on your selection unless you say otherwise",
+  "chat.otherAreas":
+    "{count} more selected area(s). The agent is told where they are; its tools act on the active one unless you name another",
   "chat.actsOnAll": "Acts on the whole schematic — select a region to narrow it",
   "chat.placeholder": "Replace the cobblestone with stone…",
   "chat.send": "Send",

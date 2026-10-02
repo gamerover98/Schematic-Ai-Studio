@@ -165,13 +165,13 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.docScale, request) as Promise<EditResponse>,
   transformRegion: (request: TransformRequest) =>
     ipcRenderer.invoke(IPC.docTransform, request) as Promise<EditResponse>,
-  copyRegion: (region) => ipcRenderer.invoke(IPC.docCopy, region) as Promise<ClipboardResponse>,
-  cutRegion: (region) => ipcRenderer.invoke(IPC.docCut, region) as Promise<ClipboardResponse>,
+  copyRegion: (regions) => ipcRenderer.invoke(IPC.docCopy, regions) as Promise<ClipboardResponse>,
+  cutRegion: (regions) => ipcRenderer.invoke(IPC.docCut, regions) as Promise<ClipboardResponse>,
   pasteClipboard: (request: PasteRequest) =>
     ipcRenderer.invoke(IPC.docPaste, request) as Promise<EditResponse>,
   moveRegion: (request: MoveRegionRequest) =>
     ipcRenderer.invoke(IPC.docMove, request) as Promise<EditResponse>,
-  regionMesh: (region) => ipcRenderer.invoke(IPC.docRegionMesh, region) as Promise<RegionMeshResponse>,
+  regionMesh: (regions) => ipcRenderer.invoke(IPC.docRegionMesh, regions) as Promise<RegionMeshResponse>,
   clipboardMesh: () => ipcRenderer.invoke(IPC.docClipboardMesh) as Promise<RegionMeshResponse>,
   selectionPalette: (request: SelectionPaletteRequest) =>
     ipcRenderer.invoke(IPC.docSelectionPalette, request) as Promise<SelectionPaletteResponse>,

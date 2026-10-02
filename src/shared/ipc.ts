@@ -926,9 +926,14 @@ export interface MeshPayload {
  * Both fields are "I hold this", never "send me this": main decides what to
  * send, and an unrecognised token or version simply means everything.
  */
-/** Pick this region up and put its corner down at `to`. */
+/**
+ * Pick these areas up and put the corner of their bounds down at `to`.
+ *
+ * Several areas move together and keep their places relative to each other;
+ * the gap between them stays where it is. One area is a list of one.
+ */
 export interface MoveRegionRequest {
-  region: RegionSpec;
+  regions: RegionSpec[];
   to: { x: number; y: number; z: number };
 }
 
@@ -1453,7 +1458,8 @@ export interface BlockInspection {
  * and `attachment` and touches none of the horizontal properties.
  */
 export interface TransformRequest {
-  region: RegionSpec;
+  /** The areas, turned rigidly together; `to` is the corner of their bounds. */
+  regions: RegionSpec[];
   transform:
     | { kind: "rotate"; steps: 0 | 1 | 2 | 3 }
     | { kind: "mirror"; axis: "x" | "y" | "z" };
@@ -1468,7 +1474,8 @@ export interface TransformRequest {
  * low corner of each group and says in `notes` how many it threw away.
  */
 export interface ScaleRequest {
-  region: RegionSpec;
+  /** The areas, scaled together about one point; `to` is the corner of their bounds. */
+  regions: RegionSpec[];
   spec: { kind: "multiply"; factor: number } | { kind: "divide"; factor: number };
   to?: { x: number; y: number; z: number } | null;
 }
@@ -1725,8 +1732,16 @@ export type TraceEvent =
 export interface AgentRequestPayload {
   requestId: string;
   prompt: string;
-  /** The user's selection, which the agent's tools default to. */
+  /** The user's selection -- its active area -- which the agent's tools default to. */
   selection: RegionSpec | null;
+  /**
+   * The other areas selected beside it, if any.
+   *
+   * Described to the model so "these two towers" means something, but not
+   * what a tool acts on by default: that stays one box, because every tool
+   * takes one box and a model has to be able to say which.
+   */
+  otherAreas?: RegionSpec[];
 }
 
 /**
@@ -2119,7 +2134,8 @@ export interface BgptApi {
   getDocumentState(): Promise<DocumentStateResponse>;
   getDocumentMesh(request: DocumentMeshRequest): Promise<DocumentMeshResponse>;
   moveRegion(request: MoveRegionRequest): Promise<EditResponse>;
-  regionMesh(region: RegionSpec): Promise<RegionMeshResponse>;
+  /** The areas' contents as geometry, from the corner of their bounds. */
+  regionMesh(regions: RegionSpec[]): Promise<RegionMeshResponse>;
   /**
    * The clipboard's contents as geometry, for the ghost a copy leaves behind.
    *
@@ -2169,9 +2185,10 @@ export interface BgptApi {
   /**
    * Copy the selection out, or cut it. The clipboard lives in main and
    * deliberately outlives the open document, so it can carry between two.
+   * Several areas are copied as one clipboard, keeping their arrangement.
    */
-  copyRegion(region: RegionSpec): Promise<ClipboardResponse>;
-  cutRegion(region: RegionSpec): Promise<ClipboardResponse>;
+  copyRegion(regions: RegionSpec[]): Promise<ClipboardResponse>;
+  cutRegion(regions: RegionSpec[]): Promise<ClipboardResponse>;
   /** Write the clipboard in. Undoable as one step. */
   pasteClipboard(request: PasteRequest): Promise<EditResponse>;
   saveDocument(request: SaveRequest): Promise<SaveResponse>;

@@ -6065,5 +6065,133 @@ console.log("\n--- a mix shared out by a pattern ---");
   );
 }
 
+
+// --- several areas, one selection --------------------------------------------
+//
+// Two areas with a gap between them, and a block standing in the gap. Every
+// region verb acts on the areas and leaves the gap exactly as it was: nobody
+// selected it, so nothing may be read from it, cleared in it or carried out of
+// it. The block in the gap is what makes each check see the difference -- with
+// the gap empty, a verb working on the bounds would pass all of them.
+console.log("\n--- several areas, one selection ---");
+{
+  const row = (session: DocumentSession, y = 0): string[] =>
+    Array.from({ length: session.doc.width }, (_unused, x) =>
+      getBlock(session.doc, x, y, 0).namespacedName.replace("minecraft:", ""),
+    );
+  const put = (session: DocumentSession, x: number, name: string): void => {
+    setBlock(session.doc, x, 0, 0, { namespacedName: `minecraft:${name}`, properties: {} });
+  };
+  const fresh = (): DocumentSession => {
+    const session = newDocument({ width: 12, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    put(session, 0, "stone");
+    put(session, 1, "stone");
+    put(session, 4, "gold_block");
+    put(session, 6, "dirt");
+    put(session, 7, "dirt");
+    return session;
+  };
+  const left = { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 };
+  const right = { minX: 6, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 };
+  const start = ["stone", "stone", "air", "air", "gold_block", "air", "dirt", "dirt", "air", "air", "air", "air"];
+
+  // A move carries both areas by the corner of their bounds.
+  let session = fresh();
+  moveRegion(session, [left, right], { x: 2, y: 0, z: 0 });
+  equal("two areas move together, and the block between them stays", row(session), [
+    "air", "air", "stone", "stone", "gold_block", "air", "air", "air", "dirt", "dirt", "air", "air",
+  ]);
+  equal("...as one undo step", session.history.undoStack.length, 1);
+  undoEdit(session);
+  equal("...which puts both back", row(session), start);
+  closeDocument();
+
+  /*
+   * A mirror of the bounds sends each area to the other end. In place, which
+   * is the case that needs the clearing pass: a reflection is a bijection on
+   * the bounds and not on the areas, so the cells an area left would otherwise
+   * keep their blocks.
+   */
+  session = fresh();
+  transformRegion(session, [left, right], { kind: "mirror", axis: "x" });
+  equal("a mirror swaps the two areas and leaves the gap alone", row(session), [
+    "dirt", "dirt", "air", "air", "gold_block", "air", "stone", "stone", "air", "air", "air", "air",
+  ]);
+  closeDocument();
+
+  // A copy keeps the arrangement and not the gap; a paste puts it back so.
+  session = fresh();
+  const held = copySelection(session, [left, right]);
+  equal("a copy of two areas spans their bounds", [held.width, held.blocks], [8, 4]);
+  check(
+    "...and takes nothing from the gap",
+    held.cells.every((cell) => cell.entry.namespacedName !== "minecraft:gold_block"),
+  );
+  pasteSelection(session, { x: 3, y: 0, z: 0 });
+  equal("a paste lands them in the same arrangement, over the gap's block", row(session), [
+    "stone", "stone", "air", "stone", "stone", "air", "dirt", "dirt", "air", "dirt", "dirt", "air",
+  ]);
+  closeDocument();
+
+  session = fresh();
+  cutSelection(session, [left, right]);
+  equal("a cut empties the areas and not the gap", row(session), [
+    "air", "air", "air", "air", "gold_block", "air", "air", "air", "air", "air", "air", "air",
+  ]);
+  closeDocument();
+
+  // Overlapping areas are one set of cells.
+  session = fresh();
+  const overlapping = copySelection(session, [
+    { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+    { minX: 1, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 },
+  ]);
+  equal("a block two areas share is copied once", overlapping.blocks, 2);
+  check(
+    "no areas at all is refused by name",
+    (() => {
+      try {
+        copySelection(session, []);
+        return false;
+      } catch (err) {
+        return err instanceof RegionCountError;
+      }
+    })(),
+  );
+  closeDocument();
+
+  /*
+   * A scale writes only what came from an area. The gap's cells at the
+   * destination are not written from the gap -- the block that was in it is
+   * not doubled -- and the document grows to hold the result, as one step.
+   */
+  session = newDocument({ width: 12, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  put(session, 0, "stone");
+  put(session, 1, "gold_block");
+  put(session, 2, "dirt");
+  scaleRegion(
+    session,
+    [
+      { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 },
+      { minX: 2, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 },
+    ],
+    { kind: "multiply", factor: 2 },
+    { to: { x: 0, y: 0, z: 0 } },
+  );
+  equal("a scale of two areas doubles each and not the gap", row(session).slice(0, 6), [
+    "stone", "stone", "air", "air", "dirt", "dirt",
+  ]);
+  equal("...on every layer it grew to", row(session, 1).slice(0, 6), [
+    "stone", "stone", "air", "air", "dirt", "dirt",
+  ]);
+  equal("...as one undo step", session.history.undoStack.length, 1);
+  undoEdit(session);
+  equal("...which takes the growth back too", [session.doc.height, row(session).slice(0, 3)], [
+    1,
+    ["stone", "gold_block", "dirt"],
+  ]);
+  closeDocument();
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);
