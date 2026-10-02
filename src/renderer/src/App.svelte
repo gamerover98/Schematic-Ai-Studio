@@ -4071,21 +4071,26 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   }
 
   /**
-   * Empties the selection, which is a fill with air.
+   * Empties the selection, which is a fill with the document's empty space.
    *
    * Air is a real block everywhere in this app -- every empty cell in the
    * document is one, and the writers and the agent both name it -- so there is
    * no separate "erase" operation to add. It goes through `applyEdit` like any
    * other fill, which is what makes it one undo step.
+   *
+   * The empty space and not the word air, for the reason a break writes it:
+   * with water chosen, Delete used to leave a dry pocket in the pond, while
+   * breaking the same blocks one at a time left water.
    */
   async function deleteSelection(): Promise<void> {
     if (!selection) return;
     const regions = areasForIpc();
+    const empty = parseBlock(docState?.voidBlock || "minecraft:air");
     const outcome = await runDocument(t("task.deleting"), () =>
       api().applyEdit({
         kind: "fill",
         regions,
-        mix: singleMix({ namespacedName: "minecraft:air" }),
+        mix: singleMix(empty),
       }),
     );
     reportChange(outcome?.changed ?? null);

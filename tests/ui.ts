@@ -5326,5 +5326,21 @@ console.log("\n--- several areas, one selection ---");
   }
 }
 
+
+// --- Delete leaves the document's empty space --------------------------------
+//
+// A break has always written the empty space; Delete wrote the word air, so
+// with water chosen it left a dry pocket where breaking the same blocks one by
+// one left water. Read from the source: the fill crosses IPC, and this harness
+// makes no round trip.
+console.log("\n--- Delete leaves the document's empty space ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const from = app.indexOf("async function deleteSelection");
+  const body = from === -1 ? "" : app.slice(from, from + 700);
+  check("Delete fills with the empty space block", /parseBlock\(docState\?\.voidBlock \|\| "minecraft:air"\)/.test(body));
+  check("...and not with air written out", !body.includes('singleMix({ namespacedName: "minecraft:air" })'));
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

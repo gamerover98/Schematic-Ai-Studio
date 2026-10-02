@@ -3125,6 +3125,19 @@ The same fix carries the void block: `cutSelection` and `moveRegion` each wrote
 `RegionEditOptions.voidBlock` is `EditOptions.voidBlock`'s spelling for its
 reason -- a string the caller already holds, parsed once here.
 
+**And when the caller says nothing, the session answers.** As an option only,
+the fix reached only the callers that remembered to pass it. The window's cut
+did not, and neither did any MCP verb (cut, paste, move), so all of them went
+on leaving air. That is the rule this file keeps recording, about discipline at
+several call sites. `emptyEntry` in `session.ts` now falls back to
+`session.voidBlock`, which is the document's empty space and the same answer
+`emptySpaceFor` gives the connection pass. A caller passes `voidBlock` only
+when it means something else. `tests/session.ts` calls cut, move and turn with
+no options at all, and they fail if the fallback goes back to air.
+
+Delete is the window's other way to empty cells, and it wrote the word air too.
+It fills with `docState.voidBlock` now, exactly as a break does.
+
 **A copy leaves a ghost behind, and pasting became a gesture rather than a
 coordinate.** Ctrl+C used to be invisible: the status line said how many
 blocks, and nothing on screen said what was held or where it would land — so

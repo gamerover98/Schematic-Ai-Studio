@@ -6193,5 +6193,55 @@ console.log("\n--- several areas, one selection ---");
   closeDocument();
 }
 
+
+// --- a region edit leaves the document's empty space ------------------------
+//
+// The empty space is the session's, so a caller that says nothing gets it.
+// Every MCP verb and the window's cut said nothing, and got air: an underwater
+// build cut, moved or turned came back with dry holes in it. Called here with
+// no options at all, which is exactly how those callers call.
+console.log("\n--- a region edit leaves the document's empty space ---");
+{
+  const pond = (): DocumentSession => {
+    const session = newDocument({ width: 8, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setSessionVoidBlock(session, "minecraft:water");
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 1, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    return session;
+  };
+  const at = (session: DocumentSession, x: number) => getBlock(session.doc, x, 0, 0).namespacedName;
+  const two = { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 };
+
+  let session = pond();
+  cutSelection(session, two);
+  equal("a cut told nothing leaves the empty space", [at(session, 0), at(session, 1)], [
+    "minecraft:water",
+    "minecraft:water",
+  ]);
+  closeDocument();
+
+  session = pond();
+  moveRegion(session, two, { x: 4, y: 0, z: 0 });
+  equal("...and so does a move", [at(session, 0), at(session, 4)], ["minecraft:water", "minecraft:stone"]);
+  closeDocument();
+
+  session = pond();
+  transformRegion(session, two, { kind: "rotate", steps: 2 }, { to: { x: 5, y: 0, z: 0 } });
+  equal("...and a turn that lands somewhere else", at(session, 0), "minecraft:water");
+  closeDocument();
+
+  // A caller that does say still wins, and air is the answer with no choice made.
+  session = pond();
+  cutSelection(session, two, { voidBlock: "minecraft:air" });
+  equal("a caller that names a block still gets that block", at(session, 0), "minecraft:air");
+  closeDocument();
+
+  session = newDocument({ width: 4, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+  cutSelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 });
+  equal("...and with no empty space chosen a cut leaves air", at(session, 0), "minecraft:air");
+  closeDocument();
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

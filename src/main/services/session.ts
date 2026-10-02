@@ -2158,7 +2158,7 @@ export function cutSelection(
   // Box by box: a cell two areas share is written twice with the same block,
   // and `setBlock` answers the second write with nothing changed.
   runTransaction(doc, history, "Cut the selection", (tx) =>
-    boxes.reduce((changed, box) => changed + tx.fill(box, emptyEntry(options.voidBlock)), 0),
+    boxes.reduce((changed, box) => changed + tx.fill(box, emptyEntry(session, options.voidBlock)), 0),
   );
   return clipboard;
 }
@@ -2197,7 +2197,7 @@ export function pasteSelection(
    * says the intent and main supplies the fact, which is `EditOptions.voidBlock`
    * arriving at the same arrangement from the other side.
    */
-  const keepUnder = options.skipEmpty === true ? emptyEntry(options.voidBlock) : null;
+  const keepUnder = options.skipEmpty === true ? emptyEntry(session, options.voidBlock) : null;
   const landing = pasteLanding(held, at, options.includeAir === true, keepUnder);
   const growth = landing === null ? null : growthFor(doc, landing, options.autoGrow !== false);
   return runTransaction(doc, history, "Paste", (tx) => {
@@ -2294,7 +2294,8 @@ export interface RegionEditOptions {
   /** Whether the schematic grows to hold the result. Refuses by name when off. */
   autoGrow?: boolean;
   /**
-   * What the region leaves behind: the document's own empty space.
+   * What the region leaves behind, when a caller wants something other than
+   * the document's own empty space. Absent means that empty space.
    *
    * A string, the way `EditOptions.voidBlock` is, and parsed here for the same
    * reason -- so a caller passes what the session holds rather than converting
@@ -2305,10 +2306,23 @@ export interface RegionEditOptions {
   voidBlock?: string;
 }
 
-/** The block a region leaves behind, from whatever the session was told. */
-function emptyEntry(voidBlock: string | undefined): PaletteEntry {
-  if (voidBlock === undefined || voidBlock === "") return AIR_ENTRY;
-  return parsePaletteEntry(voidBlock);
+/**
+ * The block a region leaves behind: what the caller said, else the session's
+ * own empty space.
+ *
+ * The fallback is the session's and not air, and that is the fix. The field
+ * used to be the only way in, so a caller that left it out got air -- and two
+ * of them did: the window's cut and every MCP verb (cut, paste, move). An
+ * underwater build cut from the window came back with a dry hole in it, with
+ * the option that prevents exactly that sitting unused one call away. The
+ * empty space belongs to the session (`session.voidBlock`, the same answer
+ * `emptySpaceFor` gives the connection pass), so the session supplies it, and
+ * a caller only has to speak when it means something else.
+ */
+function emptyEntry(session: DocumentSession, voidBlock: string | undefined): PaletteEntry {
+  const block = voidBlock ?? session.voidBlock;
+  if (block === "") return AIR_ENTRY;
+  return parsePaletteEntry(block);
 }
 
 /**
@@ -2379,7 +2393,7 @@ export function moveRegion(
   };
   const growth = growthFor(doc, landing, options.autoGrow !== false);
   const held = copyRegions(doc, boxes);
-  const empty = emptyEntry(options.voidBlock);
+  const empty = emptyEntry(session, options.voidBlock);
 
   return runTransaction(doc, history, "Move the selection", (tx) => {
     /*
@@ -2524,7 +2538,7 @@ export function transformRegion(
         : { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] };
     return applyRegionTransform(doc, tx, source, transform, {
       to: corner,
-      empty: emptyEntry(options.voidBlock),
+      empty: emptyEntry(session, options.voidBlock),
       mask: mask === null ? null : mask.map((box) => shiftRegion(box, shift)),
     });
   });
@@ -2610,7 +2624,7 @@ export function scaleRegion(
     const source = growth === null ? region : shiftRegion(region, growth.shift);
     return applyRegionScale(doc, tx, source, spec, {
       to: { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] },
-      empty: emptyEntry(options.voidBlock),
+      empty: emptyEntry(session, options.voidBlock),
       mask: mask === null ? null : mask.map((box) => shiftRegion(box, shift)),
     });
   });
