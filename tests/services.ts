@@ -170,6 +170,9 @@ import {
   effectiveIncludeDevBuilds,
   type UpdateSettings,
   gpuAdapterKey,
+  DEFAULT_PREVIEW_SETTINGS,
+  LOD_AUTO_TRIANGLES,
+  lodSettings,
   type GpuPreference,
   type PreviewSettings,
 } from "../src/shared/settings.js";
@@ -2147,6 +2150,42 @@ console.log("\n--- settings coercion ---");
   } satisfies Settings;
 
   equal("every settings field survives a round-trip", coerceSettings(settings), settings);
+
+  /*
+   * The levels of detail, read the way main and the viewer both read them.
+   *
+   * `preview` is spread over the defaults with no validation, so the reader
+   * has to be total: a junk value reads exactly like an absent one, and the
+   * window and main cannot disagree about what a stored value means.
+   */
+  equal(
+    "junk level-of-detail settings read as the defaults",
+    lodSettings({ lodMode: "banana", lodPixels: 3, lodAutoTriangles: "lots", lodShapes: "no", lodTint: 1 }),
+    {
+      mode: DEFAULT_PREVIEW_SETTINGS.lodMode,
+      pixels: DEFAULT_PREVIEW_SETTINGS.lodPixels,
+      autoTriangles: DEFAULT_PREVIEW_SETTINGS.lodAutoTriangles,
+      shapes: true,
+      coarse: true,
+      tint: false,
+    },
+  );
+  equal(
+    "...and a stored choice is kept",
+    lodSettings({ lodMode: "always", lodPixels: 8, lodAutoTriangles: 2_000_000, lodShapes: false, lodCoarse: false, lodTint: true }),
+    { mode: "always", pixels: 8, autoTriangles: 2_000_000, shapes: false, coarse: false, tint: true },
+  );
+  equal(
+    "the automatic threshold is clamped and snapped to its step",
+    [123, 1e12, 1_100_000].map((value) => lodSettings({ lodAutoTriangles: value }).autoTriangles),
+    [LOD_AUTO_TRIANGLES.min, LOD_AUTO_TRIANGLES.max, 1_000_000],
+  );
+  equal(
+    "...and survives the settings file like every preview field",
+    coerceSettings({ ...settings, preview: { ...settings.preview, lodMode: "always", lodAutoTriangles: 4_000_000 } })
+      .preview.lodAutoTriangles,
+    4_000_000,
+  );
 
   /*
    * The default version is the newest release this build knows.

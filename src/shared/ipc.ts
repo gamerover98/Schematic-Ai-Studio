@@ -840,8 +840,15 @@ export interface PreviewRequest {
  * a setting -- and, because that makes it a separate object, never hands to
  * the raycaster. That is the whole of what the split buys: a click passes
  * through the void exactly as it passes through air.
+ *
+ * The other three are the levels of detail, drawn in place of `"solid"` at a
+ * distance and never raycast either: `"lod1"` is one chunk with every block
+ * that has a stand-in drawn by it, keyed like the chunk; `"lod2"` and
+ * `"lod3"` are a whole 64-block region in cells two and four blocks wide,
+ * keyed by the region's coordinates in the same packing. See
+ * `renderer/lib/lod.ts` for which is shown when.
  */
-export type ChunkLayer = "solid" | "void";
+export type ChunkLayer = "solid" | "void" | "lod1" | "lod2" | "lod3";
 
 /** One chunk of one layer, which is what the renderer keeps a mesh for. */
 export interface ChunkRef {
@@ -891,6 +898,35 @@ export interface ChunkGeometry {
    * silently replace its solid one.
    */
   layer: ChunkLayer;
+  /**
+   * For a level of detail, how far its surface may stray from the full
+   * mesh's, in blocks; absent on `"solid"` and `"void"`.
+   *
+   * Measured in main, where the shapes are: the viewer turns it into pixels
+   * at the camera's distance and shows the level only where those stay under
+   * the setting. A number the viewer guessed would be wrong per block, and
+   * would be wrong in the direction that shows.
+   */
+  lodError?: number;
+}
+
+/**
+ * Where the levels of detail stand for the document on screen.
+ *
+ * - `off`: the window did not ask for any;
+ * - `below`: asked for in `auto`, but the full mesh is under the threshold,
+ *   so there is nothing a simpler version would save;
+ * - `pending`: some are still to be built -- the viewer shows the full mesh
+ *   there meanwhile, which is always right, and asks again shortly;
+ * - `ready`: every level asked for is built.
+ */
+export type LodState = "off" | "below" | "pending" | "ready";
+
+/** What the settings pane says about the open document's levels of detail. */
+export interface MeshLod {
+  state: LodState;
+  /** The full mesh's triangles, which is what `auto` measures. */
+  triangles: number;
 }
 
 /**
@@ -1023,6 +1059,12 @@ export interface MeshPayload {
    * placing their group here. Zero until something grows below the origin.
    */
   frame: [number, number, number];
+  /**
+   * The levels of detail: whether any are built, still coming, or not
+   * wanted. Required rather than optional, so a payload cannot leave the
+   * viewer guessing whether more is on the way.
+   */
+  lod: MeshLod;
 }
 
 /**

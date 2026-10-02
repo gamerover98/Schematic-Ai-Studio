@@ -23,6 +23,9 @@ before it is fixed".
 
 How the user produces a report:
 
+0. Ask which screen the window is on. On a laptop with two GPUs, ask for a
+   second report on the other screen too: the panel and the external monitor
+   are often driven by different cards (Report 1 against Report 3).
 1. Settings → Quality: **Show the frame counter** and **Diagnose stutters**.
 2. Reproduce. The counter shows `worst N ms · culprit` for the last 2 s.
 3. **Copy stutter report**, paste it. Optionally Help → Toggle Developer
@@ -56,6 +59,14 @@ the pane (Settings → Quality → Graphics card), before reading any phase.
 `gpuLoad.pixels × msaaSamples` is the other half: 12 M px × 8 on an iGPU is a
 slideshow whatever the code does.
 
+`context.lod` says what the levels of detail were doing: `state` is main's
+(`off`, `below` the automatic threshold, `pending`, `ready`, with the full
+mesh's triangles), `mode` and `pixels` the settings, `meshes` how many level
+meshes were held, and `chosen` the last frame's choice -- chunks drawn in full
+and at level 1, regions at levels 2 and 3, meshes in a crossing. A heavy
+build drawn with `mode: "off"`, or `below` a threshold set too high, is a
+setting to change before any code.
+
 Each spike's `reading` is the first inference. Then:
 
 | culprit / evidence | where to look | usual fix |
@@ -70,6 +81,10 @@ Each spike's `reading` is the first inference. Then:
 | `outside the loop` + Long Animation Frame scripts | the `scripts[].fn` / `invoker` named | that function; often a Svelte `$effect` firing more often than it should |
 | `outside the loop`, no scripts, no events | GPU, compositor, GC — see `readingOf` | lower resolution/AA to test the GPU hypothesis; look for per-frame allocation for GC |
 | `mesh answered by main` with a large `ms` | main process | not a frame drop by itself — main is another process; it only delays the picture |
+| `lod select` | `applyLevels` → `LodSelector.choose` over `lodRegions` (`lod.ts`) | it walks every region's eight corners and the chunks of the regions shown in chunks; if it grows, the region count or `rebuildLodIndex` is the place, not the GPU |
+| `shadow map from full chunks`, often | `shadowsFromFullDetail`, run only when `shadowsStale()` was called while levels are shown | something marks shadows stale too often; a delta bringing only levels must not (`touchesFullMesh`) |
+| `mesh answered by main` with `main["levels of detail"]` large | main's level-of-detail queue, at most `LOD_SLICE_MS` per answer plus one piece: a region ~10 ms, a statue chunk's level 1 up to ~400 ms | the known cost of a heavy chunk; the window asks only once the edits stop (400 ms), so it should never be in the middle of a run of clicks |
+| `scene pass` with `context.lod.chosen.fading` above zero on a still frame | a crossing that does not end: `LodSelector.fading` keeps frames coming | crossings last `FADE_MS`; one that never settles is a target flipping every frame, which `HYSTERESIS` exists to stop |
 
 When the report does not settle it, ask for a DevTools Performance recording of
 the moment, or add a finer `lap` inside the suspect phase — temporarily if it

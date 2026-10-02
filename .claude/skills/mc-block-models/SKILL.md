@@ -192,7 +192,13 @@ anything here.
    `occludesNeighbours` says so. A shaped block that still occludes punches holes
    in whatever it stands against.
 
-6. **Show the user the model you transcribed from**, with its URL and version
+6. **Count the faces.** A shape with more than `LOD_FACE_BUDGET` (48) faces in
+   any state gets a simpler stand-in for the middle distance, and
+   `tests/blocks.ts` fails until it has one -- or lists it as *straightened*,
+   the automatic fallback, until somebody writes one. Follow
+   `.claude/skills/mc-block-lod`.
+
+7. **Show the user the model you transcribed from**, with its URL and version
    tag. Geometry with no provenance is indistinguishable from geometry somebody
    eyeballed.
 
@@ -205,10 +211,11 @@ anything here.
   `.mcmeta`.
 - **Only a full opaque cube may cull.** Culling against a slab or a fence
   removes faces nothing covers.
-- **A block that is invisible in game may still need drawing.** Barriers and
-  structure voids are placed on purpose and a build full of them would look
-  empty, so they are drawn from their `item/` icon — the only texture they have.
-  `light` stays invisible, because it has no appearance to reproduce.
+- **A block that is invisible in game may still need drawing.** Barriers,
+  structure voids and `light` are placed on purpose and a build full of them
+  would look empty, so they are drawn from their `item/` icon — the only
+  texture they have; `light`'s shows its level. All three turn back into air
+  when `preview.showMarkers` is off (`hideMarkers` in `preview.ts`).
 - **Fluids are not named after their block.** `minecraft:water` draws from
   `water_still`. None of the generic candidates produces that.
 - **Unlisted stays a cube.** That is the same answer as before the block was

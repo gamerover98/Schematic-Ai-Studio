@@ -54,6 +54,26 @@ import {
 } from "../src/renderer/src/lib/shader_modes.js";
 import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "../src/renderer/src/lib/gpu_choice.js";
 import { counterIdle, SETTLE_MS, shouldDraw, ViewWatch } from "../src/renderer/src/lib/render_demand.js";
+import * as THREE from "three";
+import {
+  allowed,
+  BAYER_4X4,
+  chunkTarget,
+  FADE_MS,
+  keepsPixel,
+  LodSelector,
+  nearestDepth,
+  packKey,
+  regionOfChunk,
+  regionTarget,
+  unpackKey,
+  worldPerPixel,
+  type LodBox,
+  type LodDraw,
+  type LodRegion,
+  type LodView,
+} from "../src/renderer/src/lib/lod.js";
+import { chunkCoords, chunkKey } from "../src/main/pipeline/chunked_mesh.js";
 import {
   continuedPlacement,
   entryFace,
@@ -2880,7 +2900,7 @@ console.log("\n--- how the viewport is drawn ---");
       "an animation nobody draws is not uploaded",
       /for \(const item of playing\) \{\s*if \(!item\.active\) continue;/.test(loop),
     );
-    const effect = viewer.slice(viewer.indexOf("applyDelta(previous, previousVoid, payload, map);"));
+    const effect = viewer.slice(viewer.indexOf("applyDelta(previous, previousVoid, previousLod, payload, map);"));
     check("the tiles drawn are recounted after a delta", /applyDelta[^]*?refreshAnimated\(\);[^]*?applied\("delta applied"\)/.test(effect));
     check("...and after a rebuild", /applyWireframe\(built\.solid, wireframe\);\s*refreshAnimated\(\);/.test(viewer));
   }
@@ -3083,8 +3103,13 @@ console.log("\n--- the void block ---");
    * of the fault this would be: the shadow appears only after an edit, and
    * only in the chunk the edit touched.
    */
-  const shadowed = viewer.match(/mesh\.(?:cast|receive)Shadow = !isVoid/g) ?? [];
-  equal("neither place lets the void cast a shadow", shadowed.length, 4);
+  const prepared = viewer.match(/prepareMesh\(mesh, chunk\.layer\);/g) ?? [];
+  equal("both places that build a chunk mesh prepare it in one place", prepared.length, 2);
+  const prepare = viewer.slice(viewer.indexOf("function prepareMesh("));
+  check(
+    "...where neither lets the void cast a shadow or receive one",
+    /mesh\.castShadow = layer === "solid";\s*mesh\.receiveShadow = layer !== "void";/.test(prepare),
+  );
 }
 
 // --- undo that reaches the selection ---------------------------------------
@@ -3916,8 +3941,8 @@ console.log("\n--- a block too thin to aim at ---");
     /mesh\.userData\.thin = thinBoxes\(chunk\.positions, chunk\.normals\)/.test(viewer),
   );
   check(
-    "...and the void layer gets none, because nothing raycasts it",
-    /if \(chunk\.layer !== "void"\) \{\s*\r?\n\s*mesh\.userData\.thin/.test(viewer),
+    "...and only the solid layer gets them: nothing raycasts the void or a level of detail",
+    /if \(chunk\.layer === "solid"\) \{\s*\r?\n\s*mesh\.userData\.thin/.test(viewer),
   );
   const pick = viewer.slice(viewer.indexOf("function pickBlockAt"));
   check(
@@ -5531,6 +5556,242 @@ console.log("\n--- a click in creative mode is never dropped ---");
   );
   check("...and holds no busy flag that would drop the next click", !apply.includes("busy = true"));
   check("clicks run in order, one after another", /buildQueue = buildQueue\.then\(\(\) => applyBuild\(doing, call\)\);/.test(app));
+}
+
+
+// --- levels of detail -------------------------------------------------------
+//
+// `lod.ts` decides which level each region and chunk shows. The rule is a
+// screen-space error with a tenth of hysteresis, a change of level is crossed
+// in a quarter of a second with two complementary dithers, and up close --
+// the document as R frames it -- nothing changes at all.
+console.log("\n--- levels of detail ---");
+{
+  for (const [x, y, z] of [
+    [0, 0, 0],
+    [3, -2, 7],
+    [-5, 1, -9],
+    [100, 40, -100],
+  ] as const) {
+    equal(`the key of (${x}, ${y}, ${z}) is main's`, packKey(x, y, z), chunkKey(x, y, z));
+    equal(`...and reads back as main reads it`, unpackKey(chunkKey(x, y, z)), chunkCoords(chunkKey(x, y, z)));
+  }
+  equal("a chunk's region floors negative coordinates", unpackKey(regionOfChunk(packKey(-1, 0, 5))), [-1, 0, 1]);
+
+  // A camera at the origin looking down -z: its view matrix is the identity.
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const view = (over: Partial<LodView> = {}): LodView => ({
+    view: identity,
+    perspective: true,
+    fovDeg: 60,
+    orthoHeight: 0,
+    near: 0.1,
+    heightPx: 1000,
+    offset: [0, 0, 0],
+    ...over,
+  });
+  const box = (z0: number, z1: number): LodBox => ({ minX: -1, minY: -1, minZ: z0, maxX: 1, maxY: 1, maxZ: z1 });
+
+  equal("a box in front is as deep as its nearest corner", nearestDepth(view(), box(-20, -10)), 10);
+  equal("a camera inside a box sees it at the near plane: the full mesh", nearestDepth(view(), box(-5, 5)), 0.1);
+  equal(
+    "...and the group's offset is where the chunks stand",
+    nearestDepth(view({ offset: [0, 0, -5] }), box(-20, -10)),
+    15,
+  );
+  check(
+    "a pixel covers 2 z tan(fov / 2) / H at depth z",
+    Math.abs(worldPerPixel(view(), 100) - (2 * 100 * Math.tan(Math.PI / 6)) / 1000) < 1e-12,
+  );
+  equal(
+    "orthographic, the same at any depth",
+    [worldPerPixel(view({ perspective: false, orthoHeight: 50 }), 1), worldPerPixel(view({ perspective: false, orthoHeight: 50 }), 1000)],
+    [0.05, 0.05],
+  );
+
+  check("a level is taken a tenth before the threshold", allowed(1.79, 2, false) && !allowed(1.81, 2, false));
+  check("...and kept until a tenth past it", allowed(2.19, 2, true) && !allowed(2.21, 2, true));
+
+  const levels = { shapes: true, coarse: true };
+  const region = (z0: number, z1: number, lod2: number | null, lod3: number | null, shapes: number | null = 0.25): LodRegion => ({
+    key: packKey(0, 0, 0),
+    box: box(z0, z1),
+    lod2,
+    lod3,
+    chunks: [{ key: packKey(0, 0, 0), box: box(z0, z1), shapes }],
+  });
+  // At depth d a pixel is 0.0011547 d: level 2 (2 blocks) is taken past
+  // ~962 at two pixels, level 3 (4 blocks) past ~1925, level 1 (0.25) past ~120.
+  equal("near, a region shows its chunks", regionTarget(view(), region(-110, -100, 2, 4), 2, levels, 0), 0);
+  equal("far, level 2", regionTarget(view(), region(-1110, -1000, 2, 4), 2, levels, 0), 2);
+  equal("farther, level 3", regionTarget(view(), region(-3100, -3000, 2, 4), 2, levels, 0), 3);
+  equal("a level not held is passed over", regionTarget(view(), region(-3100, -3000, 2, null), 2, levels, 0), 2);
+  equal(
+    "coarse levels switched off leave the chunks",
+    regionTarget(view(), region(-3100, -3000, 2, 4), 2, { shapes: true, coarse: false }, 0),
+    0,
+  );
+  const chunk = { key: packKey(0, 0, 0), box: box(-140, -130), shapes: 0.25 };
+  equal("a chunk far enough shows level 1", chunkTarget(view(), chunk, 2, levels, 0), 1);
+  equal("...one nearer, the full mesh", chunkTarget(view(), { ...chunk, box: box(-60, -50) }, 2, levels, 0), 0);
+  equal("...one with no level 1, the full mesh at any distance", chunkTarget(view(), { ...chunk, shapes: null }, 2, levels, 0), 0);
+  equal("...and with level 1 switched off", chunkTarget(view(), chunk, 2, { shapes: false, coarse: true }, 0), 0);
+
+  // The crossing, in time.
+  const selector = new LodSelector();
+  const out = new Map<string, LodDraw>();
+  const solid = `solid:${packKey(0, 0, 0)}`;
+  const lod3 = `lod3:${packKey(0, 0, 0)}`;
+  selector.choose(view(), [region(-3100, -3000, 2, 4)], 2, levels, 0, out);
+  equal("the first look settles at once", [...out.entries()], [[lod3, null]]);
+  check("...with nothing crossing", !selector.fading);
+  selector.choose(view(), [region(-110, -100, 2, 4)], 2, levels, 1000, out);
+  check("coming close starts a crossing", selector.fading);
+  const start = [out.get(lod3), out.get(solid)];
+  check(
+    "...the coarse level on one side and the chunks on the other, with one t",
+    JSON.stringify(start) === JSON.stringify([{ t: 1, coarse: true }, { t: 1, coarse: false }]),
+    JSON.stringify(start),
+  );
+  selector.choose(view(), [region(-110, -100, 2, 4)], 2, levels, 1000 + FADE_MS / 2, out);
+  const half = [out.get(lod3), out.get(solid)] as LodDraw[];
+  check("halfway, both at one half", half[0]?.t === 0.5 && half[1]?.t === 0.5, JSON.stringify(half));
+  let complement = true;
+  for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+    for (let y = 0; y < 4; y += 1) {
+      for (let x = 0; x < 4; x += 1) {
+        if (keepsPixel({ t, coarse: true }, x, y) === keepsPixel({ t, coarse: false }, x, y)) complement = false;
+      }
+    }
+  }
+  check("every pixel is drawn by exactly one side of a crossing", complement);
+  check("the dither's thresholds are sixteen, none of them 0 or 1", BAYER_4X4.length === 16 && BAYER_4X4.every((v) => v > 0 && v < 1));
+  selector.choose(view(), [region(-110, -100, 2, 4)], 2, levels, 1000 + FADE_MS, out);
+  equal("a quarter of a second later only the chunks are drawn", [...out.entries()], [[solid, null]]);
+  check("...and nothing is crossing", !selector.fading);
+  selector.choose(view(), [region(-110, -100, 2, 4)], 2, levels, 5000, out);
+  check("a still camera draws one level of everything", [...out.values()].every((how) => how === null));
+
+  const gone = new LodSelector();
+  gone.choose(view(), [region(-1110, -1000, 2, null, null)], 2, levels, 0, out);
+  gone.choose(view(), [region(-1110, -1000, null, null, null)], 2, levels, 10, out);
+  equal("a level whose mesh went is left at once, not crossed from", [...out.entries()], [[solid, null]]);
+  check("...with nothing crossing", !gone.fading);
+
+  /*
+   * The report, as a check: a small build framed by R, and closer, is drawn
+   * in full -- at the default two pixels, even with every chunk holding the
+   * worst stand-in there is and a viewport only 600 pixels tall.
+   */
+  const size = { width: 21, height: 24, length: 22 };
+  const framing = documentFraming(size);
+  for (const [label, scale] of [
+    ["as R frames it", 1],
+    ["and from half as far", 0.5],
+  ] as const) {
+    const camera = new THREE.PerspectiveCamera(ORBIT_FOV, 1.6, 0.1, 2048);
+    camera.position.set(
+      framing.target.x + (framing.position.x - framing.target.x) * scale,
+      framing.target.y + (framing.position.y - framing.target.y) * scale,
+      framing.target.z + (framing.position.z - framing.target.z) * scale,
+    );
+    camera.lookAt(framing.target.x, framing.target.y, framing.target.z);
+    camera.updateMatrixWorld();
+    const chunks = [];
+    for (let cx = 0; cx < 2; cx += 1) {
+      for (let cy = 0; cy < 2; cy += 1) {
+        for (let cz = 0; cz < 2; cz += 1) {
+          chunks.push({
+            key: packKey(cx, cy, cz),
+            box: {
+              minX: cx * 16,
+              minY: cy * 16,
+              minZ: cz * 16,
+              maxX: Math.min(size.width, cx * 16 + 16),
+              maxY: Math.min(size.height, cy * 16 + 16),
+              maxZ: Math.min(size.length, cz * 16 + 16),
+            },
+            shapes: 0.2832,
+          });
+        }
+      }
+    }
+    const pavilion: LodRegion = {
+      key: packKey(0, 0, 0),
+      box: { minX: 0, minY: 0, minZ: 0, maxX: size.width, maxY: size.height, maxZ: size.length },
+      lod2: 2,
+      lod3: 4,
+      chunks,
+    };
+    const small = new LodSelector();
+    const stats = small.choose(
+      {
+        view: camera.matrixWorldInverse.elements,
+        perspective: true,
+        fovDeg: ORBIT_FOV,
+        orthoHeight: 0,
+        near: 0.1,
+        heightPx: 600,
+        offset: [0, 0, 0],
+      },
+      [pavilion],
+      2,
+      levels,
+      0,
+      out,
+    );
+    equal(`a 21x24x22 build ${label} is drawn in full`, [stats.full, stats.shapes, stats.lod2, stats.lod3], [8, 0, 0, 0]);
+  }
+
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const casts = viewer.match(/raycaster\.intersectObjects?\([^)]*\)/g) ?? [];
+  check("no raycast reaches a level of detail", casts.length > 0 && !casts.some((cast) => cast.includes("lodLoaded")));
+  const frame = viewer.slice(viewer.indexOf("function renderFrame("));
+  const probeAt = frame.indexOf("shadowsFromFullDetail()");
+  check(
+    "the shadow map is drawn from the full chunks before the scene pass",
+    probeAt > 0 && probeAt < frame.indexOf("renderer.render(scene, camera)"),
+  );
+  const probe = viewer.slice(viewer.indexOf("function shadowsFromFullDetail("));
+  check(
+    "...with every full chunk shown and every level hidden",
+    /mesh\.visible = layer === "solid";/.test(probe.slice(0, 1200)),
+  );
+  check(
+    "a delta that brings only levels leaves the shadow map as it was",
+    viewer.includes("if (moved || touchesFullMesh(payload)) shadowsStale();"),
+  );
+  check(
+    "the crossing and tint copies have programs of their own",
+    viewer.includes('variant.customProgramCacheKey = () => (fade ? "lod-fade" : "lod-tint");'),
+  );
+  check(
+    "...and dither as keepsPixel does, from its own table",
+    viewer.includes("uLodCoarse > 0.5 ? lodThreshold >= uLodFade : lodThreshold < uLodFade") &&
+      viewer.includes("BAYER_4X4.map"),
+  );
+  const demand = viewer.slice(viewer.indexOf("const pending ="), viewer.indexOf("const pending =") + 300);
+  check("a crossing keeps frames coming until it ends", demand.includes("lodSelector.fading"));
+
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check(
+    "asking for other levels reaches main",
+    ["lodMode", "lodShapes", "lodCoarse", "lodAutoTriangles"].every((field) => app.includes(`patch.${field} !== undefined`)),
+  );
+  check(
+    "...while the pixels and the tint stay the viewer's",
+    !app.includes("patch.lodPixels !== undefined") && !app.includes("patch.lodTint !== undefined"),
+  );
+  check("levels still queued in main are asked for again", app.includes('if (mesh?.lod.state !== "pending") return;'));
+
+  const modal = readFileSync(path.join(RENDERER, "lib", "SettingsModal.svelte"), "utf8");
+  check(
+    "the level-of-detail pane has every control",
+    ['id="lod-mode"', 'id="lod-pixels"', 'id="lod-auto"', "lodShapes:", "lodCoarse:", "lodTint:", "lodStatusLine"].every(
+      (part) => modal.includes(part),
+    ),
+  );
+  check("...and the threshold is disabled outside Automatic, not hidden", modal.includes('disabled={lod.mode !== "auto"}'));
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

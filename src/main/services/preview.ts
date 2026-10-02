@@ -40,6 +40,7 @@ import type {
   ChunkGeometry,
   ChunkLayer,
   MeshAtlas,
+  MeshLod,
   MeshPayload,
 } from "../../shared/ipc.js";
 import { loadStructure } from "../pipeline/loader.js";
@@ -72,6 +73,8 @@ import {
   buildChunkedMesh,
   createChunkMeshCache,
   type ChunkMeshCache,
+  type LodPiece,
+  type LodRequest,
   type MeshBounds,
 } from "../pipeline/chunked_mesh.js";
 import { carryLight, computeLight, relight, type LightGrid } from "../pipeline/lighting.js";
@@ -276,6 +279,8 @@ function toMeshPayload(
   voidPieces: readonly MeshBuffers[] = [],
   voidKeys: readonly number[] = [],
   frame: readonly [number, number, number] = [0, 0, 0],
+  lodPieces: readonly LodPiece[] = [],
+  lod: MeshLod = { state: "off", triangles: 0 },
 ): MeshPayload {
   const geometry = (
     buffers: readonly MeshBuffers[],
@@ -296,6 +301,19 @@ function toMeshPayload(
     chunks: [
       ...geometry(pieces, keys, "solid"),
       ...geometry(voidPieces, voidKeys, "void"),
+      ...lodPieces.map(
+        (piece): ChunkGeometry => ({
+          key: piece.key,
+          layer: piece.layer,
+          positions: piece.buffers.positions,
+          normals: piece.buffers.normals,
+          uvs: piece.buffers.uvs,
+          indices: piece.buffers.indices,
+          light: piece.buffers.light,
+          opaqueIndices: piece.buffers.opaqueIndices,
+          lodError: piece.error,
+        }),
+      ),
     ],
     // A whole payload says what exists by listing it; there is nothing left
     // over to take down, and no token because nothing here is incremental.
@@ -307,6 +325,7 @@ function toMeshPayload(
     atlasLayout: source.layout,
     atlasPatch: null,
     frame: [frame[0], frame[1], frame[2]],
+    lod,
   };
 }
 
@@ -760,6 +779,18 @@ export interface DocumentPreviewOptions {
    * geometry without moving `doc.revision`, so it is part of the cache key.
    */
   voidBlock?: string;
+  /**
+   * The levels of detail the window asked for, or `null` for none: the
+   * stand-ins of complex blocks (`lod1`) and the coarse regions (`lod2`,
+   * `lod3`). The window asks because only the window can draw them; see
+   * `LodRequest`. Not part of any mesh key: changing it re-meshes no chunk.
+   */
+  lod?: DocumentLodOptions | null;
+  /**
+   * How long this build may spend on queued regions, in milliseconds. Zero --
+   * the default -- is an edit's own build, which must not wait for one.
+   */
+  lodBudgetMs?: number;
 
   /*
    * Both are part of the mesh cache key, for the same reason the two tints
@@ -855,11 +886,16 @@ export function fillVoid(
   return { structure: { ...structure, palette }, voidIndices };
 }
 
+/** `LodRequest` without the budget, which is per build rather than a setting. */
+export type DocumentLodOptions = Omit<LodRequest, "budgetMs">;
+
 export interface DocumentPreviewResult extends PreviewResult {
   /** Hand this back on the next call to re-mesh only what changed. */
   meshCache: ChunkMeshCache;
   rebuiltChunks: number;
   totalChunks: number;
+  /** How many regions' coarse meshes were rebuilt; zero without `lod`. */
+  rebuiltRegions: number;
   /**
    * Where the time went, in milliseconds, by step.
    *
@@ -923,7 +959,7 @@ export async function buildDocumentPreview(
   const signs = signsIn(doc);
   const present = documentPresence(doc);
   lap("prepare");
-  await primeBaker(structure, cached.baker, signs, present);
+  await primeBaker(structure, cached.baker, signs, present, options.lod?.shapes === true);
   lap("prime");
   /*
    * The banners' composed cloth, for the glyphs' reason: a tile first made
@@ -1065,7 +1101,13 @@ export async function buildDocumentPreview(
     filled.voidIndices,
     banners,
     timings,
-    { frame: doc.frame, changed, key, epoch: taken.epoch },
+    {
+      frame: doc.frame,
+      changed,
+      key,
+      epoch: taken.epoch,
+      lod: options.lod ? { ...options.lod, budgetMs: options.lodBudgetMs ?? 0 } : null,
+    },
   );
   at = performance.now();
   await warnAboutBlocksWithNoGeometry(
@@ -1099,6 +1141,8 @@ export async function buildDocumentPreview(
     chunked.voidPieces,
     chunked.voidPieceKeys,
     doc.frame,
+    chunked.lodPieces,
+    chunked.lod,
   );
   lap("payload");
   return {
@@ -1108,6 +1152,7 @@ export async function buildDocumentPreview(
     meshCache: chunked.cache,
     rebuiltChunks: chunked.rebuilt,
     totalChunks: chunked.total,
+    rebuiltRegions: chunked.rebuiltRegions,
     timings,
     atlas: source,
   };
@@ -1180,10 +1225,13 @@ async function primeBaker(
   baker: ModelBaker,
   signs: ReadonlyMap<number, SignText>,
   present: Presence,
+  /** Whether the stand-ins are wanted too: their textures have to be in the atlas as well. */
+  lod = false,
 ): Promise<void> {
   for (const [index, entry] of structure.palette.entries()) {
     if (present(index) && !paletteEntryIsAir(entry)) {
       await baker.bakeBlockstate(entry);
+      if (lod) await baker.bakeLod(entry);
     }
   }
   /*

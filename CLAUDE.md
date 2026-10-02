@@ -4734,8 +4734,9 @@ invisible to a *player* and placed on purpose — a barrier keeps people out of
 somewhere, and a shell of them is a decision somebody has to be able to review.
 Drawing nothing meant a build could be full of them and look empty. So the
 default is deliberately *not* the game's own view, and `preview.showMarkers`
-turns them back into air for anyone who wants it. `light` stays invisible: it
-has no in-game appearance to reproduce and nothing structural to review.
+turns them back into air for anyone who wants it. `light` joined them later,
+for the same reason: it is placed on purpose and is invisible in game, so it
+is drawn from its item icon, which shows its level, and hides with them.
 
 Two things make drawing them safe, and both are load-bearing. They are in
 `isSeeThrough`, so they never cull — a barrier that deleted the face of the wall
@@ -6834,6 +6835,84 @@ main which card draws without asking the window.
 - The pane says which card draws, and warns when the choice was not honoured.
 - Where DXGI does not exist (Linux), the cards Chromium saw are listed as
   information, and only a preference can be chosen.
+
+**Levels of detail draw a heavy build lighter at a distance, and nothing
+changes up close.** Four levels: the full chunks; level 1 per chunk, every block
+with more than `LOD_FACE_BUDGET` faces drawn by a hand-written stand-in from
+`LOD_SHAPES` (statues, cauldrons, lit candles, a fence joined on four sides);
+and levels 2 and 3 per 64-block region, in cells two and four blocks wide
+(`coarse_mesh.ts`). `renderer/lib/lod.ts` chooses: a level is shown where what
+it leaves out, measured in blocks by main and projected at the nearest point of
+what it covers, is smaller on screen than `preview.lodPixels` (2 by default).
+Settings → Level of detail holds the mode (Off, Automatic, Always), the pixels,
+the automatic threshold (1 M triangles of full mesh, so a small build never gets
+any), the two kinds apart, and a tint per level for seeing where each is shown.
+
+**The first version broke the app, and the rule it broke is the one to keep:
+the window asks, main builds.** Main shipped the levels by default while the
+viewer had no code to choose between them, and `groupFor` put every layer that
+was not `void` into `solid` -- all four drawn at once at every distance, the
+coarse shell hiding the build and taking its clicks. A 21x24x22 pavilion came
+out in four-block cubes. Main now builds a level only when `request.settings`
+asks for one (`DocumentPreviewOptions.lod`), and a feature stays off until both
+of its halves exist: the dev instance runs the working tree and reloads on
+every edit, so every intermediate state is on somebody's screen.
+
+**Errors are measured, not guessed.** Level 1's is `lodShapeError`, a Hausdorff
+distance between the block and its stand-in as solids, sampled on the surfaces
+that can be seen: statues 0.09-0.28 blocks, candles 0.25, cauldrons 0.19, fences
+0.09. Measuring found the statue's own: the antenna, left out, was 0.50 blocks
+in every pose, four times anything else, so it keeps a box. The coarse levels
+err by the **cell's whole width** (`COARSE_ERROR`, 2 and 4), not by the
+`factor - 1` their surface can stray: a cell is one cube wearing one texture,
+and on rolling grass at a block and a half per pixel level 2 at "one block" came
+out greener than the ground in a third of the pixels.
+
+**A change of level is crossed in time, with two complementary dithers.** For
+`FADE_MS` both levels draw, each discarding pixels against a 4x4 Bayer threshold
+and the *same* `t` -- the finer keeps `>= t`, the coarser `< t` -- so the
+crossing has no holes and draws no pixel twice; a region crossing to level 2
+hands its `t` to every chunk in it. In time and not in distance, and that was
+measured: with a band of distance where both draw, a still camera with a row of
+statue chunks in it drew 8.2 M triangles where the full mesh is 7.47 M.
+`HYSTERESIS` stops a camera resting at a threshold from crossing back and forth.
+A fading mesh needs its own fade, and three uploads uniforms per object only for
+a `ShaderMaterial`, so it borrows a material copy from a pool (`lodVariant`);
+every other mesh keeps the shared material, with no `discard` in its shader.
+
+**Clicks and shadows always use the full chunks.** A level lives in
+`lodLoaded`, which no raycast names; the chunk it stands in for stays in
+`loaded`, hidden, and three's raycaster ignores `visible`, so a click at any
+distance lands on the block that is really there. The shadow map is drawn from
+the full chunks by a render of nothing (`shadowsFromFullDetail`: a camera with
+the same layers pointed away from the world, into a 1x1 target), because three
+culls shadow casters by the light's frustum and not the camera's -- a coarse
+shell in the shadow map would darken the full chunks the moment they came back.
+A delta that brings only levels leaves the shadow map alone (`touchesFullMesh`):
+redrawing it there was a full extra pass per slice of the queue.
+
+**Never in an edit's own build.** Main meshes the full chunks and nothing else.
+Level 1 of a chunk it touched goes down in the same payload -- the full mesh
+shows there, which is always right -- and is queued; a region it touched is
+queued and **keeps its old meshes on screen** until rebuilt, because at a coarse
+level an edit is below a pixel and taking the region down would show two changes
+for one nobody can see. The window asks again 400 ms after the last edit and
+every 50 ms while `MeshPayload.lod.state` is `pending`; each answer spends at
+most `LOD_SLICE_MS` (40) on the queue, regions first, then one level 1 at a
+time. The options are not part of the full mesh's cache key, so changing them
+re-meshes no chunk.
+
+Measured with `npm run bench:edit -- --lod` (statues 64x16x64, terrain
+256x96x256): an edit costs what it did without levels -- breaking a statue
+983 → 1013 ms, terrain 23-46 ms either way -- and the queue drains at rest,
+~40 ms on terrain, ~1.4 s in five slices of up to ~370 ms for statue chunks.
+In the app the statue field framed by R draws 3.93 M triangles instead of
+7.47 M, all at level 1: 1.2% brighter, and a fifth of its pixels changed by
+more than 10/255 -- the full mesh's moiré gone, not a change of shape. The
+terrain at the level-2 distance draws 105 k triangles in 35 draw calls instead
+of 416 k in ~690; at level 3, 27 k. The full mesh itself is byte for byte what
+it was: every offered block baked in all 20,040 states hashes the same as
+before levels existed.
 
 **A shader mode is a preset, and `vanilla` is the identity.** There are no
 shader packs and there must not appear to be: the renderer opens no connection

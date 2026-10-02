@@ -29,8 +29,15 @@ import {
   COPPER_GOLEM_POSES,
   DYE_COLOURS,
   coversFace,
+  hasHandWrittenLod,
+  LOD_FACE_BUDGET,
+  lodShapeError,
+  lodShapeFor,
   occludesFace,
   occludesNeighbours,
+  placedExtent,
+  shapeCoversFace,
+  shapeFaceCount,
   shapeFor,
   type ModelPartDef,
 } from "../src/main/pipeline/block_shapes.js";
@@ -9141,6 +9148,140 @@ console.log("\n--- a bell hangs from what it was clicked onto ---");
       `${ceiling} against ${floorPosts}`,
     );
   }
+}
+
+
+// --- levels of detail -------------------------------------------------------
+//
+// Every block with more faces than `LOD_FACE_BUDGET`, in every state the game
+// has, gets a stand-in for the middle distance -- written by hand in
+// `LOD_SHAPES`, or straightened from its own boxes until it is. A stand-in is
+// only allowed to be simpler: fewer faces, inside the block's own box, never
+// tilted off a quarter turn, covering every side the block covers so it hides
+// no less of its neighbours, and drawn the way any block is drawn -- UVs in
+// the tile, something painted, wound the way it faces. And its error is
+// measured, because that is what decides how far away it may be shown.
+console.log("\n--- levels of detail ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  const listPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "block_id_list.txt");
+  const ids = [...parseBlockList(readFileSync(listPath, "utf8"))];
+  const missing: string[] = [];
+  const unasked: string[] = [];
+  const notFewer: string[] = [];
+  const outside: string[] = [];
+  const tilted: string[] = [];
+  const uncovered: string[] = [];
+  const offTile: string[] = [];
+  const blank: string[] = [];
+  const backwards: string[] = [];
+  const straightened = new Set<string>();
+  const errors = new Map<string, number>();
+  const sides = ["north", "south", "east", "west", "up", "down"] as const;
+  let walked = 0;
+  for (const id of ids) {
+    if (paletteEntryIsAir({ namespacedName: id, properties: {} })) continue;
+    // Every combination of the legal values, as the game has them.
+    let states: Record<string, string>[] = [{ ...(defaultStateFor(id) ?? {}) }];
+    for (const property of propertiesOf(id).filter((name) => name !== "waterlogged")) {
+      const values = legalValuesFor(id, property) ?? [];
+      const next: Record<string, string>[] = [];
+      for (const state of states) for (const value of values) next.push({ ...state, [property]: value });
+      if (next.length > 0) states = next.slice(0, 4096);
+    }
+    for (const properties of states) {
+      const entry = { namespacedName: id, properties };
+      const name = `${id.replace("minecraft:", "")}${JSON.stringify(properties)}`;
+      const full = shapeFor(entry);
+      const faces = shapeFaceCount(full);
+      const lod = lodShapeFor(entry);
+      if (faces <= LOD_FACE_BUDGET) {
+        if (lod !== null) unasked.push(name);
+        continue;
+      }
+      walked += 1;
+      if (lod === null || lod.kind !== "boxes" || full.kind !== "boxes") {
+        missing.push(name);
+        continue;
+      }
+      if (!hasHandWrittenLod(entry)) straightened.add(id.replace("minecraft:", ""));
+      if (shapeFaceCount(lod) >= faces) notFewer.push(`${name} ${shapeFaceCount(lod)} >= ${faces}`);
+      const extent = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+      for (const part of full.boxes) {
+        const box = placedExtent(part);
+        for (let axis = 0; axis < 3; axis += 1) {
+          extent[axis] = Math.min(extent[axis], box[axis]);
+          extent[axis + 3] = Math.max(extent[axis + 3], box[axis + 3]);
+        }
+      }
+      for (const part of lod.boxes) {
+        const box = placedExtent(part);
+        const inside = [0, 1, 2].every(
+          (axis) => box[axis] >= extent[axis] - 1e-6 && box[axis + 3] <= extent[axis + 3] + 1e-6,
+        );
+        if (!inside) outside.push(name);
+        const tilts = [...(part.rotation ? [part.rotation] : []), ...(part.chain ?? [])];
+        if (tilts.some((tilt) => Math.abs(tilt.angle) % 90 !== 0)) tilted.push(name);
+      }
+      for (const side of sides) {
+        if (shapeCoversFace(full, side) && !shapeCoversFace(lod, side)) uncovered.push(`${name} ${side}`);
+      }
+      const baked = await baker.bakeLod(entry);
+      if (baked === null) {
+        missing.push(`${name} (bakes to nothing)`);
+        continue;
+      }
+      const drawn = [...Object.values(baked.faces), ...baked.extraFaces];
+      if (drawn.some((face) => [...face.uvs].some((uv) => uv < -1e-6 || uv > 1 + 1e-6))) offTile.push(name);
+      if (!drawn.some(facePaintsSomething)) blank.push(name);
+      if (drawn.some((face) => !windingAgrees(face))) backwards.push(name);
+      const short = id.replace("minecraft:", "");
+      errors.set(short, Math.max(errors.get(short) ?? 0, lodShapeError(entry)));
+    }
+  }
+  check("there are blocks over the budget to walk", walked > 0, `${walked} states`);
+  equal("every shape over the budget has a stand-in", missing, []);
+  equal("...and none within it is given one", unasked, []);
+  equal("every stand-in has fewer faces than its block", notFewer, []);
+  equal("...stays inside its block's own box", outside, []);
+  equal("...is turned only by quarter turns", tilted, []);
+  equal("...covers every side its block covers", uncovered, []);
+  equal("...keeps its UVs inside the tile", offTile, []);
+  equal("...paints something", blank, []);
+  equal("...and is wound the way it faces", backwards, []);
+  console.log(`  INFO: straightened rather than written by hand: ${[...straightened].join(", ") || "none"}`);
+  console.log(
+    `  INFO: measured error in blocks: ${[...errors].map(([id, error]) => `${id} ${error}`).join(", ")}`,
+  );
+  const statueErrors = [...errors].filter(([id]) => id.endsWith("copper_golem_statue")).map(([, error]) => error);
+  check(
+    "a statue's stand-in errs by under a third of a block",
+    statueErrors.length > 0 && statueErrors.every((error) => error < 0.3),
+    statueErrors.join(", "),
+  );
+  check(
+    "every stand-in errs by under half a block",
+    [...errors.values()].every((error) => error > 0 && error < 0.5),
+  );
+
+  // The statues, pose by pose: the antenna keeps a box of its own, the nose goes.
+  const counts: string[] = [];
+  for (const pose of ["standing", "sitting", "running", "star"]) {
+    for (const facing of ["north", "east", "south", "west"]) {
+      const statue = { namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: pose, facing } };
+      const lod = lodShapeFor(statue);
+      counts.push(`${pose}/${facing} ${shapeFaceCount(shapeFor(statue))}->${lod === null ? "none" : shapeFaceCount(lod)}`);
+    }
+  }
+  const stand = lodShapeFor({ namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: "standing", facing: "north" } });
+  const run = lodShapeFor({ namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: "running", facing: "north" } });
+  equal(
+    "a standing statue is four boxes, a running one six",
+    [stand?.kind === "boxes" ? stand.boxes.length : 0, run?.kind === "boxes" ? run.boxes.length : 0],
+    [4, 6],
+  );
+  console.log(`  INFO: statue faces, full->stand-in: ${counts.join(", ")}`);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

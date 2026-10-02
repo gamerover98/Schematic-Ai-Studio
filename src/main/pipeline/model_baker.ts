@@ -32,7 +32,13 @@ import { PNG } from "pngjs";
 
 import { defaultStateFor } from "../../shared/block_states.js";
 import { DEFAULT_BIOME_COLOR, DEFAULT_WATER_COLOR } from "../../shared/settings.js";
-import { shapeFor, type BlockShape, type BoxRotation, type UvWindow } from "./block_shapes.js";
+import {
+  lodShapeFor,
+  shapeFor,
+  type BlockShape,
+  type BoxRotation,
+  type UvWindow,
+} from "./block_shapes.js";
 import type { BakedFace, CellFace, PaletteEntry, RgbaImage } from "./types.js";
 import { paletteEntryCacheKey } from "./types.js";
 
@@ -1232,6 +1238,8 @@ export class ResourcePackTextures {
 export class ModelBaker {
   // RULEBOOK §1 Record-over-Map row: both caches below.
   private readonly cache: Record<string, BakedBlock> = {};
+  /** `bakeLod`'s, keyed the same way; `null` is "drawn the same at a distance". */
+  private readonly lodCache = new Map<string, BakedBlock | null>();
   private readonly textureCache: Record<string, RgbaImage> = {};
   /** Cut glyphs, and the ones known to have nothing to draw. */
   private readonly glyphCache = new Map<string, { key: string | null; advance: number } | null>();
@@ -1534,6 +1542,41 @@ export class ModelBaker {
     // straight to the fallback baker.
     const baked = await this.bakeFallback(entry);
     this.cache[cacheKey] = baked;
+    return baked;
+  }
+
+  /**
+   * The block's simpler stand-in for the middle distance, or `null` when it
+   * is drawn the same there -- anything within `LOD_FACE_BUDGET`, and anything
+   * whose textures resolve nothing, which the hashed-colour cube already
+   * draws in six faces. See `lodShapeFor`.
+   *
+   * Textured exactly as the full block is, from the same `cubeFaceTextures`,
+   * so the stand-in wears the textures the full shape resolved and the
+   * chunk's two meshes cannot disagree about what the block is made of.
+   */
+  async bakeLod(entry: PaletteEntry): Promise<BakedBlock | null> {
+    const cacheKey = paletteEntryCacheKey(entry);
+    const known = this.lodCache.get(cacheKey);
+    if (known !== undefined) return known;
+    let baked: BakedBlock | null = null;
+    const shape = lodShapeFor(entry);
+    if (shape !== null) {
+      const texturedFaces = await this.cubeFaceTextures(entry);
+      const primaryKey =
+        texturedFaces === null
+          ? undefined
+          : (texturedFaces.north ??
+            texturedFaces.east ??
+            texturedFaces.west ??
+            texturedFaces.south ??
+            texturedFaces.up ??
+            texturedFaces.down);
+      if (texturedFaces !== null && primaryKey) {
+        baked = await this.bakeShape(shape, primaryKey, texturedFaces);
+      }
+    }
+    this.lodCache.set(cacheKey, baked);
     return baked;
   }
 

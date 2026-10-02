@@ -28,16 +28,22 @@ import { buildDocumentPreview } from "../src/main/services/preview.js";
 import type { RgbaImage } from "../src/main/pipeline/types.js";
 import {
   buildChunkedMesh,
+  chunkKey,
   concatChunks,
   createChunkMeshCache,
   CHUNK_SIZE,
+  type ChunkedMeshResult,
   type ChunkMeshCache,
+  type LodRequest,
 } from "../src/main/pipeline/chunked_mesh.js";
+import { COARSE_ERROR, REGION_CHUNKS, REGION_SIZE } from "../src/main/pipeline/coarse_mesh.js";
+import { lodShapeError } from "../src/main/pipeline/block_shapes.js";
 import { buildMesh, culledFaces } from "../src/main/pipeline/mesher.js";
 import { fillVoid } from "../src/main/services/preview.js";
 import { readSignText, type SignText } from "../src/main/pipeline/sign_text.js";
 import { ModelBaker } from "../src/main/pipeline/model_baker.js";
 import { readFileSync } from "fs";
+import { readdir } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import type { MeshBuffers, PaletteEntry } from "../src/main/pipeline/types.js";
@@ -1013,6 +1019,181 @@ console.log("\n--- the atlas grows without moving a tile ---");
     flood.push(`block/flood${i}`);
   }
   check("more than the reserve holds is refused, so the sheet is packed again", !appendTiles(atlas, images, flood));
+}
+
+
+// --- levels of detail -------------------------------------------------------
+//
+// Built beside the chunks, from main's queue and never from an edit's own
+// build, and only when the window asks for them. The property the suite above
+// rests on holds here too: a queue drained after edits gives exactly the
+// pieces a build from nothing gives.
+console.log("\n--- levels of detail ---");
+{
+  equal("a region is four chunks of sixteen", REGION_SIZE, REGION_CHUNKS * CHUNK_SIZE);
+
+  /*
+   * With the bundled pack, and not the bare baker the rest of this suite
+   * uses: without textures a statue bakes to the hashed-colour cube, which
+   * has six faces and nothing to simplify.
+   */
+  const resources = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "resources");
+  const zips = (await readdir(resources)).filter((name) => name.toLowerCase().endsWith(".zip")).sort();
+  const lodBaker = await ModelBaker.create(null, zips.length > 0 ? path.join(resources, zips[0]) : null);
+
+  const STATUE = block("minecraft:copper_golem_statue", {
+    copper_golem_pose: "running",
+    facing: "north",
+    waterlogged: "false",
+  });
+  /*
+   * A stone floor two blocks thick, a patch of statues in the first chunk and
+   * a wall. Two thick so the floor's top is on a two-block cell's top: a
+   * coarse face reads the corner shading of the fine faces in its own plane.
+   */
+  const lodDoc = (): SchematicDocument => {
+    const doc = createDocument({ width: 40, height: 20, length: 40 });
+    for (let x = 0; x < 40; x += 1) {
+      for (let z = 0; z < 40; z += 1) {
+        setBlock(doc, x, 0, z, STONE);
+        setBlock(doc, x, 1, z, STONE);
+      }
+    }
+    for (let x = 2; x < 8; x += 1) {
+      for (let z = 2; z < 8; z += 1) setBlock(doc, x, 2, z, STATUE);
+    }
+    for (let y = 2; y < 10; y += 1) {
+      for (let z = 20; z < 30; z += 1) setBlock(doc, 24, y, z, STONE);
+    }
+    return doc;
+  };
+  const ask = (budgetMs: number, autoTriangles: number | null = null): LodRequest => ({
+    shapes: true,
+    coarse: true,
+    autoTriangles,
+    budgetMs,
+  });
+  const lodBuild = async (
+    doc: SchematicDocument,
+    cache: ChunkMeshCache,
+    lod: LodRequest | null,
+  ): Promise<ChunkedMeshResult> => {
+    const structure = toStructureData(doc);
+    await culledFaces(structure, lodBaker);
+    for (const entry of structure.palette) await lodBaker.bakeLod(entry);
+    const atlas = buildAtlas(lodBaker.textures);
+    const light = computeLight(structure);
+    return buildChunkedMesh(
+      structure,
+      lodBaker,
+      atlas.uvRects,
+      1,
+      cache,
+      { light, occlusion: true, smooth: true },
+      null,
+      null,
+      null,
+      null,
+      { frame: [0, 0, 0], changed: null, lod },
+    );
+  };
+  /** Builds, then asks again until nothing is queued: what the window does. */
+  const drained = async (doc: SchematicDocument, cache: ChunkMeshCache, lod: LodRequest) => {
+    let result = await lodBuild(doc, cache, lod);
+    let rounds = 0;
+    while (result.lod.state === "pending" && rounds < 1000) {
+      result = await lodBuild(doc, result.cache, { ...lod, budgetMs: 40 });
+      rounds += 1;
+    }
+    return result;
+  };
+  const piecesOf = (result: ChunkedMeshResult) =>
+    new Map(result.lodPieces.map((piece) => [`${piece.layer}:${piece.key}`, piece]));
+  const statueChunk = chunkKey(0, 0, 0);
+  const region = chunkKey(0, 0, 0);
+
+  const off = await lodBuild(lodDoc(), createChunkMeshCache(), null);
+  equal("asked for nothing, nothing is built", off.lodPieces.length, 0);
+  equal("...and says so", off.lod.state, "off");
+
+  const doc = lodDoc();
+  const cold = await lodBuild(doc, createChunkMeshCache(), ask(0));
+  equal("an edit's own build builds no level", cold.lodPieces.length, 0);
+  equal("...and says they are coming", cold.lod.state, "pending");
+  check("...and counts the full mesh", cold.lod.triangles > 0);
+
+  const ready = await drained(doc, cold.cache, ask(0));
+  equal("asking again builds them all", ready.lod.state, "ready");
+  const built = piecesOf(ready);
+  check("the chunk with statues has a level 1", built.has(`lod1:${statueChunk}`));
+  equal(
+    "...whose error is the statues' own, measured",
+    built.get(`lod1:${statueChunk}`)?.error,
+    lodShapeError(STATUE),
+  );
+  check(
+    "no chunk without a complex block has one",
+    [...built.keys()].filter((name) => name.startsWith("lod1:")).length === 1,
+  );
+  check("the region has both coarse levels", built.has(`lod2:${region}`) && built.has(`lod3:${region}`));
+  equal("...erring by a whole cell each", [built.get(`lod2:${region}`)?.error, built.get(`lod3:${region}`)?.error], [
+    COARSE_ERROR.lod2,
+    COARSE_ERROR.lod3,
+  ]);
+
+  // An edit among the statues: level 1 of that chunk goes at once, the
+  // region's coarse meshes stay on screen until their rebuild lands.
+  setBlock(doc, 3, 2, 3, AIR);
+  const edited = await lodBuild(doc, ready.cache, ask(0));
+  const after = piecesOf(edited);
+  check("an edit takes its chunk's level 1 down at once", !after.has(`lod1:${statueChunk}`));
+  check(
+    "...and keeps the stale region on screen meanwhile",
+    after.get(`lod2:${region}`)?.buffers === built.get(`lod2:${region}`)?.buffers,
+  );
+  equal("...and queues both", edited.lod.state, "pending");
+
+  const caught = await drained(doc, edited.cache, ask(0));
+  const fresh = await drained(doc, createChunkMeshCache(), ask(0));
+  const prints = (result: ChunkedMeshResult) =>
+    result.lodPieces.map((piece) => `${piece.layer}:${piece.key}:${fingerprint(piece.buffers)}:${piece.error}`).join("|");
+  equal("a drained queue gives exactly what a build from nothing gives", prints(caught), prints(fresh));
+  check("...and the region was rebuilt, not kept", piecesOf(caught).get(`lod2:${region}`)?.buffers !== built.get(`lod2:${region}`)?.buffers);
+
+  // Asking for levels re-meshes no chunk: they are built beside them.
+  const plain = await lodBuild(doc, createChunkMeshCache(), null);
+  const asked = await drained(doc, plain.cache, ask(0));
+  check(
+    "asking for levels re-meshes no chunk's full mesh",
+    asked.pieces.length === plain.pieces.length && asked.pieces.every((piece, i) => piece === plain.pieces[i]),
+  );
+  const dropped = await lodBuild(doc, asked.cache, null);
+  equal("no longer asking takes every level down", dropped.lodPieces.length, 0);
+
+  // Automatic: only from the threshold.
+  const below = await drained(doc, createChunkMeshCache(), ask(0, 1e9));
+  equal("under the automatic threshold, nothing is built", below.lodPieces.length, 0);
+  equal("...and it says why", below.lod.state, "below");
+  const above = await drained(doc, below.cache, ask(0, 1));
+  check("over it, the levels are built", above.lodPieces.length > 0 && above.lod.state === "ready");
+  const backBelow = await lodBuild(doc, above.cache, ask(0, 1e9));
+  equal("back under it, they go", backBelow.lodPieces.length, 0);
+
+  // A coarse face is as bright as what it stands for: on open flat ground,
+  // full sky and no occlusion; beside the wall, darker at the corner.
+  const level2 = built.get(`lod2:${region}`)!.buffers;
+  let open = false;
+  let shaded = false;
+  for (let v = 0; v < level2.positions.length / 3; v += 1) {
+    const up = level2.normals[v * 3 + 1] > 0.5;
+    if (!up) continue;
+    const sky = level2.light[v * 3 + 1];
+    const occlusion = level2.light[v * 3 + 2];
+    if (sky === 1 && occlusion === 1) open = true;
+    if (occlusion < 1 && occlusion > 0.4) shaded = true;
+  }
+  check("a coarse face on open ground is lit like the ground", open);
+  check("one against the wall carries the corner shading the ground there has", shaded);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

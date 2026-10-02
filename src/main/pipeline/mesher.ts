@@ -19,6 +19,7 @@
 
 import {
   coversFace,
+  lodShapeError,
   occludesFace,
   occludesNeighbours,
   type CellFace,
@@ -161,6 +162,86 @@ function loweredFace(face: BakedFace, height: number): BakedFace {
   return { ...face, positions, uvs };
 }
 
+/**
+ * Where `culledFaces` puts what the middle distance needs: the stand-ins of
+ * the blocks that have one, and which of the full faces they replace.
+ *
+ * The full faces stay in the returned array, in the order they always had, so
+ * a chunk's own mesh is byte for byte what it was; `skip` names the runs of it
+ * that belong to blocks with a stand-in, and `chunked_mesh.ts` builds `lod1`
+ * as everything else plus `simple`. One pass over the chunk for both, because
+ * nothing about a block with no stand-in differs between them: culling and
+ * shading read the neighbours' full shapes either way.
+ */
+export interface LodFaces {
+  /** `[start, end)` pairs into the returned faces, flattened. */
+  readonly skip: number[];
+  /** The stand-ins' faces, culled and placed like any other. */
+  readonly simple: BakedFace[];
+  /**
+   * The largest `lodShapeError` among the stand-ins used, in blocks: how far
+   * this chunk's middle-distance mesh strays from the full one. Starts at 0.
+   */
+  error: number;
+}
+
+/**
+ * One shade for every vertex of a stand-in: the mean of the full block's own,
+ * weighted by the area of the faces they belong to.
+ *
+ * Not `shadeFace` per vertex, and that is a trade made on purpose. Per-vertex
+ * shading reads four neighbours per corner and was the larger half of what
+ * level 1 cost to build; at the distance a stand-in is drawn from, a block is
+ * a few pixels and its corner shading is below one of them. What *is* visible
+ * at any distance is how bright the block is overall, and the mean keeps that
+ * exactly -- so the switch from the full block to its stand-in moves no
+ * brightness, which a pixel threshold could not have hidden.
+ *
+ * `null` when the full block drew nothing (every face culled): then neither
+ * does its stand-in.
+ */
+function meanShade(faces: readonly BakedFace[], from: number, to: number): Float32Array | undefined | null {
+  if (to <= from) return null;
+  let weight = 0;
+  let block = 0;
+  let sky = 0;
+  let occlusion = 0;
+  let shaded = false;
+  for (let i = from; i < to; i += 1) {
+    const face = faces[i];
+    const p = face.positions;
+    // A quad's area from two of its edges; every face here is a parallelogram.
+    const ax = p[3] - p[0];
+    const ay = p[4] - p[1];
+    const az = p[5] - p[2];
+    const bx = p[9] - p[0];
+    const by = p[10] - p[1];
+    const bz = p[11] - p[2];
+    const area = Math.hypot(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx);
+    if (area <= 0) continue;
+    const shade = face.shade;
+    if (shade === undefined) continue;
+    shaded = true;
+    weight += area;
+    for (let v = 0; v < 12; v += 3) {
+      block += (shade[v] * area) / 4;
+      sky += (shade[v + 1] * area) / 4;
+      occlusion += (shade[v + 2] * area) / 4;
+    }
+  }
+  // Faces with no shade at all were meshed without a light grid, and the
+  // stand-in follows them: no shade either.
+  if (!shaded) return undefined;
+  if (weight <= 0) return null;
+  const out = new Float32Array(12);
+  for (let v = 0; v < 12; v += 3) {
+    out[v] = block / weight;
+    out[v + 1] = sky / weight;
+    out[v + 2] = occlusion / weight;
+  }
+  return out;
+}
+
 export async function culledFaces(
   struct: StructureData,
   baker: ModelBaker,
@@ -220,6 +301,11 @@ export async function culledFaces(
    * banner was before patterns were read.
    */
   banners?: ReadonlyMap<number, string>,
+  /**
+   * Where the stand-ins for the middle distance go, if anybody wants them;
+   * see `LodFaces`. Omitted, nothing is collected and nothing is baked for it.
+   */
+  lod?: LodFaces,
 ): Promise<BakedFace[]> {
   const voxels = struct.voxels;
   const [sizeX, sizeY, sizeZ] = [
@@ -270,16 +356,24 @@ export async function culledFaces(
    * nothing at all and skipping it is the whole point.
    */
   const hasInnerFaces: boolean[] = [];
+  /** Each entry's stand-in, when one is wanted and it has one, and its error. */
+  const standIns: (BakedBlock | null)[] = [];
+  const standInErrors: number[] = [];
   for (const entry of struct.palette) {
     if (paletteEntryIsAir(entry)) {
       opaqueTexture.push(true);
       hasInnerFaces.push(false);
+      standIns.push(null);
+      standInErrors.push(0);
       continue;
     }
     const baked = await baker.bakeBlockstate(entry);
     const drawn = [...Object.values(baked.faces), ...baked.extraFaces];
     opaqueTexture.push(drawn.every((face) => baker.isTextureOpaque(face.textureKey)));
     hasInnerFaces.push(baked.extraFaces.length > 0);
+    const standIn = lod === undefined ? null : await baker.bakeLod(entry);
+    standIns.push(standIn);
+    standInErrors.push(standIn === null ? 0 : lodShapeError(entry));
   }
 
   const isVoidEntry = struct.palette.map((_entry, index) => voidIndices?.has(index) === true);
@@ -614,6 +708,9 @@ export async function culledFaces(
           faces.push(voidCell ? { ...face, voidFill: true } : face);
         };
         const bakedBlock: BakedBlock = await baker.bakeBlockstate(entry);
+        // The void is drawn in full at every distance; see `LodFaces`.
+        const standIn = voidCell ? null : (standIns[paletteIndex] ?? null);
+        const cellStart = faces.length;
 
         /*
          * The surfaces of a multi-box shape, each dropped if it lies on a side
@@ -676,6 +773,7 @@ export async function culledFaces(
          * is only for the cells where water is a property of something else, so
          * nothing is drawn twice.
          */
+        const waterFrom = faces.length;
         if (waterBlock !== null && entry.properties.waterlogged === "true") {
           for (const [faceName, offset] of Object.entries(DIRECTIONS)) {
             const [dx, dy, dz] = offset;
@@ -695,6 +793,28 @@ export async function culledFaces(
             // same 8/9 as any other -- unless there is more water above it.
             const flooded = loweredFace(waterFace, holdsWater(x, y + 1, z) ? 1 : 8 / 9);
             emit(bakedFaceOffset(flooded, x, y, z, shadeFace(flooded, x, y, z)));
+          }
+        }
+
+        /*
+         * ...and, for the middle distance, the block's stand-in in place of all
+         * of it but the water it stands in: culled against its neighbours like
+         * the full block, and lit by the full block's own mean -- `meanShade`
+         * says why that and not per-vertex shading.
+         *
+         * Only blocks drawn as boxes have one, and none of those is a full cube,
+         * so nothing below this applies to them.
+         */
+        if (standIn !== null && lod !== undefined) {
+          lod.skip.push(cellStart, faces.length);
+          for (let i = waterFrom; i < faces.length; i += 1) lod.simple.push(faces[i]);
+          const shade = meanShade(faces, cellStart, waterFrom);
+          if (shade !== null) {
+            if (standInErrors[paletteIndex] > lod.error) lod.error = standInErrors[paletteIndex];
+            for (const baked of standIn.extraFaces) {
+              if (baked.cullFace !== undefined && coveredBeyond(x, y, z, baked.cullFace)) continue;
+              lod.simple.push(bakedFaceOffset(baked, x, y, z, shade));
+            }
           }
         }
 

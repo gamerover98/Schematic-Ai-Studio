@@ -134,6 +134,74 @@ export const FPS_CAPS = [0, 30, 60, 90, 120, 144] as const;
 export const GPU_PREFERENCES = ["auto", "high-performance", "low-power"] as const;
 export type GpuPreference = (typeof GPU_PREFERENCES)[number];
 
+/**
+ * Whether simpler meshes may stand in for the real one at a distance.
+ *
+ * `off` draws every chunk in full at every distance, and main builds no
+ * levels at all. `auto` builds them only for a document whose full mesh
+ * reaches `lodAutoTriangles`: a small build is cheap to draw and has to look
+ * exactly as it is. `always` builds them for any document. Either way the
+ * viewer shows a level only where what it leaves out is smaller on screen
+ * than `lodPixels` -- see `renderer/lib/lod.ts`.
+ */
+export const LOD_MODES = ["off", "auto", "always"] as const;
+export type LodMode = (typeof LOD_MODES)[number];
+
+/**
+ * The screen-space errors offered, in pixels: how much a level of detail may
+ * leave out, measured on screen, before the full mesh is drawn instead.
+ */
+export const LOD_PIXELS = [1, 2, 4, 8] as const;
+
+/** Bounds of the automatic threshold, in triangles of the full mesh. */
+export const LOD_AUTO_TRIANGLES = { min: 250_000, max: 10_000_000, step: 250_000 } as const;
+
+/** The levels-of-detail settings, read; see `lodSettings`. */
+export interface LodSettings {
+  readonly mode: LodMode;
+  readonly pixels: number;
+  readonly autoTriangles: number;
+  /** The simplified shapes of complex blocks: level 1. */
+  readonly shapes: boolean;
+  /** The coarse blocks of a whole region: levels 2 and 3. */
+  readonly coarse: boolean;
+  /** Tint each level so where it is shown can be seen. */
+  readonly tint: boolean;
+}
+
+/**
+ * The levels-of-detail settings, every field total.
+ *
+ * `projection`'s rule for `projection`'s reason: `preview` is spread over the
+ * defaults without validation, so a junk value has to read exactly like an
+ * absent one. Main and the viewer both read the settings through here, so
+ * they cannot disagree about what a stored value means.
+ */
+export function lodSettings(preview: Partial<Record<keyof PreviewSettings, unknown>>): LodSettings {
+  const defaults = DEFAULT_PREVIEW_SETTINGS;
+  const mode = (LOD_MODES as readonly unknown[]).includes(preview.lodMode)
+    ? (preview.lodMode as LodMode)
+    : defaults.lodMode;
+  const pixels = (LOD_PIXELS as readonly unknown[]).includes(preview.lodPixels)
+    ? (preview.lodPixels as number)
+    : defaults.lodPixels;
+  const raw = preview.lodAutoTriangles;
+  const { min, max, step } = LOD_AUTO_TRIANGLES;
+  const autoTriangles =
+    typeof raw === "number" && Number.isFinite(raw)
+      ? Math.min(max, Math.max(min, Math.round(raw / step) * step))
+      : defaults.lodAutoTriangles;
+  return {
+    mode,
+    pixels,
+    autoTriangles,
+    // `!== false`: on unless somebody turned it off, `autoGrow`'s reading.
+    shapes: preview.lodShapes !== false,
+    coarse: preview.lodCoarse !== false,
+    tint: preview.lodTint === true,
+  };
+}
+
 /** Total: anything that is not a known preference is `"auto"`. */
 export function gpuPreference(value: unknown): GpuPreference {
   return (GPU_PREFERENCES as readonly unknown[]).includes(value)
@@ -215,6 +283,22 @@ export interface PreviewSettings {
    * this is how to tell one from anything else. See `render_demand.ts`.
    */
   alwaysDraw: boolean;
+  /**
+   * Whether simpler meshes may stand in for the real one at a distance. See
+   * `LOD_MODES`. All six `lod*` fields are read through `lodSettings`, which
+   * is total.
+   */
+  lodMode: LodMode;
+  /** The screen-space error a level of detail may cost; see `LOD_PIXELS`. */
+  lodPixels: number;
+  /** In `auto`, the full mesh's triangles from which levels are built. */
+  lodAutoTriangles: number;
+  /** Level 1: complex blocks drawn by a simplified shape. */
+  lodShapes: boolean;
+  /** Levels 2 and 3: a whole region drawn in blocks two and four wide. */
+  lodCoarse: boolean;
+  /** Tint each level -- green, yellow, red -- to see where it is shown. */
+  lodTint: boolean;
   /** Which look the viewport is drawn with. See `SHADER_MODES`. */
   shaderMode: ShaderMode;
   sunAzimuthDeg: number;
@@ -354,6 +438,14 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   showFps: false,
   frameDiagnostics: false,
   alwaysDraw: false,
+  // Automatic: only a document heavy enough to need levels gets them, and a
+  // small build is always drawn exactly as it is.
+  lodMode: "auto",
+  lodPixels: 2,
+  lodAutoTriangles: 1_000_000,
+  lodShapes: true,
+  lodCoarse: true,
+  lodTint: false,
   shaderMode: "vanilla",
   sunAzimuthDeg: 60,
   sunElevationDeg: 35,

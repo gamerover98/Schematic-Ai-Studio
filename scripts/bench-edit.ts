@@ -4,6 +4,10 @@
  *
  *   npm run bench:edit            all three documents
  *   npm run bench:edit -- dense   one of them by name
+ *   npm run bench:edit -- --lod   with the levels of detail asked for, as the
+ *                                 window asks in "always"; the queue they
+ *                                 leave is drained and timed apart, since
+ *                                 an edit's own answer never waits for it
  *
  * The steps are the ones a click in creative mode goes through: the edit, the
  * `DocumentState` the window gets back, and the mesh request that follows,
@@ -40,9 +44,11 @@ import type { MeshPayload } from "../src/shared/ipc.js";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pack = path.join(root, "resources", "Faithful 64x - Release 14.zip");
 
+const flags = process.argv.slice(2);
 const options: DocumentPreviewOptions = {
   resourcePackPath: null,
   fallbackResourcePackPath: pack,
+  lod: flags.includes("--lod") ? { shapes: true, coarse: true, autoTriangles: null } : null,
 };
 
 function blockList(): string[] {
@@ -128,10 +134,21 @@ function kilobytes(payload: MeshPayload): number {
   return Math.round(bytes / 1024);
 }
 
-function triangles(payload: MeshPayload): number {
+function triangles(payload: MeshPayload, layer = "solid"): number {
   let count = 0;
-  for (const chunk of payload.chunks) count += chunk.indices.length / 3;
+  for (const chunk of payload.chunks) if (chunk.layer === layer) count += chunk.indices.length / 3;
   return count;
+}
+
+/** Triangles per level, for the levels the payload carries. */
+function levels(payload: MeshPayload): string {
+  return ["lod1", "lod2", "lod3"]
+    .map((layer) => {
+      const count = triangles(payload, layer);
+      const meshes = payload.chunks.filter((chunk) => chunk.layer === layer).length;
+      return count === 0 ? "" : `   ${layer} ${count.toLocaleString()} tris in ${meshes}`;
+    })
+    .join("");
 }
 
 const ms = (from: number) => Math.round((performance.now() - from) * 10) / 10;
@@ -149,7 +166,34 @@ async function run(name: string): Promise<void> {
     atlas: first.mesh.atlasVersion as number | null,
     atlasLayout: first.mesh.atlasLayout as number | null,
   };
-  console.log(`cold mesh            ${ms(t)} ms   ${first.mesh.chunks.length} chunks   ${triangles(first.mesh).toLocaleString()} tris   ${kilobytes(first.mesh).toLocaleString()} KB`);
+  console.log(`cold mesh            ${ms(t)} ms   ${first.mesh.chunks.length} chunks   ${triangles(first.mesh).toLocaleString()} tris   ${kilobytes(first.mesh).toLocaleString()} KB${levels(first.mesh)}`);
+  const firstTimings = (first as { timings?: Record<string, number> }).timings;
+  if (firstTimings) console.log(`${"".padEnd(21)}${Object.entries(firstTimings).map(([k, v]) => `${k} ${Math.round(v * 10) / 10}`).join(" · ")}`);
+
+  /*
+   * What the window does while levels are queued: ask again with nothing
+   * changed, each answer a slice of the queue. Timed apart from the edit,
+   * because the edit's own answer never waits for it.
+   */
+  const drain = async (): Promise<string> => {
+    if (!options.lod || session.mesh?.payload.lod.state !== "pending") return "";
+    const t0 = performance.now();
+    let slices = 0;
+    let longest = 0;
+    while (session.mesh?.payload.lod.state === "pending" && slices < 100000) {
+      const t1 = performance.now();
+      const answer = await documentMesh(session, options, held);
+      longest = Math.max(longest, performance.now() - t1);
+      held = { mesh: answer.mesh.token, atlas: answer.mesh.atlasVersion, atlasLayout: answer.mesh.atlasLayout };
+      slices += 1;
+    }
+    return `queue ${ms(t0)} ms in ${slices} slices (longest ${Math.round(longest * 10) / 10} ms)`;
+  };
+  if (options.lod) {
+    const drained = await drain();
+    const full = session.mesh!.payload;
+    console.log(`${"levels".padEnd(21)}${drained}${levels(full)} · state ${full.lod.state}, ${full.lod.triangles.toLocaleString()} full tris`);
+  }
 
   const edit = async (label: string, block: string, at: [number, number, number]): Promise<void> => {
     const t0 = performance.now();
@@ -171,6 +215,8 @@ async function run(name: string): Promise<void> {
         `${changed === 0 ? " · nothing changed" : ""}` +
         (timings ? `\n${"".padEnd(21)}${Object.entries(timings).map(([k, v]) => `${k} ${Math.round(v * 10) / 10}`).join(" · ")}` : ""),
     );
+    const drained = await drain();
+    if (drained !== "") console.log(`${"".padEnd(21)}${drained}`);
   };
 
   await edit("place, middle", "minecraft:oak_planks", spec.place);
@@ -183,7 +229,7 @@ async function run(name: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const only = process.argv.slice(2).filter((arg) => arg !== "--");
+  const only = flags.filter((arg) => arg !== "--" && !arg.startsWith("--"));
   clearBakerCache();
   const t = performance.now();
   await warmBaker(blockList().map((block) => parsePaletteEntry(block.split("[", 1)[0])), options);

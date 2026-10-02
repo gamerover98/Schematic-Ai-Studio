@@ -29,7 +29,7 @@
     SkyTextures,
     AtlasPatch,
   } from "../../../shared/ipc.js";
-  import type { GpuPreference, ResolvedTheme } from "../../../shared/settings.js";
+  import type { GpuPreference, LodMode, ResolvedTheme } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
   import {
     antialiasSamples,
@@ -40,6 +40,18 @@
   } from "./shader_modes.js";
   import { animationsUsed } from "./atlas_animation.js";
   import { counterIdle, shouldDraw, ViewWatch } from "./render_demand.js";
+  import {
+    BAYER_4X4,
+    LodSelector,
+    meshKey,
+    regionOfChunk,
+    type LodBox,
+    type LodChunk,
+    type LodDraw,
+    type LodRegion,
+    type LodStats,
+    type LodView,
+  } from "./lod.js";
   import {
     FrameProfiler,
     culpritOf,
@@ -280,6 +292,17 @@ import { isTyping } from "./typing.js";
     frameDiagnostics?: boolean;
     /** Draw on every refresh rather than on demand; see `render_demand.ts`. */
     alwaysDraw?: boolean;
+    /**
+     * The levels of detail: whether this chooses between them at all, the
+     * screen-space error a level may cost in pixels, which kinds may be
+     * shown, and the diagnostic tint. The app reads them through
+     * `lodSettings`; `lod.ts` is the rule they feed.
+     */
+    lodMode?: LodMode;
+    lodPixels?: number;
+    lodShapes?: boolean;
+    lodCoarse?: boolean;
+    lodTint?: boolean;
     /** Which look to draw with. `shader_modes.ts` says what each one means. */
     shaderMode?: string;
     /**
@@ -536,6 +559,11 @@ import { isTyping } from "./typing.js";
     showFps = false,
     frameDiagnostics = false,
     alwaysDraw = false,
+    lodMode = "off",
+    lodPixels = 2,
+    lodShapes = true,
+    lodCoarse = true,
+    lodTint = false,
     shaderMode = "vanilla",
     showBounds = false,
     voidOpacity = 0.4,
@@ -1039,6 +1067,16 @@ import { isTyping } from "./typing.js";
    * `Mesh.raycast` knows nothing about flags either.
    */
   let voidLoaded: THREE.Object3D | null = null;
+  /**
+   * The levels of detail, beside `loaded` and never inside it.
+   *
+   * Every raycast in this file names `loaded`, and that is the whole of what
+   * keeps picking exact at a distance: while a level stands in for a chunk,
+   * the chunk stays in `loaded`, hidden, and three's raycaster does not look
+   * at `visible`. So a click lands on the block that is really there,
+   * whatever is drawn in its place. See `lod.ts`.
+   */
+  let lodLoaded: THREE.Object3D | null = null;
   /** When the pointer lock was taken, for the look filter below. */
   let lockedAt = 0;
   let selectionBox: THREE.LineSegments | undefined;
@@ -1239,8 +1277,10 @@ import { isTyping } from "./typing.js";
   function placeChunks(frame: readonly [number, number, number]): void {
     loaded?.position.set(frame[0], frame[1], frame[2]);
     voidLoaded?.position.set(frame[0], frame[1], frame[2]);
+    lodLoaded?.position.set(frame[0], frame[1], frame[2]);
     loaded?.updateMatrixWorld(true);
     voidLoaded?.updateMatrixWorld(true);
+    lodLoaded?.updateMatrixWorld(true);
   }
 
   function pickBlockAt(clientX: number, clientY: number): PickedBlock | null {
@@ -3248,6 +3288,8 @@ import { isTyping } from "./typing.js";
     worst: { ms: number; culprit: string } | null;
     /** Nothing has been drawn for a while, because nothing changed. */
     idle?: boolean;
+    /** What the level selection chose, while it is choosing. */
+    lod?: LodStats | null;
   } | null>(null);
   const FPS_MS = 500;
 
@@ -3453,6 +3495,14 @@ import { isTyping } from "./typing.js";
           (stars.material as THREE.PointsMaterial).size = reach * 0.004;
         }
       }
+      /*
+       * The levels of detail: the shadow map from the full chunks first, if it
+       * is stale, then the selection for this view. Both only while levels
+       * exist and are wanted -- without them the frame is what it always was.
+       */
+      const choosing = levelsActive();
+      if (choosing) shadowsFromFullDetail();
+      applyLevels(choosing);
       let t0 = stamp();
       renderer.setRenderTarget(aaTarget);
       renderer.render(scene, camera);
@@ -3487,6 +3537,7 @@ import { isTyping } from "./typing.js";
           ms: Math.round(((now - fpsAt) / fpsFrames) * 10) / 10,
           triangles: renderer.info.render.triangles,
           calls: renderer.info.render.calls,
+          lod: lodStats === null ? null : { ...lodStats },
           worst:
             worst === null
               ? null
@@ -3686,7 +3737,11 @@ import { isTyping } from "./typing.js";
         // Timed inside, split into its first upload and the rest; a lap
         // around it as well would count the same milliseconds twice.
         const animated = playAnimations(now);
-        const pending = usingEnvironment() && environmentStale && now - environmentAt > ENVIRONMENT_MS;
+        // Work left over: an environment map held back by its floor, or a
+        // level of detail still crossing to the next.
+        const pending =
+          (usingEnvironment() && environmentStale && now - environmentAt > ENVIRONMENT_MS) ||
+          lodSelector.fading;
         if (!shouldDraw({ now, activeAt, animated, pending, always: alwaysDraw })) {
           if (showFps && fps !== null && !fps.idle && counterIdle(now, lastDrawnAt, FPS_MS) && renderer) {
             // The last frame's own counts: `info` is reset only when a frame
@@ -3696,6 +3751,7 @@ import { isTyping } from "./typing.js";
               idle: true,
               triangles: renderer.info.render.triangles,
               calls: renderer.info.render.calls,
+              lod: lodStats === null ? null : { ...lodStats },
             };
           }
           return;
@@ -4256,6 +4312,11 @@ import { isTyping } from "./typing.js";
       showFps,
       frameDiagnostics,
       alwaysDraw,
+      lodMode,
+      lodPixels,
+      lodShapes,
+      lodCoarse,
+      lodTint,
       shaderMode,
       showBounds,
       voidOpacity,
@@ -4915,42 +4976,45 @@ import { isTyping } from "./typing.js";
    * cannot see what you are working on" is a bug however faithful it is.
    */
   function shadeWithBakedLight(target: THREE.Material): void {
-    target.onBeforeCompile = (shader) => {
-      shader.uniforms.uDaylight = daylight;
-      shader.fragmentShader = shader.fragmentShader
-        .replace("void main() {", "uniform float uDaylight;\nvoid main() {")
-        .replace(
-          "#include <color_fragment>",
-          `
-          vec3 albedo = diffuseColor.rgb;
-          float blockLight = vColor.r;
-          float skyLight = vColor.g * uDaylight;
-          float occlusion = vColor.b;
-
-          /*
-           * The sky half dims the surface, so the sun still lights it and the
-           * shadow map still darkens it.
-           */
-          diffuseColor.rgb = albedo * max(0.06, skyLight) * occlusion;
-
-          /*
-           * The block half is *light*, and adding it is the whole point.
-           *
-           * As a multiply on the albedo it could only ever stop a surface being
-           * dark -- never make it brighter than whatever the scene's own lights
-           * gave it. So a torch in a sealed room at night lit nothing: the
-           * ambient there is near zero, and near zero times anything is near
-           * zero. That is what "the torches do not light the area" was.
-           *
-           * Emissive is added after the lighting pass, which is what lets a
-           * torch light a room the sun cannot reach -- and, being independent
-           * of uDaylight, lets it stay lit when the sun goes down.
-           */
-          totalEmissiveRadiance += albedo * blockLight * occlusion * 0.9;
-          `,
-        );
-    };
+    target.onBeforeCompile = (shader) => injectBakedLight(shader);
     target.needsUpdate = true;
+  }
+
+  /** `shadeWithBakedLight`'s shader edit, which the level-of-detail copies repeat. */
+  function injectBakedLight(shader: THREE.WebGLProgramParametersWithUniforms): void {
+    shader.uniforms.uDaylight = daylight;
+    shader.fragmentShader = shader.fragmentShader
+      .replace("void main() {", "uniform float uDaylight;\nvoid main() {")
+      .replace(
+        "#include <color_fragment>",
+        `
+        vec3 albedo = diffuseColor.rgb;
+        float blockLight = vColor.r;
+        float skyLight = vColor.g * uDaylight;
+        float occlusion = vColor.b;
+
+        /*
+         * The sky half dims the surface, so the sun still lights it and the
+         * shadow map still darkens it.
+         */
+        diffuseColor.rgb = albedo * max(0.06, skyLight) * occlusion;
+
+        /*
+         * The block half is *light*, and adding it is the whole point.
+         *
+         * As a multiply on the albedo it could only ever stop a surface being
+         * dark -- never make it brighter than whatever the scene's own lights
+         * gave it. So a torch in a sealed room at night lit nothing: the
+         * ambient there is near zero, and near zero times anything is near
+         * zero. That is what "the torches do not light the area" was.
+         *
+         * Emissive is added after the lighting pass, which is what lets a
+         * torch light a room the sun cannot reach -- and, being independent
+         * of uDaylight, lets it stay lit when the sun goes down.
+         */
+        totalEmissiveRadiance += albedo * blockLight * occlusion * 0.9;
+        `,
+      );
   }
 
   /**
@@ -5206,11 +5270,17 @@ import { isTyping } from "./typing.js";
      * than in a map of their own, so they are evicted exactly when it is:
      * `chunkMeshes` is already keyed on layer *and* number for a reason,
      * and a second map keyed the same way is a second chance to get that
-     * wrong. The void layer gets none, because nothing raycasts it.
+     * wrong. Only the solid layer gets them: nothing raycasts the void or a
+     * level of detail.
      */
-    if (chunk.layer !== "void") {
+    if (chunk.layer === "solid") {
       mesh.userData.thin = thinBoxes(chunk.positions, chunk.normals);
     }
+    // What the level selection walks: which chunk or region this is, and for
+    // a level of detail how far it strays from the full mesh, in blocks.
+    mesh.userData.layer = chunk.layer;
+    mesh.userData.key = chunk.key;
+    mesh.userData.lodError = chunk.lodError ?? null;
     return mesh;
   }
 
@@ -5222,7 +5292,34 @@ import { isTyping } from "./typing.js";
    * was empty space beside it.
    */
   function meshId(chunk: { key: number; layer: ChunkLayer }): string {
-    return `${chunk.layer}:${chunk.key}`;
+    return meshKey(chunk.layer, chunk.key);
+  }
+
+  /** The group a layer's meshes live in: picked, never picked, or a level of detail. */
+  function groupOf(
+    layer: ChunkLayer,
+    solid: THREE.Object3D,
+    filler: THREE.Object3D,
+    lod: THREE.Object3D,
+  ): THREE.Object3D {
+    return layer === "void" ? filler : layer === "solid" ? solid : lod;
+  }
+
+  /**
+   * Where a new mesh of a layer starts out. A level of detail starts hidden:
+   * it is the selection's to show, and a frame drawn before the selection
+   * runs must not put it on top of the chunks it stands for.
+   */
+  function prepareMesh(mesh: THREE.Mesh, layer: ChunkLayer): void {
+    /*
+     * The void casts no shadow and receives none. A document-sized volume
+     * of it would put the whole build in its own shade, and it is not there
+     * in the sense a shadow means. A level of detail casts none either: the
+     * shadow map is drawn from the full chunks, see `shadowsFromFullDetail`.
+     */
+    mesh.castShadow = layer === "solid";
+    mesh.receiveShadow = layer !== "void";
+    mesh.visible = layer === "solid" || layer === "void";
   }
 
   /**
@@ -5237,26 +5334,21 @@ import { isTyping } from "./typing.js";
   function buildModel(
     payload: MeshPayload,
     texture: THREE.Texture,
-  ): { solid: THREE.Group; filler: THREE.Group } {
+  ): { solid: THREE.Group; filler: THREE.Group; lod: THREE.Group } {
     const solid = new THREE.Group();
     const filler = new THREE.Group();
-    const shared = [ensureMaterial(texture), ensureBlendedMaterial(texture)];
+    const lod = new THREE.Group();
+    const shared = sharedMaterials(texture);
     const voidShared = [ensureVoidMaterial(texture), ensureVoidMaterial(texture)];
+    releaseAllFades();
     chunkMeshes.clear();
     for (const chunk of payload.chunks) {
-      const isVoid = chunk.layer === "void";
-      const mesh = chunkMesh(chunk, isVoid ? voidShared : shared);
+      const mesh = chunkMesh(chunk, chunk.layer === "void" ? voidShared : shared);
       chunkMeshes.set(meshId(chunk), mesh);
-      /*
-       * The void casts no shadow and receives none. A document-sized volume
-       * of it would put the whole build in its own shade, and it is not
-       * there in the sense a shadow means.
-       */
-      mesh.castShadow = !isVoid;
-      mesh.receiveShadow = !isVoid;
-      (isVoid ? filler : solid).add(mesh);
+      prepareMesh(mesh, chunk.layer);
+      groupOf(chunk.layer, solid, filler, lod).add(mesh);
     }
-    return { solid, filler };
+    return { solid, filler, lod };
   }
 
   /**
@@ -5271,34 +5363,363 @@ import { isTyping } from "./typing.js";
   function applyDelta(
     solid: THREE.Object3D,
     filler: THREE.Object3D,
+    lod: THREE.Object3D,
     payload: MeshPayload,
     texture: THREE.Texture,
   ): void {
-    const shared = [ensureMaterial(texture), ensureBlendedMaterial(texture)];
+    const shared = sharedMaterials(texture);
     const voidShared = [ensureVoidMaterial(texture), ensureVoidMaterial(texture)];
-    const groupFor = (layer: ChunkLayer): THREE.Object3D => (layer === "void" ? filler : solid);
     for (const ref of payload.dropped) {
       const id = meshId(ref);
       const gone = chunkMeshes.get(id);
       if (!gone) continue;
-      groupFor(ref.layer).remove(gone);
+      groupOf(ref.layer, solid, filler, lod).remove(gone);
       gone.geometry.dispose();
+      releaseFade(gone);
       chunkMeshes.delete(id);
     }
     for (const chunk of payload.chunks) {
       const id = meshId(chunk);
-      const isVoid = chunk.layer === "void";
       const existing = chunkMeshes.get(id);
       if (existing) {
-        groupFor(chunk.layer).remove(existing);
+        groupOf(chunk.layer, solid, filler, lod).remove(existing);
         existing.geometry.dispose();
+        releaseFade(existing);
       }
-      const mesh = chunkMesh(chunk, isVoid ? voidShared : shared);
-      mesh.castShadow = !isVoid;
-      mesh.receiveShadow = !isVoid;
+      const mesh = chunkMesh(chunk, chunk.layer === "void" ? voidShared : shared);
+      prepareMesh(mesh, chunk.layer);
       chunkMeshes.set(id, mesh);
-      groupFor(chunk.layer).add(mesh);
+      groupOf(chunk.layer, solid, filler, lod).add(mesh);
     }
+  }
+
+  // --- levels of detail -----------------------------------------------------
+
+  /** The block materials as one stable pair, so a mesh can be handed it back. */
+  type MaterialPair = [THREE.MeshStandardMaterial, THREE.MeshStandardMaterial];
+  let sharedPair: MaterialPair | null = null;
+
+  function sharedMaterials(texture: THREE.Texture): MaterialPair {
+    const opaque = ensureMaterial(texture);
+    const blend = ensureBlendedMaterial(texture);
+    if (sharedPair === null || sharedPair[0] !== opaque || sharedPair[1] !== blend) {
+      sharedPair = [opaque, blend];
+    }
+    return sharedPair;
+  }
+
+  /**
+   * The diagnostic tint of each level, mixed halfway into the albedo.
+   *
+   * Mixed rather than multiplied: green times copper is olive, which on a
+   * field of copper statues is the colour of copper. Halfway towards a strong
+   * colour reads on any texture, and keeps enough of it to see what is there.
+   */
+  const LOD_TINT: Readonly<Record<string, readonly [number, number, number]>> = {
+    lod1: [0.15, 1, 0.2],
+    lod2: [1, 0.9, 0.1],
+    lod3: [1, 0.12, 0.08],
+  };
+  const LOD_TINT_AMOUNT = 0.5;
+
+  /**
+   * The copies of the block materials the levels of detail are drawn with.
+   *
+   * Two kinds. A tinted copy per level, shared by its meshes, for `lodTint`.
+   * And a copy per mesh while it is one side of a cross-fade, because its
+   * fade is its own: three uploads a material's uniforms when the material
+   * changes between two draws, and only a `ShaderMaterial` can ask for it per
+   * object (`uniformsNeedUpdate`). The copies share one program -- the same
+   * `customProgramCacheKey` -- and each has its own uniforms, so a fading
+   * mesh costs one uniform upload. A mesh in no band keeps the shared
+   * material and costs nothing at all, and has no `discard` in its shader.
+   */
+  const tintPairs = new Map<string, MaterialPair>();
+  const fadeFree: MaterialPair[] = [];
+  const fadeInUse = new Map<THREE.Mesh, MaterialPair>();
+
+  /** The ordered dither's thresholds as a GLSL array, from `lod.ts`'s own table. */
+  const BAYER_GLSL = `const float LOD_BAYER[16] = float[16](${BAYER_4X4.map((value) => value.toFixed(6)).join(", ")});`;
+
+  function lodVariant(base: THREE.MeshStandardMaterial, fade: boolean): THREE.MeshStandardMaterial {
+    const variant = new THREE.MeshStandardMaterial();
+    variant.copy(base);
+    const uniforms = {
+      uLodFade: { value: 0 },
+      uLodCoarse: { value: 0 },
+      // The tint's colour, and how far towards it: zero is no tint.
+      uLodTint: { value: new THREE.Vector4(1, 1, 1, 0) },
+    };
+    variant.userData.lod = uniforms;
+    variant.onBeforeCompile = (shader) => {
+      shader.uniforms.uLodTint = uniforms.uLodTint;
+      // The tint goes on the albedo before the baked light reads it, so the
+      // light and the torches act on the tinted colour like any other.
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <color_fragment>",
+        "diffuseColor.rgb = mix(diffuseColor.rgb, uLodTint.rgb, uLodTint.a);\n#include <color_fragment>",
+      );
+      injectBakedLight(shader);
+      let head = "uniform vec4 uLodTint;\n";
+      let body = "";
+      if (fade) {
+        shader.uniforms.uLodFade = uniforms.uLodFade;
+        shader.uniforms.uLodCoarse = uniforms.uLodCoarse;
+        head += `uniform float uLodFade;\nuniform float uLodCoarse;\n${BAYER_GLSL}\n`;
+        // `keepsPixel` in `lod.ts`, which the checks hold this to.
+        body = `
+          {
+            ivec2 lodCell = ivec2(mod(gl_FragCoord.xy, 4.0));
+            float lodThreshold = LOD_BAYER[lodCell.y * 4 + lodCell.x];
+            if (uLodCoarse > 0.5 ? lodThreshold >= uLodFade : lodThreshold < uLodFade) discard;
+          }
+        `;
+      }
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "void main() {",
+        `${head}void main() {${body}`,
+      );
+    };
+    variant.customProgramCacheKey = () => (fade ? "lod-fade" : "lod-tint");
+    variant.needsUpdate = true;
+    return variant;
+  }
+
+  /** Keeps a copy in step with what the shared material has been told since. */
+  function syncVariant(variant: THREE.MeshStandardMaterial, base: THREE.MeshStandardMaterial): void {
+    if (variant.map !== base.map) {
+      variant.map = base.map;
+      variant.needsUpdate = true;
+    }
+    variant.envMapIntensity = base.envMapIntensity;
+    variant.wireframe = base.wireframe;
+  }
+
+  function tintedPair(layer: ChunkLayer, base: MaterialPair): MaterialPair {
+    let pair = tintPairs.get(layer);
+    if (pair === undefined) {
+      pair = [lodVariant(base[0], false), lodVariant(base[1], false)];
+      const [r, g, b] = LOD_TINT[layer] ?? [1, 1, 1];
+      for (const material of pair) {
+        (material.userData.lod.uLodTint.value as THREE.Vector4).set(r, g, b, LOD_TINT_AMOUNT);
+      }
+      tintPairs.set(layer, pair);
+    }
+    syncVariant(pair[0], base[0]);
+    syncVariant(pair[1], base[1]);
+    return pair;
+  }
+
+  function releaseFade(mesh: THREE.Mesh): void {
+    const pair = fadeInUse.get(mesh);
+    if (pair === undefined) return;
+    fadeInUse.delete(mesh);
+    fadeFree.push(pair);
+  }
+
+  function releaseAllFades(): void {
+    for (const pair of fadeInUse.values()) fadeFree.push(pair);
+    fadeInUse.clear();
+  }
+
+  /** The materials a mesh is drawn with for what the selection decided. */
+  function materialsFor(mesh: THREE.Mesh, layer: ChunkLayer, draw: LodDraw): THREE.Material[] {
+    const base = sharedPair!;
+    const tint = lodTint && layer !== "solid" ? (LOD_TINT[layer] ?? null) : null;
+    if (draw === null) {
+      releaseFade(mesh);
+      return tint === null ? base : tintedPair(layer, base);
+    }
+    let pair = fadeInUse.get(mesh);
+    if (pair === undefined) {
+      pair = fadeFree.pop() ?? [lodVariant(base[0], true), lodVariant(base[1], true)];
+      fadeInUse.set(mesh, pair);
+    }
+    for (let i = 0; i < 2; i += 1) {
+      syncVariant(pair[i], base[i]);
+      const uniforms = pair[i].userData.lod;
+      uniforms.uLodFade.value = draw.t;
+      uniforms.uLodCoarse.value = draw.coarse ? 1 : 0;
+      const [r, g, b] = tint ?? [1, 1, 1];
+      (uniforms.uLodTint.value as THREE.Vector4).set(r, g, b, tint === null ? 0 : LOD_TINT_AMOUNT);
+    }
+    return pair;
+  }
+
+  /**
+   * The regions and chunks the selection walks, rebuilt when the meshes
+   * change rather than every frame.
+   */
+  let lodRegions: LodRegion[] = [];
+  const lodDraw = new Map<string, LodDraw>();
+  /** What the last selection chose, for the counter and the stutter report. */
+  let lodStats: LodStats | null = null;
+  /** The levels each region and chunk shows, kept so a change is crossed. */
+  const lodSelector = new LodSelector();
+  /** Whether a selection is applied, as opposed to every chunk in full. */
+  let levelsShown = false;
+
+  function rebuildLodIndex(): void {
+    const shapes = new Map<number, number>();
+    const coarse = new Map<number, { lod2: number | null; lod3: number | null }>();
+    for (const mesh of chunkMeshes.values()) {
+      const layer = mesh.userData.layer as ChunkLayer;
+      const error = mesh.userData.lodError as number | null;
+      if (error === null) continue;
+      const key = mesh.userData.key as number;
+      if (layer === "lod1") shapes.set(key, error);
+      if (layer === "lod2" || layer === "lod3") {
+        const held = coarse.get(key) ?? { lod2: null, lod3: null };
+        held[layer] = error;
+        coarse.set(key, held);
+      }
+    }
+    const regions = new Map<number, { key: number; box: LodBox; lod2: number | null; lod3: number | null; chunks: LodChunk[] }>();
+    for (const mesh of chunkMeshes.values()) {
+      if (mesh.userData.layer !== "solid") continue;
+      const bounds = mesh.geometry.boundingBox;
+      if (bounds === null) continue;
+      const key = mesh.userData.key as number;
+      const regionKey = regionOfChunk(key);
+      let region = regions.get(regionKey);
+      if (region === undefined) {
+        const held = coarse.get(regionKey);
+        region = {
+          key: regionKey,
+          box: { minX: Infinity, minY: Infinity, minZ: Infinity, maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity },
+          lod2: held?.lod2 ?? null,
+          lod3: held?.lod3 ?? null,
+          chunks: [],
+        };
+        regions.set(regionKey, region);
+      }
+      const box: LodBox = {
+        minX: bounds.min.x,
+        minY: bounds.min.y,
+        minZ: bounds.min.z,
+        maxX: bounds.max.x,
+        maxY: bounds.max.y,
+        maxZ: bounds.max.z,
+      };
+      region.chunks.push({ key, box, shapes: shapes.get(key) ?? null });
+      region.box.minX = Math.min(region.box.minX, box.minX);
+      region.box.minY = Math.min(region.box.minY, box.minY);
+      region.box.minZ = Math.min(region.box.minZ, box.minZ);
+      region.box.maxX = Math.max(region.box.maxX, box.maxX);
+      region.box.maxY = Math.max(region.box.maxY, box.maxY);
+      region.box.maxZ = Math.max(region.box.maxZ, box.maxZ);
+    }
+    lodRegions = [...regions.values()];
+  }
+
+  /** Whether this frame chooses between levels at all. */
+  function levelsActive(): boolean {
+    return lodMode !== "off" && lodLoaded !== null && lodLoaded.children.length > 0 && sharedPair !== null;
+  }
+
+  /** The camera, as `lod.ts` wants it. */
+  function lodViewNow(): LodView {
+    const eye = camera!;
+    eye.updateMatrixWorld();
+    const isPerspective = (eye as THREE.PerspectiveCamera).isPerspectiveCamera === true;
+    const ortho = eye as THREE.OrthographicCamera;
+    return {
+      view: eye.matrixWorldInverse.elements,
+      perspective: isPerspective,
+      fovDeg: isPerspective ? (eye as THREE.PerspectiveCamera).fov : 0,
+      orthoHeight: isPerspective ? 0 : (ortho.top - ortho.bottom) / ortho.zoom,
+      near: (eye as THREE.PerspectiveCamera).near,
+      // The pixels drawn before supersampling: `renderScale` above one makes
+      // no pixel smaller to the eye.
+      heightPx: (canvas?.clientHeight ?? 1) * Math.min(deviceRatio, maxDpr),
+      offset: [loaded?.position.x ?? 0, loaded?.position.y ?? 0, loaded?.position.z ?? 0],
+    };
+  }
+
+  /** Every chunk in full and every level hidden: how the scene is without levels. */
+  function restoreFullDetail(): void {
+    levelsShown = false;
+    lodStats = null;
+    lodSelector.reset();
+    for (const mesh of chunkMeshes.values()) {
+      const layer = mesh.userData.layer as ChunkLayer;
+      if (layer === "void") continue;
+      mesh.visible = layer === "solid";
+      if (layer === "solid" && sharedPair !== null) mesh.material = sharedPair;
+    }
+    releaseAllFades();
+  }
+
+  /** Shows each mesh the selection chose, in the way it chose, and hides the rest. */
+  function applyLevels(active: boolean): void {
+    if (!active) {
+      if (levelsShown) restoreFullDetail();
+      return;
+    }
+    const t0 = stamp();
+    levelsShown = true;
+    lodStats = lodSelector.choose(
+      lodViewNow(),
+      lodRegions,
+      lodPixels,
+      { shapes: lodShapes, coarse: lodCoarse },
+      performance.now(),
+      lodDraw,
+    );
+    for (const [id, mesh] of chunkMeshes) {
+      const layer = mesh.userData.layer as ChunkLayer;
+      if (layer === "void") continue;
+      const draw = lodDraw.get(id);
+      if (draw === undefined) {
+        mesh.visible = false;
+        releaseFade(mesh);
+        continue;
+      }
+      mesh.visible = true;
+      mesh.material = materialsFor(mesh, layer, draw);
+    }
+    lap("lod select", t0);
+  }
+
+  /**
+   * The shadow map, drawn from the full chunks whatever is on screen.
+   *
+   * A level of detail is a shell around the blocks it stands for, so a shadow
+   * map drawn from what is on screen would darken the full chunks with the
+   * shell the moment the camera came close enough to show them -- and would
+   * have to be drawn again at every change of level, which is every few
+   * frames of moving. Drawn from the full chunks it is exact, and a change of
+   * level never touches it.
+   *
+   * three draws the shadow map at the start of a `render()`, from what is
+   * visible then, culling by the *light's* frustum and not the camera's. So a
+   * render of nothing -- a camera with the same layers, pointed away from the
+   * world, into a target one pixel square -- with the full chunks visible and
+   * the levels hidden draws exactly the shadow map, and costs what the shadow
+   * pass costs without levels: only when shadows are stale.
+   */
+  let shadowProbe: THREE.WebGLRenderTarget | null = null;
+  const shadowCamera = new THREE.OrthographicCamera(-1e-3, 1e-3, 1e-3, -1e-3, 1e-3, 2e-3);
+
+  function shadowsFromFullDetail(): void {
+    if (!renderer || !scene || !camera) return;
+    if (!renderer.shadowMap.enabled || !renderer.shadowMap.needsUpdate) return;
+    const t0 = stamp();
+    for (const mesh of chunkMeshes.values()) {
+      const layer = mesh.userData.layer as ChunkLayer;
+      if (layer === "void") continue;
+      mesh.visible = layer === "solid";
+    }
+    shadowProbe ??= new THREE.WebGLRenderTarget(1, 1);
+    shadowCamera.layers.mask = camera.layers.mask;
+    shadowCamera.position.set(0, -1e7, 0);
+    shadowCamera.lookAt(0, -2e7, 0);
+    shadowCamera.updateMatrixWorld();
+    const previous = renderer.getRenderTarget();
+    renderer.setRenderTarget(shadowProbe);
+    renderer.render(scene, shadowCamera);
+    renderer.setRenderTarget(previous);
+    lap("shadow map from full chunks", t0);
   }
 
   /**
@@ -5397,6 +5818,14 @@ import { isTyping } from "./typing.js";
     frameDocument(size);
     framedFor = key;
   });
+
+  /** Whether a delta changes anything that casts a shadow: a full chunk. */
+  function touchesFullMesh(payload: MeshPayload): boolean {
+    return (
+      payload.chunks.some((chunk) => chunk.layer === "solid") ||
+      payload.dropped.some((ref) => ref.layer === "solid")
+    );
+  }
 
   /** How big a mesh payload was, for the stutter report. */
   function payloadDetail(payload: MeshPayload): Record<string, unknown> {
@@ -5571,6 +6000,19 @@ import { isTyping } from "./typing.js";
       },
       display: displayNow(),
       documentSize,
+      /*
+       * The levels of detail: what main says of them, what the settings ask,
+       * and what the selection chose for the last frame drawn.
+       */
+      lod: {
+        state: mesh?.lod ?? null,
+        mode: lodMode,
+        pixels: lodPixels,
+        shapes: lodShapes,
+        coarse: lodCoarse,
+        meshes: lodLoaded?.children.length ?? 0,
+        chosen: lodStats,
+      },
       settings: {
         maxFps,
         gpuPreference: gpuPref,
@@ -5620,7 +6062,14 @@ import { isTyping } from "./typing.js";
         disposeObject(voidLoaded, { keepMaterials: true });
         voidLoaded = null;
       }
+      if (lodLoaded) {
+        scene.remove(lodLoaded);
+        disposeObject(lodLoaded, { keepMaterials: true });
+        lodLoaded = null;
+      }
+      releaseAllFades();
       chunkMeshes.clear();
+      rebuildLodIndex();
       refreshAnimated();
       shadowsStale();
       error = null;
@@ -5636,6 +6085,7 @@ import { isTyping } from "./typing.js";
      */
     const previous = loaded;
     const previousVoid = voidLoaded;
+    const previousLod = lodLoaded;
     /*
      * Applying a payload runs outside the loop, in this effect, so a spike it
      * causes shows up there as time outside; this event is what names it.
@@ -5660,27 +6110,42 @@ import { isTyping } from "./typing.js";
        * incrementally to a token it issued -- but the check costs nothing and
        * the failure it prevents is a structure with holes in it.
        */
-      if (payload.partial && previous !== null && previousVoid !== null) {
-        applyDelta(previous, previousVoid, payload, map);
+      if (payload.partial && previous !== null && previousVoid !== null && previousLod !== null) {
+        const moved =
+          previous.position.x !== payload.frame[0] ||
+          previous.position.y !== payload.frame[1] ||
+          previous.position.z !== payload.frame[2];
+        applyDelta(previous, previousVoid, previousLod, payload, map);
         placeChunks(payload.frame);
+        rebuildLodIndex();
         applyWireframe(previous, wireframe);
         refreshAnimated();
-        shadowsStale();
+        /*
+         * The shadow map is drawn from the full chunks alone, so a delta that
+         * only brought levels of detail -- which is every slice of the queue,
+         * twenty times a second while it drains -- leaves it as it was.
+         * Redrawing it there was a whole extra pass over the full mesh per
+         * slice.
+         */
+        if (moved || touchesFullMesh(payload)) shadowsStale();
         applied("delta applied");
         error = null;
         return;
       }
       const built = buildModel(payload, map);
-      for (const gone of [previous, previousVoid]) {
+      for (const gone of [previous, previousVoid, previousLod]) {
         if (!gone) continue;
         target.remove(gone);
         disposeObject(gone, { keepMaterials: true });
       }
       loaded = built.solid;
       voidLoaded = built.filler;
+      lodLoaded = built.lod;
       target.add(built.solid);
       target.add(built.filler);
+      target.add(built.lod);
       placeChunks(payload.frame);
+      rebuildLodIndex();
       applyWireframe(built.solid, wireframe);
       refreshAnimated();
       shadowsStale();
@@ -5708,6 +6173,15 @@ import { isTyping } from "./typing.js";
         <strong>{fps.fps}</strong> fps &middot; {fps.ms} ms<br />
       {/if}
       {fps.triangles.toLocaleString()} tris &middot; {fps.calls} draws
+      {#if fps.lod}
+        <br />{t("viewport.lodCounts", {
+          full: fps.lod.full,
+          shapes: fps.lod.shapes,
+          lod2: fps.lod.lod2,
+          lod3: fps.lod.lod3,
+          fading: fps.lod.fading,
+        })}
+      {/if}
       {#if fps.worst}
         <br />{t("viewport.worstFrame", { ms: fps.worst.ms, culprit: fps.worst.culprit })}
       {/if}

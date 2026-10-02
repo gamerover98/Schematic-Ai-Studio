@@ -99,6 +99,7 @@ import {
 import {
   normaliseVoidBlock,
   providerRequiresApiKey,
+  lodSettings,
   type Hotbar,
   type KeyStorageStatus,
   type PreviewSettings,
@@ -1310,6 +1311,7 @@ ${report.stack}`),
       try {
         const { settings } = request;
         const session = requireSession();
+        const lod = lodSettings(settings);
         const mesh = await documentMesh(
           session,
           {
@@ -1326,6 +1328,17 @@ ${report.stack}`),
             blockLight: settings.blockLight,
             occlusion: settings.ambientOcclusion,
             smoothLighting: settings.smoothLighting,
+            // The viewer chooses between the levels; main only builds them,
+            // and only the ones the window asked for -- a level sent to a
+            // viewer that cannot choose is drawn on top of the full mesh.
+            lod:
+              lod.mode === "off"
+                ? null
+                : {
+                    shapes: lod.shapes,
+                    coarse: lod.coarse,
+                    autoTriangles: lod.mode === "auto" ? lod.autoTriangles : null,
+                  },
           },
           // What the window says it already has. Main decides what to send
           // from it; it is never a request for anything in particular.

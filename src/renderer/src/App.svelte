@@ -144,6 +144,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     DEFAULT_PREVIEW_SETTINGS,
   DEFAULT_HOTBAR,
   DEFAULT_UI_SETTINGS,
+    lodSettings,
     providerRequiresApiKey,
     type ExportType,
     type KeyStorageStatus,
@@ -2578,7 +2579,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       patch.smoothLighting !== undefined ||
       // The markers are turned back into air by the mesher, not hidden by the
       // viewer, so this one rebuilds too — see `hideMarkers`.
-      patch.showMarkers !== undefined;
+      patch.showMarkers !== undefined ||
+      // Which levels of detail main builds is the window's to ask, so asking
+      // for different ones has to reach main. No chunk is re-meshed for it:
+      // the levels are built beside the chunks, from main's queue. The pixels
+      // and the tint are the viewer's alone and are not here.
+      patch.lodMode !== undefined ||
+      patch.lodShapes !== undefined ||
+      patch.lodCoarse !== undefined ||
+      patch.lodAutoTriangles !== undefined;
     if (!rebuilds || busy) return;
     // Whichever of the two is showing. Before this the tints only ever reached
     // the file-preview path, so changing one with a document open did nothing
@@ -2780,6 +2789,37 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * each, and the window then applied every stale answer in turn.
    */
   const refreshDocument = coalesce(fetchDocumentMesh);
+
+  /** The levels-of-detail settings, read once for the viewer and the pane. */
+  const lod = $derived(lodSettings(settings.preview));
+
+  /*
+   * Levels of detail still queued in main: ask again once the edits stop, and
+   * then a slice at a time until every one is built.
+   *
+   * An edit's own answer never builds a level -- placing a block has to cost
+   * what the block costs -- so main says `pending` and leaves the asking to
+   * the window. The first ask waits for the edits to stop, so a run of clicks
+   * is never held up behind a slice; after that each answer is a slice, and
+   * the next follows shortly.
+   */
+  const LOD_QUIET_MS = 400;
+  const LOD_SLICE_GAP_MS = 50;
+  let revisionAt = 0;
+  $effect(() => {
+    void docState?.revision;
+    revisionAt = performance.now();
+  });
+  $effect(() => {
+    if (mesh?.lod.state !== "pending") return;
+    const wait = Math.max(LOD_SLICE_GAP_MS, LOD_QUIET_MS - (performance.now() - revisionAt));
+    const timer = setTimeout(() => {
+      // A failed ask is no worse than not asking: the full chunks are on
+      // screen, and the next answer will say `pending` again.
+      refreshDocument().catch(() => undefined);
+    }, wait);
+    return () => clearTimeout(timer);
+  });
 
   /**
    * What the selection is made of, as main last counted it.
@@ -4693,6 +4733,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   onclearkey={clearKey}
   {mcpStatus}
   {mcpActivity}
+  lodStatus={mesh?.lod ?? null}
   startOn={settingsCategory}
   onmcpenabled={(enabled) => void setMcpEnabled(enabled)}
   onmcpregenerate={() => void regenerateMcpToken()}
@@ -5355,6 +5396,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       showFps={settings.preview.showFps}
       frameDiagnostics={settings.preview.frameDiagnostics}
       alwaysDraw={settings.preview.alwaysDraw}
+      lodMode={lod.mode}
+      lodPixels={lod.pixels}
+      lodShapes={lod.shapes}
+      lodCoarse={lod.coarse}
+      lodTint={lod.tint}
       shaderMode={settings.preview.shaderMode}
       showGrid={settings.preview.showGrid}
       showBounds={settings.preview.showBounds}

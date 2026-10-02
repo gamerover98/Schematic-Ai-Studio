@@ -16,7 +16,7 @@
 // This is a deliberate approximation, not a model loader. Blocks with no entry
 // stay full cubes, which is the same answer as before for anything not listed.
 
-import { paletteEntryIsAir, type CellFace, type PaletteEntry } from "./types.js";
+import { paletteEntryCacheKey, paletteEntryIsAir, type CellFace, type PaletteEntry } from "./types.js";
 import { DYE_HEX } from "../../shared/banner_patterns.js";
 
 /** A box in Minecraft's 1/16 units: `[x0, y0, z0, x1, y1, z1]`, each 0..16. */
@@ -726,6 +726,17 @@ export interface ModelCube {
   readonly size: readonly [number, number, number];
   /** `CubeDeformation`: grows the box on every side and moves no UV. */
   readonly grow?: number;
+  /**
+   * The size the texture is cut for, when it is not the box's own.
+   *
+   * Java has no such thing: a cube's rectangles are cut from its size. The
+   * level of detail needs it, because a stand-in box spans several parts of
+   * the model and has to wear one part's picture stretched over it -- cut
+   * from its own, bigger size, the windows would run off that part into the
+   * empty corners of the sheet and the box would draw holes. See
+   * `statueLodCubes`.
+   */
+  readonly uvSize?: readonly [number, number, number];
 }
 
 /** One `addOrReplaceChild`: its `PartPose` and what hangs off it. */
@@ -786,7 +797,10 @@ export function modelPartBoxes(root: ModelPartDef, sheet = 64): ShapeBox[] {
     for (const cube of part.cubes ?? []) {
       const grow = cube.grow ?? 0;
       const [fx, fy, fz] = cube.from;
-      const [w, h, d] = cube.size;
+      const [sw, sh, sd] = cube.size;
+      // The windows are cut from `uvSize` where one is given; the box is
+      // always its own size.
+      const [w, h, d] = cube.uvSize ?? cube.size;
       const [u, v] = cube.tex;
       const U = (n: number): number => n * scale;
       const u0 = U(u);
@@ -803,9 +817,9 @@ export function modelPartBoxes(root: ModelPartDef, sheet = 64): ShapeBox[] {
           fx - grow + origin[0],
           fy - grow + origin[1],
           fz - grow + origin[2],
-          fx + w + grow + origin[0],
-          fy + h + grow + origin[1],
-          fz + d + grow + origin[2],
+          fx + sw + grow + origin[0],
+          fy + sh + grow + origin[1],
+          fz + sd + grow + origin[2],
         ],
         uv: {
           down: [u1, v0, u2, v1],
@@ -5448,25 +5462,41 @@ function baseName(entry: PaletteEntry): string {
   return entry.namespacedName.replace(/^minecraft:/, "");
 }
 
-export function shapeFor(entry: PaletteEntry): BlockShape {
-  const name = baseName(entry);
+/** A function from a block's state to its geometry: one row of the tables above. */
+type ShapeBuilder = (entry: PaletteEntry) => BlockShape;
 
+const crossShape: ShapeBuilder = () => ({ kind: "cross" });
+const cubeShape: ShapeBuilder = () => CUBE;
+
+/**
+ * Which row of the tables draws a block, by name.
+ *
+ * Split out of `shapeFor` so the level of detail can be keyed on the same
+ * answer: `LOD_SHAPES` names builders rather than block names, and a second
+ * copy of this dispatch -- `_fence` but not `bamboo_fence`, `_cauldron` -- is
+ * how the two would come to disagree about which blocks are which.
+ */
+function shapeBuilder(name: string): ShapeBuilder {
   const exact = EXACT_SHAPES[name];
   if (exact) {
-    return exact(entry);
+    return exact;
   }
   if (name.startsWith("potted_")) {
-    return pottedPlant();
+    return pottedPlant;
   }
   if (CROSS_BLOCKS.has(name)) {
-    return { kind: "cross" };
+    return crossShape;
   }
   for (const [suffix, build] of SUFFIX_SHAPES) {
     if (name.endsWith(suffix)) {
-      return build(entry);
+      return build;
     }
   }
-  return CUBE;
+  return cubeShape;
+}
+
+export function shapeFor(entry: PaletteEntry): BlockShape {
+  return shapeBuilder(baseName(entry))(entry);
 }
 
 /**
@@ -5518,7 +5548,11 @@ const FACE_AT_MIN: Readonly<Record<CellFace, boolean>> = {
  * sentence -- a staircase's own back was never a candidate for being dropped.
  */
 export function coversFace(entry: PaletteEntry, face: CellFace): boolean {
-  const shape = shapeFor(entry);
+  return shapeCoversFace(shapeFor(entry), face);
+}
+
+/** `coversFace`, asked of a shape rather than of a block -- a level of detail's, say. */
+export function shapeCoversFace(shape: BlockShape, face: CellFace): boolean {
   if (shape.kind === "cube") return true;
   if (shape.kind !== "boxes") return false;
 
@@ -5661,4 +5695,462 @@ function isSeeThrough(entry: PaletteEntry): boolean {
     name === "light" ||
     name.endsWith("_ice")
   );
+}
+
+// --- level of detail ----------------------------------------------------------
+//
+// A block far enough away that its detail is a pixel or two does not need all
+// of it. Every chunk holding a block with more faces than `LOD_FACE_BUDGET`
+// gets a second mesh, `lod1`, in which each such block is drawn by the simpler
+// stand-in below, and the viewport shows it once the camera is far enough
+// that the difference is under the quality setting's threshold. The full mesh
+// stays where it was and is still what the pointer picks, so nothing about
+// clicking changes with distance.
+//
+// What counts as complex is measured, not listed. Walked over every state of
+// every offered id, four families cross the budget today: the copper golem
+// statues (54 to 66 faces in all sixteen states), the cauldrons (58, 59), four
+// lit candles (56) and a fence joined on all four sides (54). Each has a
+// stand-in written here, in `LOD_SHAPES`. A shape that crosses the budget
+// tomorrow falls back to `straightenedLod` until it gets one, and
+// `tests/blocks.ts` names every shape that is on the fallback.
+//
+// `.claude/skills/mc-block-lod` is how a stand-in is written.
+
+/** More faces than this and a block has a simpler stand-in at a distance. */
+export const LOD_FACE_BUDGET = 48;
+
+const CELL_FACES: readonly CellFace[] = ["north", "south", "east", "west", "up", "down"];
+
+/**
+ * The faces a shape bakes to: six per box, less the omitted ones and the ones
+ * with no area -- `ModelBaker.boxFaces`' own rule, so this agrees with what
+ * the mesher is handed without anything being baked.
+ */
+export function shapeFaceCount(shape: BlockShape): number {
+  if (shape.kind === "cube") return 6;
+  if (shape.kind === "cross") return 4;
+  let count = 0;
+  for (const part of shape.boxes) {
+    const [x0, y0, z0, x1, y1, z1] = part.box;
+    const size = [x1 - x0, y1 - y0, z1 - z0];
+    for (const face of CELL_FACES) {
+      if (part.omit?.includes(face)) continue;
+      const axis = FACE_AXIS[face];
+      if (size[(axis + 1) % 3] === 0 || size[(axis + 2) % 3] === 0) continue;
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** A point turned by one tilt, in the model's 0..16 units: `tiltFace`'s arithmetic. */
+function tiltedPoint(
+  point: readonly [number, number, number],
+  rotation: BoxRotation,
+): [number, number, number] {
+  const radians = (rotation.angle * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const [ox, oy, oz] = rotation.origin;
+  const x = point[0] - ox;
+  const y = point[1] - oy;
+  const z = point[2] - oz;
+  switch (rotation.axis) {
+    case "x":
+      return [x + ox, y * cos - z * sin + oy, y * sin + z * cos + oz];
+    case "y":
+      return [x * cos + z * sin + ox, y + oy, -x * sin + z * cos + oz];
+    default:
+      return [x * cos - y * sin + ox, x * sin + y * cos + oy, z + oz];
+  }
+}
+
+/**
+ * The axis-aligned box a shape box ends up occupying once it is tilted.
+ *
+ * Rounded to a millionth: a half turn about z puts `1e-15` on coordinates that
+ * are whole numbers, and a stand-in whose face sits at `16 - 1e-15` would lose
+ * the `cullFace` that lying on the boundary earns it.
+ */
+export function placedExtent(part: ShapeBox): Box {
+  const [x0, y0, z0, x1, y1, z1] = part.box;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  const tilts = [...(part.rotation ? [part.rotation] : []), ...(part.chain ?? [])];
+  for (const x of [x0, x1]) {
+    for (const y of [y0, y1]) {
+      for (const z of [z0, z1]) {
+        let point: [number, number, number] = [x, y, z];
+        for (const tilt of tilts) point = tiltedPoint(point, tilt);
+        for (let axis = 0; axis < 3; axis += 1) {
+          if (point[axis] < min[axis]) min[axis] = point[axis];
+          if (point[axis] > max[axis]) max[axis] = point[axis];
+        }
+      }
+    }
+  }
+  const round = (n: number): number => Math.round(n * 1e6) / 1e6;
+  return [round(min[0]), round(min[1]), round(min[2]), round(max[0]), round(max[1]), round(max[2])];
+}
+
+function boxVolume(box: Box): number {
+  return (box[3] - box[0]) * (box[4] - box[1]) * (box[5] - box[2]);
+}
+
+/**
+ * Which part of the golem a `CopperGolemModel` cube is, by where its texture
+ * starts on the sheet -- the one thing about a cube that no pose changes.
+ */
+const GOLEM_PART: Readonly<Record<string, string>> = {
+  "0,0": "head",
+  "56,0": "nose",
+  "37,8": "antenna",
+  "37,0": "antenna",
+  "0,15": "body",
+  "3,19": "body",
+  "3,18": "body",
+  "36,16": "right arm",
+  "50,16": "left arm",
+  "0,27": "leg",
+  "16,27": "leg",
+};
+
+/**
+ * The stand-in boxes for each pose: which parts of the golem each one spans.
+ *
+ * Standing and sitting keep the arms by the body, so one box takes the body
+ * and both arms. Running and the star swing them out, where a box spanning
+ * both would swallow the head and the air beside it, so there each arm keeps
+ * a box of its own.
+ *
+ * The antenna keeps a box too, and that is measured rather than tidy: it
+ * reaches half a block above the head, and leaving it out made it the
+ * stand-in's whole error -- 0.50 blocks in every pose, four times anything
+ * else -- which would have held the stand-in back to twice the distance.
+ * The nose goes: two units out from the face, it is the first pixel a
+ * distance takes away.
+ */
+const STATUE_LOD_PARTS: Readonly<Record<string, readonly (readonly string[])[]>> = {
+  standing: [["head"], ["antenna"], ["body", "right arm", "left arm"], ["leg"]],
+  sitting: [["head"], ["antenna"], ["body", "right arm", "left arm"], ["leg"]],
+  running: [["head"], ["antenna"], ["body"], ["right arm"], ["left arm"], ["leg"]],
+  star: [["head"], ["antenna"], ["body"], ["right arm"], ["left arm"], ["leg"]],
+};
+
+/** A `ModelPart` tree's cubes in the order `modelPartBoxes` emits their boxes. */
+function cubesInOrder(part: ModelPartDef, out: ModelCube[] = []): ModelCube[] {
+  for (const cube of part.cubes ?? []) out.push(cube);
+  for (const child of part.children ?? []) cubesInOrder(child, out);
+  return out;
+}
+
+const statueLodCache = new Map<string, readonly ModelCube[]>();
+
+/**
+ * The stand-in cubes for one pose, in the statue root's own space.
+ *
+ * Derived from the transcription rather than written out again: each group of
+ * parts becomes the box its cubes occupy once every part's own tilt is
+ * applied -- the root's turn excepted, which the stand-in takes exactly as the
+ * full model does. A hand-typed box per pose would be sixty numbers to keep in
+ * step with `COPPER_GOLEM_POSES`, and the tilted poses are where they would be
+ * wrong.
+ *
+ * Each box wears its biggest member's picture, stretched: `uvSize` cuts the
+ * windows from that cube's own size, so the box reads the body's patch of the
+ * sheet and not the empty corners around it.
+ */
+function statueLodCubes(pose: string): readonly ModelCube[] {
+  const known = COPPER_GOLEM_POSES[pose] !== undefined ? pose : "standing";
+  const cached = statueLodCache.get(known);
+  if (cached !== undefined) return cached;
+  const root: ModelPartDef = { offset: [0, 0, 0], children: COPPER_GOLEM_POSES[known] };
+  const placed = modelPartBoxes(root);
+  const cubes = cubesInOrder(root);
+  const out: ModelCube[] = [];
+  for (const group of STATUE_LOD_PARTS[known] ?? STATUE_LOD_PARTS.standing) {
+    const members: number[] = [];
+    cubes.forEach((cube, index) => {
+      if (group.includes(GOLEM_PART[cube.tex.join(",")] ?? "")) members.push(index);
+    });
+    if (members.length === 0) continue;
+    const extent = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+    for (const index of members) {
+      const box = placedExtent(placed[index]);
+      for (let axis = 0; axis < 3; axis += 1) {
+        extent[axis] = Math.min(extent[axis], box[axis]);
+        extent[axis + 3] = Math.max(extent[axis + 3], box[axis + 3]);
+      }
+    }
+    const size = (cube: ModelCube): number => cube.size[0] * cube.size[1] * cube.size[2];
+    const lender = members.reduce((best, index) =>
+      size(cubes[index]) > size(cubes[best]) ? index : best,
+    );
+    out.push({
+      tex: cubes[lender].tex,
+      // The root's own part puts its cubes at `origin = (8, 0, 8)`.
+      from: [extent[0] - 8, extent[1], extent[2] - 8],
+      size: [extent[3] - extent[0], extent[4] - extent[1], extent[5] - extent[2]],
+      uvSize: cubes[lender].size,
+    });
+  }
+  statueLodCache.set(known, out);
+  return out;
+}
+
+/** A copper golem statue in three or five boxes; see `STATUE_LOD_PARTS`. */
+function statueLod(entry: PaletteEntry): BlockShape {
+  const pose = entry.properties.copper_golem_pose ?? "standing";
+  const root = copperGolemStatueRoot(pose, entry.properties.facing ?? "north");
+  return {
+    kind: "boxes",
+    boxes: modelPartBoxes({ ...root, children: [{ offset: [0, 0, 0], cubes: statueLodCubes(pose) }] }),
+  };
+}
+
+/**
+ * A fence with each side's two rails as one bar.
+ *
+ * The gap between the rails is three sixteenths of a block, under a pixel at
+ * the distance this is drawn from; filling it halves the rails, and the bar
+ * keeps the rails' own coordinates, so its derived UVs are the same planks.
+ */
+function fenceLod(entry: PaletteEntry): BlockShape {
+  const list: Box[] = [[6, 0, 6, 10, 16, 10]];
+  for (const [direction, steps] of [
+    ["north", 0],
+    ["east", 1],
+    ["south", 2],
+    ["west", 3],
+  ] as const) {
+    if (entry.properties[direction] === "true") list.push(rotateBoxY([7, 6, 0, 9, 15, 7], steps));
+  }
+  return boxes(...list);
+}
+
+/** Candles without their wicks and flames: planes a unit or two across. */
+function candleLod(entry: PaletteEntry): BlockShape {
+  const full = candleShape(entry);
+  if (full.kind !== "boxes") return full;
+  return { kind: "boxes", boxes: full.boxes.filter((part) => part.rotation === undefined) };
+}
+
+const CAULDRON_LOD_WALL: Readonly<Record<string, string>> = {
+  up: "cauldron_top",
+  down: "cauldron_bottom",
+};
+
+/**
+ * A cauldron's walls taken down to the floor, which is where its eight boxes
+ * of feet were; the bowl's floor and whatever is in it stay.
+ */
+function cauldronLod(entry: PaletteEntry): BlockShape {
+  const content = cauldronContent(entry);
+  const wall = (box: Box, omit?: string[]): ShapeBox => ({
+    box,
+    texture: "cauldron_side",
+    textures: CAULDRON_LOD_WALL,
+    ...(omit === undefined ? {} : { omit }),
+  });
+  return boxes(
+    wall([0, 0, 0, 2, 16, 16]),
+    wall([14, 0, 0, 16, 16, 16]),
+    wall([2, 0, 0, 14, 16, 2], ["east", "west"]),
+    wall([2, 0, 14, 14, 16, 16], ["east", "west"]),
+    CAULDRON_POT[4],
+    ...(content === null ? [] : [content]),
+  );
+}
+
+/**
+ * The stand-ins written by hand, keyed on the builder that draws the full
+ * shape -- so the table covers exactly the blocks that builder draws, with no
+ * second list of names to drift from `shapeBuilder`'s.
+ */
+const LOD_SHAPES: ReadonlyMap<ShapeBuilder, ShapeBuilder> = new Map<ShapeBuilder, ShapeBuilder>([
+  [copperGolemStatue, statueLod],
+  [cauldron, cauldronLod],
+  [candleShape, candleLod],
+  [fence, fenceLod],
+]);
+
+/**
+ * The stand-in for a shape nobody has written one for: its biggest boxes, each
+ * straightened to the box it occupies, until it has half the faces.
+ *
+ * Planes go first, being boxes with no volume. A box keeps its texture and its
+ * windows, which a tilt may have put on the wrong face of the straightened box
+ * -- the right colours in roughly the right places, which is what a distance
+ * leaves of a block anyway, and is why every shape on this fallback is named
+ * by `tests/blocks.ts` until it has a stand-in of its own.
+ */
+function straightenedLod(shape: BlockShape): BlockShape | null {
+  if (shape.kind !== "boxes") return null;
+  const allowed = Math.min(LOD_FACE_BUDGET, shapeFaceCount(shape)) / 2;
+  const solid = shape.boxes
+    .map((part) => ({ part, extent: placedExtent(part) }))
+    .filter(({ extent }) => boxVolume(extent) > 0)
+    .sort((a, b) => boxVolume(b.extent) - boxVolume(a.extent));
+  const kept: ShapeBox[] = [];
+  let faces = 0;
+  for (const { part, extent } of solid) {
+    const box: ShapeBox = {
+      box: extent,
+      ...(part.texture === undefined ? {} : { texture: part.texture }),
+      ...(part.textures === undefined ? {} : { textures: part.textures }),
+      ...(part.uv === undefined ? {} : { uv: part.uv }),
+      ...(part.uvRotation === undefined ? {} : { uvRotation: part.uvRotation }),
+    };
+    const adds = shapeFaceCount({ kind: "boxes", boxes: [box] });
+    if (kept.length > 0 && faces + adds > allowed) break;
+    kept.push(box);
+    faces += adds;
+  }
+  return kept.length === 0 ? null : { kind: "boxes", boxes: kept };
+}
+
+/**
+ * What a block is drawn as at a distance, or `null` when it is drawn the same
+ * there as anywhere: anything within `LOD_FACE_BUDGET`.
+ */
+export function lodShapeFor(entry: PaletteEntry): BlockShape | null {
+  const build = shapeBuilder(baseName(entry));
+  const full = build(entry);
+  if (shapeFaceCount(full) <= LOD_FACE_BUDGET) return null;
+  const hand = LOD_SHAPES.get(build);
+  return hand !== undefined ? hand(entry) : straightenedLod(full);
+}
+
+/** Whether a block's stand-in is written by hand rather than straightened. */
+export function hasHandWrittenLod(entry: PaletteEntry): boolean {
+  return LOD_SHAPES.has(shapeBuilder(baseName(entry)));
+}
+
+/** A shape box's tilts, in the order they are applied. */
+function tiltsOf(part: ShapeBox): BoxRotation[] {
+  return [...(part.rotation ? [part.rotation] : []), ...(part.chain ?? [])];
+}
+
+/**
+ * How far a point lies outside a box, in the model's units: zero inside.
+ *
+ * The point is taken back into the box's own frame by undoing its tilts in
+ * reverse -- they are rigid, so the distance is the same in either frame --
+ * and measured against the box as it was written.
+ */
+function outsideBox(point: readonly [number, number, number], part: ShapeBox): number {
+  let local: [number, number, number] = [point[0], point[1], point[2]];
+  const tilts = tiltsOf(part);
+  for (let i = tilts.length - 1; i >= 0; i -= 1) {
+    local = tiltedPoint(local, { ...tilts[i], angle: -tilts[i].angle });
+  }
+  const [x0, y0, z0, x1, y1, z1] = part.box;
+  const dx = Math.max(x0 - local[0], 0, local[0] - x1);
+  const dy = Math.max(y0 - local[1], 0, local[1] - y1);
+  const dz = Math.max(z0 - local[2], 0, local[2] - z1);
+  return Math.hypot(dx, dy, dz);
+}
+
+/** How deep a point lies inside a box, in the model's units: zero outside or on it. */
+function insideBox(point: readonly [number, number, number], part: ShapeBox): number {
+  let local: [number, number, number] = [point[0], point[1], point[2]];
+  const tilts = tiltsOf(part);
+  for (let i = tilts.length - 1; i >= 0; i -= 1) {
+    local = tiltedPoint(local, { ...tilts[i], angle: -tilts[i].angle });
+  }
+  const [x0, y0, z0, x1, y1, z1] = part.box;
+  return Math.max(
+    0,
+    Math.min(local[0] - x0, x1 - local[0], local[1] - y0, y1 - local[1], local[2] - z0, z1 - local[2]),
+  );
+}
+
+/**
+ * Points on the surface of a shape that something could see: a grid on every
+ * face of every box, a unit or less apart, less the points buried in another
+ * box of the same shape -- the arm inside a stand-in's body box is drawn by
+ * nobody, and counting it would measure something nobody can see.
+ */
+function visibleSurface(boxes: readonly ShapeBox[]): [number, number, number][] {
+  const out: [number, number, number][] = [];
+  const steps = (length: number): number[] => {
+    const n = Math.max(1, Math.min(8, Math.ceil(length)));
+    return Array.from({ length: n + 1 }, (_unused, i) => (length * i) / n);
+  };
+  boxes.forEach((part, index) => {
+    const [x0, y0, z0, x1, y1, z1] = part.box;
+    const lo = [x0, y0, z0];
+    const hi = [x1, y1, z1];
+    const tilts = tiltsOf(part);
+    for (let axis = 0; axis < 3; axis += 1) {
+      const u = (axis + 1) % 3;
+      const v = (axis + 2) % 3;
+      for (const side of [lo[axis], hi[axis]]) {
+        for (const su of steps(hi[u] - lo[u])) {
+          for (const sv of steps(hi[v] - lo[v])) {
+            let point: [number, number, number] = [0, 0, 0];
+            point[axis] = side;
+            point[u] = lo[u] + su;
+            point[v] = lo[v] + sv;
+            for (const tilt of tilts) point = tiltedPoint(point, tilt);
+            const buried = boxes.some((other, at) => at !== index && insideBox(point, other) > 1e-6);
+            if (!buried) out.push(point);
+          }
+        }
+      }
+    }
+  });
+  return out;
+}
+
+/** The farthest any of `points` lies outside every box of a shape. */
+function farthestOutside(points: readonly [number, number, number][], boxes: readonly ShapeBox[]): number {
+  let worst = 0;
+  for (const point of points) {
+    let nearest = Infinity;
+    for (const part of boxes) {
+      const distance = outsideBox(point, part);
+      if (distance < nearest) nearest = distance;
+      if (nearest === 0) break;
+    }
+    if (nearest > worst) worst = nearest;
+  }
+  return worst;
+}
+
+const lodErrorCache = new Map<string, number>();
+
+/**
+ * How far a block's stand-in strays from the block, in blocks; zero for a
+ * block with none.
+ *
+ * The viewer shows a stand-in only where this, at the camera's distance, is
+ * smaller on screen than the quality setting, so it has to be measured rather
+ * than guessed: a guess too small is a switch somebody sees, and it would be
+ * too small exactly for the shapes that change most.
+ *
+ * A Hausdorff distance between the two as solids, sampled on what of their
+ * surfaces can be seen: the farthest the block reaches outside its stand-in
+ * -- an antenna it left out -- and the farthest the stand-in reaches outside
+ * the block -- the gap it filled between an arm and the body. Outside rather
+ * than from the surface, because a surface inside the other shape is hidden
+ * by it and is nobody's error.
+ */
+export function lodShapeError(entry: PaletteEntry): number {
+  const key = paletteEntryCacheKey(entry);
+  const known = lodErrorCache.get(key);
+  if (known !== undefined) return known;
+  const lod = lodShapeFor(entry);
+  const full = shapeFor(entry);
+  let error = 0;
+  if (lod !== null && lod.kind === "boxes" && full.kind === "boxes") {
+    const units = Math.max(
+      farthestOutside(visibleSurface(full.boxes), lod.boxes),
+      farthestOutside(visibleSurface(lod.boxes), full.boxes),
+    );
+    error = Math.round((units / 16) * 1e4) / 1e4;
+  }
+  lodErrorCache.set(key, error);
+  return error;
 }

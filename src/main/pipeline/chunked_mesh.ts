@@ -67,10 +67,22 @@
  * shipped was a correct one to the wrong question. See `voidDigest`.
  */
 
-import type { MeshBuffers, StructureData } from "./types.js";
+import type { BakedFace, MeshBuffers, StructureData } from "./types.js";
 import type { LightGrid } from "./lighting.js";
-import type { Shading } from "./mesher.js";
+import type { LodFaces, Shading } from "./mesher.js";
 import { buildMesh, culledFaces } from "./mesher.js";
+import {
+  buildRegionMeshes,
+  COARSE_ERROR,
+  coarseEntries,
+  REGION_CHUNKS,
+  solidEntries,
+  staleRegions,
+  type CoarseInputs,
+  type RegionMeshes,
+} from "./coarse_mesh.js";
+import { lodShapeFor } from "./block_shapes.js";
+import type { MeshLod } from "../../shared/ipc.js";
 import { signDigest, type SignText } from "./sign_text.js";
 import type { ModelBaker } from "./model_baker.js";
 import { paletteEntryCacheKey } from "./types.js";
@@ -103,6 +115,19 @@ export interface ChunkLayers {
   readonly solid: MeshBuffers;
   readonly filler: MeshBuffers;
   /**
+   * The chunk for the middle distance: `solid` with every block that has a
+   * stand-in drawn by it (`lodShapeFor`), or `null` when that would save too
+   * little to be worth a second copy of the chunk -- see `LOD1_WORTH` -- or
+   * when nobody asked for it, which `lod1Asked` tells apart.
+   */
+  readonly lod1: LodMesh | null;
+  /**
+   * Whether level 1 was asked for when this chunk was meshed. Only then does
+   * `lod1: null` mean "none worth having"; otherwise it means "not looked
+   * for", and turning level 1 on has to look.
+   */
+  readonly lod1Asked: boolean;
+  /**
    * The solid layer's box, computed once when the chunk is meshed.
    *
    * The fourth thing to ride with a chunk, after its voxels, its light and its
@@ -113,6 +138,12 @@ export interface ChunkLayers {
    * carries its box with it and the union is O(chunks).
    */
   readonly bounds: MeshBounds | null;
+}
+
+/** A level-of-detail mesh, and how far it strays from the full one, in blocks. */
+export interface LodMesh {
+  readonly buffers: MeshBuffers;
+  readonly error: number;
 }
 
 /** The box of one chunk's geometry, walked once, when it is built. */
@@ -192,6 +223,22 @@ export interface ChunkMeshCache {
   voidKey: string;
   /** Chunk key -> that chunk's geometry, in both layers. */
   chunks: Map<number, ChunkLayers>;
+  /**
+   * Region key -> its two coarse meshes, for the far distance; see
+   * `coarse_mesh.ts`. Keyed like the chunks, on region coordinates.
+   */
+  regions: Map<number, RegionMeshes>;
+  /**
+   * The regions still to be built, or rebuilt because something in them
+   * changed. Never built by the call of an edit: the viewer shows the chunks
+   * there meanwhile, which is always right, and asks again once the edits
+   * stop. See `LodRequest.budgetMs`.
+   */
+  pendingRegions: Set<number>;
+  /** Chunks whose level 1 was turned on after they were meshed; see `lod1Asked`. */
+  pendingShapes: Set<number>;
+  /** Whether the regions were being kept when this was built. */
+  coarseKept: boolean;
 }
 
 export interface ChunkedMeshResult {
@@ -232,11 +279,67 @@ export interface ChunkedMeshResult {
    */
   voidPieces: MeshBuffers[];
   voidPieceKeys: number[];
+  /**
+   * The levels of detail, when `ChunkHint.lod` asked for them and the document
+   * is heavy enough to need them: `lod1` keyed by chunk, `lod2` and `lod3` by
+   * region. Empty meshes are left out, as chunks are.
+   */
+  lodPieces: LodPiece[];
+  /** Where the levels of detail stand; see `MeshLod`. */
+  lod: MeshLod;
   cache: ChunkMeshCache;
   /** How many chunks had to be re-meshed, and how many there are. */
   rebuilt: number;
   total: number;
+  /** How many regions' coarse meshes were rebuilt. */
+  rebuiltRegions: number;
 }
+
+/** One level-of-detail mesh and what it stands for. */
+export interface LodPiece {
+  readonly layer: "lod1" | "lod2" | "lod3";
+  /** A chunk key for `lod1`, a region key -- the same packing -- for the others. */
+  readonly key: number;
+  readonly buffers: MeshBuffers;
+  /** How far it strays from the full mesh, in blocks; see `ChunkGeometry.lodError`. */
+  readonly error: number;
+}
+
+/**
+ * Which levels of detail the window asked for, and how much time this call
+ * may spend on them.
+ *
+ * The window asks because only the window can draw them: a level sent to a
+ * viewer that cannot choose between levels is drawn on top of the full mesh,
+ * and that is exactly how this feature first reached the screen.
+ */
+export interface LodRequest {
+  /** Level 1, for chunks with complex blocks. Built with the chunk, cheaply. */
+  readonly shapes: boolean;
+  /** Levels 2 and 3, for regions. Built only from `budgetMs`. */
+  readonly coarse: boolean;
+  /**
+   * Only for a document whose full mesh has at least this many triangles, or
+   * `null` for any document. A small build is cheap to draw and has to look
+   * exactly as it is, so in `auto` it gets none.
+   */
+  readonly autoTriangles: number | null;
+  /**
+   * How long this call may spend building regions, in milliseconds. Zero is
+   * what an edit's own call passes -- placing a block must not wait for a
+   * region -- and `Infinity` builds every one, for the suites and the bench.
+   */
+  readonly budgetMs: number;
+}
+
+/**
+ * How much smaller a chunk's `lod1` has to be than the chunk to be kept.
+ *
+ * A chunk with one statue in a field of stone saves forty faces out of
+ * thousands, and a second copy of it would cost more memory and upload than
+ * the faces it saves; a field of statues saves two thirds.
+ */
+export const LOD1_WORTH = 0.8;
 
 /**
  * What a caller knows that the structure does not say.
@@ -265,6 +368,11 @@ export interface ChunkHint {
   key?: string;
   /** Recorded on the cache for the caller; see `ChunkMeshCache.epoch`. */
   epoch?: number | null;
+  /**
+   * The levels of detail to build beside the chunks, or `null` for none.
+   * Changing it re-meshes no chunk: it is not part of `key`.
+   */
+  lod?: LodRequest | null;
 }
 
 /** The bias that lets a chunk coordinate be negative inside a packed key. */
@@ -479,6 +587,61 @@ function voidDigest(struct: StructureData, voidIndices: ReadonlySet<number> | nu
     .join(",");
 }
 
+/**
+ * A chunk's faces for the middle distance: the solid faces with the runs that
+ * belong to blocks with a stand-in left out, and the stand-ins in their place
+ * -- or `null` when the stand-ins save too little to be worth a second copy of
+ * the chunk (`LOD1_WORTH`), which includes a chunk with none.
+ */
+function middleDistanceFaces(
+  faces: readonly BakedFace[],
+  lod: LodFaces,
+  solidCount: number,
+): BakedFace[] | null {
+  if (lod.skip.length === 0) return null;
+  let skipped = 0;
+  for (let i = 0; i < lod.skip.length; i += 2) skipped += lod.skip[i + 1] - lod.skip[i];
+  if (solidCount - skipped + lod.simple.length > LOD1_WORTH * solidCount) return null;
+  const out: BakedFace[] = [];
+  let run = 0;
+  for (let i = 0; i < faces.length; i += 1) {
+    while (run < lod.skip.length && i >= lod.skip[run + 1]) run += 2;
+    if (run < lod.skip.length && i >= lod.skip[run]) continue;
+    if (faces[i].voidFill === true) continue;
+    out.push(faces[i]);
+  }
+  for (const face of lod.simple) out.push(face);
+  return out;
+}
+
+/** Whether a chunk holds any cell whose palette index `wanted` marks. */
+function chunkHolds(
+  struct: StructureData,
+  chunk: readonly [number, number, number],
+  frame: readonly [number, number, number],
+  wanted: readonly boolean[],
+): boolean {
+  if (!wanted.some(Boolean)) return false;
+  const width = struct.bounds.maxX - struct.bounds.minX + 1;
+  const height = struct.bounds.maxY - struct.bounds.minY + 1;
+  const length = struct.bounds.maxZ - struct.bounds.minZ + 1;
+  const x0 = Math.max(0, chunk[0] * CHUNK_SIZE + frame[0]);
+  const y0 = Math.max(0, chunk[1] * CHUNK_SIZE + frame[1]);
+  const z0 = Math.max(0, chunk[2] * CHUNK_SIZE + frame[2]);
+  const x1 = Math.min(width, chunk[0] * CHUNK_SIZE + CHUNK_SIZE + frame[0]);
+  const y1 = Math.min(height, chunk[1] * CHUNK_SIZE + CHUNK_SIZE + frame[1]);
+  const z1 = Math.min(length, chunk[2] * CHUNK_SIZE + CHUNK_SIZE + frame[2]);
+  for (let x = x0; x < x1; x += 1) {
+    for (let y = y0; y < y1; y += 1) {
+      const row = x * height * length + y * length;
+      for (let z = z0; z < z1; z += 1) {
+        if (wanted[struct.voxels[row + z]] === true) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function createChunkMeshCache(): ChunkMeshCache {
   return {
     width: -1,
@@ -495,6 +658,10 @@ export function createChunkMeshCache(): ChunkMeshCache {
     banners: new Map(),
     voidKey: "",
     chunks: new Map(),
+    regions: new Map(),
+    pendingRegions: new Set(),
+    pendingShapes: new Set(),
+    coarseKept: false,
   };
 }
 
@@ -554,6 +721,8 @@ export async function buildChunkedMesh(
 
   const voidKey = voidDigest(struct, voidIndices);
   const key = hint?.key ?? "";
+  const request = hint?.lod ?? null;
+  const askShapes = request !== null && request.shapes;
   const sameInputs =
     cache.width >= 0 &&
     cache.atlasVersion === atlasVersion &&
@@ -788,8 +957,10 @@ export async function buildChunkedMesh(
     }
   }
 
-  for (const dirtyKey of dirty) {
+  /** Meshes one chunk, both layers, and level 1 when asked for. */
+  const meshChunk = async (dirtyKey: number, withShapes: boolean): Promise<ChunkLayers> => {
     const [cx, cy, cz] = chunkCoords(dirtyKey);
+    const lod: LodFaces | undefined = withShapes ? { skip: [], simple: [], error: 0 } : undefined;
     // The chunk's cells, back in document coordinates for the culling pass.
     const faces = await culledFaces(
       struct,
@@ -806,6 +977,7 @@ export async function buildChunkedMesh(
       signs ?? undefined,
       voidIndices ?? undefined,
       banners ?? undefined,
+      lod,
     );
     /*
      * Partitioned here rather than meshed twice.
@@ -820,13 +992,31 @@ export async function buildChunkedMesh(
     // Positions in content coordinates, so a resize that moves the content
     // leaves this geometry right; the viewport adds `frame` back.
     const solid = buildMesh(solidFaces, atlasUv, (name) => baker.isTextureTranslucent(name), frame);
-    const layers: ChunkLayers = {
+    const lod1Faces = lod === undefined ? null : middleDistanceFaces(faces, lod, solidFaces.length);
+    return {
       solid,
       filler: buildMesh(voidFaces, atlasUv, (name) => baker.isTextureTranslucent(name), frame),
+      lod1:
+        lod1Faces === null || lod === undefined
+          ? null
+          : {
+              buffers: buildMesh(lod1Faces, atlasUv, (name) => baker.isTextureTranslucent(name), frame),
+              error: lod.error,
+            },
+      lod1Asked: withShapes,
       // Walked here, where the chunk is already being built, so a chunk carried
       // forward by reference carries its box with it.
       bounds: boundsOf(solid),
     };
+  };
+
+  /*
+   * The chunks an edit touched, in full and nothing else. Their level 1 is
+   * queued below rather than built here: on a field of statues it is half as
+   * many faces again, and placing a block must cost what the block costs.
+   */
+  for (const dirtyKey of dirty) {
+    const layers = await meshChunk(dirtyKey, false);
     if (layers.solid.indices.length === 0 && layers.filler.indices.length === 0) {
       // An all-air chunk holds nothing; dropping it keeps the concatenation
       // short rather than walking thousands of empty entries.
@@ -837,6 +1027,125 @@ export async function buildChunkedMesh(
   }
 
   lap("mesh chunks");
+
+  /*
+   * Whether the document needs levels of detail at all: in `auto`, only when
+   * its full mesh reaches the threshold. Counted over the chunks rather than
+   * guessed from the volume, because the cost is in triangles -- a field of
+   * statues is a small box and millions of them, a flat world a huge box and
+   * few.
+   */
+  let triangles = 0;
+  for (const layers of chunks.values()) triangles += layers.solid.indices.length / 3;
+  const wanted =
+    request !== null && (request.autoTriangles === null || triangles >= request.autoTriangles);
+
+  /*
+   * Level 1 of every chunk meshed without it: the ones an edit just touched,
+   * and all of them the first time it is asked for. Those that hold no block
+   * with a stand-in are settled by looking; the rest are queued and re-meshed
+   * from the budget below, one at a time, keeping the full layers they had.
+   * Meanwhile the viewer has no level 1 for them and draws them in full,
+   * which is always right.
+   */
+  const pendingShapes = new Set<number>();
+  if (wanted && askShapes) {
+    let standIn: boolean[] | null = null;
+    for (const [at, layers] of chunks) {
+      if (layers.lod1Asked) continue;
+      if (cache.pendingShapes.has(at)) {
+        pendingShapes.add(at);
+        continue;
+      }
+      standIn ??= struct.palette.map((entry) => lodShapeFor(entry) !== null);
+      if (chunkHolds(struct, chunkCoords(at), frame, standIn)) pendingShapes.add(at);
+      else chunks.set(at, { ...layers, lod1Asked: true });
+    }
+  }
+
+  /*
+   * The regions, for the far distance. Every one a re-meshed chunk can have
+   * changed -- its own and the one across any region face it lies on, see
+   * `staleRegions` -- is taken down now and queued, so the viewer shows the
+   * chunks there until it is built again. Never built by an edit's own call.
+   */
+  const keepCoarse = wanted && request.coarse;
+  const regions = new Map<number, RegionMeshes>();
+  const pendingRegions = new Set<number>();
+  let rebuiltRegions = 0;
+  if (keepCoarse) {
+    const occupied = new Set<number>();
+    for (const at of chunks.keys()) {
+      const [cx, cy, cz] = chunkCoords(at);
+      occupied.add(
+        chunkKey(Math.floor(cx / REGION_CHUNKS), Math.floor(cy / REGION_CHUNKS), Math.floor(cz / REGION_CHUNKS)),
+      );
+    }
+    if (mode === "all" || !cache.coarseKept) {
+      for (const at of occupied) pendingRegions.add(at);
+    } else {
+      /*
+       * A stale region keeps the meshes it had until the rebuilt ones land.
+       * A coarse level is shown only where a cell is a pixel or two across,
+       * so an edit inside it is below a pixel there -- and taking the old
+       * mesh down would drop the region to its full chunks and back again,
+       * two changes on screen for one that cannot be seen. A full rebuild
+       * (`mode === "all"`) is different: the atlas or the lighting moved, and
+       * the old meshes are wrong, so they go.
+       */
+      const stale = staleRegions([...dirty].map((at) => chunkCoords(at)));
+      for (const [at, meshes] of cache.regions) {
+        if (occupied.has(at)) regions.set(at, meshes);
+      }
+      for (const at of cache.pendingRegions) if (occupied.has(at)) pendingRegions.add(at);
+      for (const name of stale) {
+        const [rx, ry, rz] = name.split(",").map(Number);
+        const at = chunkKey(rx, ry, rz);
+        if (occupied.has(at)) pendingRegions.add(at);
+      }
+    }
+  }
+
+  /*
+   * The budget: what this call may spend on the queues. A deadline checked
+   * before each piece, so one piece may run past it -- a region is ~10 ms --
+   * and nothing else does.
+   */
+  const deadline = performance.now() + (request?.budgetMs ?? 0);
+  // The regions first: ~10 ms each, and each one takes a whole region's
+  // sixty-four draw calls down to one.
+  if (keepCoarse && pendingRegions.size > 0 && performance.now() < deadline) {
+    let inputs: CoarseInputs | null = null;
+    for (const at of [...pendingRegions].sort((a, b) => a - b)) {
+      if (performance.now() >= deadline) break;
+      inputs ??= {
+        struct,
+        entries: await coarseEntries(struct, baker, voidIndices),
+        atlasUv,
+        light: lighting,
+        solid: solidEntries(struct),
+        frame,
+        occlusion: shading !== null && shading.occlusion,
+      };
+      const built = buildRegionMeshes(inputs, chunkCoords(at));
+      pendingRegions.delete(at);
+      rebuiltRegions += 1;
+      // Replacing whatever stood in for it meanwhile, or taking it down.
+      if (built.lod2.indices.length > 0 || built.lod3.indices.length > 0) regions.set(at, built);
+      else regions.delete(at);
+    }
+  }
+  for (const at of [...pendingShapes].sort((a, b) => a - b)) {
+    if (performance.now() >= deadline) break;
+    const layers = chunks.get(at);
+    pendingShapes.delete(at);
+    if (layers === undefined) continue;
+    const remeshed = await meshChunk(at, true);
+    // The full layers it had, not the new ones: they are the same bytes, and
+    // new arrays would be sent again for nothing.
+    chunks.set(at, { ...layers, lod1: remeshed.lod1, lod1Asked: true });
+  }
+  lap("levels of detail");
   // Concatenated in a fixed chunk order so the same document always produces
   // the same bytes, however it was reached — which is what makes an
   // incremental build comparable to a rebuilt-from-scratch one.
@@ -844,6 +1153,7 @@ export async function buildChunkedMesh(
   const orderedKeys: number[] = [];
   const orderedVoid: MeshBuffers[] = [];
   const orderedVoidKeys: number[] = [];
+  const lodPieces: LodPiece[] = [];
   for (let cz = range.from[2]; cz <= range.to[2]; cz += 1) {
     for (let cy = range.from[1]; cy <= range.to[1]; cy += 1) {
       for (let cx = range.from[0]; cx <= range.to[0]; cx += 1) {
@@ -858,9 +1168,33 @@ export async function buildChunkedMesh(
           orderedVoid.push(piece.filler);
           orderedVoidKeys.push(at);
         }
+        if (wanted && askShapes && piece.lod1 !== null && piece.lod1.buffers.indices.length > 0) {
+          lodPieces.push({ layer: "lod1", key: at, buffers: piece.lod1.buffers, error: piece.lod1.error });
+        }
       }
     }
   }
+  // The regions in key order, which is a fixed order for the same reason the
+  // chunks are walked in one: the same document, the same bytes.
+  for (const [at, meshes] of [...regions].sort((a, b) => a[0] - b[0])) {
+    if (meshes.lod2.indices.length > 0) {
+      lodPieces.push({ layer: "lod2", key: at, buffers: meshes.lod2, error: COARSE_ERROR.lod2 });
+    }
+    if (meshes.lod3.indices.length > 0) {
+      lodPieces.push({ layer: "lod3", key: at, buffers: meshes.lod3, error: COARSE_ERROR.lod3 });
+    }
+  }
+  const lod: MeshLod = {
+    state:
+      request === null
+        ? "off"
+        : !wanted
+          ? "below"
+          : pendingRegions.size > 0 || pendingShapes.size > 0
+            ? "pending"
+            : "ready",
+    triangles,
+  };
 
   /*
    * The union, over chunks rather than over vertices.
@@ -888,6 +1222,8 @@ export async function buildChunkedMesh(
     pieceKeys: orderedKeys,
     voidPieces: orderedVoid,
     voidPieceKeys: orderedVoidKeys,
+    lodPieces,
+    lod,
     cache: {
       width,
       height,
@@ -905,8 +1241,13 @@ export async function buildChunkedMesh(
       banners: painted,
       voidKey,
       chunks,
+      regions,
+      pendingRegions,
+      pendingShapes,
+      coarseKept: keepCoarse,
     },
     rebuilt: dirty.size,
+    rebuiltRegions,
     total:
       (range.to[0] - range.from[0] + 1) *
       (range.to[1] - range.from[1] + 1) *

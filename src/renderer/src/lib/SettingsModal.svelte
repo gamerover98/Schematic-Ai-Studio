@@ -26,6 +26,9 @@
     FPS_CAPS,
     GPU_PREFERENCES,
     LANGUAGES,
+    LOD_AUTO_TRIANGLES,
+    LOD_MODES,
+    LOD_PIXELS,
     MCP_PORT,
     PREVIEW_SETTING_RANGES,
     SHADER_MODES,
@@ -33,7 +36,9 @@
     THEMES,
     effectiveIncludeDevBuilds,
     gpuPreference,
+    lodSettings,
     type GpuPreference,
+    type LodMode,
     type KeyStorageStatus,
     type Language,
     type PreviewSettings,
@@ -47,7 +52,7 @@
   import { fpsCap } from "./shader_modes.js";
   import { stutterReport } from "./frame_profiler.js";
   import { t, tn } from "./i18n.svelte.js";
-  import type { GpuStatus, McpActivity, McpStatus, UpdateStatus } from "../../../shared/ipc.js";
+  import type { GpuStatus, McpActivity, McpStatus, MeshLod, UpdateStatus } from "../../../shared/ipc.js";
   import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "./gpu_choice.js";
   import { dotColor, dotFor, maskToken } from "./mcp_status.js";
 import {
@@ -63,6 +68,7 @@ import {
     | "sky"
     | "viewport"
     | "quality"
+    | "lod"
     | "textures"
     | "providers"
     | "mcp"
@@ -112,6 +118,12 @@ import {
      * collision `DocumentPanel`'s `doc` prop exists to avoid.
      */
     startOn: Category | null;
+    /**
+     * Where the open schematic's levels of detail stand, from main, or `null`
+     * with nothing open. The settings are what was asked for; this says what
+     * came of it -- which is the answer to "why does this build have none".
+     */
+    lodStatus: MeshLod | null;
     mcpStatus: McpStatus | null;
     mcpActivity: readonly McpActivity[];
     onmcpenabled: (enabled: boolean) => void;
@@ -151,6 +163,7 @@ import {
     onsavekey,
     onclearkey,
     startOn,
+    lodStatus,
     mcpStatus,
     mcpActivity,
     onmcpenabled,
@@ -270,6 +283,40 @@ import {
       settings.preview.renderScale,
     ) / 1e6,
   );
+
+  /** The levels-of-detail settings, read the way main and the viewer read them. */
+  const lod = $derived(lodSettings(settings.preview));
+
+  function lodModeLabel(mode: LodMode): string {
+    if (mode === "off") return t("preview.lodMode.off");
+    if (mode === "auto") return t("preview.lodMode.auto");
+    return t("preview.lodMode.always");
+  }
+
+  function lodPixelsLabel(pixels: number): string {
+    if (pixels === 1) return t("preview.lodPixels.1");
+    if (pixels === 2) return t("preview.lodPixels.2");
+    if (pixels === 4) return t("preview.lodPixels.4");
+    return t("preview.lodPixels.8");
+  }
+
+  /** A triangle count as people say it: 42 k, 1.5 M. Truncated, never rounded up. */
+  function triangleCount(count: number): string {
+    if (count >= 1e6) return `${Math.floor(count / 1e5) / 10} M`;
+    if (count >= 1e3) return `${Math.floor(count / 1e3)} k`;
+    return String(count);
+  }
+
+  const lodStatusLine = $derived.by(() => {
+    if (lodStatus === null) return t("preview.lodStatus.none");
+    const triangles = triangleCount(lodStatus.triangles);
+    if (lodStatus.state === "off") return t("preview.lodStatus.off", { triangles });
+    if (lodStatus.state === "below") {
+      return t("preview.lodStatus.below", { triangles, threshold: triangleCount(lod.autoTriangles) });
+    }
+    if (lodStatus.state === "pending") return t("preview.lodStatus.pending", { triangles });
+    return t("preview.lodStatus.ready", { triangles });
+  });
 
   async function copyStutterReport(): Promise<void> {
     const report = stutterReport();
@@ -434,6 +481,7 @@ import {
     { id: "sky", key: "settings.sky" },
     { id: "viewport", key: "settings.viewport" },
     { id: "quality", key: "settings.quality" },
+    { id: "lod", key: "settings.lod" },
     { id: "textures", key: "settings.textures" },
     { id: "providers", key: "settings.providers" },
     { id: "mcp", key: "settings.mcp" },
@@ -1032,6 +1080,94 @@ import {
             {/if}
           </div>
           <p class="hint">{t("settings.qualityHint")}</p>
+        {:else if category === "lod"}
+          <!--
+            The levels of detail. Each control says what it does; the line at
+            the bottom says what the open schematic is doing with them, which
+            is the answer to why a small build has none.
+          -->
+          <div class="field">
+            <label for="lod-mode">{t("preview.lodMode")}</label>
+            <select
+              id="lod-mode"
+              value={lod.mode}
+              onchange={(event) => onpreviewchange({ lodMode: event.currentTarget.value as LodMode })}
+            >
+              {#each LOD_MODES as mode (mode)}
+                <option value={mode}>{lodModeLabel(mode)}</option>
+              {/each}
+            </select>
+            <p class="hint">{t("preview.lodModeHint")}</p>
+          </div>
+          <div class="field">
+            <label for="lod-pixels">{t("preview.lodPixels")}</label>
+            <select
+              id="lod-pixels"
+              value={String(lod.pixels)}
+              disabled={lod.mode === "off"}
+              onchange={(event) => onpreviewchange({ lodPixels: Number(event.currentTarget.value) })}
+            >
+              {#each LOD_PIXELS as pixels (pixels)}
+                <option value={String(pixels)}>{lodPixelsLabel(pixels)}</option>
+              {/each}
+            </select>
+            <p class="hint">{t("preview.lodPixelsHint")}</p>
+          </div>
+          <!--
+            Disabled outside Automatic rather than hidden, the impossible
+            versions' rule: a control that vanishes is one nobody learns exists.
+          -->
+          <div class="field">
+            <label for="lod-auto">
+              {t("preview.lodAutoTriangles", { value: triangleCount(lod.autoTriangles) })}
+            </label>
+            <input
+              id="lod-auto"
+              type="range"
+              min={LOD_AUTO_TRIANGLES.min}
+              max={LOD_AUTO_TRIANGLES.max}
+              step={LOD_AUTO_TRIANGLES.step}
+              value={lod.autoTriangles}
+              disabled={lod.mode !== "auto"}
+              oninput={(event) => onpreviewchange({ lodAutoTriangles: num(event) })}
+            />
+            <p class="hint">{t("preview.lodAutoTrianglesHint")}</p>
+          </div>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={lod.shapes}
+              disabled={lod.mode === "off"}
+              onchange={(event) => onpreviewchange({ lodShapes: event.currentTarget.checked })}
+            />
+            {t("preview.lodShapes")}
+          </label>
+          <p class="hint">{t("preview.lodShapesHint")}</p>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={lod.coarse}
+              disabled={lod.mode === "off"}
+              onchange={(event) => onpreviewchange({ lodCoarse: event.currentTarget.checked })}
+            />
+            {t("preview.lodCoarse")}
+          </label>
+          <p class="hint">{t("preview.lodCoarseHint")}</p>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={lod.tint}
+              disabled={lod.mode === "off"}
+              onchange={(event) => onpreviewchange({ lodTint: event.currentTarget.checked })}
+            />
+            {t("preview.lodTint")}
+          </label>
+          <p class="hint lod-legend">
+            <span class="lod-swatch lod-swatch-1"></span>{t("preview.lodTint.shapes")}
+            <span class="lod-swatch lod-swatch-2"></span>{t("preview.lodTint.coarse2")}
+            <span class="lod-swatch lod-swatch-3"></span>{t("preview.lodTint.coarse3")}
+          </p>
+          <p class="hint lod-status">{lodStatusLine}</p>
         {:else if category === "textures"}
           <p class="hint rebuilds">{t("settings.rebuildsHint")}</p>
 
@@ -1589,6 +1725,40 @@ import {
 
   .hint.warn {
     color: var(--warn);
+  }
+
+  /* The diagnostic tints' legend: the colours the viewport mixes each level
+     towards (`LOD_TINT` in `Viewer.svelte`). Not theme colours: they name
+     what the viewport draws, whatever the window looks like. */
+  .lod-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
+  }
+
+  .lod-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    border: 1px solid var(--border);
+  }
+
+  .lod-swatch-1 {
+    background: rgb(38, 255, 51);
+  }
+
+  .lod-swatch-2 {
+    background: rgb(255, 230, 26);
+  }
+
+  .lod-swatch-3 {
+    background: rgb(255, 31, 20);
+  }
+
+  .lod-status {
+    margin-top: 12px;
   }
 
   .activity li.failed .tool {

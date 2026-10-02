@@ -149,6 +149,17 @@ export interface DocumentSession {
    */
   mesh: {
     key: string;
+    /**
+     * The levels of detail it was built with, apart from `key`: changing them
+     * re-meshes no chunk, so they must not be part of what decides one.
+     */
+    lodKey: string;
+    /**
+     * Which build of `key` this is. A queued level of detail lands as a new
+     * payload for the same revision, and the token the renderer hands back has
+     * to say which of the two it holds.
+     */
+    serial: number;
     payload: MeshPayload;
     center: [number, number, number];
     size: [number, number, number];
@@ -2695,6 +2706,17 @@ export function editBlockEntityValue(
 // ---------------------------------------------------------------------------
 
 /**
+ * How long one request may spend building queued levels of detail, in
+ * milliseconds. A slice rather than the lot, because main is one thread and
+ * an edit that arrives meanwhile waits for it: a region is ~10 ms, so this is
+ * a few regions, and nothing waits for longer than one of these.
+ */
+export const LOD_SLICE_MS = 40;
+
+/** Counts builds, for `DocumentSession.mesh.serial`. */
+let meshSerial = 0;
+
+/**
  * The GLB for the current state, rebuilt only when the document has moved on.
  *
  * `doc.revision` is exactly the right key: monotonic, and bumped by every
@@ -2736,8 +2758,18 @@ export async function documentMesh(
     // no revision, so the same stale mesh would come back after changing it.
     options.voidBlock ?? "",
   ].join("|");
-
-  const cached = session.mesh !== null && session.mesh.key === key;
+  /*
+   * The levels of detail are geometry too, but not the chunks': asking for
+   * them, or no longer, changes what is built beside the chunks and re-meshes
+   * none of them. So they are compared apart, and a payload with levels still
+   * queued is never the cached answer -- asking again is how they get built.
+   */
+  const lodKey = options.lod
+    ? `${options.lod.shapes ? "shapes" : ""},${options.lod.coarse ? "coarse" : ""},${options.lod.autoTriangles ?? "always"}`
+    : "off";
+  const same = session.mesh !== null && session.mesh.key === key;
+  const cached =
+    same && session.mesh!.lodKey === lodKey && session.mesh!.payload.lod.state !== "pending";
   let timings: Record<string, number> = {};
   if (!cached) {
     /*
@@ -2747,20 +2779,30 @@ export async function documentMesh(
      */
     const from = session.meshCache;
     session.meshCache = undefined;
-    const built = await buildDocumentPreview(session.doc, options, from);
+    const built = await buildDocumentPreview(
+      session.doc,
+      // An edit's own build spends nothing on queued levels; asking again with
+      // nothing changed -- which is what the window does while some are
+      // queued -- spends a slice. See `LodRequest.budgetMs`.
+      { ...options, lodBudgetMs: same ? LOD_SLICE_MS : 0 },
+      from,
+    );
     timings = built.timings;
     session.meshCache = built.meshCache;
+    meshSerial += 1;
     session.mesh = {
       key,
+      lodKey,
+      serial: meshSerial,
       payload: built.mesh,
       center: built.center,
       size: built.size,
       atlas: built.atlas,
     };
   }
-  const { payload, center, size, atlas } = session.mesh!;
+  const { payload, center, size, atlas, serial } = session.mesh!;
   const shipAt = performance.now();
-  const mesh = shipMesh(session, key, payload, held, atlas);
+  const mesh = shipMesh(session, `${key}#${serial}`, payload, held, atlas);
   timings.ship = performance.now() - shipAt;
   return { mesh, center, size, cached, timings };
 }
@@ -2868,6 +2910,7 @@ function shipMesh(
     atlasLayout: source.layout,
     atlasPatch: patch,
     frame: payload.frame,
+    lod: payload.lod,
   };
 }
 
