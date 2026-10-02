@@ -953,7 +953,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * The block travels either way, because the fall-through half of the verb
      * is a placement and needs it.
      */
-    await runDocument(label, () =>
+    await queueBuild(label, () =>
       api().applyEdit({
         kind: action === "use" ? "use" : "setBlock",
         x: cell.x,
@@ -967,6 +967,53 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         ...(facing.against === null ? {} : { against: facing.against }),
       }),
     );
+  }
+
+  /**
+   * Hand placement's own road: queued, and never waiting for the picture.
+   *
+   * It went through `runDocument` like every other edit, which holds `busy`
+   * from the edit until the new mesh has arrived -- and `onBuild` returns at
+   * once while `busy` is set. So in creative mode every click that landed
+   * during that round trip was dropped: build quickly and a third of the
+   * blocks were simply not placed, which reads as the game stuttering and
+   * then ignoring you.
+   *
+   * Here a click waits only for the clicks before it, in order, and the edit
+   * is all it waits for: the state comes back, the redraw is asked for and not
+   * awaited -- `refreshDocument` already folds a burst of requests into one --
+   * and the next click goes. A click aimed at a surface the screen does not
+   * show yet is answered by main as any other click on a cell it cannot use,
+   * which is better than not being heard.
+   */
+  let buildQueue: Promise<void> = Promise.resolve();
+
+  function queueBuild(doing: string, call: () => Promise<EditResponse>): Promise<void> {
+    buildQueue = buildQueue.then(() => applyBuild(doing, call));
+    return buildQueue;
+  }
+
+  async function applyBuild(doing: string, call: () => Promise<EditResponse>): Promise<void> {
+    try {
+      const response = await call();
+      if (!response.ok) {
+        status = { tone: "warn", text: response.message };
+        return;
+      }
+      docState = response.state;
+      // Before anything reads a cell, as in `runDocument`.
+      followShift(response.shift);
+      if (response.notes !== undefined && response.notes !== "") {
+        status = { tone: "warn", text: response.notes };
+      }
+      void refreshDocument().catch((err: unknown) => failed(err, doing));
+      if (inspectedAt) {
+        const at = inspectedAt;
+        void inspectBlock(at.x, at.y, at.z).catch(() => undefined);
+      }
+    } catch (err) {
+      failed(err, doing);
+    }
   }
 
   /**
@@ -2724,6 +2771,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   let meshToken = $state<string | null>(null);
   let heldAtlas = $state<number | null>(null);
+  /** Which packing of the atlas `heldAtlas` is a version of; see `MeshAtlas.layout`. */
+  let heldAtlasLayout = $state<number | null>(null);
 
   /**
    * Redraw from main, coalesced: one request in flight and at most one more
@@ -2789,6 +2838,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         : selectionMaterials,
   );
 
+  /** Main's step timings to a tenth of a millisecond, for a readable report. */
+  function roundTimings(timings: Record<string, number>): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [step, ms] of Object.entries(timings)) out[step] = Math.round(ms * 10) / 10;
+    return out;
+  }
+
   async function fetchDocumentMesh(): Promise<void> {
     if (docState === null) {
       mesh = null;
@@ -2801,13 +2857,23 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       settings: forIpc(settings.preview),
       haveMesh: meshToken,
       haveAtlas: heldAtlas,
+      haveAtlasLayout: heldAtlasLayout,
     });
     // How long main took to answer. A slow answer only delays the picture --
     // main is another process -- so the report has to tell it apart from a
     // stall in this one.
     if (diagnosing()) {
       const at = performance.now();
-      recordEvent({ name: "mesh answered by main", at, ms: at - askedAt, detail: { ok: response.ok } });
+      recordEvent({
+        name: "mesh answered by main",
+        at,
+        ms: at - askedAt,
+        detail: {
+          ok: response.ok,
+          // Main's own steps: what of the wait was work, and which work.
+          ...(response.ok && response.timings ? { main: roundTimings(response.timings) } : {}),
+        },
+      });
     }
     if (!response.ok) {
       /*
@@ -2834,6 +2900,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     bounds = { center: response.center, size: response.size };
     meshToken = response.mesh.token;
     heldAtlas = response.mesh.atlasVersion;
+    heldAtlasLayout = response.mesh.atlasLayout;
   }
 
   /**

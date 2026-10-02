@@ -175,6 +175,7 @@ let scene: THREE.Scene | undefined;
 let camera: THREE.OrthographicCamera | undefined;
 let atlasTexture: THREE.DataTexture | undefined;
 let atlasVersion: number | null = null;
+let atlasLayout: number | null = null;
 
 /**
  * The tail of the request chain.
@@ -214,8 +215,8 @@ function ensureRenderer(): void {
   // No lights: the material is unlit and the shading is in the geometry.
 }
 
-function adoptAtlas(atlas: MeshAtlas | null, nextVersion: number): void {
-  if (atlas === null || atlasVersion === nextVersion) return;
+function adoptAtlas(atlas: MeshAtlas | null, nextVersion: number, nextLayout: number): void {
+  if (atlas === null || (atlasVersion === nextVersion && atlasLayout === nextLayout)) return;
   atlasTexture?.dispose();
   atlasTexture = new THREE.DataTexture(
     new Uint8Array(atlas.pixels),
@@ -238,13 +239,22 @@ function adoptAtlas(atlas: MeshAtlas | null, nextVersion: number): void {
   // the first few icons of a batch rendered before the upload completed.
   gl?.initTexture(atlasTexture);
 
-  const replacing = atlasVersion !== null;
+  /*
+   * A newer version of the same layout only *added* tiles: every icon already
+   * drawn addresses a tile that is where it was, so they all stay. Only a new
+   * layout moves UVs, and then everything drawn is wrong and is asked for
+   * again -- which used to happen whenever a document so much as lit a
+   * furnace, and was nine hundred icons re-meshed for one new texture.
+   */
+  const replacing = atlasLayout !== null && atlasLayout !== nextLayout;
   atlasVersion = nextVersion;
+  atlasLayout = nextLayout;
+  if (!replacing) return;
   // Anything drawn against the old atlas is now wrong.
   painted = new Map();
   requested = new Set();
   // ...and has to be asked for again by whoever was showing it.
-  if (replacing) generation += 1;
+  generation += 1;
 }
 
 /** Shade every vertex by the way its face points, as the game does. */
@@ -308,7 +318,7 @@ export function requestBlockIcons(blocks: readonly string[]): void {
   queue = queue.then(async () => {
     let response;
     try {
-      response = await api().getBlockIcons({ blocks: wanted, atlasVersion });
+      response = await api().getBlockIcons({ blocks: wanted, atlasVersion, atlasLayout });
     } catch {
       for (const block of wanted) requested.delete(block);
       return;
@@ -322,7 +332,7 @@ export function requestBlockIcons(blocks: readonly string[]): void {
     }
 
     ensureRenderer();
-    adoptAtlas(response.atlas, response.atlasVersion);
+    adoptAtlas(response.atlas, response.atlasVersion, response.atlasLayout);
 
     /*
      * Painted in slices, yielding between them.

@@ -28,11 +28,35 @@
  *
  * ## What invalidates everything
  *
- * The dimensions changing (a resize renumbers every index), the atlas
- * changing (cached UVs address the old layout), and the void block changing
- * (`fillVoid` rewrites the palette under the same indices). The palette
- * *growing* does not: it is append-only, so an index cached earlier still
- * means the same block.
+ * The atlas changing (cached UVs address the old layout), the void block
+ * changing (`fillVoid` rewrites the palette under the same indices), and the
+ * caller's own `ChunkHint.key` changing. The palette *growing* does not: it is
+ * append-only, so an index cached earlier still means the same block.
+ *
+ * ## A resize does not, when the caller says where the content went
+ *
+ * It used to: a resize renumbers every index, so the cache threw everything
+ * away -- five seconds on a 256x96x256 terrain, and seventeen on a field of
+ * copper golem statues, for one block placed past the edge. That is the
+ * ordinary way of building in creative mode.
+ *
+ * Chunks are cut and meshed in **content** coordinates: the document's own
+ * minus `ChunkHint.frame`, the sum of every resize's shift. Content does not
+ * move when the box grows, on either side, so a chunk meshed before the growth
+ * is still right after it, and the viewport places the whole set at `frame`.
+ * What a resize does change is re-meshed: the chunks across the box's old and
+ * new faces, and whatever the overlap compares different. Without a hint the
+ * cache knows nothing about where the content went, and a resize meshes
+ * everything as it always did.
+ *
+ * ## Where the changed cells come from
+ *
+ * Observed, as above, unless the caller already knows: `ChunkHint.changed` is
+ * the list of cells whose block or light moved since the cache was built, and
+ * with it the full comparison is skipped. `preview.ts` builds it from the
+ * document's own record of writes (`takeVoxelChanges`) and the cells `relight`
+ * changed, both of which are exact. A list that is not exact is the one way to
+ * break this, which is why `null` -- compare everything -- is always allowed.
  *
  * That third one is the odd member and is worth reading twice, because it is
  * the only invalidator that is not a fact about the document. `fillVoid` hands
@@ -110,6 +134,17 @@ export interface ChunkMeshCache {
   width: number;
   height: number;
   length: number;
+  /**
+   * The content offset the chunks were meshed at: a document cell is its
+   * content cell plus this. See "A resize does not" above.
+   */
+  frame: readonly [number, number, number];
+  /** The caller's `ChunkHint.key` when the chunks were meshed. */
+  key: string;
+  /** The light the chunks were meshed with, for `relight` to start from. */
+  lightGrid: LightGrid | null;
+  /** The `VoxelChanges` epoch the caller took when it built this; see `takeVoxelChanges`. */
+  epoch: number | null;
   /** Bumped by the caller whenever the atlas is rebuilt; see the note above. */
   atlasVersion: number;
   /** The grid as it was when the cached chunks were built. */
@@ -203,17 +238,89 @@ export interface ChunkedMeshResult {
   total: number;
 }
 
-function chunkCounts(width: number, height: number, length: number): [number, number, number] {
-  return [
-    Math.ceil(width / CHUNK_SIZE),
-    Math.ceil(height / CHUNK_SIZE),
-    Math.ceil(length / CHUNK_SIZE),
-  ];
+/**
+ * What a caller knows that the structure does not say.
+ *
+ * Optional, and without it the cache behaves as it always did: everything
+ * observed, and a resize meshing everything.
+ */
+export interface ChunkHint {
+  /**
+   * Where the content sits in the grid: a document cell is its content cell
+   * plus this. `SchematicDocument.frame`.
+   */
+  frame: readonly [number, number, number];
+  /**
+   * The cells (flat indices in the current grid) whose block or light may
+   * have changed since `cache` was built, or `null` to compare everything.
+   *
+   * Only honoured when the grid has the same shape and frame as the cache's;
+   * a resize always compares.
+   */
+  changed: Iterable<number> | null;
+  /**
+   * Anything else the geometry depends on that the structure does not carry,
+   * such as whether markers are hidden. A different key meshes everything.
+   */
+  key?: string;
+  /** Recorded on the cache for the caller; see `ChunkMeshCache.epoch`. */
+  epoch?: number | null;
 }
 
-/** Chunk coordinates packed into one number, so the map can key on a primitive. */
-function chunkKey(cx: number, cy: number, cz: number, nx: number, ny: number): number {
-  return cx + nx * (cy + ny * cz);
+/** The bias that lets a chunk coordinate be negative inside a packed key. */
+const KEY_BIAS = 32768;
+const KEY_SPAN = 65536;
+
+/**
+ * Chunk coordinates packed into one number, so the maps can key on a
+ * primitive.
+ *
+ * Content coordinates can be negative -- the box grows below the origin and
+ * the content stays put -- so each axis is biased. Sixteen bits an axis is
+ * half a million blocks either way, and the whole key stays well inside a
+ * double's integers.
+ */
+export function chunkKey(cx: number, cy: number, cz: number): number {
+  return cx + KEY_BIAS + KEY_SPAN * (cy + KEY_BIAS + KEY_SPAN * (cz + KEY_BIAS));
+}
+
+export function chunkCoords(key: number): [number, number, number] {
+  const cx = (key % KEY_SPAN) - KEY_BIAS;
+  const rest = Math.floor(key / KEY_SPAN);
+  const cy = (rest % KEY_SPAN) - KEY_BIAS;
+  const cz = Math.floor(rest / KEY_SPAN) - KEY_BIAS;
+  return [cx, cy, cz];
+}
+
+/** The chunks a box of `size` cells covers, in content coordinates, at `frame`. */
+interface ChunkRange {
+  readonly from: readonly [number, number, number];
+  readonly to: readonly [number, number, number];
+}
+
+function chunkRange(
+  size: readonly [number, number, number],
+  frame: readonly [number, number, number],
+): ChunkRange {
+  return {
+    from: [0, 1, 2].map((axis) => Math.floor(-frame[axis] / CHUNK_SIZE)) as [number, number, number],
+    to: [0, 1, 2].map((axis) => Math.floor((size[axis] - 1 - frame[axis]) / CHUNK_SIZE)) as [
+      number,
+      number,
+      number,
+    ],
+  };
+}
+
+function inRange(range: ChunkRange, cx: number, cy: number, cz: number): boolean {
+  return (
+    cx >= range.from[0] &&
+    cx <= range.to[0] &&
+    cy >= range.from[1] &&
+    cy <= range.to[1] &&
+    cz >= range.from[2] &&
+    cz <= range.to[2]
+  );
 }
 
 function emptyBuffers(): MeshBuffers {
@@ -306,32 +413,41 @@ export function concatChunks(pieces: readonly MeshBuffers[]): MeshBuffers {
   return { positions, normals, uvs, indices, light, opaqueIndices: opaqueTotal };
 }
 
-/** The chunks a changed voxel invalidates: its own, and its face-neighbours'. */
+/**
+ * The chunks a changed voxel invalidates: every chunk within one cell of it.
+ *
+ * Its own, and its face-neighbours' -- a face is drawn or culled by the block
+ * across it -- and the diagonal ones too, which is the half that was missing.
+ * Occlusion and smooth lighting read the cells at a face's corners, which are
+ * diagonal to the cell the face is on, so a block placed on a chunk's edge
+ * changes the shading of faces in the chunk across that edge, a chunk that
+ * shares no face with it. Only the face-neighbours were marked, and those
+ * faces kept their old shading until something else touched their chunk.
+ * `tests/chunks.ts` compares light in every vertex, which is what saw it.
+ *
+ * `x/y/z` are document coordinates and `frame` turns them into content ones,
+ * which is what the chunks are cut in.
+ */
 function markDirty(
   dirty: Set<number>,
   x: number,
   y: number,
   z: number,
-  nx: number,
-  ny: number,
-  nz: number,
+  frame: readonly [number, number, number],
+  range: ChunkRange,
 ): void {
-  for (const [dx, dy, dz] of [
-    [0, 0, 0],
-    [1, 0, 0],
-    [-1, 0, 0],
-    [0, 1, 0],
-    [0, -1, 0],
-    [0, 0, 1],
-    [0, 0, -1],
-  ]) {
-    const cx = Math.floor((x + dx) / CHUNK_SIZE);
-    const cy = Math.floor((y + dy) / CHUNK_SIZE);
-    const cz = Math.floor((z + dz) / CHUNK_SIZE);
-    if (cx < 0 || cy < 0 || cz < 0 || cx >= nx || cy >= ny || cz >= nz) {
-      continue;
+  const cx0 = Math.floor((x - 1 - frame[0]) / CHUNK_SIZE);
+  const cx1 = Math.floor((x + 1 - frame[0]) / CHUNK_SIZE);
+  const cy0 = Math.floor((y - 1 - frame[1]) / CHUNK_SIZE);
+  const cy1 = Math.floor((y + 1 - frame[1]) / CHUNK_SIZE);
+  const cz0 = Math.floor((z - 1 - frame[2]) / CHUNK_SIZE);
+  const cz1 = Math.floor((z + 1 - frame[2]) / CHUNK_SIZE);
+  for (let cx = cx0; cx <= cx1; cx += 1) {
+    for (let cy = cy0; cy <= cy1; cy += 1) {
+      for (let cz = cz0; cz <= cz1; cz += 1) {
+        if (inRange(range, cx, cy, cz)) dirty.add(chunkKey(cx, cy, cz));
+      }
     }
-    dirty.add(chunkKey(cx, cy, cz, nx, ny));
   }
 }
 
@@ -368,6 +484,10 @@ export function createChunkMeshCache(): ChunkMeshCache {
     width: -1,
     height: -1,
     length: -1,
+    frame: [0, 0, 0],
+    key: "",
+    lightGrid: null,
+    epoch: null,
     atlasVersion: -1,
     voxels: new Int32Array(0),
     light: new Uint8Array(0),
@@ -413,45 +533,202 @@ export async function buildChunkedMesh(
   voidIndices: ReadonlySet<number> | null = null,
   /** The patterned banners' cloth keys, by flat index; see `culledFaces`. */
   banners: ReadonlyMap<number, string> | null = null,
+  /** Where the time went, by step, added to; see `DocumentPreviewResult.timings`. */
+  timings: Record<string, number> | null = null,
+  /** What the caller knows about what changed; see `ChunkHint`. */
+  hint: ChunkHint | null = null,
 ): Promise<ChunkedMeshResult> {
+  let at = performance.now();
+  const lap = (name: string): void => {
+    if (timings === null) return;
+    const now = performance.now();
+    timings[name] = (timings[name] ?? 0) + (now - at);
+    at = now;
+  };
   const width = struct.bounds.maxX - struct.bounds.minX + 1;
   const height = struct.bounds.maxY - struct.bounds.minY + 1;
   const length = struct.bounds.maxZ - struct.bounds.minZ + 1;
-  const [nx, ny, nz] = chunkCounts(width, height, length);
+  const frame = hint?.frame ?? ([0, 0, 0] as const);
+  const range = chunkRange([width, height, length], frame);
+  const plane = height * length;
 
-  const light = packLight(shading?.light ?? null, struct.voxels.length);
   const voidKey = voidDigest(struct, voidIndices);
-  const reusable =
+  const key = hint?.key ?? "";
+  const sameInputs =
+    cache.width >= 0 &&
+    cache.atlasVersion === atlasVersion &&
+    cache.voidKey === voidKey &&
+    cache.key === key;
+  const sameShape =
     cache.width === width &&
     cache.height === height &&
     cache.length === length &&
-    cache.atlasVersion === atlasVersion &&
-    cache.voidKey === voidKey &&
-    cache.voxels.length === struct.voxels.length &&
-    cache.light.length === light.length;
+    cache.frame[0] === frame[0] &&
+    cache.frame[1] === frame[1] &&
+    cache.frame[2] === frame[2] &&
+    cache.voxels.length === struct.voxels.length;
+  /*
+   * Four ways to find the dirty chunks, from cheapest to most thorough:
+   * - `listed`: the caller says which cells changed;
+   * - `diff`: same shape, compare every cell, as this always did;
+   * - `moved`: the box was resized and the caller said where the content went;
+   * - `all`: anything else, the first build included.
+   */
+  const mode: "listed" | "diff" | "moved" | "all" = !sameInputs
+    ? "all"
+    : sameShape
+      ? hint?.changed !== null && hint?.changed !== undefined
+        ? "listed"
+        : "diff"
+      : hint !== null
+        ? "moved"
+        : "all";
 
-  const dirty = new Set<number>();
-  if (!reusable) {
-    for (let cz = 0; cz < nz; cz += 1) {
-      for (let cy = 0; cy < ny; cy += 1) {
-        for (let cx = 0; cx < nx; cx += 1) {
-          dirty.add(chunkKey(cx, cy, cz, nx, ny));
-        }
+  const lighting = shading?.light ?? null;
+  const packedAt = (index: number): number =>
+    lighting === null ? 0 : (lighting.sky[index] << 4) | lighting.block[index];
+  /*
+   * A growth the caller can list: the box only got bigger, there is no void
+   * block (which would fill the new cells with geometry), and the caller says
+   * which cells changed, counting a new cell as changed wherever it is not
+   * plain air lit as though it were outside the box.
+   *
+   * That counting is the whole trick. To the mesher, a cell outside the grid
+   * and an air cell with no block light and full sky are the same neighbour:
+   * nothing to cull against, nothing to occlude, the same light to read. So
+   * the old snapshot is carried into the new grid with every new cell set to
+   * exactly that, and the listed cells are compared against it like any other
+   * edit -- and the column of chunks along the old face, which a growth used
+   * to re-mesh in full, is re-meshed only where something across it changed.
+   */
+  const shiftNow = [0, 1, 2].map((axis) => frame[axis] - cache.frame[axis]);
+  const listedGrowth =
+    mode === "moved" &&
+    hint?.changed !== null &&
+    hint?.changed !== undefined &&
+    voidKey === "" &&
+    shiftNow.every((step) => step >= 0) &&
+    cache.width + shiftNow[0] <= width &&
+    cache.height + shiftNow[1] <= height &&
+    cache.length + shiftNow[2] <= length;
+  // What `packedAt` gives an air cell lit as though it were outside the box.
+  const OUTSIDE_LIGHT = lighting === null ? 0 : 15 << 4;
+  const carry = (): { voxels: Int32Array; light: Uint8Array } => {
+    const voxels = new Int32Array(width * height * length);
+    const lit = new Uint8Array(width * height * length).fill(OUTSIDE_LIGHT);
+    const oldPlane = cache.height * cache.length;
+    for (let ox = 0; ox < cache.width; ox += 1) {
+      for (let oy = 0; oy < cache.height; oy += 1) {
+        const from = ox * oldPlane + oy * cache.length;
+        const to = (ox + shiftNow[0]) * plane + (oy + shiftNow[1]) * length + shiftNow[2];
+        voxels.set(cache.voxels.subarray(from, from + cache.length), to);
+        lit.set(cache.light.subarray(from, from + cache.length), to);
       }
     }
-  } else {
+    return { voxels, light: lit };
+  };
+  const carried = listedGrowth ? carry() : null;
+  // Packed in full only when something compares in full; a listed change
+  // updates the cache's own copy cell by cell.
+  const light =
+    mode === "listed"
+      ? cache.light
+      : carried !== null
+        ? carried.light
+        : packLight(lighting, struct.voxels.length);
+  const snapshot =
+    mode === "listed"
+      ? cache.voxels
+      : carried !== null
+        ? carried.voxels
+        : Int32Array.from(struct.voxels);
+
+  const dirty = new Set<number>();
+  const markCell = (index: number): void => {
+    const x = Math.floor(index / plane);
+    const rest = index - x * plane;
+    markDirty(dirty, x, Math.floor(rest / length), rest % length, frame, range);
+  };
+  const markAll = (): void => {
+    for (let cz = range.from[2]; cz <= range.to[2]; cz += 1) {
+      for (let cy = range.from[1]; cy <= range.to[1]; cy += 1) {
+        for (let cx = range.from[0]; cx <= range.to[0]; cx += 1) dirty.add(chunkKey(cx, cy, cz));
+      }
+    }
+  };
+
+  if (mode === "all") {
+    markAll();
+  } else if (mode === "listed" || listedGrowth) {
+    const current = struct.voxels;
+    for (const index of hint!.changed!) {
+      if (index < 0 || index >= current.length) continue;
+      const packed = packedAt(index);
+      if (snapshot[index] === current[index] && light[index] === packed) continue;
+      snapshot[index] = current[index];
+      light[index] = packed;
+      markCell(index);
+    }
+  } else if (mode === "diff") {
     const previous = cache.voxels;
     const current = struct.voxels;
     const wasLit = cache.light;
     for (let i = 0; i < current.length; i += 1) {
-      if (current[i] !== previous[i] || light[i] !== wasLit[i]) {
-        // The flat layout is x-major: i = x*height*length + y*length + z.
-        const x = Math.floor(i / (height * length));
-        const rest = i - x * height * length;
-        markDirty(dirty, x, Math.floor(rest / length), rest % length, nx, ny, nz);
+      if (current[i] !== previous[i] || light[i] !== wasLit[i]) markCell(i);
+    }
+  } else {
+    /*
+     * The box was resized. Content coordinates did not move, so a cell of the
+     * old grid that is still in the box is compared with the cell the same
+     * content now occupies, and the chunks across each face that moved are
+     * re-meshed whatever they compare: a cell there either is new, has lost a
+     * neighbour, or has gained one, and its faces, occlusion and light
+     * sampling all read the neighbours.
+     */
+    const was = [cache.width, cache.height, cache.length] as const;
+    const now = [width, height, length] as const;
+    const shift = [0, 1, 2].map((axis) => frame[axis] - cache.frame[axis]);
+    for (let axis = 0; axis < 3; axis += 1) {
+      for (const side of [0, 1] as const) {
+        // Content coordinates of the face's cells, old and new.
+        const oldFace = side === 0 ? -cache.frame[axis] : was[axis] - 1 - cache.frame[axis];
+        const newFace = side === 0 ? -frame[axis] : now[axis] - 1 - frame[axis];
+        if (oldFace === newFace) continue;
+        const lo = Math.floor((Math.min(oldFace, newFace) - 1) / CHUNK_SIZE);
+        const hi = Math.floor((Math.max(oldFace, newFace) + 1) / CHUNK_SIZE);
+        for (let cz = range.from[2]; cz <= range.to[2]; cz += 1) {
+          for (let cy = range.from[1]; cy <= range.to[1]; cy += 1) {
+            for (let cx = range.from[0]; cx <= range.to[0]; cx += 1) {
+              const along = axis === 0 ? cx : axis === 1 ? cy : cz;
+              if (along >= lo && along <= hi) dirty.add(chunkKey(cx, cy, cz));
+            }
+          }
+        }
+      }
+    }
+    const previous = cache.voxels;
+    const wasLit = cache.light;
+    const oldPlane = cache.height * cache.length;
+    const current = struct.voxels;
+    for (let x = 0; x < width; x += 1) {
+      const ox = x - shift[0];
+      if (ox < 0 || ox >= cache.width) continue;
+      for (let y = 0; y < height; y += 1) {
+        const oy = y - shift[1];
+        if (oy < 0 || oy >= cache.height) continue;
+        let index = x * plane + y * length;
+        let oldIndex = ox * oldPlane + oy * cache.length - shift[2];
+        for (let z = 0; z < length; z += 1, index += 1, oldIndex += 1) {
+          const oz = z - shift[2];
+          if (oz < 0 || oz >= cache.length) continue;
+          if (current[index] !== previous[oldIndex] || light[index] !== wasLit[oldIndex]) {
+            markDirty(dirty, x, y, z, frame, range);
+          }
+        }
       }
     }
   }
+  lap("diff");
 
   /*
    * The signs, diffed the same way and marking only their own chunk.
@@ -459,7 +736,26 @@ export async function buildChunkedMesh(
    * `markDirty` spreads to the face-neighbours because light does; text does
    * not leave the block it is written on, so spreading here would re-mesh six
    * chunks to redraw one word.
+   *
+   * After a resize the cache's maps are keyed by the old grid's indices, so
+   * they are carried into the new one first: the same content cell, the new
+   * index, and a sign that fell outside the box simply gone.
    */
+  const carriedMap = (before: ReadonlyMap<number, string>): ReadonlyMap<number, string> => {
+    if (mode !== "moved") return before;
+    const moved = new Map<number, string>();
+    const oldPlane = cache.height * cache.length;
+    for (const [at, value] of before) {
+      const ox = Math.floor(at / oldPlane);
+      const rest = at - ox * oldPlane;
+      const x = ox + frame[0] - cache.frame[0];
+      const y = Math.floor(rest / cache.length) + frame[1] - cache.frame[1];
+      const z = (rest % cache.length) + frame[2] - cache.frame[2];
+      if (x < 0 || y < 0 || z < 0 || x >= width || y >= height || z >= length) continue;
+      moved.set(x * plane + y * length + z, value);
+    }
+    return moved;
+  };
   const written = new Map<number, string>();
   if (signs !== null) {
     for (const [at, text] of signs) written.set(at, signDigest(text));
@@ -468,37 +764,43 @@ export async function buildChunkedMesh(
   const markOwnChunk = (before: ReadonlyMap<number, string>, after: ReadonlyMap<number, string>): void => {
     for (const at of new Set([...after.keys(), ...before.keys()])) {
       if (after.get(at) === before.get(at)) continue;
-      const x = Math.floor(at / (height * length));
-      const rest = at - x * height * length;
-      const cx = Math.floor(x / CHUNK_SIZE);
-      const cy = Math.floor(Math.floor(rest / length) / CHUNK_SIZE);
-      const cz = Math.floor((rest % length) / CHUNK_SIZE);
-      if (cx < nx && cy < ny && cz < nz) dirty.add(chunkKey(cx, cy, cz, nx, ny));
+      const x = Math.floor(at / plane);
+      const rest = at - x * plane;
+      const cx = Math.floor((x - frame[0]) / CHUNK_SIZE);
+      const cy = Math.floor((Math.floor(rest / length) - frame[1]) / CHUNK_SIZE);
+      const cz = Math.floor(((rest % length) - frame[2]) / CHUNK_SIZE);
+      if (inRange(range, cx, cy, cz)) dirty.add(chunkKey(cx, cy, cz));
     }
   };
-  if (reusable) {
-    markOwnChunk(cache.signs, written);
+  if (mode !== "all") {
+    markOwnChunk(carriedMap(cache.signs), written);
     // A banner's cloth hangs into the cell below or above, but it is emitted
     // by the banner's own cell, so its own chunk is the one that redraws it.
-    markOwnChunk(cache.banners, painted);
+    markOwnChunk(carriedMap(cache.banners), painted);
   }
 
-  const chunks = reusable ? new Map(cache.chunks) : new Map<number, ChunkLayers>();
+  const chunks = new Map<number, ChunkLayers>();
+  if (mode !== "all") {
+    for (const [at, layers] of cache.chunks) {
+      const [cx, cy, cz] = chunkCoords(at);
+      // A chunk the box no longer reaches is gone; one it still reaches is kept.
+      if (inRange(range, cx, cy, cz)) chunks.set(at, layers);
+    }
+  }
 
-  for (const key of dirty) {
-    const cx = key % nx;
-    const cy = Math.floor(key / nx) % ny;
-    const cz = Math.floor(key / (nx * ny));
+  for (const dirtyKey of dirty) {
+    const [cx, cy, cz] = chunkCoords(dirtyKey);
+    // The chunk's cells, back in document coordinates for the culling pass.
     const faces = await culledFaces(
       struct,
       baker,
       {
-        minX: cx * CHUNK_SIZE,
-        minY: cy * CHUNK_SIZE,
-        minZ: cz * CHUNK_SIZE,
-        maxX: cx * CHUNK_SIZE + CHUNK_SIZE - 1,
-        maxY: cy * CHUNK_SIZE + CHUNK_SIZE - 1,
-        maxZ: cz * CHUNK_SIZE + CHUNK_SIZE - 1,
+        minX: cx * CHUNK_SIZE + frame[0],
+        minY: cy * CHUNK_SIZE + frame[1],
+        minZ: cz * CHUNK_SIZE + frame[2],
+        maxX: cx * CHUNK_SIZE + CHUNK_SIZE - 1 + frame[0],
+        maxY: cy * CHUNK_SIZE + CHUNK_SIZE - 1 + frame[1],
+        maxZ: cz * CHUNK_SIZE + CHUNK_SIZE - 1 + frame[2],
       },
       shading,
       signs ?? undefined,
@@ -515,10 +817,12 @@ export async function buildChunkedMesh(
      */
     const solidFaces = faces.filter((face) => face.voidFill !== true);
     const voidFaces = voidIndices === null ? [] : faces.filter((face) => face.voidFill === true);
-    const solid = buildMesh(solidFaces, atlasUv, (name) => baker.isTextureTranslucent(name));
+    // Positions in content coordinates, so a resize that moves the content
+    // leaves this geometry right; the viewport adds `frame` back.
+    const solid = buildMesh(solidFaces, atlasUv, (name) => baker.isTextureTranslucent(name), frame);
     const layers: ChunkLayers = {
       solid,
-      filler: buildMesh(voidFaces, atlasUv, (name) => baker.isTextureTranslucent(name)),
+      filler: buildMesh(voidFaces, atlasUv, (name) => baker.isTextureTranslucent(name), frame),
       // Walked here, where the chunk is already being built, so a chunk carried
       // forward by reference carries its box with it.
       bounds: boundsOf(solid),
@@ -526,12 +830,13 @@ export async function buildChunkedMesh(
     if (layers.solid.indices.length === 0 && layers.filler.indices.length === 0) {
       // An all-air chunk holds nothing; dropping it keeps the concatenation
       // short rather than walking thousands of empty entries.
-      chunks.delete(key);
+      chunks.delete(dirtyKey);
     } else {
-      chunks.set(key, layers);
+      chunks.set(dirtyKey, layers);
     }
   }
 
+  lap("mesh chunks");
   // Concatenated in a fixed chunk order so the same document always produces
   // the same bytes, however it was reached — which is what makes an
   // incremental build comparable to a rebuilt-from-scratch one.
@@ -539,19 +844,19 @@ export async function buildChunkedMesh(
   const orderedKeys: number[] = [];
   const orderedVoid: MeshBuffers[] = [];
   const orderedVoidKeys: number[] = [];
-  for (let cz = 0; cz < nz; cz += 1) {
-    for (let cy = 0; cy < ny; cy += 1) {
-      for (let cx = 0; cx < nx; cx += 1) {
-        const key = chunkKey(cx, cy, cz, nx, ny);
-        const piece = chunks.get(key);
+  for (let cz = range.from[2]; cz <= range.to[2]; cz += 1) {
+    for (let cy = range.from[1]; cy <= range.to[1]; cy += 1) {
+      for (let cx = range.from[0]; cx <= range.to[0]; cx += 1) {
+        const at = chunkKey(cx, cy, cz);
+        const piece = chunks.get(at);
         if (piece === undefined) continue;
         if (piece.solid.indices.length > 0) {
           ordered.push(piece.solid);
-          orderedKeys.push(key);
+          orderedKeys.push(at);
         }
         if (piece.filler.indices.length > 0) {
           orderedVoid.push(piece.filler);
-          orderedVoidKeys.push(key);
+          orderedVoidKeys.push(at);
         }
       }
     }
@@ -576,6 +881,7 @@ export async function buildChunkedMesh(
     }
   }
 
+  lap("assemble");
   return {
     bounds: { min, max },
     pieces: ordered,
@@ -586,10 +892,14 @@ export async function buildChunkedMesh(
       width,
       height,
       length,
+      frame: [frame[0], frame[1], frame[2]],
+      key,
+      lightGrid: lighting,
+      epoch: hint?.epoch ?? null,
       atlasVersion,
       // A copy, not the document's own array: the document keeps mutating it,
       // and a shared reference would compare equal to itself and see no change.
-      voxels: Int32Array.from(struct.voxels),
+      voxels: snapshot,
       light,
       signs: written,
       banners: painted,
@@ -597,6 +907,9 @@ export async function buildChunkedMesh(
       chunks,
     },
     rebuilt: dirty.size,
-    total: nx * ny * nz,
+    total:
+      (range.to[0] - range.from[0] + 1) *
+      (range.to[1] - range.from[1] + 1) *
+      (range.to[2] - range.from[2] + 1),
   };
 }

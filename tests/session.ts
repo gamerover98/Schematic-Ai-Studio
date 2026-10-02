@@ -429,6 +429,7 @@ try {
     const again = await documentMesh(session, previewOptions, {
       mesh: full.mesh.token,
       atlas: full.mesh.atlasVersion,
+      atlasLayout: full.mesh.atlasLayout,
     });
     check("asking again with the same token ships no geometry", again.mesh.chunks.length === 0);
     check("...and is marked as a delta, not as an empty document", again.mesh.partial);
@@ -439,6 +440,7 @@ try {
     const delta = await documentMesh(session, previewOptions, {
       mesh: again.mesh.token,
       atlas: again.mesh.atlasVersion,
+      atlasLayout: again.mesh.atlasLayout,
     });
     check("an edit ships something", delta.mesh.chunks.length > 0);
     check(
@@ -447,6 +449,16 @@ try {
       `${delta.mesh.chunks.length} of ${chunkCount}`,
     );
     check("...still without the atlas", delta.mesh.atlas === null);
+    /*
+     * A version without its layout cannot say which packing it is a version
+     * of, and two packings can share a count -- so it gets the whole sheet,
+     * which is always a correct answer.
+     */
+    const unlabelled = await documentMesh(session, previewOptions, {
+      mesh: delta.mesh.token,
+      atlas: delta.mesh.atlasVersion,
+    });
+    check("a version without a layout is sent the whole atlas", unlabelled.mesh.atlas !== null);
 
     // A token from before that edit is not one main can subtract from.
     const stale = await documentMesh(session, previewOptions, {

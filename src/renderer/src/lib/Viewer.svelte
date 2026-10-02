@@ -27,6 +27,7 @@
     MeshPayload,
     PackTexture,
     SkyTextures,
+    AtlasPatch,
   } from "../../../shared/ipc.js";
   import type { GpuPreference, ResolvedTheme } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
@@ -618,6 +619,7 @@ import { isTyping } from "./typing.js";
    */
   let texture: THREE.DataTexture | undefined;
   let textureVersion = -1;
+  let textureLayout = -1;
   let material: THREE.MeshStandardMaterial | undefined;
   let blended: THREE.MeshStandardMaterial | undefined;
   let voidMaterial: THREE.MeshStandardMaterial | undefined;
@@ -1177,15 +1179,22 @@ import { isTyping } from "./typing.js";
    *
    * Bounded by the chunk boxes three.js already keeps for frustum culling,
    * so a document's worth of chains costs a handful of slab tests rather
-   * than a scan. The meshes carry no transform -- the pipeline emits none --
-   * so object space is world space here, as everywhere else in this file.
+   * than a scan.
+   *
+   * The boxes are in the chunks' own space, which is content coordinates:
+   * the group sits at `MeshPayload.frame`, so the ray is taken into that
+   * space and the box found is brought back out. A translation and nothing
+   * else, so distances are the same in both.
    */
   function nearestThinBox(
     ray: THREE.Ray,
     limit: number,
   ): { box: ThinBox; face: Face; distance: number } | null {
     if (!loaded) return null;
-    const origin: [number, number, number] = [ray.origin.x, ray.origin.y, ray.origin.z];
+    const offset = loaded.position;
+    localRay.origin.copy(ray.origin).sub(offset);
+    localRay.direction.copy(ray.direction);
+    const origin: [number, number, number] = [localRay.origin.x, localRay.origin.y, localRay.origin.z];
     const direction: [number, number, number] = [
       ray.direction.x,
       ray.direction.y,
@@ -1196,7 +1205,7 @@ import { isTyping } from "./typing.js";
       const boxes = (child as THREE.Mesh).userData?.thin as ThinBox[] | undefined;
       if (boxes === undefined || boxes.length === 0) continue;
       const bounds = (child as THREE.Mesh).geometry.boundingBox;
-      if (bounds !== null && !ray.intersectsBox(bounds)) continue;
+      if (bounds !== null && !localRay.intersectsBox(bounds)) continue;
       for (const box of boxes) {
         const meets = rayBox(origin, direction, box.min, box.max);
         if (meets === null) continue;
@@ -1205,7 +1214,33 @@ import { isTyping } from "./typing.js";
         best = { box, face: meets.face, distance: meets.distance };
       }
     }
-    return best;
+    if (best === null || (offset.x === 0 && offset.y === 0 && offset.z === 0)) return best;
+    const shift = (at: readonly [number, number, number]): [number, number, number] => [
+      at[0] + offset.x,
+      at[1] + offset.y,
+      at[2] + offset.z,
+    ];
+    return {
+      ...best,
+      box: { ...best.box, cell: shift(best.box.cell), min: shift(best.box.min), max: shift(best.box.max) },
+    };
+  }
+
+  /** Reused by `nearestThinBox`: one ray per pick, not one per call. */
+  const localRay = new THREE.Ray();
+
+  /**
+   * Puts the chunks where the document has them.
+   *
+   * Main meshes in content coordinates, which a resize below the origin does
+   * not move -- so the chunks it already built stay right, and only this
+   * offset changes. See `MeshPayload.frame`.
+   */
+  function placeChunks(frame: readonly [number, number, number]): void {
+    loaded?.position.set(frame[0], frame[1], frame[2]);
+    voidLoaded?.position.set(frame[0], frame[1], frame[2]);
+    loaded?.updateMatrixWorld(true);
+    voidLoaded?.updateMatrixWorld(true);
   }
 
   function pickBlockAt(clientX: number, clientY: number): PickedBlock | null {
@@ -2599,6 +2634,7 @@ import { isTyping } from "./typing.js";
       // as though the sun were shining through the world.
       const from = state.night ? state.moonDirection : state.sunDirection;
       sun.position.set(from[0] * 2000, from[1] * 2000, from[2] * 2000);
+      lightDirection.set(from[0], from[1], from[2]).normalize();
       sun.color.setRGB(state.lightColor[0], state.lightColor[1], state.lightColor[2]);
       sunBase = state.lightIntensity;
     }
@@ -2755,7 +2791,21 @@ import { isTyping } from "./typing.js";
       radius * Math.sin(el),
       radius * Math.cos(el) * Math.sin(az),
     );
+    lightDirection.copy(sun.position).normalize();
   }
+
+  /**
+   * Which way the light comes from, as `applySky` or the angle sliders set it.
+   *
+   * Kept apart from `sun.position`, which `placeShadow` moves to fit the
+   * shadow camera round the document: read back as the direction, a position
+   * fitted round the box's centre points somewhere slightly different, so
+   * every `placeShadow` that ran without `applySky` first turned the sun a
+   * little. Nobody saw it while the shadow effect re-ran on every edit; the
+   * edit loop's light-for-light comparison with a full rebuild showed the
+   * shadows and the faces moving between two identical meshes.
+   */
+  const lightDirection = new THREE.Vector3(0.5, 0.6, 0.6).normalize();
 
   function applyWireframe(object: THREE.Object3D, on: boolean): void {
     object.traverse((child) => {
@@ -4394,12 +4444,12 @@ import { isTyping } from "./typing.js";
   function placeShadow(): void {
     if (!sun || !scene) return;
     const [width, height, length] = documentSize ?? [64, 64, 64];
-    // The light's direction is where it *is*, since it always looks at the
-    // structure; `applySky` has already put it there.
+    // The direction `applySky` chose, not where the last fit left the light:
+    // see `lightDirection`.
     const fit = fitShadow({
       center: { x: width / 2, y: height / 2, z: length / 2 },
       size: { x: width, y: height, z: length },
-      direction: { x: sun.position.x, y: sun.position.y, z: sun.position.z },
+      direction: { x: lightDirection.x, y: lightDirection.y, z: lightDirection.z },
       mapSize: shadowQuality,
     });
     sun.position.set(fit.position.x, fit.position.y, fit.position.z);
@@ -4913,7 +4963,7 @@ import { isTyping } from "./typing.js";
    * A decode that never happens cannot fail silently.
    */
   function ensureTexture(atlas: MeshAtlas): THREE.Texture {
-    if (texture && textureVersion === atlas.version) {
+    if (texture && textureVersion === atlas.version && textureLayout === atlas.layout) {
       return texture;
     }
     texture?.dispose();
@@ -4931,8 +4981,49 @@ import { isTyping } from "./typing.js";
     next.needsUpdate = true;
     texture = next;
     textureVersion = atlas.version;
+    textureLayout = atlas.layout;
     adoptAnimations(atlas);
     return next;
+  }
+
+  /**
+   * Tiles main added to the atlas this window already holds.
+   *
+   * A texture nobody had drawn before -- a lit furnace, a sign's letters --
+   * used to repack the whole sheet, re-mesh the document and resend 27 MB.
+   * It lands in the sheet's reserve now (`packAtlas`), every other UV stays
+   * where it was, and this copies the new squares into the texture on the GPU
+   * the way an animation frame is copied. The CPU copy is written too, so a
+   * re-upload of the texture would not lose them.
+   */
+  function applyAtlasPatch(patch: AtlasPatch): void {
+    if (!renderer || !texture || patch.layout !== textureLayout) return;
+    const image = texture.image as { data: Uint8Array; width: number; height: number };
+    renderer.initTexture(texture);
+    for (const tile of patch.tiles) {
+      for (let row = 0; row < tile.height; row += 1) {
+        image.data.set(
+          tile.pixels.subarray(row * tile.width * 4, (row + 1) * tile.width * 4),
+          ((tile.y + row) * image.width + tile.x) * 4,
+        );
+      }
+      const scratch = new THREE.DataTexture(
+        new Uint8Array(tile.pixels),
+        tile.width,
+        tile.height,
+        THREE.RGBAFormat,
+      );
+      scratch.magFilter = THREE.NearestFilter;
+      scratch.minFilter = THREE.NearestFilter;
+      scratch.generateMipmaps = false;
+      scratch.colorSpace = THREE.SRGBColorSpace;
+      scratch.needsUpdate = true;
+      blitAt.set(tile.x, tile.y);
+      renderer.copyTextureToTexture(scratch, texture, null, blitAt);
+      scratch.dispose();
+    }
+    playing.push(...patch.animations.map(playingFor));
+    textureVersion = patch.version;
   }
 
   /**
@@ -4964,7 +5055,11 @@ import { isTyping } from "./typing.js";
 
   function adoptAnimations(atlas: MeshAtlas): void {
     for (const item of playing) item.scratch.dispose();
-    playing = atlas.animations.map((animation) => {
+    playing = atlas.animations.map(playingFor);
+  }
+
+  function playingFor(animation: AtlasAnimation): PlayingTexture {
+    {
       const scratch = new THREE.DataTexture(
         new Uint8Array(animation.size * animation.size * 4),
         animation.size,
@@ -4979,7 +5074,7 @@ import { isTyping } from "./typing.js";
       scratch.generateMipmaps = false;
       scratch.colorSpace = THREE.SRGBColorSpace;
       return { animation, scratch, shown: -1, active: false };
-    });
+    }
   }
 
   /**
@@ -5554,6 +5649,7 @@ import { isTyping } from "./typing.js";
         throw new Error(t("viewport.noAtlas"));
       }
       const map = payload.atlas ? ensureTexture(payload.atlas) : texture!;
+      if (payload.atlasPatch) applyAtlasPatch(payload.atlasPatch);
 
       /*
        * An update to what is already up, rather than a replacement for it.
@@ -5566,6 +5662,7 @@ import { isTyping } from "./typing.js";
        */
       if (payload.partial && previous !== null && previousVoid !== null) {
         applyDelta(previous, previousVoid, payload, map);
+        placeChunks(payload.frame);
         applyWireframe(previous, wireframe);
         refreshAnimated();
         shadowsStale();
@@ -5583,6 +5680,7 @@ import { isTyping } from "./typing.js";
       voidLoaded = built.filler;
       target.add(built.solid);
       target.add(built.filler);
+      placeChunks(payload.frame);
       applyWireframe(built.solid, wireframe);
       refreshAnimated();
       shadowsStale();

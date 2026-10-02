@@ -2098,10 +2098,21 @@ console.log("\n--- a patterned banner, in the inspector ---");
   // A composed cloth grows the atlas, and the icons drawn against the old one
   // were thrown away and never asked for again: the hotbar went blank.
   const icons = readFileSync(path.join(RENDERER, "lib", "block_icons.svelte.ts"), "utf8");
-  const adopt = icons.slice(icons.indexOf("function adoptAtlas("), icons.indexOf("function adoptAtlas(") + 2000);
+  const adopt = icons.slice(icons.indexOf("function adoptAtlas("), icons.indexOf("function adoptAtlas(") + 2400);
   check(
     "an atlas that replaces another makes every icon reader ask again",
-    /if \(replacing\) generation \+= 1/.test(adopt) && /export function iconsReady\(\): boolean \{\s*void generation;/.test(icons),
+    /if \(!replacing\) return;[\s\S]*generation \+= 1;/.test(adopt) &&
+      /export function iconsReady\(\): boolean \{\s*void generation;/.test(icons),
+  );
+  /*
+   * ...and "replaces" means a new layout. A newer version of the same layout
+   * only added tiles, so every icon already drawn is still right; treating it
+   * as a replacement re-meshed nine hundred icons whenever a document lit a
+   * furnace.
+   */
+  check(
+    "a newer version of the same atlas layout keeps the icons drawn",
+    /const replacing = atlasLayout !== null && atlasLayout !== nextLayout;/.test(adopt),
   );
 }
 
@@ -5498,6 +5509,28 @@ console.log("\n--- the frame costs less ---");
   const invalidation = between("void [\n      mesh,", "invalidate();\n  });");
   const missing = locals.filter((name) => !new RegExp(`\\b${name}\\b`).test(invalidation));
   check("every prop is read by the invalidation effect", locals.length > 30 && missing.length === 0, `${locals.length} props; missing: ${missing.join(", ")}`);
+}
+
+// --- a click in creative mode is never dropped -------------------------------
+//
+// Hand placement went through `runDocument`, which holds `busy` until the new
+// mesh has arrived, and `onBuild` returns while `busy` is set: every click
+// during that round trip was lost. It has its own road now, queued and not
+// waiting for the picture. Read from the source, because the round trip is
+// main's and this harness makes none.
+console.log("\n--- a click in creative mode is never dropped ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const build = app.slice(app.indexOf("async function onBuild("), app.indexOf("function queueBuild("));
+  check("a placement by hand goes through the build queue", build.includes("await queueBuild(label, () =>"));
+  check("...and not through runDocument", !build.includes("runDocument("));
+  const apply = app.slice(app.indexOf("async function applyBuild("), app.indexOf("async function applyBuild(") + 1400);
+  check(
+    "the queue asks for the redraw without waiting for it",
+    apply.includes("void refreshDocument()") && !apply.includes("await refreshDocument()"),
+  );
+  check("...and holds no busy flag that would drop the next click", !apply.includes("busy = true"));
+  check("clicks run in order, one after another", /buildQueue = buildQueue\.then\(\(\) => applyBuild\(doing, call\)\);/.test(app));
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

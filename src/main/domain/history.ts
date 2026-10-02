@@ -46,6 +46,7 @@ import { deriveConnections } from "./connect.js";
 import {
   posKey,
   resizeDocument,
+  writeVoxel,
   setBlock,
   setBlockEntity,
   type Region,
@@ -621,7 +622,7 @@ class Recorder implements TransactionScope {
 function applyCommand(doc: SchematicDocument, command: Command): void {
   if (command.kind === "blocks") {
     for (const delta of command.blocks) {
-      doc.voxels[delta.index] = delta.after;
+      writeVoxel(doc, delta.index, delta.after);
     }
     for (const delta of command.blockEntities) {
       if (delta.after === null) {
@@ -652,7 +653,7 @@ function applyCommand(doc: SchematicDocument, command: Command): void {
 function revertCommand(doc: SchematicDocument, command: Command): void {
   if (command.kind === "blocks") {
     for (const delta of command.blocks) {
-      doc.voxels[delta.index] = delta.before;
+      writeVoxel(doc, delta.index, delta.before);
     }
     for (const delta of command.blockEntities) {
       if (delta.before === null) {
@@ -679,7 +680,7 @@ function revertCommand(doc: SchematicDocument, command: Command): void {
     [-command.shift[0], -command.shift[1], -command.shift[2]],
   );
   for (const delta of command.dropped) {
-    doc.voxels[delta.index] = delta.before;
+    writeVoxel(doc, delta.index, delta.before);
   }
   for (const record of command.droppedEntities) {
     doc.blockEntities.set(posKey(record.pos[0], record.pos[1], record.pos[2]), record);

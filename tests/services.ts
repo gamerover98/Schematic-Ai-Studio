@@ -94,6 +94,7 @@ import {
   buildPreview,
   clearBakerCache,
   clearPreviewCache,
+  fullAtlas,
   sunAnglesRadians,
 } from "../src/main/services/preview.js";
 import {
@@ -402,7 +403,9 @@ try {
     // `tests/chunks.ts` compares the chunked path against itself.
     check(
       "a single-chunk document renders byte-identically to the file it came from",
-      meshDigest(preview.mesh) === meshDigest(fromDocument.mesh),
+      // The document path leaves the atlas to whoever ships it (`atlasFor`),
+      // so the sheet it addresses is compared as the sheet.
+      meshDigest(preview.mesh) === meshDigest({ ...fromDocument.mesh, atlas: fullAtlas(fromDocument.atlas) }),
     );
     equal("...with the same bounds", fromDocument.size, preview.size);
     equal("...and the whole structure fits in one chunk, as assumed above", fromDocument.totalChunks, 1);
@@ -453,7 +456,12 @@ try {
     const iconOptions = { resourcePackPath: null, fallbackResourcePackPath: bundledPack };
 
     const firstPass = await buildBlockIcons(iconBlocks, iconOptions, null);
-    const secondPass = await buildBlockIcons(iconBlocks, iconOptions, firstPass.atlasVersion);
+    const secondPass = await buildBlockIcons(
+      iconBlocks,
+      iconOptions,
+      firstPass.atlasVersion,
+      firstPass.atlasLayout,
+    );
 
     equal("every block asked for comes back", firstPass.icons.length, iconBlocks.length);
     check("the first batch carries its atlas", firstPass.atlas !== null);

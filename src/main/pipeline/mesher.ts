@@ -338,31 +338,63 @@ export async function culledFaces(
    */
   const lighting = shading?.light ?? null;
 
-  const lightAt = (
-    x: number,
-    y: number,
-    z: number,
-    nx: number,
-    ny: number,
-    nz: number,
-  ): [number, number] => {
-    if (!lighting) return [0, MAX_LIGHT];
-    const front = [x + nx, y + ny, z + nz] as const;
-    if (!inside(front[0], front[1], front[2])) return [0, MAX_LIGHT];
-    const frontIndex = flatIndex(front[0], front[1], front[2]);
+  /*
+   * `lightAt` answers into these two rather than returning a pair: it runs
+   * once per face, and a tuple per face was garbage per face. Read them
+   * straight after the call.
+   */
+  let litBlock = 0;
+  let litSky = MAX_LIGHT;
+  const SIX = Object.values(DIRECTIONS);
+  const lightAt = (x: number, y: number, z: number, nx: number, ny: number, nz: number): void => {
+    litBlock = 0;
+    litSky = MAX_LIGHT;
+    if (!lighting) return;
+    const fx = x + nx;
+    const fy = y + ny;
+    const fz = z + nz;
+    if (!inside(fx, fy, fz)) return;
+    const frontIndex = flatIndex(fx, fy, fz);
     if (opaqueEntry[voxels[frontIndex]] !== true) {
-      return [lighting.block[frontIndex], lighting.sky[frontIndex]];
+      litBlock = lighting.block[frontIndex];
+      litSky = lighting.sky[frontIndex];
+      return;
     }
     let block = 0;
     let sky = 0;
-    for (const [dx, dy, dz] of Object.values(DIRECTIONS)) {
+    for (let d = 0; d < SIX.length; d += 1) {
+      const [dx, dy, dz] = SIX[d];
       if (!inside(x + dx, y + dy, z + dz)) continue;
       const index = flatIndex(x + dx, y + dy, z + dz);
       if (opaqueEntry[voxels[index]] === true) continue;
-      block = Math.max(block, lighting.block[index]);
-      sky = Math.max(sky, lighting.sky[index]);
+      if (lighting.block[index] > block) block = lighting.block[index];
+      if (lighting.sky[index] > sky) sky = lighting.sky[index];
     }
-    return [block, sky];
+    litBlock = block;
+    litSky = sky;
+  };
+
+  /*
+   * The smooth-lighting average over a corner's four cells, accumulated here
+   * by `smoothCell` rather than over an array of four coordinate arrays: that
+   * was five arrays and a closure per vertex, twenty per face, and most of
+   * what the garbage collector was doing while a chunk meshed.
+   */
+  let blockSum = 0;
+  let skySum = 0;
+  let counted = 0;
+  const smoothCell = (cx: number, cy: number, cz: number): void => {
+    if (!inside(cx, cy, cz)) {
+      // Outside the grid is open sky, the same answer `lightAt` gives.
+      skySum += MAX_LIGHT;
+      counted += 1;
+      return;
+    }
+    const index = flatIndex(cx, cy, cz);
+    if (opaqueEntry[voxels[index]] === true) return;
+    blockSum += lighting!.block[index];
+    skySum += lighting!.sky[index];
+    counted += 1;
   };
 
   /**
@@ -398,56 +430,57 @@ export async function culledFaces(
 
   const shadeFace = (face: BakedFace, x: number, y: number, z: number): Float32Array | undefined => {
     if (!shading) return undefined;
-    const [nx, ny, nz] = face.normal;
-    const [blockLight, skyLight] = lightAt(x, y, z, Math.round(nx), Math.round(ny), Math.round(nz));
-    const block = blockLight / MAX_LIGHT;
-    const sky = skyLight / MAX_LIGHT;
+    const nx = face.normal[0];
+    const ny = face.normal[1];
+    const nz = face.normal[2];
+    const rx = Math.round(nx);
+    const ry = Math.round(ny);
+    const rz = Math.round(nz);
+    lightAt(x, y, z, rx, ry, rz);
+    const block = litBlock / MAX_LIGHT;
+    const sky = litSky / MAX_LIGHT;
 
     // The two axes in the face's plane, or none when the normal is diagonal.
     const axis = Math.abs(nx) > 0.9 ? 0 : Math.abs(ny) > 0.9 ? 1 : Math.abs(nz) > 0.9 ? 2 : -1;
     const out = new Float32Array(12);
+    const t1 = (axis + 1) % 3;
+    const t2 = (axis + 2) % 3;
+    // The cell the face looks into, where its four corner cells start.
+    const bx = x + rx;
+    const by = y + ry;
+    const bz = z + rz;
+    const positions = face.positions;
     for (let v = 0; v < 4; v += 1) {
       let occlusion = 1;
       let vertexBlock = block;
       let vertexSky = sky;
       if (axis !== -1) {
-        const local = [
-          face.positions[v * 3] - 0.5,
-          face.positions[v * 3 + 1] - 0.5,
-          face.positions[v * 3 + 2] - 0.5,
-        ];
-        const step = [Math.round(nx), Math.round(ny), Math.round(nz)];
-        const t1 = (axis + 1) % 3;
-        const t2 = (axis + 2) % 3;
-        const s1 = local[t1] >= 0 ? 1 : -1;
-        const s2 = local[t2] >= 0 ? 1 : -1;
         /*
          * The four cells that meet at this corner, on the *outside* of the
          * face: the one it looks into, the two beside it, and the diagonal.
          * They are what both halves below read -- occlusion asks whether they
          * are solid and smooth lighting averages how bright they are, which is
          * why the two settings cost the same lookups.
+         *
+         * Which side of the block's centre the vertex sits on, along the two
+         * axes in the face's plane, picks the corner.
          */
-        const corner = (a: number, b: number): [number, number, number] => {
-          const at = [x + step[0], y + step[1], z + step[2]];
-          at[t1] += a;
-          at[t2] += b;
-          return [at[0], at[1], at[2]];
-        };
-        const cells: [number, number, number][] = [
-          corner(0, 0),
-          corner(s1, 0),
-          corner(0, s2),
-          corner(s1, s2),
-        ];
+        const s1 = positions[v * 3 + t1] - 0.5 >= 0 ? 1 : -1;
+        const s2 = positions[v * 3 + t2] - 0.5 >= 0 ? 1 : -1;
+        const ax = t1 === 0 ? s1 : 0;
+        const ay = t1 === 1 ? s1 : 0;
+        const az = t1 === 2 ? s1 : 0;
+        const bx2 = t2 === 0 ? s2 : 0;
+        const by2 = t2 === 1 ? s2 : 0;
+        const bz2 = t2 === 2 ? s2 : 0;
 
         if (shading.occlusion) {
           occlusion =
             OCCLUSION_LEVELS[
               cornerOcclusion(
-                solidAt(...cells[1]),
-                solidAt(...cells[2]),
-                solidAt(...cells[3]),
+                solidAt(bx + ax, by + ay, bz + az),
+                solidAt(bx + bx2, by + by2, bz + bz2),
+                solidAt(bx + ax + bx2, by + ay + by2, bz + az + bz2),
               )
             ];
         }
@@ -460,22 +493,13 @@ export async function culledFaces(
            * build -- which is exactly what occlusion is already there to say,
            * more honestly.
            */
-          let blockSum = 0;
-          let skySum = 0;
-          let counted = 0;
-          for (const [cx, cy, cz] of cells) {
-            if (!inside(cx, cy, cz)) {
-              // Outside the grid is open sky, the same answer `lightAt` gives.
-              skySum += MAX_LIGHT;
-              counted += 1;
-              continue;
-            }
-            const index = flatIndex(cx, cy, cz);
-            if (opaqueEntry[voxels[index]] === true) continue;
-            blockSum += lighting.block[index];
-            skySum += lighting.sky[index];
-            counted += 1;
-          }
+          blockSum = 0;
+          skySum = 0;
+          counted = 0;
+          smoothCell(bx, by, bz);
+          smoothCell(bx + ax, by + ay, bz + az);
+          smoothCell(bx + bx2, by + by2, bz + bz2);
+          smoothCell(bx + ax + bx2, by + ay + by2, bz + az + bz2);
           if (counted > 0) {
             vertexBlock = blockSum / counted / MAX_LIGHT;
             vertexSky = skySum / counted / MAX_LIGHT;
@@ -815,25 +839,53 @@ export function buildMesh(
    * one block is drawn against nothing.
    */
   isTranslucent?: (textureKey: string) => boolean,
+  /**
+   * Subtracted from every position: where the coordinates are measured from.
+   *
+   * The chunk cache meshes in content coordinates -- see `chunked_mesh.ts` --
+   * so that a resize which moves the content leaves geometry already built
+   * where it was. Omitted, positions are the document's own.
+   */
+  origin?: readonly [number, number, number],
 ): MeshBuffers {
   if (faces.length === 0) {
     return emptyMeshBuffers();
   }
 
-  const positionsChunks: Float32Array[] = [];
-  const normalsChunks: Float32Array[] = [];
-  const uvsChunks: Float32Array[] = [];
-  const lightChunks: Float32Array[] = [];
-  // Two index lists over one set of vertices: the split is a draw order, not a
-  // second mesh, so only the indices are partitioned.
-  const opaque: number[] = [];
-  const translucent: number[] = [];
+  /*
+   * Two passes: count, then write straight into arrays of the final size.
+   *
+   * It used to collect four small arrays per face -- a copy of its UVs, a tile
+   * of its normal, its light -- and concatenate them at the end, which on a
+   * chunk of copper golem statues is a million short-lived arrays and a copy
+   * of every one. The counting pass costs a map lookup per face.
+   */
+  let opaqueFaces = 0;
+  let translucentFaces = 0;
+  for (const face of faces) {
+    if (atlasUv[face.textureKey] === undefined) continue;
+    if (isTranslucent?.(face.textureKey) === true) translucentFaces += 1;
+    else opaqueFaces += 1;
+  }
+  const total = opaqueFaces + translucentFaces;
+  if (total === 0) {
+    return emptyMeshBuffers();
+  }
 
-  let vertexOffset = 0;
+  const positions = new Float32Array(total * 12);
+  const normals = new Float32Array(total * 12);
+  const uvs = new Float32Array(total * 8);
+  const light = new Float32Array(total * 12);
+  const indices = new Uint32Array(total * 6);
   // Counter-clockwise winding when looking from the face normal so front
   // faces render — mesher.py:71-72.
   const quadIndices = [0, 2, 1, 0, 3, 2] as const;
+  // Opaque indices first and translucent after them, so one number says where
+  // the split is: it is a draw order, not a second mesh.
+  let opaqueAt = 0;
+  let translucentAt = opaqueFaces * 6;
 
+  let written = 0;
   for (const face of faces) {
     // inventory.tsv `culled_faces / build_mesh` row, site 2 (mesher.py:75):
     // Mapping.get() + skip-on-None(undefined), silent — a texture key
@@ -845,65 +897,54 @@ export function buildMesh(
       continue;
     }
     const [u0, v0, u1, v1] = rect;
+    const vertex = written * 4;
 
-    const uv = face.uvs.slice();
-    for (let i = 0; i < uv.length; i += 2) {
-      uv[i] = u0 + (u1 - u0) * uv[i];
-      uv[i + 1] = v0 + (v1 - v0) * uv[i + 1];
+    positions.set(face.positions, vertex * 3);
+    for (let i = 0; i < 8; i += 2) {
+      uvs[vertex * 2 + i] = u0 + (u1 - u0) * face.uvs[i];
+      uvs[vertex * 2 + i + 1] = v0 + (v1 - v0) * face.uvs[i + 1];
     }
-
-    positionsChunks.push(face.positions);
-    const normalTile = new Float32Array(12);
     for (let v = 0; v < 4; v++) {
-      normalTile[v * 3] = face.normal[0];
-      normalTile[v * 3 + 1] = face.normal[1];
-      normalTile[v * 3 + 2] = face.normal[2];
+      const at = (vertex + v) * 3;
+      normals[at] = face.normal[0];
+      normals[at + 1] = face.normal[1];
+      normals[at + 2] = face.normal[2];
     }
-    normalsChunks.push(normalTile);
-    uvsChunks.push(uv);
-
     if (face.shade !== undefined) {
-      lightChunks.push(face.shade);
+      light.set(face.shade, vertex * 3);
     } else {
-      const flat = new Float32Array(12);
       for (let v = 0; v < 4; v += 1) {
-        flat[v * 3] = UNSHADED[0];
-        flat[v * 3 + 1] = UNSHADED[1];
-        flat[v * 3 + 2] = UNSHADED[2];
+        const at = (vertex + v) * 3;
+        light[at] = UNSHADED[0];
+        light[at + 1] = UNSHADED[1];
+        light[at + 2] = UNSHADED[2];
       }
-      lightChunks.push(flat);
     }
 
-    const into = isTranslucent?.(face.textureKey) === true ? translucent : opaque;
-    for (const qi of quadIndices) {
-      into.push(qi + vertexOffset);
+    if (isTranslucent?.(face.textureKey) === true) {
+      for (const qi of quadIndices) indices[translucentAt++] = qi + vertex;
+    } else {
+      for (const qi of quadIndices) indices[opaqueAt++] = qi + vertex;
     }
-    vertexOffset += 4;
+    written += 1;
   }
 
-  if (positionsChunks.length === 0) {
-    return emptyMeshBuffers();
+  if (origin !== undefined && (origin[0] !== 0 || origin[1] !== 0 || origin[2] !== 0)) {
+    for (let i = 0; i < positions.length; i += 3) {
+      positions[i] -= origin[0];
+      positions[i + 1] -= origin[1];
+      positions[i + 2] -= origin[2];
+    }
   }
-
   return {
-    positions: concatFloat32(positionsChunks),
-    normals: concatFloat32(normalsChunks),
-    uvs: concatFloat32(uvsChunks),
-    indices: Uint32Array.from([...opaque, ...translucent]),
-    light: concatFloat32(lightChunks),
-    opaqueIndices: opaque.length,
+    positions,
+    normals,
+    uvs,
+    indices,
+    light,
+    opaqueIndices: opaqueFaces * 6,
   };
 }
 
-function concatFloat32(chunks: readonly Float32Array[]): Float32Array {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const out = new Float32Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
 
 // PORT STATUS: confidence=high todos=0

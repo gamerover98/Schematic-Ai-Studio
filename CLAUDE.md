@@ -89,6 +89,10 @@ They are thin wrappers over the npm scripts, which stay the source of truth:
 `check.sh` runs typecheck plus every suite and does **not** stop at the first
 failure — a runner that aborts early hides how much else is broken.
 
+`npm run bench:edit` measures what one placed block costs in main on three
+large documents, step by step. It fails nothing; its numbers belong in the
+commit and beside the change that moved them.
+
 ## Invariants — do not quietly change these
 
 **The document's palette is append-only while editing.** Clearing an entry that
@@ -2063,13 +2067,63 @@ to be the thing being edited. Same reason the edit list writes into a chunk
 that **already has geometry**: an edit into an empty chunk creates it, and a
 chunk with no old box has no stale box to keep.
 
-**`paletteTally` is one walk where there were two.** `documentState` wants the
-materials list and the block count, and asked for them separately — two passes
-over every cell on every mutating handler, which a selection-face drag reaches
-many times a second. 12.1 ms became 5.6 ms on the same document. `blocks` is
-derived as `cells - counts[0]` rather than by filtering names, because that is
-`countBlocks`' answer *exactly*: index 0 is always air and is the only thing it
-excludes, so a `cave_air` interned at some other index counts as a block to it.
+**`paletteTally` walks nothing: the document keeps its counts.** It was two
+walks, then one -- 12.1 ms became 5.6 ms -- and is now `doc.counts`, one number
+per palette entry kept by every write. `blocks` is derived as
+`cells - counts[0]`, because that is `countBlocks`' answer *exactly*: index 0
+is always air and is the only thing it excludes, so a `cave_air` interned at
+some other index counts as a block to it.
+
+**One placed block costs what the block costs, and on a big document it cost
+what the document costs.** `npm run bench:edit` (`scripts/bench-edit.ts`)
+places, breaks, lights and grows on three documents and prints main's steps.
+Before and after, one block placed:
+
+| | in the middle | past the edge (growing) | a texture nobody drew before |
+|---|---|---|---|
+| dense 128x32x128 | 187 ms → 60 ms | 5.0 s → 36 ms | |
+| terrain 256x96x256 | 400 ms + 60 ms of state → 25 ms | 5.6 s → 58 ms | 5.8 s → 30 ms |
+| statues 64x16x64 | 3.4 s → 0.75 s | 17 s → 250 ms | |
+
+Opening the statue field went from 17 s to 4 s, the dense document from 4.8 s
+to 1.8 s. Where the time had gone, in that order of size:
+
+- **every texture that arrived repacked the atlas**, which moved every UV, so
+  the whole document was meshed again and 27 MB resent. The atlas keeps a
+  reserve now (`packAtlas`) and a new tile goes there without moving another;
+  the renderer is sent the tile (`AtlasPatch`). See "The atlas grows" below.
+- **a resize threw the chunk cache away.** Chunks are meshed in content
+  coordinates (`doc.frame`, the sum of every resize's shift), which growth does
+  not move; the viewport places them at `MeshPayload.frame`. New cells are air,
+  and air with no block light and full sky is, to the mesher, exactly what
+  "outside the grid" is -- so the old snapshot is carried into the new grid
+  with new cells set to that, and only what really changed across the old face
+  is re-meshed (`chunked_mesh.ts`).
+- **two `new Set(voxels)`, the light flood and a full-grid compare** ran on
+  every edit regardless of its size. Presence comes from `doc.counts`; the
+  document records the cells it writes (`doc.changes`, see `writeVoxel` and
+  `takeVoxelChanges`); `relight` floods only the columns within `LIGHT_REACH`
+  of them and starts from values outside the box, which do not change.
+- **meshing allocated per face**: forty small arrays and closures per face in
+  the shading, three per face in `buildMesh`. 790 ms became 185 ms for a chunk
+  of statues.
+
+`tests/document.ts` walks `src/main` and refuses a write to a document's
+`voxels` outside `writeVoxel` and the three bulk rewrites, because the counts
+and the change list are only as true as that list. `tests/chunks.ts` walks
+seventy random edits, growths on every side and shrinks, and requires the
+incremental mesh to equal a rebuild -- **light in every vertex included** --
+and the incremental light grid to equal a full flood. That comparison found
+two faults that predated all of this: chunks diagonal to an edited cell were
+never re-meshed although their corner shading reads it (`markDirty` marks all
+26 neighbours now), and the sky flood seeded only beside solid blocks, which
+left the space under every overhang lit from the floor up.
+
+**A click in creative mode is never dropped.** Hand placement went through
+`runDocument`, which holds `busy` until the new mesh arrives, and `onBuild`
+returned while `busy` was set -- so every click during that round trip was
+lost. `queueBuild` runs the clicks in order and waits only for the edit; the
+redraw is asked for and not awaited.
 
 **The viewport receives geometry, not a container format.** `docMesh` hands over
 per-chunk `Float32Array`/`Uint32Array` attributes plus the atlas as raw RGBA
@@ -4599,11 +4653,23 @@ answer; building twice from one object proves nothing, because `Object.keys` and
 rule at all.
 
 The atlas goes from 20.8 MB to 27.6 MB over the whole 920-block set, and packs
-in the same ~130 ms. It is sent only when its version moves — `MeshPayload`
-carries `atlas: MeshAtlas | null` and the renderer hands back the version it
-holds — so that is a cost per atlas, not per edit. `MAX_TILE` caps one texture
+in the same ~130 ms. It is sent only when its layout moves — `MeshPayload`
+carries `atlas: MeshAtlas | null` and the renderer hands back the version and
+layout it holds — so that is a cost per atlas, not per edit. `MAX_TILE` caps one texture
 at 256: the ender dragon's sheet is 1024×1024, and a dragon head is one small
 block.
+
+**The atlas grows into a reserve, and only a full reserve repacks it.** The
+sheet is packed with empty rows kept at the bottom (`ATLAS_RESERVE`, a sixth);
+a texture that arrives later -- a lit furnace, a sign's letters, a banner's
+design -- is put there by `appendTiles` and no other tile moves. So the
+version (the texture count) and the **layout** are two numbers now: UVs are
+valid across every version of one layout, the chunk cache and the icon cache
+key on the layout, and the renderer is sent an `AtlasPatch` with the new tiles
+when it holds an older version of the same layout. Only when the reserve is
+full is the sheet packed again, as a new layout, which is what every arrival
+used to cost: a whole re-mesh and 27 MB. `atlasBuildCount` counts packings
+only, and a warm-up still makes exactly one.
 
 **The atlas grows as blocks are meshed, and its version *is* the texture count.**
 That is the fault behind "the icons are wrong until I scroll", and it was in
@@ -6623,6 +6689,14 @@ a stutter. `preview.alwaysDraw` is the old behaviour, under the diagnostics,
 for telling a missed invalidation from anything else. `aimCamera` still draws
 at once.
 
+**The light's direction is kept, not read back from the light.** `placeShadow`
+moves `sun.position` to fit the shadow camera round the document, and it used
+to take the direction from that same position -- which, fitted round the box's
+centre, points slightly elsewhere. So every `placeShadow` without an `applySky`
+before it turned the sun a little. It is `lightDirection` now, set where the
+hour or the sliders set the light. Found by comparing an incremental frame with
+a rebuilt one: the meshes were identical and the shadows were not.
+
 **The shadow map is drawn on request.** `shadowMap.autoUpdate` is off, and
 `shadowsStale()` is the one place that sets `needsUpdate`: aiming the light
 (`placeShadow`, which the sun's movement goes through), every payload, and the
@@ -6920,8 +6994,13 @@ Two things about the flood fill, both measured:
   Every open cell in an unroofed column is already at 15, which on an open build
   is most of the volume — half a million cells, each dequeued, decomposed into
   coordinates and asked about six neighbours only to find them all already at 15.
-  That was **223 ms an edit**; seeding from cells that touch something solid is
-  **16 ms**.
+  That was **223 ms an edit**; seeding only from cells beside something dimmer
+  is **16 ms**. "Dimmer" means an open neighbour below 15. It was read as "a
+  solid neighbour", which is the same set where the sky meets the ground and a
+  different one under an overhang: the open column beside a roof lit nothing,
+  so the space under it was lit from the floor up. `relight` is what showed it,
+  because a partial flood cannot reproduce a rule that depends on more than the
+  light.
 - **`spread` writes its six neighbours out longhand.** A closure allocated per
   dequeue was most of the rest.
 
@@ -6931,6 +7010,13 @@ packed to a byte per cell and compared exactly as the voxels are. Same rule as
 ever: dirtiness is *observed*, not announced — a caller that had to remember to
 say "and the light reached this far" would forget, and the chunk that stayed
 dark would be a bug nobody could reproduce.
+
+**After an ordinary edit the observing is done by the writes, not by a compare.**
+`doc.changes` lists the cells written since the cache last took the list, and
+`relight` lists the cells whose light it changed; `ChunkHint.changed` is the
+union, and with it no cell outside it is looked at. Both lists are exact, and
+`null` -- compare everything -- is always allowed, which is what a load, a
+compact, a shrink or a fill past `MAX_TRACKED_CHANGES` falls back to.
 
 **Animated textures are blitted into the atlas, not packed into it.** Water is
 32 frames, lava 38, fire 32; a square tile holding all of them would either grow

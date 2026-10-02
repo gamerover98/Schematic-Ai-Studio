@@ -141,6 +141,15 @@ is only for this investigation.
   `invalidate()` is missing.
 - **Something that casts a shadow and moves calls `shadowsStale()`**; the map
   is not redrawn every frame any more.
+- **"mesh answered by main" carries `main`**: main's own steps in ms (light,
+  diff, mesh chunks, atlas, ship...). A long answer with small steps was a
+  wait, not work. For an edit that is slow in main, reproduce it with
+  `npm run bench:edit` before changing anything: it prints the same steps.
+- **An edit must cost what it touches.** The document records the cells it
+  writes (`writeVoxel`, `doc.changes`) and keeps counts (`doc.counts`); a new
+  write path that bypasses them breaks both, and `tests/document.ts` refuses
+  it. A new texture goes into the atlas reserve (`appendTiles`); a full repack
+  shows up as `atlas` taking ~150 ms and the payload carrying the whole sheet.
 - **One `render()` into `aaTarget` per frame.** Every further render into a
   multisampled target is a full-screen resolve; draw extra passes into a target
   of their own, the compass's arrangement.

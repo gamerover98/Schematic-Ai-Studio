@@ -110,7 +110,68 @@ export interface SchematicDocument {
   filePath: string | null;
   /** Monotonic; a cache key, not a dirty flag. See the invariants above. */
   revision: number;
+  /**
+   * How many cells hold each palette index, kept by every write to `voxels`.
+   *
+   * The materials list, the block count and the mesher's "which blocks are
+   * present" were each a walk over every cell, on every edit: on a 256x96x256
+   * terrain, 57 ms for the state the window gets back and two `new Set(voxels)`
+   * of ~95 ms each in the mesh request -- four times the cost of meshing the
+   * chunk that changed. One count per palette entry answers all three.
+   *
+   * It is kept exactly, not estimated: `writeVoxel` is the one way a single
+   * cell changes, and the three bulk rewrites (loading, compacting, resizing)
+   * recount. `tests/document.ts` walks `src/main` and refuses a write to
+   * `voxels` anywhere else, because one missed site is a count that drifts
+   * and a block the mesher thinks is absent.
+   */
+  counts: number[];
+  /**
+   * Where the content sits in the grid, relative to where it started: the sum
+   * of every resize's `shift`.
+   *
+   * A resize below the origin moves every cell, and the chunk cache would have
+   * had to throw everything away -- five seconds on the same terrain for one
+   * block placed past the low edge. The cache meshes in *content* coordinates
+   * (`doc` minus `frame`), which a shift does not move, and the viewport places
+   * the chunks at `frame`. An undo resizes back with the opposite shift, so it
+   * puts this back too.
+   */
+  frame: [number, number, number];
+  /** The cells written since the mesh last looked; see `VoxelChanges`. */
+  changes: VoxelChanges;
 }
+
+/**
+ * Which cells changed since the chunk cache last read the document.
+ *
+ * The cache used to compare a snapshot of the whole grid with the grid, every
+ * edit, to find the handful of cells that moved -- 25 to 45 ms on the terrain,
+ * and linear in the volume. This is the list, written where the cells are.
+ *
+ * `cells` is `null` when the answer is "everything, as far as anyone knows":
+ * after a load or a compact, which rewrite the grid, and past
+ * `MAX_TRACKED_CHANGES`, where a fill is big enough that comparing everything
+ * is cheaper than remembering it. `null` is always safe; the cache then diffs
+ * the whole grid as it did before.
+ *
+ * A resize carries the list into the new grid rather than dropping it: the
+ * cells it adds are air, which a reader can tell from the two shapes, and the
+ * ones already listed are the same cells at new indices. That is what lets a
+ * block placed past the edge -- a resize and a write in one transaction --
+ * cost what the write costs.
+ *
+ * `epoch` is what makes it safe to have one list and several readers. The cache
+ * records the epoch it took, and a list taken by anyone else since is a list
+ * it has not seen, so it falls back to the full diff.
+ */
+export interface VoxelChanges {
+  epoch: number;
+  cells: Set<number> | null;
+}
+
+/** Past this many cells, the list gives way to a full diff. */
+export const MAX_TRACKED_CHANGES = 1 << 18;
 
 /**
  * The cell WorldEdit's anchor occupies, from the stored offset — and back.
@@ -212,7 +273,78 @@ export function createDocument(options: CreateDocumentOptions): SchematicDocumen
     metadata: {},
     filePath: null,
     revision: 0,
+    counts: [width * height * length],
+    frame: [0, 0, 0],
+    changes: { epoch: 0, cells: null },
   };
+}
+
+/** How many cells hold each palette index, counted. */
+export function countsOf(voxels: Int32Array, paletteLength: number): number[] {
+  const counts = new Array<number>(paletteLength).fill(0);
+  for (let i = 0; i < voxels.length; i += 1) {
+    const index = voxels[i];
+    if (index >= counts.length) {
+      for (let k = counts.length; k <= index; k += 1) counts.push(0);
+    }
+    counts[index] += 1;
+  }
+  return counts;
+}
+
+/**
+ * Counts every cell again, after a rewrite of the whole grid.
+ *
+ * Also forgets which cells changed: a rewrite of the whole grid is, as far as
+ * any reader can tell, a change to all of it.
+ */
+export function recountVoxels(doc: SchematicDocument): void {
+  doc.counts = countsOf(doc.voxels, doc.palette.length);
+  doc.changes.cells = null;
+}
+
+/**
+ * Writes one cell, keeping `counts` and `changes` true.
+ *
+ * The only way one cell of `voxels` changes. `setBlock` comes through here and
+ * so does the undo stack's replay, which writes indices directly.
+ */
+export function writeVoxel(doc: SchematicDocument, index: number, value: number): void {
+  const before = doc.voxels[index];
+  if (before === value) return;
+  doc.voxels[index] = value;
+  const counts = doc.counts;
+  while (counts.length <= value) counts.push(0);
+  counts[before] -= 1;
+  counts[value] += 1;
+  const cells = doc.changes.cells;
+  if (cells !== null) {
+    if (cells.size >= MAX_TRACKED_CHANGES) doc.changes.cells = null;
+    else cells.add(index);
+  }
+}
+
+/**
+ * The cells written since `seen`, and a fresh list from here on.
+ *
+ * `seen` is the epoch the caller took last time. If anybody else has taken a
+ * list since, or a bulk rewrite happened, the answer is `null` -- "compare
+ * everything" -- which is always correct and only slower.
+ */
+export function takeVoxelChanges(
+  doc: SchematicDocument,
+  seen: number | null,
+): { cells: ReadonlySet<number> | null; epoch: number } {
+  const current = doc.changes;
+  const cells = seen === current.epoch ? current.cells : null;
+  const epoch = current.epoch + 1;
+  doc.changes = { epoch, cells: new Set() };
+  return { cells, epoch };
+}
+
+/** Whether any cell holds this palette index. */
+export function paletteIndexPresent(doc: SchematicDocument, index: number): boolean {
+  return (doc.counts[index] ?? 0) > 0;
 }
 
 /**
@@ -245,6 +377,7 @@ export function documentFromLoaded(
   for (let i = 0; i < doc.voxels.length && i < loaded.voxels.length; i += 1) {
     doc.voxels[i] = remap[loaded.voxels[i]] ?? 0;
   }
+  recountVoxels(doc);
 
   for (const record of loaded.blockEntities) {
     doc.blockEntities.set(posKey(record.pos[0], record.pos[1], record.pos[2]), record);
@@ -312,12 +445,9 @@ export function paletteTally(doc: SchematicDocument): {
   histogram: Map<string, number>;
   blocks: number;
 } {
-  const counts = new Int32Array(doc.palette.length);
-  for (const index of doc.voxels) {
-    if (index >= 0 && index < counts.length) {
-      counts[index] += 1;
-    }
-  }
+  // Kept by every write rather than counted here; see `counts`. The walk this
+  // replaced was 57 ms of every edit on a 256x96x256.
+  const counts = doc.counts;
   const histogram = new Map<string, number>();
   doc.palette.forEach((entry, index) => {
     if (counts[index] > 0) {
@@ -367,6 +497,7 @@ export function compactPalette(doc: SchematicDocument): void {
   }
   doc.palette = next;
   doc.paletteIndex = new Map(next.map((entry, index) => [paletteEntryCacheKey(entry), index]));
+  recountVoxels(doc);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,7 +560,7 @@ export function setBlock(
   if (before === after && beforeEntity === null) {
     return null;
   }
-  doc.voxels[index] = after;
+  writeVoxel(doc, index, after);
   if (beforeEntity !== null) {
     doc.blockEntities.delete(key);
   }
@@ -512,20 +643,31 @@ export function resizeDocument(
   const next = new Int32Array(width * height * length);
   const [dx, dy, dz] = shift;
 
-  for (let x = 0; x < doc.width; x += 1) {
+  // A row of z at a time: the rows are contiguous in both grids, so each is
+  // one copy rather than a loop of index arithmetic per cell.
+  const z0 = Math.max(0, -dz);
+  const z1 = Math.min(doc.length, length - dz);
+  for (let x = 0; x < doc.width && z1 > z0; x += 1) {
     const nx = x + dx;
     if (nx < 0 || nx >= width) continue;
     for (let y = 0; y < doc.height; y += 1) {
       const ny = y + dy;
       if (ny < 0 || ny >= height) continue;
-      for (let z = 0; z < doc.length; z += 1) {
-        const nz = z + dz;
-        if (nz < 0 || nz >= length) continue;
-        next[nx * height * length + ny * length + nz] =
-          doc.voxels[x * doc.height * doc.length + y * doc.length + z];
-      }
+      const from = x * doc.height * doc.length + y * doc.length + z0;
+      next.set(doc.voxels.subarray(from, from + (z1 - z0)), nx * height * length + ny * length + z0 + dz);
     }
   }
+  /*
+   * Growing drops no cell and adds only air, so the counts move by exactly the
+   * cells added; only a resize that cuts something off has to count again.
+   */
+  const keepsEverything =
+    dx >= 0 &&
+    dy >= 0 &&
+    dz >= 0 &&
+    doc.width + dx <= width &&
+    doc.height + dy <= height &&
+    doc.length + dz <= length;
 
   // Block entities move with their blocks, and any that fell outside the new
   // box go with them -- leaving them behind would strand a chest's contents at
@@ -541,10 +683,34 @@ export function resizeDocument(
     movedEntities.set(posKey(nx, ny, nz), { ...record, pos: [nx, ny, nz] });
   }
 
+  // The listed cells, at their indices in the new grid; any that fell outside
+  // it are gone, along with the cells themselves.
+  const listed = doc.changes.cells;
+  if (listed !== null) {
+    const moved = new Set<number>();
+    const oldPlane = doc.height * doc.length;
+    for (const index of listed) {
+      const x = Math.floor(index / oldPlane) + dx;
+      const rest = index % oldPlane;
+      const y = Math.floor(rest / doc.length) + dy;
+      const z = (rest % doc.length) + dz;
+      if (x < 0 || y < 0 || z < 0 || x >= width || y >= height || z >= length) continue;
+      moved.add(x * height * length + y * length + z);
+    }
+    doc.changes.cells = moved;
+  }
+  const added = next.length - doc.voxels.length;
   doc.voxels = next;
   doc.width = width;
   doc.height = height;
   doc.length = length;
+  if (keepsEverything) {
+    doc.counts = [...doc.counts];
+    doc.counts[0] = (doc.counts[0] ?? 0) + added;
+  } else {
+    doc.counts = countsOf(next, doc.palette.length);
+  }
+  doc.frame = [doc.frame[0] + dx, doc.frame[1] + dy, doc.frame[2] + dz];
   doc.blockEntities = movedEntities;
   doc.entities = doc.entities.map((entity) => ({
     ...entity,

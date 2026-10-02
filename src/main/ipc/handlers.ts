@@ -893,6 +893,7 @@ ${report.stack}`),
             waterColor: settings.preview.waterColor,
           },
           req.atlasVersion ?? null,
+          req.atlasLayout ?? null,
         );
         return { ok: true, ...result };
       } catch (err) {
@@ -1328,7 +1329,7 @@ ${report.stack}`),
           },
           // What the window says it already has. Main decides what to send
           // from it; it is never a request for anything in particular.
-          { mesh: request.haveMesh, atlas: request.haveAtlas },
+          { mesh: request.haveMesh, atlas: request.haveAtlas, atlasLayout: request.haveAtlasLayout },
         );
         const sun = sunAnglesRadians(settings);
         return {

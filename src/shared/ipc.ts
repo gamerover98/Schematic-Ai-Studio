@@ -678,6 +678,8 @@ export interface BlockIconsRequest {
    * request says "I have version N" and gets geometry alone.
    */
   atlasVersion?: number | null;
+  /** ...and the layout of it; see `MeshAtlas.layout`. */
+  atlasLayout?: number | null;
 }
 
 export interface BlockIcon {
@@ -690,6 +692,11 @@ export interface BlockIconsSuccess {
   icons: BlockIcon[];
   atlas: MeshAtlas | null;
   atlasVersion: number;
+  /**
+   * Icons drawn against an earlier version of the same layout are still
+   * right; only a new layout makes them wrong. See `MeshAtlas.layout`.
+   */
+  atlasLayout: number;
 }
 
 export type BlockIconsResponse = Result<BlockIconsSuccess>;
@@ -906,6 +913,12 @@ export interface MeshAtlas {
    */
   version: number;
   /**
+   * Which packing of the sheet this is. Tiles added since keep every UV of
+   * this layout valid and arrive as an `AtlasPatch`; a new layout means every
+   * UV moved and the sheet is sent whole. See `packAtlas`.
+   */
+  layout: number;
+  /**
    * The textures that move, and their frames.
    *
    * The atlas itself holds frame 0 and always will: packing 32 frames of water
@@ -917,6 +930,25 @@ export interface MeshAtlas {
    * They travel with the atlas and are therefore bound to its version, which is
    * what keeps this off the per-edit path: an edit re-sends neither.
    */
+  animations: AtlasAnimation[];
+}
+
+/**
+ * Tiles added to an atlas the renderer already holds, without moving any
+ * other.
+ *
+ * What a texture nobody had drawn before costs now: its tile, a few kilobytes,
+ * copied into the texture the renderer has. It used to cost the whole sheet --
+ * 27 MB -- and a re-mesh of the document, because every UV moved.
+ */
+export interface AtlasPatch {
+  /** The layout these tiles belong to; see `MeshAtlas.layout`. */
+  layout: number;
+  /** The version the atlas is at once they are in. */
+  version: number;
+  /** Each tile's padded square, at its place in the sheet. */
+  tiles: Array<{ x: number; y: number; width: number; height: number; pixels: Uint8Array }>;
+  /** The moving textures among them, to play alongside the ones already held. */
   animations: AtlasAnimation[];
 }
 
@@ -974,6 +1006,23 @@ export interface MeshPayload {
   /** Omitted when `atlasVersion` matches what the renderer already holds. */
   atlas: MeshAtlas | null;
   atlasVersion: number;
+  /** See `MeshAtlas.layout`. */
+  atlasLayout: number;
+  /**
+   * The tiles added since the version the renderer said it holds, when it
+   * holds this layout. `atlas` and this are never both set.
+   */
+  atlasPatch: AtlasPatch | null;
+  /**
+   * Where the chunks go: their positions are in content coordinates, and a
+   * document cell is its content cell plus this.
+   *
+   * Main meshes in content coordinates so that a resize which moves the
+   * content -- growing the box below the origin -- leaves every chunk it
+   * already built where it was, and the viewport moves them all at once by
+   * placing their group here. Zero until something grows below the origin.
+   */
+  frame: [number, number, number];
 }
 
 /**
@@ -1033,6 +1082,8 @@ export interface DocumentMeshRequest {
   haveMesh: string | null;
   /** The atlas version it is drawing with, if any. */
   haveAtlas: number | null;
+  /** ...and the layout of it; see `MeshAtlas.layout`. */
+  haveAtlasLayout: number | null;
 }
 
 export interface PreviewSuccess {
@@ -1460,6 +1511,12 @@ export interface DocumentMesh {
   cached: boolean;
   sunAzimuth: number;
   sunElevation: number;
+  /**
+   * Where main spent the time, in milliseconds by step, for the stutter
+   * report: a slow answer is the same length whether main was relighting,
+   * meshing or busy with something else, and only main can say which.
+   */
+  timings: Record<string, number>;
 }
 
 /**

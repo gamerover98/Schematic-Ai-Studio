@@ -100,7 +100,12 @@ import {
   renameFor,
 } from "../../shared/block_versions.js";
 import { DOCUMENT_SIZE } from "../../shared/settings.js";
-import { buildDocumentPreview, type DocumentPreviewOptions } from "./preview.js";
+import {
+  atlasFor,
+  buildDocumentPreview,
+  type AtlasSource,
+  type DocumentPreviewOptions,
+} from "./preview.js";
 import type { ChunkMeshCache } from "../pipeline/chunked_mesh.js";
 import { saveDocument, type WriteResult } from "./writers.js";
 import { cropToContent, type CropSummary } from "../domain/crop.js";
@@ -142,7 +147,14 @@ export interface DocumentSession {
    * The GLB last handed out, and everything it was built from — the document's
    * revision *and* the preview options that reach the atlas. See `documentMesh`.
    */
-  mesh: { key: string; payload: MeshPayload; center: [number, number, number]; size: [number, number, number] } | null;
+  mesh: {
+    key: string;
+    payload: MeshPayload;
+    center: [number, number, number];
+    size: [number, number, number];
+    /** The atlas the payload's UVs address; `shipMesh` sends what is missing of it. */
+    atlas: AtlasSource;
+  } | null;
   /**
    * Per-chunk geometry carried between rebuilds, so an edit re-meshes only the
    * chunks it touched. Belongs to the session because it is per document; the
@@ -2691,8 +2703,17 @@ export function editBlockEntityValue(
 export async function documentMesh(
   session: DocumentSession,
   options: DocumentPreviewOptions,
-  held: { mesh: string | null; atlas: number | null } = { mesh: null, atlas: null },
-): Promise<{ mesh: MeshPayload; center: [number, number, number]; size: [number, number, number]; cached: boolean }> {
+  held: { mesh: string | null; atlas: number | null; atlasLayout?: number | null } = {
+    mesh: null,
+    atlas: null,
+  },
+): Promise<{
+  mesh: MeshPayload;
+  center: [number, number, number];
+  size: [number, number, number];
+  cached: boolean;
+  timings: Record<string, number>;
+}> {
   // The revision is not the whole key. The two biome tints are multiplied into
   // the texture atlas rather than applied by the viewer, so changing one has to
   // rebuild the mesh — and it changes no revision, because it changes no block.
@@ -2717,18 +2738,31 @@ export async function documentMesh(
   ].join("|");
 
   const cached = session.mesh !== null && session.mesh.key === key;
+  let timings: Record<string, number> = {};
   if (!cached) {
-    const built = await buildDocumentPreview(session.doc, options, session.meshCache);
+    /*
+     * A build that throws may have taken the document's record of changed
+     * cells, so the cache it started from can no longer be brought up to
+     * date incrementally: it is dropped, and the next build meshes everything.
+     */
+    const from = session.meshCache;
+    session.meshCache = undefined;
+    const built = await buildDocumentPreview(session.doc, options, from);
+    timings = built.timings;
     session.meshCache = built.meshCache;
     session.mesh = {
       key,
       payload: built.mesh,
       center: built.center,
       size: built.size,
+      atlas: built.atlas,
     };
   }
-  const { payload, center, size } = session.mesh!;
-  return { mesh: shipMesh(session, key, payload, held), center, size, cached };
+  const { payload, center, size, atlas } = session.mesh!;
+  const shipAt = performance.now();
+  const mesh = shipMesh(session, key, payload, held, atlas);
+  timings.ship = performance.now() - shipAt;
+  return { mesh, center, size, cached, timings };
 }
 
 /**
@@ -2774,7 +2808,8 @@ function shipMesh(
   session: DocumentSession,
   token: string,
   payload: MeshPayload,
-  held: { mesh: string | null; atlas: number | null },
+  held: { mesh: string | null; atlas: number | null; atlasLayout?: number | null },
+  source: AtlasSource,
 ): MeshPayload {
   const sent = session.sent ?? null;
   /*
@@ -2814,16 +2849,25 @@ function shipMesh(
     chunks: new Map(payload.chunks.map((chunk) => [chunkId(chunk), chunk.positions])),
   };
 
+  /*
+   * The atlas is the larger half and changes far less often than the
+   * geometry: it grows only when a texture nothing has drawn before appears,
+   * and then by a tile or two into the sheet the renderer already has.
+   */
+  const { atlas, patch } = atlasFor(source, {
+    version: held.atlas,
+    layout: held.atlasLayout ?? null,
+  });
   return {
     chunks,
     dropped,
     partial: incremental,
     token,
-    // The atlas is the larger half and changes far less often than the
-    // geometry: it grows only when a block type nothing has drawn before
-    // appears, which after the startup warm-up is never.
-    atlas: held.atlas === payload.atlasVersion ? null : payload.atlas,
-    atlasVersion: payload.atlasVersion,
+    atlas,
+    atlasVersion: source.version,
+    atlasLayout: source.layout,
+    atlasPatch: patch,
+    frame: payload.frame,
   };
 }
 

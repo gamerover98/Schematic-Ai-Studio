@@ -16,7 +16,7 @@
  */
 
 import type { BlockEntityRecord } from "../pipeline/types.js";
-import { documentSize, posKey, type SchematicDocument } from "./document.js";
+import { countsOf, documentSize, posKey, type SchematicDocument } from "./document.js";
 
 /** The tight box around the non-air voxels, in the document's own coordinates. */
 export interface ContentBounds {
@@ -143,6 +143,11 @@ export function cropToContent(doc: SchematicDocument): CroppedDocument | null {
       height,
       length,
       voxels,
+      // Its own counts and change list, not the original's: the spread above
+      // would share both, and the copy's grid is a different one.
+      counts: countsOf(voxels, doc.palette.length),
+      changes: { epoch: 0, cells: null },
+      frame: [0, 0, 0],
       blockEntities,
       entities,
       // The schematic's world origin moves the *opposite* way to its content,
