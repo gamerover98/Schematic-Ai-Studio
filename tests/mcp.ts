@@ -46,7 +46,7 @@ import {
   startupRefusal,
   withinRoot,
 } from "../src/main/mcp/policy.js";
-import { countBlocks, getBlock } from "../src/main/domain/document.js";
+import { countBlocks, getBlock, setBlock } from "../src/main/domain/document.js";
 import { BANNER_EDITOR_URL, BANNER_PATTERNS } from "../src/shared/banner_patterns.js";
 import {
   MC_VERSION_NAMES,
@@ -466,6 +466,57 @@ try {
   // bug report: the writers write what they are given, the mesher ignores what
   // it does not recognise, and the game fills in whatever the file left out. It
   // surfaces two steps away, as an inspector with nothing in it.
+  /*
+   * A bed is one bed. `get_palette` listed a foot and a head, which is true
+   * of the file and false of the build -- and a model replacing "the beds"
+   * from that list would name both, or worse, only the foot and leave the
+   * heads standing. One row now, with the other half spelled out under
+   * `pair` for the replace that has to name it.
+   */
+  console.log("\n--- get_palette counts a block of two cells once ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const put = (x: number, z: number, block: string, properties: Record<string, string>): void => {
+      setBlock(session.doc, x, 0, z, { namespacedName: block, properties });
+    };
+    put(0, 1, "minecraft:red_bed", { facing: "north", occupied: "false", part: "foot" });
+    put(0, 0, "minecraft:red_bed", { facing: "north", occupied: "false", part: "head" });
+    put(2, 0, "minecraft:red_bed", { facing: "east", occupied: "false", part: "foot" });
+    put(3, 0, "minecraft:red_bed", { facing: "east", occupied: "false", part: "head" });
+    put(5, 0, "minecraft:piston", { extended: "true", facing: "east" });
+    put(6, 0, "minecraft:piston_head", { facing: "east", short: "false", type: "normal" });
+
+    type Rows = { blocks: { block: string; count: number; pair?: string[] }[] };
+    const exact = (await callTool("get_palette", {}, options(sink))).result as Rows;
+    equal(
+      "each bed is one row, with its head as its pair",
+      exact.blocks
+        .filter((row) => row.block.startsWith("minecraft:red_bed"))
+        .map((row) => [row.block, row.count, row.pair?.length ?? 0].join(" "))
+        .sort(),
+      [
+        "minecraft:red_bed[facing=east,occupied=false,part=foot] 1 1",
+        "minecraft:red_bed[facing=north,occupied=false,part=foot] 1 1",
+      ],
+    );
+    check(
+      "...and no head is listed on its own",
+      exact.blocks.every((row) => !row.block.includes("part=head") && !row.block.startsWith("minecraft:piston_head")),
+    );
+
+    const merged = (await callTool("get_palette", { unify: true }, options(sink))).result as Rows;
+    equal(
+      "unify merges every state into the bare id",
+      merged.blocks.map((row) => [row.block, row.count, (row.pair ?? []).join("+")].join(" ")).sort(),
+      [
+        "minecraft:piston 1 minecraft:piston_head[facing=east,short=false,type=normal]",
+        "minecraft:red_bed 2 ",
+      ],
+    );
+    closeDocument();
+  }
+
   console.log("\n--- a tool places a block in the state the game would give it ---");
   {
     const session = open();

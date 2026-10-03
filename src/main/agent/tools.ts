@@ -59,11 +59,12 @@ import {
   countBlocks,
   getBlock,
   normalizeRegion,
-  paletteHistogram,
   regionVolume,
   type Region,
   type SchematicDocument,
 } from "../domain/document.js";
+import { countMaterials } from "../domain/materials.js";
+import { unifyStates } from "../../shared/material_list.js";
 import type { TransactionScope } from "../domain/history.js";
 import {
   applyRegionTransform,
@@ -869,20 +870,25 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "get_palette",
     description:
-      "Which blocks the schematic contains and how many of each. Use this before replacing a block, to find how it is actually spelled.",
+      "Which blocks the schematic contains and how many of each. Use this before replacing a block, to find how it is actually spelled. " +
+      "A block that is two cells -- a bed, a door, a two-tall plant, an extended piston and its head -- is counted once, " +
+      "under its lower or foot half, and `pair` lists the spelling of the other half, which a replace has to name as well. " +
+      "`unify: true` merges every state of a block into one row under its bare id, which a replace matches in any state.",
     schema: {
       type: "object",
-      properties: {},
+      properties: {
+        unify: {
+          type: "boolean",
+          description: "One row per block id, whatever its states. Defaults to false: one row per exact state.",
+        },
+      },
       additionalProperties: false,
     },
-    async run(context, _args: Record<string, never>, id) {
+    async run(context, args: { unify?: boolean }, id) {
       step(context, "get_palette", "listing the materials in use", id);
-      const entries = [...paletteHistogram(context.doc).entries()]
-        .filter(([block]) => !block.startsWith("minecraft:air"))
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 128)
-        .map(([block, count]) => ({ block, count }));
-      return { blocks: entries };
+      const counted = countMaterials(context.doc, null).palette;
+      const rows = args.unify === true ? unifyStates(counted) : counted;
+      return { blocks: rows.slice(0, 128) };
     },
   },
 

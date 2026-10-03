@@ -89,6 +89,7 @@ import {
   legalValuesFor,
 } from "../../shared/block_states.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
+import { FACING_STEP, twoPartFamily } from "../../shared/two_part.js";
 import { standsOn, type SupportBelow } from "../../shared/block_support.js";
 import { coversFace } from "../pipeline/block_shapes.js";
 import { normaliseVoidBlock, voidSources } from "../../shared/settings.js";
@@ -117,6 +118,7 @@ import {
   type Extent,
 } from "../domain/grow.js";
 import { peelEmptyFaces } from "../domain/shrink.js";
+import { countMaterials, listMaterials } from "../domain/materials.js";
 import {
   bannerFormatOf,
   checkBannerPatterns,
@@ -352,25 +354,6 @@ export function adoptDocument(doc: SchematicDocument, history?: History): Docume
 // State for the renderer
 // ---------------------------------------------------------------------------
 
-/**
- * Every block in the document, most common first.
- *
- * It was capped at 64, silently, while the panel showing it capped at 8 and
- * said "…and N more" -- so past 64 distinct states that sentence *understated*
- * the palette, which is worse than either cap alone. A schematic's materials
- * list is one of the few things worth being complete: it is how you find the
- * one stray block you did not mean to place.
- *
- * The cost is already paid. `paletteHistogram` walks every voxel and runs on
- * every state push either way; dropping the `.slice` adds payload, not work.
- */
-function paletteCounts(histogram: ReadonlyMap<string, number>): PaletteCount[] {
-  return [...histogram.entries()]
-    .filter(([block]) => !block.startsWith("minecraft:air"))
-    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
-    .map(([block, count]) => ({ block, count }));
-}
-
 export function documentState(session: DocumentSession): DocumentState {
   const { doc, history } = session;
   // One walk for both numbers. This runs on every mutating handler, and a
@@ -385,7 +368,12 @@ export function documentState(session: DocumentSession): DocumentState {
     offset: doc.offset === null ? null : ([...doc.offset] as [number, number, number]),
     worldOrigin: doc.worldOrigin === null ? null : ([...doc.worldOrigin] as [number, number, number]),
     blockCount: tally.blocks,
-    palette: paletteCounts(tally.histogram),
+    /*
+     * Every state, two halves of a bed counted as two: this runs on every
+     * edit and reads the counts the document keeps, and pairing them would
+     * be a walk. The materials list asks `selectionPalette`, which pairs.
+     */
+    palette: listMaterials(tally.histogram),
     dirty: isDirty(history),
     canUndo: canUndo(history),
     undoDepth: history.undoStack.length,
@@ -399,7 +387,8 @@ export function documentState(session: DocumentSession): DocumentState {
 }
 
 /**
- * What the selected areas are made of, for the materials inventory.
+ * What the selected areas are made of, for the materials inventory -- or the
+ * whole document, for `null`.
  *
  * The materials list was the whole document's, beside tools that act on the
  * selection -- so "click a material to replace it" offered blocks the selection
@@ -411,18 +400,25 @@ export function documentState(session: DocumentSession): DocumentState {
  * document: a cell outside holds nothing and is counted as `outside`, not as
  * air, because a replace of air would never reach it.
  *
+ * A block of two cells is one block here (`countMaterials`), which is why the
+ * whole document is asked for too rather than read off `DocumentState`.
+ *
  * Asked for, never pushed: `documentState` runs on every edit and a selection
  * is the renderer's, so this is the renderer's question to ask when either
  * moves.
  */
 export function selectionPalette(
   session: DocumentSession,
-  request: readonly RegionSpec[],
+  request: readonly RegionSpec[] | null,
 ): { palette: PaletteCount[]; air: number; outside: number; cells: number } {
+  const { doc } = session;
+  if (request === null) {
+    const whole = countMaterials(doc, null);
+    return { palette: whole.palette, air: whole.air, outside: 0, cells: whole.walked };
+  }
   if (request.length === 0 || request.length > MAX_BOXES) {
     throw new RegionCountError(request.length);
   }
-  const { doc } = session;
   const asked = request.map(orderRegion);
   const cells = unionVolume(asked);
   const inside = asked
@@ -436,24 +432,8 @@ export function selectionPalette(
     }))
     .filter((box) => box.minX <= box.maxX && box.minY <= box.maxY && box.minZ <= box.maxZ);
 
-  const counts = new Int32Array(doc.palette.length);
-  const plane = doc.height * doc.length;
-  let walked = 0;
-  forEachUnionCell(inside, (x, y, z) => {
-    const index = doc.voxels[x * plane + y * doc.length + z];
-    if (index >= 0 && index < counts.length) counts[index] += 1;
-    walked += 1;
-  });
-
-  const histogram = new Map<string, number>();
-  doc.palette.forEach((entry, index) => {
-    if (counts[index] === 0) return;
-    const key = paletteEntryCacheKey(entry);
-    histogram.set(key, (histogram.get(key) ?? 0) + counts[index]);
-  });
-  let air = 0;
-  for (const [key, count] of histogram) if (key.startsWith("minecraft:air")) air += count;
-  return { palette: paletteCounts(histogram), air, outside: cells - walked, cells };
+  const counted = countMaterials(doc, inside);
+  return { palette: counted.palette, air: counted.air, outside: cells - counted.walked, cells };
 }
 
 // ---------------------------------------------------------------------------
@@ -913,7 +893,7 @@ function useTarget(
   });
 
   const cells = [{ ...at, entry: swung(existing) }];
-  const family = TWO_PART.find((candidate) => candidate.matches(existing.namespacedName));
+  const family = twoPartFamily(existing.namespacedName);
   const held = family === undefined ? undefined : existing.properties[family.property];
   if (family !== undefined && family.step !== null && (held === family.near || held === family.far)) {
     const away = held === family.near ? 1 : -1;
@@ -929,68 +909,6 @@ function useTarget(
   }
   return { cells, label: `${opening ? "Open" : "Close"} ${existing.namespacedName}` };
 }
-
-/**
- * The families that are one block to place and two blocks in the file.
- *
- * A bed is a foot and a head; a door is a lower half and an upper. Both are
- * states the game cannot hold on their own -- a lone bed foot drops as an item
- * the moment anything updates it, and a lone door half is a door you can walk
- * through -- and both were being written as one block, so the schematic looked
- * right here and came apart when it was pasted.
- *
- * `step` is `null` for the family whose second cell is decided by `facing`,
- * which is the bed: its head goes one cell the way you were looking when you
- * laid it. A door's is always the cell above, whichever way it faces.
- *
- * A request that already names the far half -- `part=head`, `half=upper` -- is
- * somebody placing one half on purpose: the inspector, a paste, an agent tool.
- * Those are left alone. Only an absent value, or the near one, means "place the
- * whole thing".
- */
-const TWO_PART: readonly {
-  readonly matches: (name: string) => boolean;
-  readonly property: string;
-  readonly near: string;
-  readonly far: string;
-  readonly step: readonly [number, number, number] | null;
-}[] = [
-  { matches: (name) => name.endsWith("_bed"), property: "part", near: "foot", far: "head", step: null },
-  // `_trapdoor` does not end in `_door`, which is why this needs no guard --
-  // `tests/session.ts` says so, because it is the kind of thing that reads as
-  // true and would be relied on without ever being checked.
-  { matches: (name) => name.endsWith("_door"), property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
-  /*
-   * The double plants: tall grass, large fern, the four tall flowers, tall
-   * seagrass, the small dripleaf and the pitcher plant. Vanilla's
-   * `DoublePlantBlock` places both halves, and a lone lower half is a tuft cut
-   * off at the top. Asked of the registry rather than listed: a `half` whose
-   * legal values are `lower` and `upper` is exactly that family (a stair's
-   * or a slab's is `top`/`bottom`). The pitcher *crop* has the property and
-   * is not one of them: it is planted as a seed and grows its upper half from
-   * stage 3, so placing it is one cell.
-   *
-   * The pre-Flattening era needs nothing of its own: `legacy_blocks.json`
-   * maps `175:0..5` and `175:8..13` onto these same six names with
-   * `half=lower` and `half=upper`, so a 1.8.8 to 1.12.2 document holds them
-   * spelled this way and the MCEdit writer maps both halves back.
-   */
-  { matches: isDoublePlant, property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
-];
-
-function isDoublePlant(name: string): boolean {
-  if (name.endsWith("_door") || name === "minecraft:pitcher_crop") return false;
-  const values = legalValuesFor(name, "half");
-  return values !== null && values.length === 2 && values.includes("lower") && values.includes("upper");
-}
-
-/** One cell along each horizontal facing, as `[dx, dy, dz]`. */
-const FACING_STEP: Readonly<Record<string, readonly [number, number, number]>> = {
-  north: [0, 0, -1],
-  south: [0, 0, 1],
-  west: [-1, 0, 0],
-  east: [1, 0, 0],
-};
 
 interface TwoPartPlacement {
   readonly other: { x: number; y: number; z: number };
@@ -1022,7 +940,7 @@ function twoPartPlacement(
   entry: PaletteEntry,
   free: (entry: PaletteEntry) => boolean,
 ): TwoPartPlacement | "blocked" | null {
-  const family = TWO_PART.find((candidate) => candidate.matches(entry.namespacedName));
+  const family = twoPartFamily(entry.namespacedName);
   if (family === undefined) return null;
   if (entry.properties[family.property] === family.far) return null;
 

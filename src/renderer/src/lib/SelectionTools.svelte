@@ -22,7 +22,7 @@
   import { isBannerBlock } from "../../../shared/banner_patterns.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
   import { tryParseMix } from "../../../shared/block_mix.js";
-  import { canonicalBlock, withBlockAdded } from "./block_spelling.js";
+  import { canonicalBlock, withBlockAdded, withBlocksAdded } from "./block_spelling.js";
   import type { MaterialAction } from "./materials.js";
   import { t } from "./i18n.svelte.js";
 
@@ -141,8 +141,13 @@
    * means, and this is where each meaning lands. The state comes along -- the
    * count on the slot is of exactly that state, and a replace naming it finds
    * exactly those.
+   *
+   * A slot that is a whole bed is the foot's state with the head's as `pair`.
+   * In the hand the foot alone is right, because placing a foot places the
+   * bed; Replace takes both, or replacing the beds would leave their heads.
    */
-  function onMaterial(material: string, action: MaterialAction): void {
+  function onMaterial(slot: { block: string; pair: readonly string[] }, action: MaterialAction): void {
+    const material = slot.block;
     switch (action) {
       case "with":
         onblockchange(canonicalBlock(material, legacy));
@@ -151,10 +156,10 @@
         onblockchange(withBlockAdded(block, material, legacy));
         break;
       case "replace":
-        onreplacefromchange(canonicalBlock(material, legacy));
+        onreplacefromchange(withBlocksAdded("", [material, ...slot.pair], legacy));
         break;
       case "addReplace":
-        onreplacefromchange(withBlockAdded(replaceFrom, material, legacy));
+        onreplacefromchange(withBlocksAdded(replaceFrom, [material, ...slot.pair], legacy));
         break;
       case "state":
         onblockchange(canonicalBlock(material, legacy));

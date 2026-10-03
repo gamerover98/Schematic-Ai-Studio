@@ -34,14 +34,18 @@
     /** Whose materials these are, for what the share in the hover is of. */
     scope: "selection" | "document";
     legacy?: LegacyIndex | null;
-    onaction: (block: string, action: MaterialAction) => void;
+    /**
+     * A slot, clicked. `pair` is the far halves the slot also stands for --
+     * a bed's head beside its foot -- which a replace has to name as well.
+     */
+    onaction: (slot: { block: string; pair: readonly string[] }, action: MaterialAction) => void;
   }
 
   const { palette, air, outside, cells, scope, legacy = null, onaction }: Props = $props();
 
-  const slots = $derived<{ block: string; count: number; air: boolean }[]>([
-    ...palette.map((entry) => ({ block: entry.block, count: entry.count, air: false })),
-    ...(air > 0 ? [{ block: AIR, count: air, air: true }] : []),
+  const slots = $derived<{ block: string; count: number; air: boolean; pair: readonly string[] }[]>([
+    ...palette.map((entry) => ({ block: entry.block, count: entry.count, air: false, pair: entry.pair ?? [] })),
+    ...(air > 0 ? [{ block: AIR, count: air, air: true, pair: [] }] : []),
   ]);
 
   /** What the shares are of: the cells that hold something, air included. */
@@ -73,14 +77,18 @@
     hovered = null;
   }
 
-  function act(slot: { block: string; air: boolean }, event: MouseEvent, button: number): void {
+  function act(
+    slot: { block: string; air: boolean; pair: readonly string[] },
+    event: MouseEvent,
+    button: number,
+  ): void {
     const action = materialAction(
       { button, ctrl: event.ctrlKey || event.metaKey, shift: event.shiftKey },
       slot.air,
     );
     if (action === "none") return;
     hoverEnd();
-    onaction(slot.block, action);
+    onaction({ block: slot.block, pair: slot.pair }, action);
   }
 
   const hoveredSlot = $derived(hovered === null ? null : (slots[hovered.index] ?? null));

@@ -132,7 +132,6 @@ import {
     type TransformRequest,
     singleMix,
   } from "../../shared/ipc.js";
-  import { documentMaterials } from "./lib/materials.js";
   import { parseMix, pickAt } from "../../shared/block_mix.js";
   import { withBlockAdded } from "./lib/block_spelling.js";
   import type { SchematicFormat } from "../../shared/schematic.js";
@@ -2883,7 +2882,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   });
 
   /**
-   * What the selection is made of, as main last counted it.
+   * What the selection is made of, or the whole schematic with nothing
+   * selected, as main last counted it.
    *
    * Asked for rather than pushed, because the selection is the renderer's and
    * main cannot know when it moved. A face drag moves it many times a second,
@@ -2891,52 +2891,66 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * `coalesce` keeps it to one count in flight: on a large selection a count
    * is a walk over millions of cells.
    *
+   * The whole schematic is asked for too, and was not: it was read off
+   * `DocumentState.palette`, which counts states as the file holds them -- so
+   * a bed was two beds. Pairing the halves is main's (`countMaterials`), and
+   * with nothing of two cells in the document it costs no walk at all.
+   *
    * The last answer stays on screen until the next one lands, so the slots do
-   * not blank and refill on every edit.
+   * not blank and refill on every edit -- but only while it is an answer to
+   * the same question: the selection's list under "the schematic" would be a
+   * wrong list, where a late one is merely late.
    */
-  let selectionMaterials = $state<SelectionPaletteSuccess | null>(null);
-  const refreshSelectionMaterials = coalesce(fetchSelectionMaterials);
+  let materialsAnswer = $state<{ of: "selection" | "document"; counted: SelectionPaletteSuccess } | null>(
+    null,
+  );
+  const refreshMaterials = coalesce(fetchMaterials);
 
-  async function fetchSelectionMaterials(): Promise<void> {
-    if (selection === null || docState === null || !bridgeAvailable) {
-      selectionMaterials = null;
+  const materialsScope = $derived<"selection" | "document">(selection === null ? "document" : "selection");
+
+  async function fetchMaterials(): Promise<void> {
+    if (docState === null || !bridgeAvailable) {
+      materialsAnswer = null;
       return;
     }
+    const of = materialsScope;
     // Every area, a cell two of them share counted once -- main walks the union.
-    const response = await api().selectionPalette({ regions: areasForIpc() });
-    // Dropped meanwhile: the effect has already cleared it, and a late answer
-    // must not put back the materials of a selection that is gone.
-    if (!response.ok || selection === null || docState === null) return;
-    selectionMaterials = {
-      palette: response.palette,
-      air: response.air,
-      outside: response.outside,
-      cells: response.cells,
+    const response = await api().selectionPalette({ regions: of === "selection" ? areasForIpc() : null });
+    // Closed or moved meanwhile: a late answer must not put back the
+    // materials of a selection that is gone.
+    if (!response.ok || docState === null || materialsScope !== of) return;
+    materialsAnswer = {
+      of,
+      counted: {
+        palette: response.palette,
+        air: response.air,
+        outside: response.outside,
+        cells: response.cells,
+      },
     };
   }
 
   $effect(() => {
-    if (!toolsOpen || selection === null || docState === null) {
-      selectionMaterials = null;
+    if (!toolsOpen || docState === null) {
+      materialsAnswer = null;
       return;
     }
     void docState.revision;
     void selectionAreas;
+    void materialsScope;
     const timer = setTimeout(() => {
       // A count that fails is no count, not a banner: nothing the user did
       // has failed, and the slots simply keep the last answer.
-      refreshSelectionMaterials().catch(() => undefined);
+      refreshMaterials().catch(() => undefined);
     }, 120);
     return () => clearTimeout(timer);
   });
 
   /** The selection's materials, or the whole schematic's with nothing selected. */
   const materials = $derived(
-    docState === null
-      ? null
-      : selection === null
-        ? documentMaterials(docState.palette, docState.size)
-        : selectionMaterials,
+    docState !== null && materialsAnswer !== null && materialsAnswer.of === materialsScope
+      ? materialsAnswer.counted
+      : null,
   );
 
   /** Main's step timings to a tenth of a millisecond, for a readable report. */

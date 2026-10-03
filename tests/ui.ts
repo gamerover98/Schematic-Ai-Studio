@@ -210,9 +210,10 @@ import {
   isAirBlock,
   readSpelling,
   withBlockAdded,
+  withBlocksAdded,
   writeSpelling,
 } from "../src/renderer/src/lib/block_spelling.js";
-import { documentMaterials, formatCount, materialAction } from "../src/renderer/src/lib/materials.js";
+import { formatCount, materialAction } from "../src/renderer/src/lib/materials.js";
 import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/shared/block_mix.js";
 import { MAP_PLANES } from "../src/shared/distribution_map.js";
 import { averageColour } from "../src/renderer/src/lib/icon_colour.js";
@@ -5230,14 +5231,22 @@ console.log("\n--- the materials, as an inventory ---");
     [true, true, false, false],
   );
 
-  const whole = documentMaterials(
-    [
-      { block: "minecraft:stone", count: 10 },
-      { block: "minecraft:cave_air", count: 2 },
-    ],
-    [4, 2, 2],
+  /*
+   * A slot that is a whole bed stands for its foot and its head. Replace has
+   * to name both, or replacing the beds leaves their heads behind.
+   */
+  const bedPair = tryParseMix(
+    withBlocksAdded(
+      "",
+      ["minecraft:red_bed[facing=north,part=foot]", "minecraft:red_bed[facing=north,part=head]"],
+      null,
+    ),
   );
-  equal("with nothing selected the air is what the palette leaves over", [whole.air, whole.cells, whole.outside], [4, 16, 0]);
+  equal(
+    "a whole bed goes into a field as both of its halves",
+    bedPair?.entries.map((entry) => entry.block),
+    ["minecraft:red_bed[facing=north,part=foot]", "minecraft:red_bed[facing=north,part=head]"],
+  );
 
   equal("adding to an empty field gives that block alone", withBlockAdded("", "stone", null), "minecraft:stone");
   const two = tryParseMix(withBlockAdded("minecraft:stone", "dirt", null));
@@ -5272,10 +5281,25 @@ console.log("\n--- the materials, as an inventory ---");
    * still.
    */
   const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
-  check("the selection's materials are counted one request at a time", app.includes("coalesce(fetchSelectionMaterials)"));
+  check("the selection's materials are counted one request at a time", app.includes("coalesce(fetchMaterials)"));
   check(
     "...once the selection has held still",
-    /setTimeout\(\(\) => \{[\s\S]{0,300}refreshSelectionMaterials\(\)/.test(app),
+    /setTimeout\(\(\) => \{[\s\S]{0,300}refreshMaterials\(\)/.test(app),
+  );
+  /*
+   * With nothing selected the list was read off `DocumentState.palette`,
+   * which counts the states the file holds -- a bed was two beds. Main pairs
+   * the halves, so the whole document is asked for as well.
+   */
+  check(
+    "with nothing selected the whole schematic is asked of main",
+    app.includes('regions: of === "selection" ? areasForIpc() : null'),
+  );
+  check("...and not read off the document's state", !app.includes("documentMaterials("));
+  const replaceArm = tools.slice(tools.indexOf('case "replace":'), tools.indexOf('case "state":'));
+  check(
+    "Replace takes a slot's other half with it",
+    (replaceArm.match(/\[material, \.\.\.slot\.pair\]/g) ?? []).length === 2,
   );
 }
 

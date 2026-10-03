@@ -279,8 +279,19 @@ function paint(icon: BlockIcon): string | null {
   geometry.setAttribute("uv", new THREE.BufferAttribute(icon.geometry.uvs, 2));
   geometry.setIndex(new THREE.BufferAttribute(icon.geometry.indices, 1));
   shadeGeometry(geometry, icon.geometry.normals);
-  // The block sits at 0..1; centring it is what puts it in the frame.
-  geometry.translate(-0.5, -0.5, -0.5);
+  /*
+   * The cells sit at 0..size; centring them is what puts them in the frame,
+   * and a block of two -- a bed, a door -- is drawn at half scale so the
+   * whole of it fits where one block does.
+   *
+   * The box framed is the cells main reports, never the geometry's own: a
+   * torch, a slab or a model that hangs over its cell is framed exactly as it
+   * always was, because its cell is still 1x1x1.
+   */
+  const [width, height, length] = icon.size;
+  geometry.translate(-width / 2, -height / 2, -length / 2);
+  const scale = 1 / Math.max(width, height, length);
+  geometry.scale(scale, scale, scale);
 
   const material = new THREE.MeshBasicMaterial({
     map: atlasTexture,

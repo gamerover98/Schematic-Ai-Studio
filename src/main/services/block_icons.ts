@@ -29,7 +29,9 @@
 
 import { createDocument, setBlock, type SchematicDocument } from "../domain/document.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import type { PaletteEntry } from "../pipeline/types.js";
 import { splitBlockInput } from "../../shared/block_input.js";
+import { wholeOf, type BlockState } from "../../shared/two_part.js";
 import type { ChunkGeometry, MeshAtlas } from "../../shared/ipc.js";
 import {
   buildDocumentPreview,
@@ -51,6 +53,14 @@ export interface BlockIcon {
    * invisible tile that looks like a failure to load.
    */
   geometry: ChunkGeometry | null;
+  /** The cells the picture is of; see `BlockIcon.size` in `shared/ipc.ts`. */
+  size: [number, number, number];
+}
+
+/** What is cached per block: the picture's geometry and the cells it spans. */
+interface IconMesh {
+  geometry: ChunkGeometry | null;
+  size: [number, number, number];
 }
 
 export interface BlockIconsResult {
@@ -70,7 +80,7 @@ export interface BlockIconsResult {
  * every texture a document added -- a lit furnace, a sign's letters -- threw
  * away every icon, and the renderer asked for all nine hundred again.
  */
-const cache = new Map<string, ChunkGeometry | null>();
+const cache = new Map<string, IconMesh>();
 
 /**
  * Enough for several screens of scrolling and nowhere near enough to matter.
@@ -80,11 +90,48 @@ const cache = new Map<string, ChunkGeometry | null>();
  */
 const MAX_CACHED_ICONS = 4096;
 
-/** A one-block document, which is what an icon is a picture of. */
-function documentFor(block: string): SchematicDocument {
-  const doc = createDocument({ width: 1, height: 1, length: 1, format: "sponge3" });
-  setBlock(doc, 0, 0, 0, parsePaletteEntry(iconBlock(block)));
-  return doc;
+/**
+ * The cells an icon is a picture of: one, or two for a block that is two.
+ *
+ * A bed's icon was its foot, a door's its lower half and a sunflower's its
+ * stalk -- half a block, in the inventory, the hotbar, the block picker and the
+ * materials list, which read as a broken model rather than as half of one.
+ * `wholeOf` is the reading placement uses, so the picture is of exactly what a
+ * click with it in hand puts down: a bare bed or a foot is both halves, a head
+ * on its own is a head.
+ *
+ * The far half goes where placing puts it, so the two cells are shifted to
+ * start at zero: a bed facing north has its head at `z = 0` and its foot at
+ * `z = 1`.
+ */
+function iconCells(block: string): {
+  cells: { x: number; y: number; z: number; entry: PaletteEntry }[];
+  size: [number, number, number];
+} {
+  const entry = parsePaletteEntry(iconBlock(block));
+  const whole = wholeOf(entry);
+  if (whole === null) return { cells: [{ x: 0, y: 0, z: 0, entry }], size: [1, 1, 1] };
+  const [dx, dy, dz] = whole.step;
+  const near = { x: Math.max(0, -dx), y: Math.max(0, -dy), z: Math.max(0, -dz) };
+  const plain = (state: BlockState): PaletteEntry => ({
+    namespacedName: state.namespacedName,
+    properties: { ...state.properties },
+  });
+  return {
+    cells: [
+      { ...near, entry: plain(whole.near) },
+      { x: near.x + dx, y: near.y + dy, z: near.z + dz, entry: plain(whole.far) },
+    ],
+    size: [1 + Math.abs(dx), 1 + Math.abs(dy), 1 + Math.abs(dz)],
+  };
+}
+
+/** The document an icon is a picture of. */
+function documentFor(block: string): { doc: SchematicDocument; size: [number, number, number] } {
+  const { cells, size } = iconCells(block);
+  const doc = createDocument({ width: size[0], height: size[1], length: size[2], format: "sponge3" });
+  for (const cell of cells) setBlock(doc, cell.x, cell.y, cell.z, cell.entry);
+  return { doc, size };
 }
 
 /**
@@ -114,10 +161,11 @@ function iconBlock(block: string): string {
 async function meshOne(
   block: string,
   options: DocumentPreviewOptions,
-): Promise<{ geometry: ChunkGeometry | null; source: AtlasSource } | null> {
+): Promise<{ mesh: IconMesh; source: AtlasSource } | null> {
   try {
-    const preview = await buildDocumentPreview(documentFor(block), options);
-    return { geometry: preview.mesh.chunks[0] ?? null, source: preview.atlas };
+    const { doc, size } = documentFor(block);
+    const preview = await buildDocumentPreview(doc, options);
+    return { mesh: { geometry: preview.mesh.chunks[0] ?? null, size }, source: preview.atlas };
   } catch {
     return null;
   }
@@ -142,13 +190,20 @@ async function meshOne(
  *
  * So it decodes directly and packs once. Same guarantee, two orders of
  * magnitude cheaper, and `warmBaker` carries the measurements.
+ *
+ * **Both halves of a block that is two**, for the same reason: a bed's head
+ * has textures its foot does not, and left to the mesh they would be decoded
+ * in the middle of a batch -- the sixty-layouts fault, one block at a time.
  */
 async function prime(
   blocks: readonly string[],
   options: DocumentPreviewOptions,
   onProgress?: (done: number, total: number) => void,
 ): Promise<void> {
-  await warmBaker(blocks.map((block) => parsePaletteEntry(iconBlock(block))), options, onProgress);
+  const entries = blocks.flatMap((block) => iconCells(block).cells.map((cell) => cell.entry));
+  // Reported against the blocks, not the halves: the caller's bar counts blocks.
+  const scale = entries.length === 0 ? 1 : blocks.length / entries.length;
+  await warmBaker(entries, options, (done) => onProgress?.(Math.round(done * scale), blocks.length));
 }
 
 /**
@@ -198,7 +253,7 @@ export async function warmBlockIcons(
 
   for (const [index, block] of blocks.entries()) {
     const built = await meshOne(block, options);
-    if (built !== null) cache.set(`${built.source.layout}:${block}`, built.geometry);
+    if (built !== null) cache.set(`${built.source.layout}:${block}`, built.mesh);
     await breathe(blocks.length + index, total, onProgress);
   }
 
@@ -221,7 +276,10 @@ export async function buildBlockIcons(
   const now = await currentAtlas(options);
   if (wanted.every((block) => cache.has(`${now.layout}:${block}`))) {
     return reply(
-      wanted.map((block) => ({ block, geometry: cache.get(`${now.layout}:${block}`) ?? null })),
+      wanted.map((block) => {
+        const cached = cache.get(`${now.layout}:${block}`);
+        return { block, geometry: cached?.geometry ?? null, size: cached?.size ?? [1, 1, 1] };
+      }),
       now,
       knownAtlasVersion,
       knownAtlasLayout,
@@ -234,11 +292,11 @@ export async function buildBlockIcons(
   for (const block of wanted) {
     const built = await meshOne(block, options);
     if (built === null) {
-      icons.push({ block, geometry: null });
+      icons.push({ block, geometry: null, size: [1, 1, 1] });
       continue;
     }
-    cache.set(`${built.source.layout}:${block}`, built.geometry);
-    icons.push({ block, geometry: built.geometry });
+    cache.set(`${built.source.layout}:${block}`, built.mesh);
+    icons.push({ block, ...built.mesh });
   }
 
   evict();

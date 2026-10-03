@@ -686,6 +686,13 @@ export interface BlockIcon {
   block: string;
   /** `null` when the block meshed to nothing — air, or a shape not drawn. */
   geometry: ChunkGeometry | null;
+  /**
+   * The cells the picture is of, `[width, height, length]`: `[1, 1, 1]` for
+   * a block, two along one axis for a bed, a door, a two-tall plant or an
+   * extended piston, which are drawn whole. The renderer frames this box
+   * rather than the geometry, so a torch or a slab is framed as it was.
+   */
+  size: [number, number, number];
 }
 
 export interface BlockIconsSuccess {
@@ -1178,11 +1185,25 @@ export interface PaletteCount {
   /** `minecraft:oak_stairs[facing=north]`. */
   block: string;
   count: number;
+  /**
+   * The far halves counted into this one, by exact spelling: a bed's head
+   * beside the foot that is `block`, a door's upper half, an extended
+   * piston's head. Absent for every other block.
+   *
+   * A slot that stands for a whole bed has to reach both of its cells, so a
+   * replace or a highlight of it names these as well as `block`. Only from
+   * `selectionPalette`: `DocumentState.palette` counts states as they are.
+   */
+  pair?: string[];
 }
 
-/** The areas whose contents to count, as one set of cells. */
+/**
+ * The areas whose contents to count, as one set of cells -- or `null` for
+ * the whole document, which is counted from what the document already keeps
+ * rather than by walking its box.
+ */
 export interface SelectionPaletteRequest {
-  regions: RegionSpec[];
+  regions: RegionSpec[] | null;
 }
 
 /**

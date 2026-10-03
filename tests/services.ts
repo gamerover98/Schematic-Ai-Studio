@@ -487,6 +487,64 @@ try {
       "and they are real geometry, not empty",
       firstPass.icons.every((icon) => icon.geometry !== null && icon.geometry.indices.length > 0),
     );
+    check(
+      "a block is a picture of one cell",
+      firstPass.icons.every((icon) => icon.size.join("x") === "1x1x1"),
+    );
+
+    /*
+     * A block that is two cells is drawn whole. A bed's icon was its foot and
+     * a door's its lower half, in the inventory, the hotbar and the materials
+     * list -- half a block, which read as a broken model.
+     *
+     * The reading is placement's: a bare id or the near half is the whole, the
+     * far half on its own is one cell. And the geometry has to reach into the
+     * second cell, or the size is a claim about a picture that was not drawn.
+     */
+    {
+      const wholes = await buildBlockIcons(
+        [
+          "minecraft:red_bed",
+          "minecraft:red_bed[facing=east,part=foot]",
+          "minecraft:red_bed[facing=north,part=head]",
+          "minecraft:oak_door",
+          "minecraft:sunflower[half=upper]",
+          "minecraft:piston[extended=true,facing=up]",
+          "minecraft:piston",
+        ],
+        iconOptions,
+        null,
+      );
+      const sizeOf = (block: string): string =>
+        wholes.icons.find((icon) => icon.block === block)?.size.join("x") ?? "missing";
+      /** How far along each axis the geometry reaches. */
+      const reach = (block: string): string => {
+        const geometry = wholes.icons.find((icon) => icon.block === block)?.geometry;
+        if (!geometry) return "none";
+        const max = [0, 0, 0];
+        for (let i = 0; i < geometry.positions.length; i += 3) {
+          for (let axis = 0; axis < 3; axis += 1) max[axis] = Math.max(max[axis], geometry.positions[i + axis]);
+        }
+        return max.map((value) => Math.ceil(value - 1e-6)).join("x");
+      };
+      equal("a bare bed is a picture of both halves, along its facing", sizeOf("minecraft:red_bed"), "1x1x2");
+      equal("...and its geometry reaches the second cell", reach("minecraft:red_bed"), "1x1x2");
+      equal(
+        "a foot facing east is a bed two cells along x",
+        sizeOf("minecraft:red_bed[facing=east,part=foot]"),
+        "2x1x1",
+      );
+      equal("a head on its own is one cell", sizeOf("minecraft:red_bed[facing=north,part=head]"), "1x1x1");
+      equal("a door is both halves, one above the other", sizeOf("minecraft:oak_door"), "1x2x1");
+      equal("...and its geometry reaches the top one", reach("minecraft:oak_door"), "1x2x1");
+      equal("the top of a sunflower on its own is one cell", sizeOf("minecraft:sunflower[half=upper]"), "1x1x1");
+      equal(
+        "an extended piston is drawn with its head",
+        sizeOf("minecraft:piston[extended=true,facing=up]"),
+        "1x2x1",
+      );
+      equal("a retracted one is one block", sizeOf("minecraft:piston"), "1x1x1");
+    }
 
     /*
      * And the cost of that guarantee, which is the part that was catastrophic

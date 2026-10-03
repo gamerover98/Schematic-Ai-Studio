@@ -108,3 +108,11 @@ export function withBlockAdded(text: string, block: string, legacy: LegacyIndex 
       : next,
   );
 }
+
+/**
+ * `withBlockAdded` for several blocks at once: the materials inventory's way
+ * of naming a whole bed, whose slot stands for a foot and a head.
+ */
+export function withBlocksAdded(text: string, blocks: readonly string[], legacy: LegacyIndex | null): string {
+  return blocks.reduce((next, block) => withBlockAdded(next, block, legacy), text);
+}

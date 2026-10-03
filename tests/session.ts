@@ -5982,6 +5982,126 @@ console.log("\n--- what the selection is made of ---");
       }
     })(),
   );
+
+  /*
+   * The whole document is asked for too, and with nothing of two cells in it
+   * the answer is the counts the document keeps -- `DocumentState.palette`,
+   * with the air said apart.
+   */
+  const whole = selectionPalette(session, null);
+  equal(
+    "the whole document, with nothing in two parts, is the counts it keeps",
+    whole.palette,
+    documentState(session).palette,
+  );
+  equal("...with its air and its cells", [whole.air, whole.outside, whole.cells], [23, 0, 32]);
+  closeDocument();
+}
+
+console.log("\n--- a block of two cells is counted once ---");
+{
+  /*
+   * A bed was counted as two beds, a door as two doors: true of the file, a
+   * foot and a head, and false of the build. Written straight into the
+   * document rather than placed, so the cells are exactly these and nothing
+   * the placement rules decide.
+   */
+  const session = newDocument({ width: 8, height: 3, length: 3 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  const put = (x: number, y: number, z: number, namespacedName: string, properties: Record<string, string>): void => {
+    setBlock(session.doc, x, y, z, { namespacedName, properties });
+  };
+  const bed = (part: string, facing = "north"): Record<string, string> => ({ facing, occupied: "false", part });
+  put(0, 0, 1, "minecraft:red_bed", bed("foot"));
+  put(0, 0, 0, "minecraft:red_bed", bed("head"));
+  const door = (half: string): Record<string, string> => ({
+    facing: "north",
+    half,
+    hinge: "left",
+    open: "false",
+    powered: "false",
+  });
+  put(2, 0, 0, "minecraft:oak_door", door("lower"));
+  put(2, 1, 0, "minecraft:oak_door", door("upper"));
+  put(4, 0, 0, "minecraft:sunflower", { half: "lower" });
+  put(4, 1, 0, "minecraft:sunflower", { half: "upper" });
+  put(5, 0, 0, "minecraft:piston", { extended: "true", facing: "east" });
+  put(6, 0, 0, "minecraft:piston_head", { facing: "east", short: "false", type: "normal" });
+  // A head whose foot would be past the edge of the document.
+  put(6, 0, 2, "minecraft:red_bed", bed("head"));
+
+  const rows = (palette: readonly { block: string; count: number; pair?: string[] }[]): string[] =>
+    palette.map((row) => `${row.block} ${row.count}${row.pair ? ` +${row.pair.join("+")}` : ""}`).sort();
+  const foot = "minecraft:red_bed[facing=north,occupied=false,part=foot]";
+  const head = "minecraft:red_bed[facing=north,occupied=false,part=head]";
+  const lower = "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]";
+  const upper = "minecraft:oak_door[facing=north,half=upper,hinge=left,open=false,powered=false]";
+
+  const all = selectionPalette(session, null);
+  equal("a bed, a door, a sunflower and a piston are one of each", rows(all.palette), [
+    `${foot} 1 +${head}`,
+    `${head} 1`,
+    `${lower} 1 +${upper}`,
+    "minecraft:piston[extended=true,facing=east] 1 +minecraft:piston_head[facing=east,short=false,type=normal]",
+    "minecraft:sunflower[half=lower] 1 +minecraft:sunflower[half=upper]",
+  ].sort());
+  equal(
+    "...and every cell is still a cell: the air is what is left",
+    all.air,
+    8 * 3 * 3 - 9,
+  );
+
+  equal(
+    "half a bed in the selection is half a bed",
+    rows(selectionPalette(session, [{ minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 }]).palette),
+    [`${head} 1`],
+  );
+  equal(
+    "the foot on its own is counted as a foot, with nothing paired",
+    rows(selectionPalette(session, [{ minX: 0, minY: 0, minZ: 1, maxX: 0, maxY: 0, maxZ: 1 }]).palette),
+    [`${foot} 1`],
+  );
+  equal(
+    "two areas holding one half each hold one bed",
+    rows(
+      selectionPalette(session, [
+        { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 },
+        { minX: 0, minY: 0, minZ: 1, maxX: 0, maxY: 0, maxZ: 1 },
+      ]).palette,
+    ),
+    [`${foot} 1 +${head}`],
+  );
+  equal(
+    "two areas that both hold the whole bed hold one bed",
+    rows(
+      selectionPalette(session, [
+        { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 1 },
+        { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 1 },
+      ]).palette,
+    ),
+    [`${foot} 1 +${head}`],
+  );
+
+  /*
+   * A far half belongs only with the block it came with: a different bed one
+   * step back, or one facing elsewhere, is a neighbour rather than a partner.
+   */
+  put(0, 0, 1, "minecraft:blue_bed", bed("foot"));
+  check(
+    "a head beside another colour's foot is a head",
+    rows(selectionPalette(session, null).palette).includes(`${head} 2`),
+  );
+  put(0, 0, 1, "minecraft:red_bed", bed("foot", "south"));
+  check(
+    "...and beside a foot facing away, too",
+    rows(selectionPalette(session, null).palette).includes(`${head} 2`),
+  );
+  put(5, 0, 0, "minecraft:sticky_piston", { extended: "true", facing: "east" });
+  check(
+    "a normal piston's head on a sticky piston is a head",
+    rows(selectionPalette(session, null).palette).includes(
+      "minecraft:piston_head[facing=east,short=false,type=normal] 1",
+    ),
+  );
   closeDocument();
 }
 

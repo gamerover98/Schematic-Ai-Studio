@@ -6,8 +6,6 @@
  * stating -- where a count changes unit, and what a click on air means.
  */
 
-import type { PaletteCount } from "../../../shared/ipc.js";
-
 /**
  * A count short enough for the corner of a 36px slot.
  *
@@ -63,19 +61,3 @@ export function materialAction(
 
 /** The spelling an air slot stands for. */
 export const AIR = "minecraft:air";
-
-/**
- * The whole document's materials, for when nothing is selected.
- *
- * `DocumentState.palette` leaves air out, so the air is what the volume has
- * left over. Every cell holds exactly one entry, and the palette names every
- * entry that is not air, so that is exact rather than an estimate.
- */
-export function documentMaterials(
-  palette: readonly PaletteCount[],
-  size: readonly [number, number, number],
-): { palette: readonly PaletteCount[]; air: number; outside: number; cells: number } {
-  const cells = size[0] * size[1] * size[2];
-  const blocks = palette.reduce((sum, entry) => sum + entry.count, 0);
-  return { palette, air: Math.max(0, cells - blocks), outside: 0, cells };
-}

@@ -280,7 +280,7 @@ anything updates it, and until then it draws as half a bed — and a lone door
 half is a door you walk through. Both were written as one block, so the
 schematic looked right here and came apart when it was pasted.
 
-`TWO_PART` in `services/session.ts` is the table and there are two rows, which
+`TWO_PART` in `shared/two_part.ts` is the table and there are two rows, which
 is one more than there are shapes of answer: the far cell is one step along
 `facing` for a bed — where the camera was looking when the block was picked up —
 and always the cell above for a door. Both halves go in **one transaction**, or
@@ -1999,8 +1999,32 @@ the areas, overlaps once, through `forEachUnionCell`, the walk the fill takes.
 It is **asked for, not pushed**: the selection is the renderer's, so
 `App.svelte` asks once the selection has held still for 120 ms, one request in
 flight through `coalesce`. A 256x64x256 selection is about 35 ms in main. With
-nothing selected the panel shows the whole schematic from `DocumentState`,
-which costs no request.
+nothing selected it asks for the whole schematic, `regions: null`.
+
+**A bed is one bed, and that is why the whole schematic is asked for too.** The
+list counted a bed as two -- a foot and a head, which is true of the file and
+false of the build -- and the same for a door, a two-tall plant and an extended
+piston with its `piston_head`. `countMaterials` in `domain/materials.ts` leaves
+a far half out when its near half is one step back (`nearOf` and `nearKey` in
+`shared/two_part.ts`), is the same block facing the same way, and **is inside
+the cells being counted**: a selection holding a head and not its foot holds
+half a bed, and is told so. The near half's row carries the far one as
+`PaletteCount.pair`, and Shift+click puts both in Replace, or replacing the
+beds would leave their heads.
+
+The whole document is not counted by walking its box, which is 52 ms on a
+256x96x256 asked on every edit. Whether an entry is a far half is decided once
+per palette entry; with none present the answer is `doc.counts` as it stands,
+and otherwise one pass reads a byte per cell. `DocumentState.palette` still
+counts states as the file holds them, because it runs on every edit.
+
+`TWO_PART` moved to `shared/two_part.ts` for the third reader: **icons draw
+the whole block**. `iconCells` in `services/block_icons.ts` reads it the way
+placement does -- a bare bed or a foot is both halves, a head on its own is a
+head -- and `BlockIcon.size` says how many cells, which `paint()` frames at
+`1 / max(size)`. It frames the cells and never the geometry, so a torch or a
+slab is drawn exactly as before. `prime` decodes both halves, or the head's
+textures would arrive mid-batch and move the atlas under the icons.
 
 Two rules in it are easy to undo by tidying:
 
