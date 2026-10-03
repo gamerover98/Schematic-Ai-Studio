@@ -1664,6 +1664,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // message about what it was.
         status = { tone: "error", text: err instanceof Error ? err.message : String(err) };
       } finally {
+        // Whatever failed above: a document main holds is the user's work, and
+        // a window that cannot list the versions can still show it.
+        try {
+          await adoptWhatMainHolds();
+        } catch (err) {
+          failed(err, t("task.resuming"));
+        }
         /*
          * Asked once, at startup, before the user has done anything they could
          * lose by answering it -- and asked whatever failed above. Main keeps
@@ -2632,6 +2639,45 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     liveTrace = [];
     await generateFrom(prompt, true);
     if (bridgeAvailable) adoptChat(await api().getChatState());
+  }
+
+  /**
+   * Picks up what main already holds, which after a reload is not nothing.
+   *
+   * Main owns the document and outlives this window. A reload -- Ctrl+R in
+   * development, or the Reload the crash dialog offers -- starts a renderer
+   * with `docState` null while the session, its undo stack and its
+   * conversation are all still in main. Nothing asked, so the window said
+   * "Nothing open" over a schematic that was open, dirty and still being
+   * autosaved, and the next New or Open replaced it without a question,
+   * because `mayDiscard` asks only about the document it knows of. The crash
+   * dialog's promise that a reload loses nothing was true of main and false
+   * of everything on screen.
+   *
+   * At a cold launch main has nothing open and an empty conversation, so this
+   * changes nothing there. The chat is asked for either way: a conversation
+   * held with nothing open is main's too, and survives the reload the same.
+   *
+   * Not an open: no baseline version is kept, and the selection, which was
+   * the window's own, is not coming back.
+   */
+  async function adoptWhatMainHolds(): Promise<void> {
+    if (!bridgeAvailable) return;
+    const response = await api().getDocumentState();
+    if (response.ok && response.state !== null) {
+      docState = response.state;
+      project = response.project ?? null;
+      // A structure this camera has not been aimed at.
+      framingEpoch += 1;
+    }
+    adoptChat(await api().getChatState());
+    await refreshConversations();
+    if (docState !== null) {
+      // Not awaited: the startup screen waits on this, and a large mesh is
+      // seconds of a window that is otherwise ready.
+      void refreshDocument();
+      await refreshVersions();
+    }
   }
 
   /** Takes main's copy of the log as the truth. */

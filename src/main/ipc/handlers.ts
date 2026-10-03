@@ -1325,10 +1325,22 @@ ${report.stack}`),
     await refreshShell();
   });
 
+  /*
+   * What is open, for a window that does not know: one that was reloaded --
+   * Ctrl+R, or the crash dialog's Reload -- while this process kept the
+   * session. The notes come with it because they are what the dialogs open on,
+   * and `docOpen` is the only other place that hands them over.
+   */
   ipcMain.handle(IPC.docState, async (): Promise<DocumentStateResponse> => {
     const session = currentSession();
     // Not an error: "nothing is open" is the app's starting state.
-    return { ok: true, state: session === null ? null : documentState(session) };
+    if (session === null) return { ok: true, state: null };
+    const filePath = session.doc.filePath;
+    return {
+      ok: true,
+      state: documentState(session),
+      project: filePath === null ? null : await projectNotes(filePath),
+    };
   });
 
   ipcMain.handle(

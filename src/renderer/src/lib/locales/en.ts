@@ -940,6 +940,7 @@ export const en = {
   "task.openingChooser": "Opening the schematic chooser",
   "task.openingPicker": "Opening the file chooser",
   "task.opening": "Opening the schematic",
+  "task.resuming": "Picking up the open schematic",
   "task.saving": "Saving the schematic",
   "task.creating": "Creating the schematic",
   "task.choosingSaveLocation": "Choosing where to save",

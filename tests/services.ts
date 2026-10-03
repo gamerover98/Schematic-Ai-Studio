@@ -2947,155 +2947,60 @@ console.log("\n--- a recovery answered with something open ---");
   );
 }
 
-// --- what the window says on its way down -----------------------------------
-/*
- * The failure this wording is for is silent and total: a reactive loop that
- * Svelte or the browser aborts takes every effect in the window with it, while
- * the viewport goes on drawing and main goes on answering. Navigable and
- * completely dead, with a clean console -- reported that way twice before
- * anything was listening for it.
- */
-console.log("\n--- what the window says on its way down ---");
+// --- a reloaded window picks up what main holds -----------------------------
+//
+// Main owns the document and outlives the window. A reload -- Ctrl+R, or the
+// crash dialog's Reload -- started a renderer with nothing open while main kept
+// the session, dirty and autosaving: `getDocumentState` was on the bridge and
+// nothing called it. So the window said "Nothing open", and the next New or
+// Open replaced the work without a question, because `mayDiscard` asks only
+// about a document the window knows of. Read out of the source, for the
+// reason the section above gives.
+console.log("\n--- a reloaded window picks up what main holds ---");
 {
-  const plain = failurePrompt("");
-  /*
-   * Escape and the window's close button both land on `cancelId`, so the half
-   * that reloads must never be the one they reach. `discard_prompt`'s rule, and
-   * here it matters more: this dialog is raised *by* an error, so it can appear
-   * while somebody is in the middle of something else.
-   *
-   * The indices are literal types, so `tsc` rejects any comparison between them
-   * outright -- which is a stronger statement than a check could make, and is
-   * why there is not one. What no type states is that they are three distinct
-   * buttons with words on them.
-   */
-  check(
-    "three buttons, and they say different things",
-    plain.buttons.length === 3 &&
-      plain.buttons.every((label) => label.trim() !== "") &&
-      new Set(plain.buttons).size === 3,
-    plain.buttons.join(" | "),
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const handlers = readFileSync(path.join(here, "..", "src", "main", "ipc", "handlers.ts"), "utf8");
+  const app = readFileSync(path.join(here, "..", "src", "renderer", "src", "App.svelte"), "utf8").replace(
+    /\r\n/g,
+    "\n",
   );
-  check(
-    "it says what a reload costs",
-    plain.detail.includes("undo history"),
-    plain.detail,
-  );
-  /*
-   * And what it does not cost. Autosave lives in main, on a 20-second timer,
-   * and main is the half still working -- so the snapshot is current however
-   * long the window has been dead. A dialog that only warned would leave
-   * somebody weighing a reload against an unknown.
-   */
-  check(
-    "...and what it does not",
-    plain.detail.includes("20 seconds"),
-    plain.detail,
-  );
-
-  const said = failurePrompt("effect_update_depth_exceeded");
-  check(
-    "what the renderer managed to say is carried through",
-    said.detail.includes("effect_update_depth_exceeded"),
-    said.detail,
-  );
-
-  /*
-   * The count, and only when there is one. The renderer reports once, so a
-   * number here means something genuinely kept failing underneath -- worth
-   * knowing before choosing, and misleading shown as a zero.
-   */
-  check("no count when nothing followed", !plain.detail.includes("further"), plain.detail);
-  check(
-    "...and one when something did",
-    failurePrompt("x", 3).detail.includes("3 further errors"),
-  );
-  check(
-    "...counted in the singular when it is one",
-    failurePrompt("x", 1).detail.includes("1 further error since"),
-  );
-
-  /*
-   * The report, which is the thing a person actually pastes. The versions are
-   * in it because an issue asks for them every time, and because main has all
-   * of them without asking the renderer -- which matters when the renderer is
-   * the half that has stopped answering.
-   */
-  const facts = {
-    appName: "Schematic AI Studio",
-    appVersion: "1.0.0",
-    platform: "win32 x64",
-    electron: "33.0.0",
-    chrome: "130.0.0",
-    node: "20.18.0",
-    kind: "error" as const,
-    message: "Cannot read properties of null (reading 'children')",
-    at: "app.js:1:2",
-    stack: "at $effect (BlockPicker.svelte)",
+  const between = (source: string, from: string, to: string): string => {
+    const at = source.indexOf(from);
+    if (at === -1) return "";
+    const end = source.indexOf(to, at + from.length);
+    return source.slice(at, end === -1 ? source.length : end);
   };
-  const text = failureReport(facts);
-  for (const wanted of [
-    "1.0.0",
-    "win32 x64",
-    "33.0.0",
-    "Cannot read properties of null",
-    "BlockPicker.svelte",
-  ]) {
-    check(`the report carries ${wanted}`, text.includes(wanted), text);
-  }
 
-  /*
-   * An empty stack or location leaves no ragged blank line behind. It is the
-   * ordinary case for a rejection, not an edge one.
-   */
-  const bare = failureReport({ ...facts, at: "", stack: "" });
+  const served = between(handlers, "ipcMain.handle(IPC.docState,", "ipcMain.handle(");
   check(
-    "...and says nothing where there was nothing to say",
-    !bare.includes("at ") && !/\n\s*\n\s*$/.test(bare),
-    JSON.stringify(bare),
+    "main answers what is open, with the notes the dialogs open on",
+    /documentState\(session\)/.test(served) && /projectNotes\(/.test(served),
   );
 
-  /*
-   * The issue URL is built from the repository the manifest already names, and
-   * carries an **abridged** body: GitHub takes it as a query parameter, so it
-   * travels in a URL, and a stack clears that ceiling easily. `abridgeTrace`'s
-   * rule -- cap on the way out and say what was dropped. The whole report is on
-   * the clipboard by then, so the sentence is an instruction, not an apology.
-   */
-  const long = failureReport({ ...facts, stack: "at frame\n".repeat(400) });
+  // The slice ends at `startingUp = false`, so finding it here is finding it
+  // before the startup screen is put away.
+  const startup = between(app, 'step("recent", "done");', "startingUp = false;");
   check(
-    "a long report is abridged for the URL",
-    issueBody(long).length < long.length,
-    `${issueBody(long).length} vs ${long.length}`,
-  );
-  check(
-    "...and says where the rest of it is",
-    issueBody(long).includes("clipboard"),
-  );
-  check(
-    "a short one is carried whole",
-    issueBody(text).includes(facts.message),
+    "the window asks at startup, whatever a step did",
+    /\} finally \{[\s\S]*adoptWhatMainHolds\(\)/.test(startup),
+    "a reload shows Nothing open over a schematic main still holds",
   );
 
-  const url = issueUrl("https://github.com/gamerover98/Schematic-Ai-Studio", text);
+  const adopt = between(app, "async function adoptWhatMainHolds", "\n  }\n");
   check(
-    "the URL points at the repository the manifest names",
-    url.startsWith("https://github.com/gamerover98/Schematic-Ai-Studio/issues/new?"),
-    url,
-  );
-  /*
-   * And it survives the round trip. A body that arrived percent-mangled would
-   * still open a page, which is exactly the kind of wrong that looks right.
-   */
-  const body = new URL(url).searchParams.get("body") ?? "";
-  check(
-    "...and the body decodes back to what was put in it",
-    body === issueBody(text),
+    "it takes main's document and frames the camera on it",
+    /api\(\)\.getDocumentState\(\)/.test(adopt) &&
+      /docState = response\.state/.test(adopt) &&
+      /project = response\.project/.test(adopt) &&
+      /framingEpoch \+= 1/.test(adopt) &&
+      /refreshDocument\(\)/.test(adopt),
   );
   check(
-    "...trailing slash or not",
-    issueUrl("https://example.com/repo/", text).includes("/repo/issues/new?"),
+    "...and main's conversation, with or without a document",
+    /adoptChat\(await api\(\)\.getChatState\(\)\)/.test(adopt) &&
+      adopt.indexOf("getChatState") < adopt.indexOf("if (docState !== null)"),
   );
+  check("...and it is not an open: no baseline version is kept", adopt !== "" && !/saveVersion\(/.test(adopt));
 }
 
 // --- what the window says on its way down -----------------------------------
@@ -3128,21 +3033,28 @@ console.log("\n--- what the window says on its way down ---");
     plain.buttons.join(" | "),
   );
   check(
-    "it says what a reload costs",
-    plain.detail.includes("undo history"),
+    "it says what a reload costs: the window's own state",
+    plain.detail.includes("the selection"),
     plain.detail,
   );
   /*
-   * And what it does not cost. Autosave lives in main, on a 20-second timer,
-   * and main is the half still working -- so the snapshot is current however
-   * long the window has been dead. A dialog that only warned would leave
-   * somebody weighing a reload against an unknown.
+   * And what it does not cost. The document is main's, and main is the half
+   * still working: the reloaded window picks it up with its unsaved changes
+   * and its undo stack (`adoptWhatMainHolds`, checked below). This used to say
+   * the undo history was lost, which was true of the screen and not of main.
+   * Autosave is main's as well, and is the net under a reload that does not
+   * help. A dialog that only warned would leave somebody weighing a reload
+   * against an unknown.
    */
   check(
-    "...and what it does not",
-    plain.detail.includes("20 seconds"),
+    "...and what it does not: the schematic, its changes and its undo history",
+    plain.detail.includes("comes back as it was") &&
+      plain.detail.includes("unsaved changes") &&
+      plain.detail.includes("undo history") &&
+      !/lost[^.]*undo history/.test(plain.detail),
     plain.detail,
   );
+  check("...and that it is saved every 20 seconds besides", plain.detail.includes("20 seconds"), plain.detail);
 
   const said = failurePrompt("effect_update_depth_exceeded");
   check(

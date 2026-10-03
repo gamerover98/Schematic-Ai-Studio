@@ -752,14 +752,33 @@ entry registers the listeners **before the mount**, so a failure during mount
 is reported too, and reports **once** — an error handler that reports a loop is
 a loop of reports. Main counts what follows and says so in the dialog.
 
-Offering a reload is safe to offer for a reason worth stating: **autosave is
-main's**, on a 20-second timer, and main is the half still working. So the
-snapshot is current however long the window has been dead, and
-`failure_prompt.ts` says so rather than leaving somebody to weigh a reload
-against an unknown. It is Electron-free for `discard_prompt.ts`'s reason, and
-`ipcMain.on` is a third way to serve a channel that `tests/services.ts`'s walk
-had to be taught — it knew `handle` and `send`, and called a served channel
-unserved.
+Offering a reload is safe to offer for a reason worth stating: **the document
+is main's**, and main is the half still working. The reload is
+`webContents.reload()`, so the session, its unsaved changes and its undo stack
+are all there afterwards, and the new window picks them up (below). Autosave is
+main's too, on a 20-second timer, and is the net under a reload that does not
+help. `failure_prompt.ts` says all of that, and what a reload does cost: the
+selection, the camera, a message half typed. It is Electron-free for
+`discard_prompt.ts`'s reason, and `ipcMain.on` is a third way to serve a
+channel that `tests/services.ts`'s walk had to be taught — it knew `handle` and
+`send`, and called a served channel unserved.
+
+**A reloaded window asks main what is open, and for a long time it did not.**
+`getDocumentState` was on the bridge with no caller, so a reload started a
+renderer with `docState` null over a session main still held, dirty and
+autosaving. The window said "Nothing open", and the next New or Open replaced
+the work without a question, because `mayDiscard` asks only about a document
+the window knows of. The dialog said a reload cost twenty seconds and the undo
+history, which was true of the screen and false of main. Found while testing
+the noise maps.
+
+`adoptWhatMainHolds` in `App.svelte` runs in the startup `finally`, before the
+startup screen goes. It takes the state, the project notes (the `docState`
+handler sends them, as `docOpen` does), the conversation and the version list,
+and frames the camera. The conversation is asked for with nothing open too,
+because a chat held with nothing open is main's as well. It is **not an
+open**: no baseline version, and the selection, which was the window's, does
+not come back. At a cold launch main holds nothing and it changes nothing.
 
 **`scrollIntoView` scrolls every scrollable ancestor, and this app has a
 floating panel that watches its own geometry.** `BlockPicker`'s dropdown keeps
