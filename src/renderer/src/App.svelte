@@ -5306,6 +5306,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           replaceFrom={replaceBlock}
           onreplacefromchange={(next) => (replaceBlock = next)}
           onbrowse={browseBlocks}
+          documentSize={docState?.size ?? null}
           onswap={swapBlockFields}
           {materials}
           onfill={fillSelection}

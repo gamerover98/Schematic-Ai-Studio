@@ -40,6 +40,7 @@ import {
   type Distribution,
   type DistributionKind,
 } from "../src/shared/block_mix.js";
+import { distributionMap, MAP_MAX_SIZE, MAP_PLANES } from "../src/shared/distribution_map.js";
 import { noiseSeed, perlin3, simplex3 } from "../src/shared/noise.js";
 import { unionVolume } from "../src/shared/regions.js";
 import { assignByQuota } from "../src/main/domain/mix.js";
@@ -6168,6 +6169,61 @@ console.log("\n--- a mix shared out by a pattern ---");
     Math.abs(stone / (48 * 48) - 0.7) < 0.07,
     `${((100 * stone) / (48 * 48)).toFixed(1)}% stone`,
   );
+
+  // --- the map beside the parameters ---------------------------------------
+  //
+  // It has to be the same answer, or it is a picture of something else: every
+  // pixel is the block `pickAt` gives that cell over the same frame.
+  const mapFrame = { minX: 3, minY: -2, minZ: 5, maxX: 42, maxY: 9, maxZ: 34 };
+  const mapMix = parseMix("#perlin{seed=11,frequency=0.12}5%stone,3%andesite,2%gravel");
+  for (const plane of MAP_PLANES) {
+    const map = distributionMap({ mix: mapMix, frame: mapFrame, plane, level: 4 });
+    let agree = 0;
+    for (let row = 0; row < map.height; row += 1) {
+      for (let column = 0; column < map.width; column += 1) {
+        const cell = { x: 0, y: 0, z: 0 };
+        cell[map.cut] = map.level;
+        cell[map.across] = map.columns[column];
+        cell[map.down] = map.rows[row];
+        if (mapMix.entries[map.entries[row * map.width + column]] === pickAt(mapMix, cell.x, cell.y, cell.z, mapFrame)) agree += 1;
+      }
+    }
+    equal(`the ${plane} map gives every cell the block the hand would`, agree, map.width * map.height);
+  }
+  const top = distributionMap({ mix: mapMix, frame: mapFrame, plane: "xz", level: 4 });
+  equal("...one pixel per cell while the frame fits", [top.width, top.height], [40, 30]);
+  equal(
+    "...and the same map twice",
+    Array.from(distributionMap({ mix: mapMix, frame: mapFrame, plane: "xz", level: 4 }).entries),
+    Array.from(top.entries),
+  );
+  equal("...with north at the top", [top.rows[0], top.rows[top.height - 1]], [5, 34]);
+  const front = distributionMap({ mix: mapMix, frame: mapFrame, plane: "xy", level: 99 });
+  equal("a side view has up at the top", [front.rows[0], front.rows[front.height - 1]], [9, -2]);
+  equal("...and a level outside the frame is brought into it", front.level, 34);
+
+  const rampMap = distributionMap({ mix: parseMix("#gradient{axis=y,edge=0}1%stone,1%dirt"), frame, plane: "xy", level: 1 });
+  equal(
+    "a gradient up the frame reads bottom to top in a side view",
+    [rampMap.entries[0], rampMap.entries[(rampMap.height - 1) * rampMap.width]],
+    [1, 0],
+  );
+
+  const broad = distributionMap({
+    mix: handNoise,
+    frame: { minX: 0, minY: 0, minZ: 0, maxX: 299, maxY: 0, maxZ: 47 },
+    plane: "xz",
+    level: 0,
+  });
+  equal("a frame wider than the limit is sampled to it", broad.width, MAP_MAX_SIZE);
+  check(
+    "...across the whole of it",
+    broad.columns[0] >= 0 && broad.columns[0] < 3 && broad.columns[broad.width - 1] > 296 && broad.columns[broad.width - 1] <= 299,
+    `${broad.columns[0]}..${broad.columns[broad.width - 1]}`,
+  );
+  const shown = broad.counts[0] / (broad.width * broad.height);
+  check("...and its shares come within a few percent of the mix", Math.abs(shown - 0.7) < 0.07, `${(100 * shown).toFixed(1)}% stone`);
+  equal("the counts cover every pixel", broad.counts.reduce((sum, count) => sum + count, 0), broad.width * broad.height);
 }
 
 

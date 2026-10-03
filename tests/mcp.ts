@@ -30,6 +30,8 @@ import {
 } from "../src/main/mcp/tools.js";
 import { LIFECYCLE_SPECS, findLifecycle, type Lifecycle } from "../src/main/mcp/lifecycle.js";
 import { DOCUMENT_SPECS, findDocumentTool } from "../src/main/mcp/document_tools.js";
+import { PNG } from "pngjs";
+import { categoryColour } from "../src/shared/distribution_map.js";
 import {
   acceptsRequest,
   chooseToken,
@@ -427,6 +429,8 @@ try {
       // ...and a block list for the one read-only tool that is not about the
       // document at all.
       blocks: ["minecraft:stone"],
+      // ...and a mix for the one that draws a distribution.
+      block: "#perlin{seed=3}1%minecraft:stone,1%minecraft:dirt",
     };
     for (const tool of describeTools().filter((t) => t.annotations.readOnlyHint)) {
       const spy = { changed: 0 };
@@ -1131,6 +1135,66 @@ try {
         JSON.stringify(described),
       );
       equal("...and anything else is not a picture", pictureContent({ changed: 1 }), null);
+    }
+
+    /*
+     * What a mix would look like, before anything is filled with it. A
+     * gradient along x is the fixture because its answer can be stated: the
+     * first block on the left half of the region, the last on the right.
+     */
+    {
+      closeDocument();
+      const region = { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 3 };
+      const shown = await attempt(
+        "preview_distribution",
+        { block: "#gradient{axis=x,edge=0}1%minecraft:stone,1%minecraft:dirt", region },
+        options(sink),
+      );
+      check(
+        "a distribution is drawn with nothing open",
+        typeof shown.data === "string" && typeof shown.width === "number",
+        JSON.stringify(shown).slice(0, 300),
+      );
+      equal("...and reaches the client as an image", pictureContent(shown)?.[0]?.type, "image");
+      if (typeof shown.data === "string") {
+        const png = PNG.sync.read(Buffer.from(shown.data, "base64"));
+        // 10 by 4 cells, each 26 pixels square to make 256 across, then a gap.
+        equal("...the values and the blocks side by side", [png.width, png.height], [26 * 10 * 2 + 26, 26 * 4]);
+        const at = (x: number, y: number): number[] => Array.from(png.data.subarray((y * png.width + x) * 4, (y * png.width + x) * 4 + 3));
+        const right = 26 * 10 + 26;
+        equal("...the first block at the low end of the gradient", at(right + 5, 5), [...categoryColour(0)]);
+        equal("...and the last at the high end", at(right + 259, 5), [...categoryColour(1)]);
+        check(
+          "...beside the values in grey, darker where they are lower",
+          at(5, 5)[0] < at(259, 5)[0] && at(5, 5)[0] === at(5, 5)[2],
+          `${at(5, 5)} / ${at(259, 5)}`,
+        );
+      }
+      equal(
+        "the legend names each block's colour and share",
+        (shown.legend as { block: string; colour: string; asked: number; shown: number }[] | undefined)?.map((entry) => [
+          entry.block,
+          entry.colour,
+          entry.asked,
+          entry.shown,
+        ]),
+        [
+          ["minecraft:stone", "#4e79a7", 0.5, 0.5],
+          ["minecraft:dirt", "#f28e2b", 0.5, 0.5],
+        ],
+      );
+      const unknown = await attempt("preview_distribution", { block: "#plasma{}1%stone,1%dirt" }, options(sink));
+      check("a distribution that does not exist is refused by name", String(unknown.refused).includes("plasma"), JSON.stringify(unknown));
+
+      const session = open();
+      const revision = session.doc.revision;
+      const whole = await attempt("preview_distribution", { block: "1%stone,1%dirt" }, options(sink));
+      equal(
+        "with a schematic open, the region is the schematic",
+        whole.region,
+        { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 },
+      );
+      equal("...and the schematic is not touched", session.doc.revision, revision);
     }
 
     /*

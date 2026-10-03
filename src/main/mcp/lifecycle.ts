@@ -31,7 +31,19 @@
  */
 
 import path from "path";
+import { PNG } from "pngjs";
 
+import { DEFAULT_FRAME, effectiveShares, MixSyntaxError, parseMix } from "../../shared/block_mix.js";
+import {
+  categoryColour,
+  distributionMap,
+  levelRange,
+  MAP_MAX_SIZE,
+  MAP_PLANES,
+  mapPicture,
+  type MapPlane,
+} from "../../shared/distribution_map.js";
+import type { Box } from "../../shared/regions.js";
 import { type SchematicFormat } from "../../shared/schematic.js";
 import {
   MC_VERSION_NAMES,
@@ -354,6 +366,147 @@ const CAPTURE: LifecycleSpec = {
     return notes.length === 0 ? shot : { ...shot, note: notes.join(" ") };
   },
 };
+
+/** The longer side of `preview_distribution`'s picture is at least this many pixels. */
+const PREVIEW_PIXELS = 256;
+
+const AXIS_INTEGER = { type: "integer" } as const;
+
+/**
+ * A mix's distribution, drawn: the same map the panel shows beside the
+ * parameters, as one picture.
+ *
+ * Beside `capture_viewport` because it answers with an image and changes
+ * nothing, so it needs no transaction -- which is the line between the four
+ * tables, rather than whether a tool has effects to inject. It is not in
+ * `TOOL_SPECS` because the chat inside the app would receive the picture as
+ * base64 inside JSON, which costs the tokens and shows the model nothing.
+ *
+ * It needs no document: what a mix would look like is a question before there
+ * is anything to fill. The blocks are not checked against the version for the
+ * same reason -- nothing is placed -- and `fill_region` checks them when they
+ * are.
+ */
+const PREVIEW: LifecycleSpec = {
+  name: "preview_distribution",
+  description:
+    "A picture of how a mix of blocks would be laid out, before filling with it: one plane of the region, the distribution's values on the left (darkest lowest) and the blocks they give on the right, one colour per block, with a legend in the text. " +
+    "Use it to choose a distribution and its parameters (frequency, octaves, size...) by looking rather than by filling and undoing. " +
+    "`block` is the mix as fill_region takes it, e.g. #perlin{seed=7,frequency=0.1}70%stone,30%andesite. " +
+    "The map is the same cell for cell as a block placed by hand; a fill meets the shares exactly, so its shares may differ from the map's by a few percent. " +
+    "Coordinates are the schematic's own blocks: north is -z, east is +x, up is +y.",
+  schema: {
+    type: "object",
+    properties: {
+      block: { type: "string", description: "The mix, in fill_region's spelling." },
+      region: {
+        type: "object",
+        description:
+          "The box the shares are taken over and the map shows, in blocks. Default: the open schematic, or a 64-block cube at the origin with nothing open.",
+        properties: {
+          minX: AXIS_INTEGER,
+          minY: AXIS_INTEGER,
+          minZ: AXIS_INTEGER,
+          maxX: AXIS_INTEGER,
+          maxY: AXIS_INTEGER,
+          maxZ: AXIS_INTEGER,
+        },
+        required: ["minX", "minY", "minZ", "maxX", "maxY", "maxZ"],
+        additionalProperties: false,
+      },
+      plane: {
+        type: "string",
+        enum: [...MAP_PLANES],
+        description: "xz: from above, north at the top (default). xy: from the south, up at the top. zy: from the west, up at the top.",
+      },
+      level: {
+        type: "integer",
+        description: "Where the plane cuts the region along its third axis: y for xz, z for xy, x for zy. Default: the middle.",
+      },
+    },
+    required: ["block"],
+    additionalProperties: false,
+  },
+  readOnly: true,
+  destructive: false,
+  async run(host, args) {
+    const input = (args ?? {}) as {
+      block?: unknown;
+      region?: Box;
+      plane?: MapPlane;
+      level?: number;
+    };
+    if (typeof input.block !== "string" || input.block.trim() === "") {
+      throw new McpRefusal("Say which blocks to mix, as fill_region spells them: 70%stone,30%andesite.");
+    }
+    let mix;
+    try {
+      mix = parseMix(input.block);
+    } catch (err) {
+      throw new McpRefusal(err instanceof MixSyntaxError ? err.message : String(err));
+    }
+
+    let frame: Box;
+    if (input.region !== undefined) {
+      const r = input.region;
+      if (r.minX > r.maxX || r.minY > r.maxY || r.minZ > r.maxZ) {
+        throw new McpRefusal("Each min in region has to be at most its max.");
+      }
+      frame = r;
+    } else {
+      const session = host.session();
+      frame =
+        session === null
+          ? DEFAULT_FRAME
+          : { minX: 0, minY: 0, minZ: 0, maxX: session.doc.width - 1, maxY: session.doc.height - 1, maxZ: session.doc.length - 1 };
+    }
+    const plane: MapPlane = input.plane ?? "xz";
+    if (!MAP_PLANES.includes(plane)) throw new McpRefusal(`plane is one of ${MAP_PLANES.join(", ")}, not ${String(plane)}.`);
+    const range = levelRange(frame, plane);
+    const level = input.level ?? Math.floor((range.min + range.max) / 2);
+
+    const map = distributionMap({ mix, frame, plane, level });
+    const scale = Math.max(1, Math.ceil(PREVIEW_PIXELS / Math.max(map.width, map.height)));
+    const picture = mapPicture(map, categoryColour, scale);
+    const png = new PNG({ width: picture.width, height: picture.height });
+    png.data = Buffer.from(picture.data.buffer, picture.data.byteOffset, picture.data.byteLength);
+
+    const shares = effectiveShares(mix.entries);
+    const pixels = map.width * map.height;
+    const hex = (rgb: readonly number[]): string => `#${rgb.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+    const spanAcross = high(frame, map.across) - low(frame, map.across) + 1;
+    const spanDown = high(frame, map.down) - low(frame, map.down) + 1;
+    return {
+      data: PNG.sync.write(png).toString("base64"),
+      width: picture.width,
+      height: picture.height,
+      left: "the distribution's value at each cell, darkest lowest; blocks are dealt out by these values, the first block to the darkest",
+      right: "the block each cell gets, in the colours of the legend",
+      region: frame,
+      plane,
+      [map.cut]: map.level,
+      across: `${map.across} from ${map.columns[0]} to ${map.columns[map.width - 1]}, left to right`,
+      down: `${map.down} from ${map.rows[0]} to ${map.rows[map.height - 1]}, top to bottom`,
+      legend: mix.entries.map((entry, index) => ({
+        block: entry.block,
+        colour: hex(categoryColour(index)),
+        asked: Number(shares[index].toFixed(3)),
+        shown: Number(((map.counts[index] ?? 0) / pixels).toFixed(3)),
+      })),
+      ...(spanAcross > map.width || spanDown > map.height
+        ? { note: `The region is wider than ${MAP_MAX_SIZE} blocks, so each pixel is one cell sampled from every few rather than every cell.` }
+        : {}),
+    };
+  },
+};
+
+function low(frame: Box, axis: "x" | "y" | "z"): number {
+  return axis === "x" ? frame.minX : axis === "y" ? frame.minY : frame.minZ;
+}
+
+function high(frame: Box, axis: "x" | "y" | "z"): number {
+  return axis === "x" ? frame.maxX : axis === "y" ? frame.maxY : frame.maxZ;
+}
 
 export const LIFECYCLE_SPECS: readonly LifecycleSpec[] = [
   {
@@ -695,6 +848,7 @@ export const LIFECYCLE_SPECS: readonly LifecycleSpec[] = [
   },
 
   CAPTURE,
+  PREVIEW,
 ];
 
 export function findLifecycle(name: string): LifecycleSpec | null {

@@ -516,6 +516,34 @@ as that frame. It cuts where the shares fall in the sample. For `random`
 the cuts are the shares themselves. The frame exists so that a gradient
 placed by hand runs from one end of the document to the other.
 
+**A mix shows its distribution before anything is filled with it.**
+`shared/distribution_map.ts` samples one plane of the field over a frame and
+gives each pixel the entry `pickAt` would, through the exported `cutsFor`. It
+is not a second estimate, and `tests/session.ts` holds every pixel of all
+three planes to `pickAt`. A fill ranks exactly, so its shares can differ from
+the map's by a few percent. A thin slice of large Voronoi patches can differ
+by more, which is why both the panel and the tool print the share they show
+beside the share asked for.
+
+- **The planes are named by their axes**: `xz` from above with north at the
+  top, `xy` from the south, `zy` from the west. Up is up in both side views.
+- **The frame is what a fill covers**: the box round every selected area, or
+  the schematic with nothing selected (what the hand uses), else
+  `DEFAULT_FRAME`. Past `MAP_MAX_SIZE` cells per side it is sampled with
+  `cutsFor`'s own spacing rather than shrunk.
+- **`DistributionPreview` in `BlockMixField`.** A thumbnail beside the shares
+  while the parameters are closed. With them open, the values in grey and
+  the blocks side by side, plus the plane, a level slider and the legend.
+  Each block is painted in its icon's average colour (`icon_colour.ts`).
+  Similar blocks then look alike, which is the picture's job, and "Distinct
+  colours" swaps in `CATEGORY_COLOURS` to tell them apart. Its root class is
+  `mix-map` because `App.svelte`'s viewport section is already `.preview`.
+- **`preview_distribution` is in `mcp/lifecycle.ts`, not `TOOL_SPECS`.** It
+  changes nothing, so it needs no transaction, and an image inside the chat's
+  JSON would show the in-app model nothing. It needs no document. One
+  picture carries both halves (`mapPicture`), with the legend as text beside
+  it.
+
 **`writeMix` is in `domain/mix.ts`, so the agent and the panel write the
 same way.** `fill_region` and `replace_blocks` take the same spelling, and
 their `from` takes a list. A single block still goes through its old path.

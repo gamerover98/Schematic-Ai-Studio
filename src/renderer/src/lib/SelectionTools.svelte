@@ -14,6 +14,7 @@
    */
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import type { PaletteCount, RegionSpec } from "../../../shared/ipc.js";
+  import type { Box } from "../../../shared/regions.js";
   import BlockMixField from "./BlockMixField.svelte";
   import BannerPatternHint from "./BannerPatternHint.svelte";
   import Icon from "./Icon.svelte";
@@ -85,6 +86,11 @@
      * tiles behind a different scrollbar.
      */
     onbrowse: (purpose: "fill" | "replace") => void;
+    /**
+     * The schematic's size, for the map of a mix with nothing selected: the
+     * box the hand takes its shares over (`pickAt`'s frame in `App.svelte`).
+     */
+    documentSize?: readonly [number, number, number] | null;
     /** Exchanges the two fields, weights and all. */
     onswap: () => void;
     onfill: (block: string) => void;
@@ -119,6 +125,7 @@
     replaceFrom,
     onreplacefromchange,
     onbrowse,
+    documentSize = null,
     onswap,
     onfill,
     onreplace,
@@ -167,6 +174,28 @@
   );
 
   const none = $derived(selection === null);
+
+  /**
+   * What the map of a mix is drawn over: the box round every selected area,
+   * which is what a fill covers, or the schematic with nothing selected, which
+   * is what the hand takes its shares over.
+   */
+  const mapFrame = $derived.by((): Box | null => {
+    const boxes = selection === null ? areas : [selection, ...areas];
+    if (boxes.length > 0) {
+      return {
+        minX: Math.min(...boxes.map((box) => box.minX)),
+        minY: Math.min(...boxes.map((box) => box.minY)),
+        minZ: Math.min(...boxes.map((box) => box.minZ)),
+        maxX: Math.max(...boxes.map((box) => box.maxX)),
+        maxY: Math.max(...boxes.map((box) => box.maxY)),
+        maxZ: Math.max(...boxes.map((box) => box.maxZ)),
+      };
+    }
+    if (documentSize === null) return null;
+    const [width, height, length] = documentSize;
+    return { minX: 0, minY: 0, minZ: 0, maxX: width - 1, maxY: height - 1, maxZ: length - 1 };
+  });
 
   /*
    * Whether any block in With is a banner, however it was spelled: a bare id,
@@ -310,6 +339,7 @@
       {blocks}
       {placeable}
       {legacy}
+      frame={mapFrame}
       onchange={onblockchange}
       onbrowse={() => onbrowse("fill")}
     />

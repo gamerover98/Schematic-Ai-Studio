@@ -37,8 +37,10 @@
     type ParamValue,
   } from "../../../shared/block_mix.js";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
+  import type { Box } from "../../../shared/regions.js";
   import { tick } from "svelte";
   import BlockPicker from "./BlockPicker.svelte";
+  import DistributionPreview from "./DistributionPreview.svelte";
   import BlockStateModal from "./BlockStateModal.svelte";
   import BlockTooltip from "./BlockTooltip.svelte";
   import Icon from "./Icon.svelte";
@@ -56,6 +58,11 @@
     blocks: readonly string[];
     placeable?: ReadonlySet<string> | null;
     legacy?: LegacyIndex | null;
+    /**
+     * What a fill with this mix would cover, for the map of the distribution:
+     * the selection, or the schematic with none. `null` is the hand's default.
+     */
+    frame?: Box | null;
     onchange: (value: string) => void;
     onbrowse?: () => void;
   }
@@ -68,6 +75,7 @@
     blocks,
     placeable = null,
     legacy = null,
+    frame = null,
     onchange,
     onbrowse,
   }: Props = $props();
@@ -315,6 +323,12 @@
       <Icon name="dice" size={16} weight={1.8} />
     </button>
   </div>
+  <!--
+    Always there for a mix, closed as a thumbnail: what a fill will look like
+    is worth seeing before anybody opens the parameters. Open, it sits above
+    them, so a change to one is seen on the map it moves.
+  -->
+  <DistributionPreview {mix} {frame} expanded={tuning && specs.length > 0} />
   {#if tuning && specs.length > 0}
     <div class="params">
       {#each specs as spec (spec.key)}

@@ -214,6 +214,8 @@ import {
 } from "../src/renderer/src/lib/block_spelling.js";
 import { documentMaterials, formatCount, materialAction } from "../src/renderer/src/lib/materials.js";
 import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/shared/block_mix.js";
+import { MAP_PLANES } from "../src/shared/distribution_map.js";
+import { averageColour } from "../src/renderer/src/lib/icon_colour.js";
 import {
   arcBetween,
   axisAt,
@@ -5333,6 +5335,33 @@ console.log("\n--- the distribution, in the With field ---");
    */
   const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
   check("a block placed by hand takes its shares over the document's box", /pickAt\(mix, at\.x, at\.y, at\.z, frame\)/.test(app));
+
+  /*
+   * The map beside the parameters. Its arithmetic is `distribution_map.ts`'s
+   * and is checked against `pickAt` in `tests/session.ts`; what is checked here
+   * is that the field draws it, over the frame a fill covers.
+   */
+  const planeWords = MAP_PLANES.flatMap((plane) => [`mix.map.plane.${plane}`, `mix.map.planeHint.${plane}`]);
+  equal("every plane of the map has its words", planeWords.filter((key) => catalogue[key] === undefined), []);
+  const mixBlock = field.slice(field.indexOf("{#if weights && mix.entries.length > 1}"), field.indexOf("<BlockTooltip"));
+  check("a mix shows the map of its distribution", /<DistributionPreview \{mix\} \{frame\}/.test(mixBlock));
+  check(
+    "...opened with the parameters, and only while there are some",
+    /expanded=\{tuning && specs\.length > 0\}/.test(mixBlock),
+  );
+  const preview = readFileSync(path.join(RENDERER, "lib", "DistributionPreview.svelte"), "utf8");
+  check(
+    "...drawn by the shared sampler over the frame it was given",
+    /distributionMap\(\{ mix, frame: box, plane, level \}\)/.test(preview),
+  );
+  const tools = readFileSync(path.join(RENDERER, "lib", "SelectionTools.svelte"), "utf8");
+  check("the With field's map is drawn over what a fill covers", /frame=\{mapFrame\}/.test(tools));
+  check("...and the schematic is the frame with nothing selected", /documentSize=\{docState\?\.size \?\? null\}/.test(app));
+
+  // A block's colour on the map is its icon's, the transparent margin left out.
+  equal("an icon's colour is the average of what is drawn", averageColour([255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 255, 255]), [128, 0, 128]);
+  equal("...weighted by how opaque each pixel is", averageColour([200, 0, 0, 255, 0, 0, 200, 85]), [150, 0, 50]);
+  equal("...and nothing for an icon with nothing in it", averageColour([9, 9, 9, 0]), null);
 }
 
 

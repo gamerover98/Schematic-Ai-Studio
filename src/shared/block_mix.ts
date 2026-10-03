@@ -481,7 +481,7 @@ export function distributionValue(distribution: Distribution, x: number, y: numb
  * Where a block placed by hand finds its frame when nobody gave one: a 64-block
  * cube at the origin, which is the size of an ordinary build.
  */
-const DEFAULT_FRAME: Box = { minX: 0, minY: 0, minZ: 0, maxX: 63, maxY: 63, maxZ: 63 };
+export const DEFAULT_FRAME: Box = { minX: 0, minY: 0, minZ: 0, maxX: 63, maxY: 63, maxZ: 63 };
 
 /** Samples per axis for the thresholds: 32^3 values, once per mix and frame. */
 const FRAME_SAMPLES = 32;
@@ -498,8 +498,11 @@ const cutCache = new Map<string, number[]>();
  * falls, and so on. For `random` the field is uniform and the cuts are the
  * shares themselves; for a noise they are wherever the noise puts them, which
  * for a gradient is a height in the frame.
+ *
+ * Exported for `distribution_map.ts`, so the map draws the cuts the hand uses
+ * rather than a second estimate of them.
  */
-function cutsFor(distribution: Distribution, shares: readonly number[], frame: Box): number[] {
+export function cutsFor(distribution: Distribution, shares: readonly number[], frame: Box): number[] {
   const cumulative: number[] = [];
   let running = 0;
   for (const share of shares.slice(0, -1)) {
