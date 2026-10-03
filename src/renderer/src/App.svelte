@@ -134,7 +134,7 @@ import {
     singleMix,
   } from "../../shared/ipc.js";
   import { parseMix, pickAt } from "../../shared/block_mix.js";
-  import { withBlockAdded } from "./lib/block_spelling.js";
+  import { canonicalBlock, isAirBlock, withBlockAdded } from "./lib/block_spelling.js";
   import type { SchematicFormat } from "../../shared/schematic.js";
 import { schematicExtension } from "../../shared/schematic.js";
 import type { FileKind } from "../../shared/ipc.js";
@@ -5523,6 +5523,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         hotbar = hotbar.map((id, at) => (at === slot ? activeBlock : id));
         persistHotbar();
       }}
+      onassign={(slot, block) => {
+        // Air cannot be held, and `coerceHotbar` would refuse it anyway.
+        if (isAirBlock(block)) return;
+        hotbar = hotbar.map((id, at) => (at === slot ? canonicalBlock(block, legacyForDoc) : id));
+        persistHotbar();
+      }}
+      raised={inventoryOpen}
     />
     {#if bounds}
       <!-- component.py:465-469's caption, same two-decimal formatting. -->

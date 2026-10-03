@@ -2055,10 +2055,26 @@ Two rules in it are easy to undo by tidying:
   `renderer/lib/materials.ts`, with the exact number in the hover.
 
 What a click on a slot means is `materialAction` in the same module: With,
-Ctrl adds to the mix, Shift is Replace, the right button opens the states.
-**A plain click on air fills Replace**, because air cannot be held and
-`coerceHotbar` refuses a slot of it. A slot carries the exact state, so a
-replace of it finds exactly the cells the slot counted.
+Ctrl adds to the mix, Shift is Replace, the right button pins the slot's
+reading open (`BlockTooltip`'s `pinned`: id, states, count and share, the
+pair, and Copy id). It used to put the block in With and open its states
+there, two things at once; editing a state is the With chip's right-click.
+The pinned reading takes Escape on the way down, because the window's own
+Escape drops the selection and the list with it. **A plain click on air
+fills Replace**, because air cannot be held and `coerceHotbar` refuses a
+slot of it. A slot carries the exact state, so a replace of it finds exactly
+the cells the slot counted.
+
+**A slot is also dragged, onto a field or the hotbar.** It carries
+`DraggedBlock` -- the block and its pair -- under `BLOCK_MIME`, and the
+target decides what it takes, through the same `onMaterial` a click goes
+through: With takes the foot alone, because placing a foot places the bed,
+Replace both halves, a hotbar slot the block alone. Plain fills, Ctrl adds.
+A field takes the drop only with `ondropblock`, and stops it there, or the
+text box under the pointer would type what it was handed. Air is not
+dragged. The creative inventory's tiles drag too, and the hotbar rises over
+its scrim while it is open (`raised`, `z-index: 101` against 100): the game
+draws the hotbar inside its inventory for the same reason.
 
 **A bar over the slots searches, orders and merges states**, and the rules
 are `materialRows` in the same module. Merged, a block is one slot under its

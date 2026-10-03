@@ -19,12 +19,18 @@
    * and forgotten with it; the order and the merge are settings, because they
    * are how somebody likes to read the list rather than what they are looking
    * for now.
+   *
+   * A slot is also dragged: onto With or Replace, which it fills (Ctrl adds),
+   * or onto a hotbar slot. Air is not dragged, having nowhere it may go but
+   * Replace, which a click already does. The right button pins the slot's
+   * reading open instead of opening the states, which are the With chip's.
    */
   import type { PaletteCount } from "../../../shared/ipc.js";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import { MATERIALS_SORTS, type MaterialsSort } from "../../../shared/settings.js";
   import BlockTooltip from "./BlockTooltip.svelte";
   import Icon from "./Icon.svelte";
+  import { startBlockDrag } from "./block_drag.js";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { shortName } from "./block_spelling.js";
   import type { AnchorRect } from "./floating.js";
@@ -97,6 +103,8 @@
 
   let elements = $state<(HTMLButtonElement | null)[]>([]);
   let hovered = $state<{ index: number; anchor: AnchorRect } | null>(null);
+  /** The slot whose reading the right button pinned open, by its block. */
+  let pinned = $state<{ block: string; anchor: AnchorRect } | null>(null);
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
 
   function hoverStart(index: number): void {
@@ -122,10 +130,23 @@
     );
     if (action === "none") return;
     hoverEnd();
+    if (action === "info") {
+      const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      pinned = { block: slot.block, anchor: { left: box.left, top: box.top, width: box.width, height: box.height } };
+      return;
+    }
     onaction({ block: slot.block, pair: slot.pair }, action);
   }
 
-  const hoveredSlot = $derived(hovered === null ? null : (slots[hovered.index] ?? null));
+  function dragStart(slot: MaterialRow, event: DragEvent): void {
+    hoverEnd();
+    pinned = null;
+    if (event.dataTransfer) startBlockDrag(event.dataTransfer, { block: slot.block, pair: slot.pair });
+  }
+
+  const hoveredSlot = $derived(hovered === null || pinned !== null ? null : (slots[hovered.index] ?? null));
+  /** Gone with its slot, when a count or a search takes the slot away. */
+  const pinnedSlot = $derived(pinned === null ? null : (slots.find((slot) => slot.block === pinned?.block) ?? null));
 </script>
 
 <div class="head">
@@ -172,6 +193,8 @@
         class="slot"
         class:air={slot.air}
         bind:this={elements[index]}
+        draggable={!slot.air}
+        ondragstart={(event) => dragStart(slot, event)}
         aria-label={t("materials.slot", { block: slot.block, count: slot.count.toLocaleString() })}
         onclick={(event) => act(slot, event, 0)}
         oncontextmenu={(event) => {
@@ -209,6 +232,20 @@
   share={hoveredSlot === null ? null : hoveredSlot.count / inside}
   shareOf={scope}
 />
+
+{#if pinned !== null && pinnedSlot !== null}
+  <BlockTooltip
+    block={pinnedSlot.block}
+    anchor={pinned.anchor}
+    {legacy}
+    count={pinnedSlot.count}
+    share={pinnedSlot.count / inside}
+    shareOf={scope}
+    pair={pinnedSlot.pair}
+    pinned
+    onclose={() => (pinned = null)}
+  />
+{/if}
 
 <style>
   .head {

@@ -214,7 +214,13 @@ import {
   writeSpelling,
 } from "../src/renderer/src/lib/block_spelling.js";
 import { formatCount, materialAction, materialRows } from "../src/renderer/src/lib/materials.js";
-import { BLOCK_MIME, isFileDrop, trackPageDrags } from "../src/renderer/src/lib/block_drag.js";
+import {
+  BLOCK_MIME,
+  decodeDragged,
+  encodeDragged,
+  isFileDrop,
+  trackPageDrags,
+} from "../src/renderer/src/lib/block_drag.js";
 import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/shared/block_mix.js";
 import { MAP_PLANES } from "../src/shared/distribution_map.js";
 import { averageColour } from "../src/renderer/src/lib/icon_colour.js";
@@ -5217,7 +5223,13 @@ console.log("\n--- the materials, as an inventory ---");
     [materialAction(click(0, false, true), false), materialAction(click(0, true, true), false)],
     ["replace", "addReplace"],
   );
-  equal("the right button opens the block's states", materialAction(click(2), false), "state");
+  /*
+   * The right button read the slot by putting it in With and opening its
+   * states there: two things at once, and the second is the chip's. Now it
+   * pins the slot's reading open, and the states stay a right-click on the
+   * chip in With.
+   */
+  equal("the right button pins what there is to know about the slot", materialAction(click(2), false), "info");
   /*
    * Air cannot be held -- `coerceHotbar` refuses a slot of it -- so a plain
    * click means the one thing air is for in that panel.
@@ -5264,16 +5276,63 @@ console.log("\n--- the materials, as an inventory ---");
   check("the slots are drawn from the rows, air among them", /materialRows\(palette, air,/.test(slots));
 
   const tools = readFileSync(path.join(RENDERER, "lib", "SelectionTools.svelte"), "utf8");
-  const stateArm = tools.slice(tools.indexOf('case "state":'), tools.indexOf('case "none":'));
   check(
-    "a right-click puts the block in With before opening its states",
-    stateArm.indexOf("onblockchange(") !== -1 && stateArm.indexOf("onblockchange(") < stateArm.indexOf("editLast()"),
+    "the pinned reading is a pinned tooltip that closes itself",
+    /<BlockTooltip[\s\S]{0,400}pinned\s[\s\S]{0,80}onclose=\{\(\) => \(pinned = null\)\}/.test(slots),
+  );
+  const tooltip = readFileSync(path.join(RENDERER, "lib", "BlockTooltip.svelte"), "utf8");
+  check(
+    "...and its Escape goes no further, or the window's would drop the selection",
+    /window\.addEventListener\("keydown", onKey, true\)/.test(tooltip) &&
+      /event\.stopPropagation\(\);\s*onclose\?\.\(\)/.test(tooltip),
   );
 
-  const field = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
+  /*
+   * A slot dragged onto a field fills it, as the slot's click on that field
+   * would, and Ctrl adds. What it carries is the block and its pair, so the
+   * field decides: With takes the foot, Replace both halves.
+   */
+  const bed = { block: "minecraft:red_bed[part=foot]", pair: ["minecraft:red_bed[part=head]"] };
+  equal("a dragged block comes back as it went", decodeDragged(encodeDragged(bed)), bed);
+  equal(
+    "...and text that is not one is no block",
+    [decodeDragged("minecraft:stone"), decodeDragged("{}"), decodeDragged('{"block":"  "}')],
+    [null, null, null],
+  );
+  check("a slot is dragged, air is not", slots.includes("draggable={!slot.air}"));
   check(
-    "...and the editor waits for the chip to be drawn",
-    /export function editLast\(\): void \{\s*void tick\(\)\.then/.test(field),
+    "a drop on Replace is Replace, Ctrl adds",
+    tools.includes('onMaterial(dragged, add ? "addReplace" : "replace")'),
+  );
+  check("...and on With is With", tools.includes('onMaterial(dragged, add ? "addWith" : "with")'));
+  const field = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
+  const fieldDrop = field.slice(field.indexOf("function drop("), field.indexOf("function edit("));
+  check(
+    "a field takes only a block, and takes it from the text box under it",
+    fieldDrop.indexOf("dragged === null) return;") !== -1 &&
+      fieldDrop.indexOf("dragged === null) return;") < fieldDrop.indexOf("event.stopPropagation();"),
+  );
+  const hotbar = readFileSync(path.join(RENDERER, "lib", "Hotbar.svelte"), "utf8");
+  check(
+    "a hotbar slot takes the block and not its pair: holding a foot places the bed",
+    hotbar.includes("onassign(index, dragged.block);"),
+  );
+  check(
+    "...and rises over the creative inventory to be dropped on",
+    /\.hotbar\.raised \{\s*z-index: 101;/.test(hotbar) &&
+      /\.scrim \{[^}]*z-index: 100;/.test(readFileSync(path.join(RENDERER, "lib", "CreativeInventory.svelte"), "utf8")),
+  );
+  const appSource = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check("...while it is open", appSource.includes("raised={inventoryOpen}"));
+  check(
+    "air is never put in a hotbar slot by a drop",
+    /onassign=\{\(slot, block\) => \{\s*\/\/[^\n]*\n\s*if \(isAirBlock\(block\)\) return;/.test(appSource),
+  );
+  check(
+    "the creative inventory's tiles are dragged too",
+    readFileSync(path.join(RENDERER, "lib", "CreativeInventory.svelte"), "utf8").includes(
+      "startBlockDrag(event.dataTransfer, { block, pair: [] })",
+    ),
   );
 
   /*

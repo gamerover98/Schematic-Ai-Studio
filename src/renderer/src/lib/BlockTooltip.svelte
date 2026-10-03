@@ -12,13 +12,19 @@
    * arrangement for its reason: the icons live inside a `ToolWindow`, which
    * clips. `pointer-events: none`, so it can never be the thing under the
    * pointer that keeps it open.
+   *
+   * **Pinned**, it is the materials list's right-click: the same reading,
+   * held still so it can be read and its id copied, until Escape or a press
+   * anywhere else. It takes the pointer then, and the Escape: the window's
+   * own Escape drops the selection, which would take the list away with it.
    */
   import { defaultStateFor } from "../../../shared/block_states.js";
   import { versionRangeOf, versionTableFloor } from "../../../shared/block_versions.js";
   import { mcVersion, versionNameOf } from "../../../shared/mc_versions.js";
   import { legacyIdForState, type LegacyIndex } from "../../../shared/legacy_ids.js";
+  import { api, bridgeAvailable } from "./bridge.svelte.js";
   import { blockIcons, requestBlockIcons } from "./block_icons.svelte.js";
-  import { readSpelling } from "./block_spelling.js";
+  import { readSpelling, shortName } from "./block_spelling.js";
   import { placePopover, type AnchorRect } from "./floating.js";
   import { propertyRows } from "./inspector_rows.js";
   import { t } from "./i18n.svelte.js";
@@ -36,6 +42,12 @@
     weight?: number | null;
     /** What a count's share is of: the selection, or the whole schematic. */
     shareOf?: "selection" | "document";
+    /** The far halves counted with this one: a bed's head beside its foot. */
+    pair?: readonly string[];
+    /** Held still, with a way to copy the id; see the header. */
+    pinned?: boolean;
+    /** Escape, or a press outside, while pinned. */
+    onclose?: () => void;
   }
 
   const {
@@ -46,7 +58,43 @@
     share = null,
     weight = null,
     shareOf = "selection",
+    pair = [],
+    pinned = false,
+    onclose,
   }: Props = $props();
+
+  let copied = $state(false);
+
+  async function copyId(): Promise<void> {
+    if (block === null || !bridgeAvailable) return;
+    await api().copyToClipboard(block);
+    copied = true;
+    setTimeout(() => (copied = false), 1200);
+  }
+
+  $effect(() => {
+    if (!pinned || block === null) return;
+    /*
+     * On the way down, so this Escape is the popover's and goes no further:
+     * the window's own would drop the selection, and the list with it.
+     */
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onclose?.();
+    };
+    const onPress = (event: PointerEvent) => {
+      if (popover !== null && event.target instanceof Node && popover.contains(event.target)) return;
+      onclose?.();
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onPress, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onPress, true);
+    };
+  });
 
   let popover = $state<HTMLDivElement | null>(null);
   let placement = $state<{ x: number; y: number } | null>(null);
@@ -130,7 +178,9 @@
 {#if block !== null && anchor !== null}
   <div
     class="tooltip"
-    role="tooltip"
+    class:pinned
+    role={pinned ? "dialog" : "tooltip"}
+    aria-label={pinned ? block : undefined}
     bind:this={popover}
     style={placement === null ? "visibility: hidden" : `left: ${placement.x}px; top: ${placement.y}px`}
   >
@@ -172,6 +222,17 @@
     {:else if weight !== null && share !== null}
       <p class="line strong">{t("blockInfo.weight", { weight: String(weight), share: percent(share) })}</p>
     {/if}
+    {#if pair.length > 0}
+      <p class="line">{t("blockInfo.pair", { other: pair.map(shortName).join(", ") })}</p>
+    {/if}
+    {#if pinned}
+      <div class="actions">
+        <button type="button" onclick={() => void copyId()}>
+          {copied ? t("blockInfo.copied") : t("blockInfo.copyId")}
+        </button>
+        <button type="button" onclick={() => onclose?.()}>{t("common.close")}</button>
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -187,6 +248,22 @@
     box-shadow: 0 6px 18px var(--shadow);
     font-size: 11px;
     pointer-events: none;
+  }
+
+  .tooltip.pinned {
+    pointer-events: auto;
+  }
+
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+    margin-top: 8px;
+  }
+
+  .actions button {
+    padding: 3px 8px;
+    font-size: 11px;
   }
 
   .head {

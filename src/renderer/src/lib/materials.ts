@@ -39,25 +39,31 @@ export function formatCount(count: number): string {
 }
 
 /** What a click on a slot does. */
-export type MaterialAction = "with" | "addWith" | "replace" | "addReplace" | "state" | "none";
+export type MaterialAction = "with" | "addWith" | "replace" | "addReplace" | "info" | "none";
 
 /**
  * The click on a slot, read.
  *
  * Plain is With, Ctrl adds to With's mix, Shift is Replace and Ctrl+Shift adds
- * to it, the right button opens the block's states. Cmd counts as Ctrl.
+ * to it, the right button opens what there is to know about the slot -- its
+ * id, its states, how many and what share. Cmd counts as Ctrl.
+ *
+ * The right button used to put the block in With and open its states there,
+ * which was two things at once and the second of them belongs to the chip:
+ * editing a state is editing what you are about to write, and right-clicking
+ * the chip in With still does exactly that.
  *
  * **Air cannot be held**, so a plain click on it means Replace: "replace the
  * air in here" is the one thing air is useful for in that panel, and putting
  * it in the hand would be a slot `coerceHotbar` refuses. Ctrl still adds it to
- * With's mix, because a mix with some air in it is a ruin and is legal. It has
- * no states to open.
+ * With's mix, because a mix with some air in it is a ruin and is legal. There
+ * is nothing to read about it that its slot does not already say.
  */
 export function materialAction(
   click: { button: number; ctrl: boolean; shift: boolean },
   air: boolean,
 ): MaterialAction {
-  if (click.button === 2) return air ? "none" : "state";
+  if (click.button === 2) return air ? "none" : "info";
   if (click.button !== 0) return "none";
   if (click.shift) return click.ctrl ? "addReplace" : "replace";
   if (click.ctrl) return "addWith";

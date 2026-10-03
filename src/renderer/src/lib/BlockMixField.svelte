@@ -38,12 +38,12 @@
   } from "../../../shared/block_mix.js";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import type { Box } from "../../../shared/regions.js";
-  import { tick } from "svelte";
   import BlockPicker from "./BlockPicker.svelte";
   import DistributionPreview from "./DistributionPreview.svelte";
   import BlockStateModal from "./BlockStateModal.svelte";
   import BlockTooltip from "./BlockTooltip.svelte";
   import Icon from "./Icon.svelte";
+  import { carriesBlock, droppedBlock, type DraggedBlock } from "./block_drag.js";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { canonicalBlock, isAirBlock, shortName } from "./block_spelling.js";
   import type { AnchorRect } from "./floating.js";
@@ -65,6 +65,13 @@
     frame?: Box | null;
     onchange: (value: string) => void;
     onbrowse?: () => void;
+    /**
+     * A block dropped on the field, from the materials list: plain to fill
+     * it, `add` (Ctrl) to add to it. What the field takes from the slot --
+     * a bed's head as well, or not -- is the caller's, so a field without
+     * this takes no drop at all.
+     */
+    ondropblock?: (dragged: DraggedBlock, add: boolean) => void;
   }
 
   const {
@@ -78,7 +85,39 @@
     frame = null,
     onchange,
     onbrowse,
+    ondropblock,
   }: Props = $props();
+
+  /** A block is being dragged over the field, which says it will take it. */
+  let dropping = $state(false);
+
+  function dragOver(event: DragEvent): void {
+    if (ondropblock === undefined || !carriesBlock(event.dataTransfer ? [...event.dataTransfer.types] : undefined)) {
+      return;
+    }
+    // Only for a block: anything else, a file above all, goes on to the
+    // viewport's own handlers as it always did.
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    dropping = true;
+  }
+
+  function dragLeave(event: DragEvent): void {
+    const into = event.relatedTarget;
+    if (into instanceof Node && (event.currentTarget as HTMLElement).contains(into)) return;
+    dropping = false;
+  }
+
+  function drop(event: DragEvent): void {
+    dropping = false;
+    const dragged = droppedBlock(event.dataTransfer);
+    if (ondropblock === undefined || dragged === null) return;
+    // Taken here, and nowhere above: the text box under the pointer would
+    // otherwise type whatever it was handed.
+    event.preventDefault();
+    event.stopPropagation();
+    ondropblock(dragged, event.ctrlKey || event.metaKey);
+  }
 
   const EMPTY: BlockMix = { entries: [], distribution: DEFAULT_DISTRIBUTION };
 
@@ -180,26 +219,24 @@
     hovered = null;
   }
 
-  /** Opens the state editor on a chip. Exported for the materials list. */
-  export function edit(index: number): void {
+  /** Opens the state editor on a chip: the chip's own right-click. */
+  function edit(index: number): void {
     const anchor = rectOf(index);
     hoverEnd();
     if (anchor !== null) editing = { index, anchor };
   }
-
-  /**
-   * Opens the state editor on the last chip, once it has been drawn.
-   *
-   * For the materials inventory, which sets the field and opens the editor in
-   * one click: the value arrives through a prop, so the chip it names exists
-   * only after the flush `tick` waits for.
-   */
-  export function editLast(): void {
-    void tick().then(() => edit(mix.entries.length - 1));
-  }
 </script>
 
-<div class="mix" class:weighted={showWeights}>
+<div
+  class="mix"
+  class:weighted={showWeights}
+  class:dropping
+  role="group"
+  ondragenter={dragOver}
+  ondragover={dragOver}
+  ondragleave={dragLeave}
+  ondrop={drop}
+>
   <div class="chips">
     <!--
       Keyed on the position as well: text typed by hand may name one block
@@ -400,6 +437,13 @@
     display: flex;
     align-items: flex-start;
     gap: 4px;
+    border-radius: 4px;
+  }
+
+  /* Where a dragged block will land: the selection's own colour, as an outline. */
+  .mix.dropping {
+    outline: 2px dashed var(--selection);
+    outline-offset: 2px;
   }
 
   .chips {

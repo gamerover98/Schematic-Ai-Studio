@@ -40,20 +40,48 @@ export function isFileDrop(types: readonly string[] | undefined, fromPage: boole
 }
 
 /**
- * Starts a block drag: the spelling under `BLOCK_MIME` and nothing else, as a
+ * What a drag carries: a block, and the far halves it also stands for -- a
+ * bed's head beside the foot that is `block`, which a Replace has to name and
+ * a hand must not hold.
+ */
+export interface DraggedBlock {
+  readonly block: string;
+  readonly pair: readonly string[];
+}
+
+/**
+ * Starts a block drag: the block under `BLOCK_MIME` and nothing else, as a
  * copy -- the slot keeps its block.
  */
-export function startBlockDrag(transfer: DataTransfer, block: string): void {
+export function startBlockDrag(transfer: DataTransfer, dragged: DraggedBlock): void {
   transfer.clearData();
-  transfer.setData(BLOCK_MIME, block);
+  transfer.setData(BLOCK_MIME, encodeDragged(dragged));
   transfer.effectAllowed = "copy";
 }
 
+export function encodeDragged(dragged: DraggedBlock): string {
+  return JSON.stringify({ block: dragged.block, pair: [...dragged.pair] });
+}
+
+/**
+ * The block a drag's text names, or `null` for text that is not one -- a drag
+ * from another program that happened to use the same type, or nothing at all.
+ */
+export function decodeDragged(text: string): DraggedBlock | null {
+  try {
+    const value = JSON.parse(text) as { block?: unknown; pair?: unknown };
+    if (typeof value.block !== "string" || value.block.trim() === "") return null;
+    const pair = Array.isArray(value.pair) ? value.pair.filter((each): each is string => typeof each === "string") : [];
+    return { block: value.block.trim(), pair };
+  } catch {
+    return null;
+  }
+}
+
 /** The block a drop carries, or `null` when it carries none. */
-export function droppedBlock(transfer: DataTransfer | null): string | null {
+export function droppedBlock(transfer: DataTransfer | null): DraggedBlock | null {
   if (transfer === null || !carriesBlock([...transfer.types])) return null;
-  const block = transfer.getData(BLOCK_MIME).trim();
-  return block === "" ? null : block;
+  return decodeDragged(transfer.getData(BLOCK_MIME));
 }
 
 /**

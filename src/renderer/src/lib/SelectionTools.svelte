@@ -25,6 +25,7 @@
   import { tryParseMix } from "../../../shared/block_mix.js";
   import { canonicalBlock, withBlockAdded, withBlocksAdded } from "./block_spelling.js";
   import type { MaterialAction } from "./materials.js";
+  import type { DraggedBlock } from "./block_drag.js";
   import { t } from "./i18n.svelte.js";
 
   interface Props {
@@ -144,8 +145,6 @@
     onselectall,
   }: Props = $props();
 
-  let withField = $state<ReturnType<typeof BlockMixField> | null>(null);
-
   /**
    * A slot of the inventory, clicked: `materialAction` decides what the click
    * means, and this is where each meaning lands. The state comes along -- the
@@ -155,8 +154,12 @@
    * A slot that is a whole bed is the foot's state with the head's as `pair`.
    * In the hand the foot alone is right, because placing a foot places the
    * bed; Replace takes both, or replacing the beds would leave their heads.
+   *
+   * A slot dropped on a field lands here too, as the click on that field
+   * would: plain fills it, Ctrl adds. One place deciding what With and
+   * Replace take from a slot, however the slot got there.
    */
-  function onMaterial(slot: { block: string; pair: readonly string[] }, action: MaterialAction): void {
+  function onMaterial(slot: DraggedBlock, action: MaterialAction): void {
     const material = slot.block;
     switch (action) {
       case "with":
@@ -171,10 +174,8 @@
       case "addReplace":
         onreplacefromchange(withBlocksAdded(replaceFrom, [material, ...slot.pair], legacy));
         break;
-      case "state":
-        onblockchange(canonicalBlock(material, legacy));
-        withField?.editLast();
-        break;
+      // Read in the inventory itself, which pins the slot's reading open.
+      case "info":
       case "none":
         break;
     }
@@ -332,6 +333,7 @@
       {legacy}
       onchange={onreplacefromchange}
       onbrowse={() => onbrowse("replace")}
+      ondropblock={(dragged, add) => onMaterial(dragged, add ? "addReplace" : "replace")}
     />
   </div>
 
@@ -351,7 +353,6 @@
   <div class="group">
     <label for="tool-to-block">{t("selection.with")}</label>
     <BlockMixField
-      bind:this={withField}
       id="tool-to-block"
       value={block}
       placeholder="minecraft:stone"
@@ -361,6 +362,7 @@
       frame={mapFrame}
       onchange={onblockchange}
       onbrowse={() => onbrowse("fill")}
+      ondropblock={(dragged, add) => onMaterial(dragged, add ? "addWith" : "with")}
     />
     {#if holdsBanner}
       <BannerPatternHint where="place" />

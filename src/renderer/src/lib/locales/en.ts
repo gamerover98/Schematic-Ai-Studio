@@ -512,7 +512,7 @@ export const en = {
   "materials.ofDocument": "Materials in the schematic",
   "materials.slot": "{block}: {count}",
   "materials.outside": "{count} cells of the selection lie outside the schematic and hold nothing.",
-  "materials.hint": "Click: With · Ctrl: add to With · Shift: Replace · Ctrl+Shift: add to Replace · Right-click: states",
+  "materials.hint": "Click: With · Ctrl: add to With · Shift: Replace · Ctrl+Shift: add to Replace · Right-click: details · Drag onto With, Replace or the hotbar (Ctrl adds)",
   "materials.unify": "Merge states",
   "materials.unifyHint": "One slot per block, whatever its states: vines on four walls are one slot of vines",
   "materials.search": "Search materials",
@@ -523,6 +523,9 @@ export const en = {
   "materials.sort.nameDesc": "Name Z–A",
   "materials.noMatch": "No material here matches “{query}”.",
   "blockInfo.weight": "Weight {weight} · {share} of the mix",
+  "blockInfo.pair": "Two cells, counted as one: its other half ({other}) is in this count",
+  "blockInfo.copyId": "Copy id",
+  "blockInfo.copied": "Copied",
 
   "blockState.title": "Block states",
   "blockState.none": "This block has no block states.",

@@ -16,6 +16,7 @@
    * `build_grid.ts` and `selection_drag.ts` use.
    */
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
+  import { startBlockDrag } from "./block_drag.js";
   import { mcVersion } from "../../../shared/mc_versions.js";
   import { blockLabel, gridWindow, inventoryBlocks } from "./inventory.js";
 import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
@@ -177,6 +178,12 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
               onclick={() => {
                 onpick(block);
                 onclose();
+              }}
+              draggable="true"
+              ondragstart={(event) => {
+                // Onto a hotbar slot, which rises over this window while it
+                // is open: how the game fills its hotbar.
+                if (event.dataTransfer) startBlockDrag(event.dataTransfer, { block, pair: [] });
               }}
               title={legacyIdFor(legacy, block) ?? block}
             >

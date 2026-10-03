@@ -22,6 +22,13 @@
    * `onchange`. They live in `UiSettings`, so the component holding its own copy
    * would mean two answers to "what am I holding" — and the one on screen would
    * be the one that failed to persist.
+   *
+   * ## A block dropped on a slot goes in it
+   *
+   * From the materials list or the creative inventory, by dragging, which is
+   * how the game fills its hotbar. The inventory is a modal over the window,
+   * so while it is open the bar is lifted above its scrim (`raised`): the
+   * game draws the hotbar inside its inventory for the same reason.
    */
   import { HOTBAR_SLOTS } from "../../../shared/settings.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
@@ -30,6 +37,7 @@
   import { t } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
   import { isTyping } from "./typing.js";
+  import { carriesBlock, droppedBlock } from "./block_drag.js";
 
   interface Props {
     /** Exactly `HOTBAR_SLOTS` block ids; `coerceUi` guarantees the length. */
@@ -51,9 +59,48 @@
     onedit?: (slot: number) => void;
     /** The button past the ninth slot: open the full block list. */
     onopeninventory?: () => void;
+    /** A block dropped on a slot. Without it a slot takes no drop. */
+    onassign?: (slot: number, block: string) => void;
+    /** Above the modal tier, for the creative inventory to drop onto. */
+    raised?: boolean;
   }
 
-  const { slots, active, visible, ownsWheel, onselect, onedit, onopeninventory }: Props = $props();
+  const {
+    slots,
+    active,
+    visible,
+    ownsWheel,
+    onselect,
+    onedit,
+    onopeninventory,
+    onassign,
+    raised = false,
+  }: Props = $props();
+
+  /** The slot a dragged block is over. */
+  let dropTarget = $state<number | null>(null);
+
+  function dragOver(index: number, event: DragEvent): void {
+    if (onassign === undefined || !carriesBlock(event.dataTransfer ? [...event.dataTransfer.types] : undefined)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    dropTarget = index;
+  }
+
+  /*
+   * The block alone, never its pair: a slot is what the hand holds, and
+   * holding a bed's foot places the whole bed.
+   */
+  function drop(index: number, event: DragEvent): void {
+    dropTarget = null;
+    const dragged = droppedBlock(event.dataTransfer);
+    if (onassign === undefined || dragged === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onassign(index, dragged.block);
+  }
 
   /**
    * `minecraft:oak_planks` → `oak planks`, which is what fits under a tile.
@@ -160,12 +207,19 @@
 </script>
 
 {#if visible}
-  <div class="hotbar" role="toolbar" aria-label={t("hotbar.label")}>
+  <div class="hotbar" class:raised role="toolbar" aria-label={t("hotbar.label")}>
     {#each slots as id, index (index)}
       <button
         class="slot"
         class:active={index === active}
+        class:dropping={index === dropTarget}
         onclick={() => onselect(index)}
+        ondragenter={(event) => dragOver(index, event)}
+        ondragover={(event) => dragOver(index, event)}
+        ondragleave={() => {
+          if (dropTarget === index) dropTarget = null;
+        }}
+        ondrop={(event) => drop(index, event)}
         oncontextmenu={(event) => {
           event.preventDefault();
           onedit?.(index);
@@ -233,6 +287,16 @@
     background: var(--bg-input);
     color: var(--text-dim);
     cursor: pointer;
+  }
+
+  /* Over the creative inventory's scrim, which is `z-index: 100`. */
+  .hotbar.raised {
+    z-index: 101;
+  }
+
+  .slot.dropping {
+    border-color: var(--selection);
+    border-style: dashed;
   }
 
   .slot.active {
