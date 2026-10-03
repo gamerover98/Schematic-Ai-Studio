@@ -1176,6 +1176,31 @@ replace the document with another state of the same file, and the subject has
 not moved. So `tests/services.ts` names the two handlers that open a file rather
 than walking every `adoptDocument` — the rule is about opening, not adopting.
 
+**The recovery prompt can be answered with a schematic open**, and it was
+written as though it could not. It stays on screen while something is opened
+from the File menu, a drop or an MCP client, and three things went wrong once
+something was. Found by driving the app over MCP with a stale snapshot in the
+profile:
+
+- **Discard answered `state: null`**, so the window went back to "Nothing open"
+  with the schematic still drawn and still open in main. It answers whatever is
+  open now;
+- **Restore replaced the open document without asking.** The window asks first
+  when that has unsaved changes, with `discardPrompt("restore")`, before the
+  prompt is put away, so a no leaves the question on screen;
+- **the first snapshot of the new document wrote over the work the prompt was
+  asking about**, twenty seconds after its first edit. Restore would then have
+  brought back the new document under the old one's name.
+
+The third is why the snapshot is read **at launch**, into `unanswered` in
+`ipc/handlers.ts`, rather than when the window asks: the window asks after the
+startup steps, by which time an MCP client may have opened and edited
+something. Until it is answered, `startAutosave`'s `hold` keeps the timer off
+the files, which leaves the newer work without a net for as long as the
+question is on screen. The older work is the one nobody has seen. Because of
+that hold, the window asks in a `finally`: a recovery never offered would leave
+the whole session without autosave.
+
 The subject rule has one case that looks like a bug and is not: opening a file
 the conversation has **no subject** for is an *adoption*, not a reset. That is
 the chat that built something with nothing open — the generator writes the file

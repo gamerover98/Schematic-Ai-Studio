@@ -751,7 +751,7 @@ export interface PickFileResponse {
  * every other `Failure.message`, and the renderer does not have to keep three
  * near-identical strings in step with a dialog it cannot see.
  */
-export type DiscardIntent = "new" | "open" | "close" | "update" | "restart";
+export type DiscardIntent = "new" | "open" | "close" | "update" | "restart" | "restore";
 
 export interface ConfirmDiscardRequest {
   intent: DiscardIntent;

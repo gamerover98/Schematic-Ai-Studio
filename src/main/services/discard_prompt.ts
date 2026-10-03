@@ -37,6 +37,7 @@ const CONFIRM_LABEL: Record<DiscardIntent, string> = {
   close: "Discard and close",
   update: "Discard and update",
   restart: "Discard and restart",
+  restore: "Discard and restore",
 };
 
 const INTENT_DETAIL: Record<DiscardIntent, string> = {
@@ -45,6 +46,7 @@ const INTENT_DETAIL: Record<DiscardIntent, string> = {
   close: "Closing it will throw them away.",
   update: "Installing the update restarts the app and throws them away.",
   restart: "Restarting the app throws them away.",
+  restore: "Restoring the recovered work will replace it.",
 };
 
 export function discardPrompt(intent: DiscardIntent, fileName: string | null): DiscardPrompt {

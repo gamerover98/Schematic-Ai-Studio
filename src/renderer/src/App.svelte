@@ -1439,6 +1439,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   async function resolveRecovery(restore: boolean): Promise<void> {
     const offer = recovery;
+    /*
+     * Restoring replaces whatever is open, and something can be: the prompt
+     * stays up while a schematic is opened from the File menu, a drop or an
+     * MCP client. So it asks first, as opening does, and a "no" leaves the
+     * question on screen rather than answering it.
+     */
+    if (restore && !(await mayDiscard("restore"))) return;
     // Dismissed first: whichever way this goes, the prompt is answered, and
     // leaving it up while the restore runs invites a second click.
     recovery = null;
@@ -1650,12 +1657,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // And the wooden axe the anchor marker is drawn with, for the same
         // reason and out of the same pack.
         anchorTexture = await api().getAnchorTexture();
-        // Asked once, at startup, before the user has done anything they could
-        // lose by answering it.
-        const found = await api().peekRecovery();
-        if (found.ok) {
-          recovery = found.recovery;
-        }
         step("recent", "done");
       } catch (err) {
         // Up with less is better than not up: the steps that did finish stand,
@@ -1663,6 +1664,19 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // message about what it was.
         status = { tone: "error", text: err instanceof Error ? err.message : String(err) };
       } finally {
+        /*
+         * Asked once, at startup, before the user has done anything they could
+         * lose by answering it -- and asked whatever failed above. Main keeps
+         * autosave off the snapshot until it is answered (`unanswered` in
+         * `ipc/handlers.ts`), so a question never asked would leave the whole
+         * session without one.
+         */
+        try {
+          const found = await api().peekRecovery();
+          if (found.ok) recovery = found.recovery;
+        } catch (err) {
+          status = { tone: "error", text: err instanceof Error ? err.message : String(err) };
+        }
         startingUp = false;
       }
     })();
@@ -3042,7 +3056,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * The box itself is native and lives in main, which is what lets the window's
    * own close button ask the identical question with no renderer involved.
    */
-  async function mayDiscard(intent: "new" | "open" | "close"): Promise<boolean> {
+  async function mayDiscard(intent: "new" | "open" | "close" | "restore"): Promise<boolean> {
     if (docState === null || !docState.dirty) return true;
     try {
       return await api().confirmDiscard({ intent, fileName: docState.fileName });

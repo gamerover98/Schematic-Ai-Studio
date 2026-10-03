@@ -164,10 +164,17 @@ export async function restoreAutosave(dir: string): Promise<DocumentSession | nu
  * Snapshots only a dirty document, and clears the snapshot once one is saved:
  * a stale "unsaved work" prompt on next launch, for work that was in fact
  * saved, teaches people to dismiss the prompt without reading it.
+ *
+ * `hold` keeps it off the two files entirely, and exists for one case: a
+ * previous session's snapshot that the recovery prompt is still asking about.
+ * A document opened meanwhile is a new subject, and its first snapshot would
+ * write over the work the prompt names.
  */
 export function startAutosave(options: {
   dir: string;
   getSession: () => DocumentSession | null;
+  /** True while the snapshot on disk is not this session's to write over. */
+  hold?: () => boolean | Promise<boolean>;
   intervalMs?: number;
   onError?: (err: unknown) => void;
 }): () => void {
@@ -180,6 +187,9 @@ export function startAutosave(options: {
     if (running) return;
     running = true;
     try {
+      if ((await options.hold?.()) === true) {
+        return;
+      }
       const session = options.getSession();
       if (session === null) {
         return;

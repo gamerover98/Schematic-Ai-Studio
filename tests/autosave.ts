@@ -219,6 +219,57 @@ try {
       closeDocument();
     }
   }
+
+  // --- held while a recovery is unanswered ----------------------------------
+  //
+  // The recovery prompt stays up while a schematic is opened from the File
+  // menu, a drop or an MCP client. A snapshot of that one would write over the
+  // work the prompt is asking about, so the timer keeps off the files until the
+  // prompt is answered. Asked through a promise, which is how main asks.
+  console.log("\n--- held while a recovery is unanswered ---");
+  {
+    await rm(autoDir, { recursive: true, force: true });
+    const crashed = newDocument({ width: 2, height: 2, length: 2 });
+    applyEdit(crashed, { kind: "setBlock", x: 1, y: 1, z: 1, block: glass });
+    const left = await writeAutosave(crashed.doc, autoDir);
+    closeDocument();
+
+    let held = true;
+    const stop = startAutosave({
+      dir: autoDir,
+      getSession: currentSession,
+      hold: async () => held,
+      intervalMs: 60,
+      onError: (err) => console.log(`         autosave error: ${String(err)}`),
+    });
+    try {
+      const opened = newDocument({ width: 4, height: 4, length: 4 });
+      applyEdit(opened, { kind: "setBlock", x: 3, y: 3, z: 3, block: stone });
+      await sleep(250);
+      equal(
+        "a document opened under the prompt does not write over the recovery",
+        (await readAutosave(autoDir))?.savedAt,
+        left.savedAt,
+      );
+      const restored = await restoreAutosave(autoDir);
+      check(
+        "...which still restores the work it names",
+        restored !== null && restored.doc.width === 2 && getBlock(restored.doc, 1, 1, 1).namespacedName === "minecraft:glass",
+      );
+
+      held = false;
+      await sleep(250);
+      const answered = await readAutosave(autoDir);
+      check(
+        "once answered, the open document is snapshotted again",
+        answered !== null && answered.savedAt !== left.savedAt,
+        JSON.stringify(answered),
+      );
+    } finally {
+      stop();
+      closeDocument();
+    }
+  }
 } finally {
   closeDocument();
   await rm(workDir, { recursive: true, force: true });

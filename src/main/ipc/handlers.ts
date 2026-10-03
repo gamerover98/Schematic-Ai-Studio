@@ -179,7 +179,13 @@ import {
   saveConversation,
   useConversationDirectory,
 } from "../services/conversation.js";
-import { clearAutosave, readAutosave, restoreAutosave, startAutosave } from "../services/autosave.js";
+import {
+  clearAutosave,
+  readAutosave,
+  restoreAutosave,
+  startAutosave,
+  type AutosaveRecord,
+} from "../services/autosave.js";
 import {
   checkpointExists,
   forgetCheckpointMemo,
@@ -436,12 +442,32 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   useUpdateWindow(getWindow);
 
 
+  /*
+   * The work a previous session left behind, read once, here, and kept until
+   * the recovery prompt is answered.
+   *
+   * At launch rather than when the window asks, because a snapshot is a
+   * recovery only until this session writes its own. The window asks after the
+   * startup steps, which take seconds, and an MCP client may have opened and
+   * edited a schematic by then. Asked later, the answer could be that
+   * schematic's snapshot under the old one's name.
+   *
+   * And held, because the prompt stays up while something else is opened --
+   * from the File menu, a drop, or MCP -- and the first snapshot of that would
+   * write over the work the prompt is asking about. So nothing is snapshotted
+   * while the question is unanswered. That leaves the newer work without a net
+   * for as long as the prompt is on screen, and the older work is the work
+   * nobody has seen yet.
+   */
+  let unanswered: Promise<AutosaveRecord | null> = readAutosave(autosaveDir()).catch(() => null);
+
   // Snapshots the open document while it differs from disk. Started here
   // because this is where the app's wiring lives, and left running for the
   // process's lifetime — there is nothing to tear down that outlives it.
   startAutosave({
     dir: autosaveDir(),
     getSession: currentSession,
+    hold: async () => (await unanswered) !== null,
     onError: (err) => console.warn("[autosave] snapshot failed:", err),
   });
 
@@ -1953,12 +1979,16 @@ ${report.stack}`),
 
   ipcMain.handle(IPC.docRecoveryPeek, async (): Promise<RecoveryPeekResponse> => {
     try {
-      // Only offered when nothing is open. A snapshot found while the user is
-      // already working belongs to *this* session and is not a recovery.
-      if (currentSession() !== null) {
-        return { ok: true, recovery: null };
-      }
-      return { ok: true, recovery: await readAutosave(autosaveDir()) };
+      /*
+       * What was found at launch, for as long as nobody has answered it.
+       *
+       * It used to read the disk here, and be offered only with nothing open,
+       * because a snapshot written since belongs to *this* session and is not
+       * a recovery. Reading at launch is what guarantees that now, and it does
+       * not depend on what is open: a window reloaded while the prompt was up
+       * has to be asked the same question again, whatever was opened under it.
+       */
+      return { ok: true, recovery: await unanswered };
     } catch (err) {
       return failure(err);
     }
@@ -1970,16 +2000,36 @@ ${report.stack}`),
       try {
         if (!restore) {
           await clearAutosave(autosaveDir());
-          return { ok: true, state: null };
+          unanswered = Promise.resolve(null);
+          /*
+           * Discarding the snapshot closes nothing, so the answer is whatever
+           * is open.
+           *
+           * It was `null`, which was true for as long as the prompt could only
+           * be answered with nothing open. It can be answered with something
+           * open: the prompt stays up while a schematic is opened from the File
+           * menu, a drop or an MCP client. The window took the `null` as the
+           * document having closed and went back to the start screen, with the
+           * schematic still drawn behind it and still open in main.
+           */
+          const open = currentSession();
+          return { ok: true, state: open === null ? null : shellState(open) };
         }
         const session = await restoreAutosave(autosaveDir());
         if (session === null) {
           // The snapshot turned out to be unreadable. Clear it rather than
           // offering it again on every launch.
           await clearAutosave(autosaveDir());
+          unanswered = Promise.resolve(null);
           return { ok: false, kind: "io-error", message: "The recovered file could not be read." };
         }
+        /*
+         * This replaces whatever is open, for the same reason. The window asks
+         * first when that has unsaved changes (`mayDiscard("restore")`), as it
+         * does before opening a file, so by here the answer was yes.
+         */
         adoptDocument(session.doc, session.history);
+        unanswered = Promise.resolve(null);
         /*
          * Recovering is opening, so the conversation follows the file.
          *

@@ -1072,8 +1072,9 @@ console.log("\n--- discard prompt ---");
   equal("open says what it will do", discardPrompt("open", "a").confirmLabel, "Discard and open");
   equal("close says what it will do", discardPrompt("close", "a").confirmLabel, "Discard and close");
   equal("update says what it will do", discardPrompt("update", "a").confirmLabel, "Discard and update");
+  equal("restore says what it will do", discardPrompt("restore", "a").confirmLabel, "Discard and restore");
 
-  for (const intent of ["new", "open", "close", "update"] as const) {
+  for (const intent of ["new", "open", "close", "update", "restart", "restore"] as const) {
     const prompt = discardPrompt(intent, "a.schem");
     check(
       `${intent}: the button is never a bare OK`,
@@ -2876,6 +2877,74 @@ console.log("\n--- recovering is opening ---");
       /const before = session\.history\.nextId;/.test(body),
     );
   }
+}
+
+// --- a recovery answered with something open --------------------------------
+//
+// The recovery prompt stays up while a schematic is opened from the File menu,
+// a drop or an MCP client, and three things went wrong once one was. Discard
+// answered `state: null`, so the window went back to "Nothing open" with the
+// schematic still drawn and still open in main. Restore replaced it without
+// asking. And the first snapshot of it wrote over the work the prompt was
+// asking about. `handlers.ts` and `App.svelte` cannot be loaded here, so the
+// rules are read out of the source -- the weaker kind of check, which proves
+// the rule is still there and not that it is right.
+console.log("\n--- a recovery answered with something open ---");
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const handlers = readFileSync(path.join(here, "..", "src", "main", "ipc", "handlers.ts"), "utf8");
+  const app = readFileSync(path.join(here, "..", "src", "renderer", "src", "App.svelte"), "utf8");
+  const between = (source: string, from: string, to: string): string => {
+    const at = source.indexOf(from);
+    if (at === -1) return "";
+    const end = source.indexOf(to, at + from.length);
+    return source.slice(at, end === -1 ? source.length : end);
+  };
+
+  const resolve = between(handlers, "IPC.docRecoveryResolve", "ipcMain.handle(");
+  const discard = between(resolve, "if (!restore)", "restoreAutosave(");
+  check("the recovery resolve is registered", resolve !== "" && discard !== "");
+  check(
+    "discarding the snapshot answers with whatever is open",
+    /currentSession\(\)/.test(discard) && /shellState\(/.test(discard),
+    "a discard with a schematic open sends the window back to the start screen",
+  );
+  check("...and never claims outright that nothing is", !/state:\s*null\b/.test(resolve));
+
+  // Read once at launch, before the timer, and released by every answer.
+  const launch = between(handlers, "let unanswered", "startAutosave(");
+  check("the recovery is read at launch, before the timer starts", /readAutosave\(/.test(launch));
+  check(
+    "the timer is held while it is unanswered",
+    /hold:\s*async \(\) => \(await unanswered\) !== null/.test(between(handlers, "startAutosave(", "});")),
+  );
+  check(
+    "the window is told what was read at launch, not what is on disk now",
+    !/readAutosave\(/.test(between(handlers, "IPC.docRecoveryPeek", "ipcMain.handle(")),
+  );
+  equal(
+    "every answer releases it: discard, an unreadable snapshot, and a restore",
+    resolve.match(/unanswered = Promise\.resolve\(null\)/g)?.length ?? 0,
+    3,
+  );
+
+  // The window's half.
+  const answer = between(app, "async function resolveRecovery", "api().resolveRecovery(");
+  check(
+    "restoring over unsaved work asks first",
+    /mayDiscard\("restore"\)/.test(answer),
+    "Restore replaces whatever is open without asking",
+  );
+  check(
+    "...and asks before the prompt is put away, so a no leaves the question up",
+    answer.indexOf('mayDiscard("restore")') < answer.indexOf("recovery = null"),
+  );
+  const startup = between(app, 'step("recent", "done");', "startingUp = false;");
+  check(
+    "the question is asked even when a startup step failed",
+    /\} finally \{[\s\S]*api\(\)\.peekRecovery\(\)/.test(startup),
+    "a recovery never offered would hold autosave for the whole session",
+  );
 }
 
 // --- what the window says on its way down -----------------------------------
