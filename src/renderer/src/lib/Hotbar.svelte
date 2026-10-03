@@ -28,6 +28,7 @@
   import { describeMix, tryParseMix } from "../../../shared/block_mix.js";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
   import { isTyping } from "./typing.js";
 
   interface Props {
@@ -196,7 +197,7 @@
       title={t("hotbar.browse")}
       aria-label={t("hotbar.browse")}
     >
-      <span class="glyph" aria-hidden="true">&#x229E;</span>
+      <span class="glyph"><Icon name="browse" size={18} weight={1.7} /></span>
       <span class="name">{t("hotbar.browseShort")}</span>
     </button>
   </div>
@@ -262,13 +263,10 @@
   }
 
   .glyph {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: grid;
+    place-items: center;
     width: 26px;
     height: 26px;
-    font-size: 17px;
-    line-height: 1;
   }
 
   .key {

@@ -16,6 +16,7 @@
   import type { RegionSpec } from "../../../shared/ipc.js";
   import type { ExportType, KeyStorageStatus, Settings } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
   import ModelPicker from "./ModelPicker.svelte";
 
   interface Props {
@@ -172,12 +173,16 @@
           disabled={!acceptsImages || busy}
           title={acceptsImages ? t("chat.attachImageHint") : imageHint}
         >
-          &#x1f4ce; {t("chat.attachImage")}
+          <Icon name="attach" size={12} />
+          {t("chat.attachImage")}
         </button>
       {:else}
         <span class="chip" title={imageName}>
-          &#x1f4ce; <em>{imageName}</em>
-          <button class="clear" onclick={onclearimage} aria-label={t("common.clear")}>&#x00d7;</button>
+          <Icon name="attach" size={12} />
+          <em>{imageName}</em>
+          <button class="clear" onclick={onclearimage} aria-label={t("common.clear")}>
+            <Icon name="close" size={11} weight={2.4} />
+          </button>
         </span>
       {/if}
       <select
@@ -227,7 +232,7 @@
         aria-label={t("chat.send")}
         title={blockedOnKey ? t("chat.needsKey", { provider: settings.provider }) : t("chat.send")}
       >
-        &#x27a4;
+        <Icon name="send" size={15} />
       </button>
     {/if}
   </div>
@@ -308,12 +313,12 @@
   }
 
   .chip .clear {
+    display: grid;
+    place-items: center;
     padding: 0 2px;
     border: none;
     background: none;
     color: var(--text-dim);
-    font-size: 13px;
-    line-height: 1;
   }
 
   .format {
@@ -339,6 +344,9 @@
 
   .send {
     flex: none;
+    display: inline-grid;
+    place-items: center;
+    min-height: 26px;
     padding: 4px 12px;
     font-size: 13px;
     line-height: 1.2;

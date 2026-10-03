@@ -13,6 +13,7 @@
    * one step that takes real time deserves to say why.
    */
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   export interface StartupStep {
     id: string;
@@ -38,8 +39,8 @@
     <ul>
       {#each steps as step (step.id)}
         <li class={step.state}>
-          <span class="mark" aria-hidden="true">
-            {#if step.state === "done"}&#x2713;{:else if step.state === "running"}&#x25CF;{:else}&#x25CB;{/if}
+          <span class="mark">
+            <Icon name={step.state === "done" ? "check" : step.state === "running" ? "dot" : "ring"} size={12} weight={2.4} />
           </span>
           <span class="label">{step.label}</span>
           {#if step.state === "running" && step.progress}
@@ -112,7 +113,7 @@
 
   li {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 8px;
     padding: 3px 0;
     font-size: 12px;
@@ -125,9 +126,9 @@
 
   .mark {
     flex: none;
+    display: grid;
+    place-items: center;
     width: 12px;
-    text-align: center;
-    font-size: 10px;
   }
 
   li.done .mark {

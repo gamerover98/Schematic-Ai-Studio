@@ -29,6 +29,7 @@
   import { VOID_OPACITY, voidSources } from "../../../shared/settings.js";
   import BlockPicker from "./BlockPicker.svelte";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     open: boolean;
@@ -185,7 +186,7 @@
     >
       <header>
         <h2>{t("void.title")}</h2>
-        <button class="icon" onclick={onclose} aria-label={t("common.close")}>&times;</button>
+        <button class="icon" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
       </header>
 
       <p class="hint">{t("void.hint")}</p>
@@ -312,11 +313,8 @@
   }
 
   .icon {
-    padding: 2px 8px;
     border: none;
     background: transparent;
-    font-size: 18px;
-    line-height: 1;
   }
 
   .hint {

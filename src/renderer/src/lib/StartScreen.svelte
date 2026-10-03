@@ -28,6 +28,7 @@
   import type { Artifact, RecentDocument } from "../../../shared/ipc.js";
   import { ageLabel } from "./age_label.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     /** Dismissing it reveals the app in the state it has always had. */
@@ -139,7 +140,7 @@
     tabindex="-1"
     bind:this={dialog}
   >
-    <button class="icon close" onclick={ondismiss} aria-label={t("common.close")}>&#x00d7;</button>
+    <button class="icon close" onclick={ondismiss} aria-label={t("common.close")}><Icon name="close" /></button>
     <h2>{t("start.title")}</h2>
     <p class="lead">{t("start.lead")}</p>
 
@@ -204,7 +205,7 @@
               class="reveal"
               onclick={() => onrevealartifact(artifact)}
               title={t("start.reveal")}
-              aria-label={t("start.reveal")}>&#x2026;</button
+              aria-label={t("start.reveal")}><Icon name="more" size={14} /></button
             >
           </li>
         {/each}
@@ -371,11 +372,13 @@
   /* The one thing an `.mcfunction` can do, since nothing opens it. */
   .reveal {
     flex: none;
-    padding: 2px 7px;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    padding: 0;
     border: 1px solid transparent;
     background: none;
     color: var(--text-dim);
-    font-size: 12px;
   }
 
   .reveal:hover {

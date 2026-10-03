@@ -20,6 +20,7 @@
   import { blockLabel, gridWindow, inventoryBlocks } from "./inventory.js";
 import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
   import BannerPatternHint from "./BannerPatternHint.svelte";
 
   interface Props {
@@ -142,7 +143,7 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
           {t("inventory.count", { count: filtered.length.toLocaleString() })}
           · {mcVersion(version)?.label ?? version}
         </span>
-        <button class="icon" onclick={onclose} aria-label={t("common.close")}>&#x00d7;</button>
+        <button class="icon" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
       </header>
       <!--
         Searching for banners is the moment to say where a *patterned* one comes

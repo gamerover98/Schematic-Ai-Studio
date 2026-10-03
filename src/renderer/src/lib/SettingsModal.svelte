@@ -52,6 +52,7 @@
   import { fpsCap } from "./shader_modes.js";
   import { stutterReport } from "./frame_profiler.js";
   import { t, tn } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
   import type { GpuStatus, McpActivity, McpStatus, MeshLod, UpdateStatus } from "../../../shared/ipc.js";
   import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "./gpu_choice.js";
   import { dotColor, dotFor, maskToken } from "./mcp_status.js";
@@ -1317,7 +1318,7 @@ import {
                   title={revealed ? t("mcp.hide") : t("mcp.reveal")}
                   aria-label={revealed ? t("mcp.hide") : t("mcp.reveal")}
                 >
-                  {revealed ? "🙈" : "👁"}
+                  <Icon name={revealed ? "eyeOff" : "eye"} />
                 </button>
                 <button
                   class="glyph"
@@ -1325,7 +1326,7 @@ import {
                   title={copied === "token" ? t("mcp.copied") : t("mcp.copy")}
                   aria-label={t("mcp.copy")}
                 >
-                  {copied === "token" ? "✅" : "📋"}
+                  <Icon name={copied === "token" ? "check" : "copy"} />
                 </button>
                 <button
                   class="glyph"
@@ -1334,7 +1335,7 @@ import {
                   title={t("mcp.regenerate")}
                   aria-label={t("mcp.regenerate")}
                 >
-                  🔄
+                  <Icon name="rotate" />
                 </button>
               </div>
               <p class="hint">{t("mcp.tokenHint")}</p>
@@ -1554,7 +1555,7 @@ import {
         {/if}
       </div>
 
-      <button class="icon close" onclick={onclose} aria-label={t("common.close")}>&#x00d7;</button>
+      <button class="icon close" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
     </div>
   </div>
 {/if}
@@ -1645,10 +1646,10 @@ import {
      beside it and would set the height of the whole row. */
   .pick-row button.glyph {
     flex: none;
+    display: grid;
+    place-items: center;
     width: 32px;
     padding: 0;
-    line-height: 1;
-    font-size: 14px;
   }
 
   /* A label for a row that is read, not edited -- the status and the activity

@@ -18,6 +18,7 @@
    */
   import { DOCUMENT_SIZE } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     open: boolean;
@@ -127,7 +128,7 @@
     >
       <header>
         <h2>{t("dimensions.title")}</h2>
-        <button class="icon" onclick={onclose} aria-label={t("common.close")}>&times;</button>
+        <button class="icon" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
       </header>
 
       <label class="row">
@@ -251,11 +252,8 @@
   }
 
   .icon {
-    padding: 2px 8px;
     border: none;
     background: transparent;
-    font-size: 18px;
-    line-height: 1;
   }
 
   .row {

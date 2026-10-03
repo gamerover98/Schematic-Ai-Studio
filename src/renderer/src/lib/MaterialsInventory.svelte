@@ -16,6 +16,7 @@
   import type { PaletteCount } from "../../../shared/ipc.js";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import BlockTooltip from "./BlockTooltip.svelte";
+  import Icon from "./Icon.svelte";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { shortName } from "./block_spelling.js";
   import type { AnchorRect } from "./floating.js";
@@ -105,7 +106,7 @@
       onblur={hoverEnd}
     >
       {#if slot.air}
-        <span class="glyph" aria-hidden="true">&#x2B1A;</span>
+        <span class="glyph"><Icon name="air" size={22} weight={1.6} /></span>
       {:else if icons.get(slot.block)}
         <img src={icons.get(slot.block)} alt="" width="32" height="32" />
       {:else}
@@ -185,9 +186,8 @@
   .glyph {
     position: absolute;
     inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: grid;
+    place-items: center;
     color: var(--text-dim);
   }
 
@@ -196,9 +196,6 @@
     text-transform: uppercase;
   }
 
-  .glyph {
-    font-size: 18px;
-  }
 
   /*
    * The game's stack count: white with a hard shadow, in the corner, over the

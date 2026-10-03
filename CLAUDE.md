@@ -3798,6 +3798,21 @@ opened upwards or downwards according to where you had dragged its window.
 Below still falls back to above when it does not fit, and the clamp is still
 the only part that is a guarantee.
 
+**An icon is drawn, never typed.** `lib/icons.ts` is the set: shapes on a
+24-unit square, stroked in `currentColor`. `Icon.svelte` is the only thing that
+draws one. Every button used to carry a Unicode glyph (`⊞ × ⚙ ⇅ ⤓ 🎲`), and
+that was reported as the browse button's icon sitting off to the right of its
+box. Two faults, both the glyph's:
+- a character's box is the font's, not the drawing's, so no CSS centres the ink;
+- the fixed-width button kept the global `button { padding: 8px 14px }`, which
+  left it a content box narrower than nothing.
+
+`button.icon` now zeroes the padding and centres with `place-items: center`.
+`tests/ui.ts` refuses any button whose label is a symbol character, an emoji or
+a character entity, and proves it can fail on the reported button. Text that
+merely contains one, such as `64×64` in a size option, is not an icon and is
+left alone.
+
 **A popover is positioned against the window, not against its control.**
 Everything from `.controls` down is `overflow: hidden`, and the controls that
 open popovers sit at the trailing edge of a right-hand panel — so a popover laid

@@ -5794,5 +5794,76 @@ console.log("\n--- levels of detail ---");
   check("...and the threshold is disabled outside Automatic, not hidden", modal.includes('disabled={lod.mode !== "auto"}'));
 }
 
+// --- Icons are drawn, not typed ---------------------------------------------
+/*
+ * The browse button beside every block field drew its `⊞` off to the right of
+ * its own box. Two faults, and both are a glyph's: a character is laid out by
+ * the font's metrics rather than by the drawing, and a fixed-width button that
+ * kept the global `8px 14px` padding had a content box narrower than nothing.
+ *
+ * So icons are `<Icon>`s now, and this refuses the old way coming back one
+ * button at a time: no button may be labelled by a symbol character, an emoji
+ * or a character entity. Text that merely contains one -- "64×64" in a size
+ * option -- is not a button's whole label and is left alone.
+ */
+console.log("\n--- Icons ---");
+{
+  const svelteFiles = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const full = path.join(dir, name);
+      return statSync(full).isDirectory() ? svelteFiles(full) : full.endsWith(".svelte") ? [full] : [];
+    });
+  /** Drops `{...}` expressions, nested ones included, so an attribute's `>` cannot end the tag. */
+  const withoutExpressions = (text: string): string => {
+    let out = "";
+    let depth = 0;
+    for (const character of text) {
+      if (character === "{") depth += 1;
+      else if (character === "}") depth = Math.max(0, depth - 1);
+      else if (depth === 0) out += character;
+    }
+    return out;
+  };
+  const symbol = /&#x[0-9a-f]+;|&times;|[←-⯿…‹›×]|[\u{1f300}-\u{1faff}]/iu;
+  const offenders: string[] = [];
+  for (const file of svelteFiles(RENDERER)) {
+    const source = readFileSync(file, "utf8").replace(/<!--[\s\S]*?-->/g, "");
+    let at = 0;
+    while ((at = source.indexOf("<button", at)) >= 0) {
+      const end = source.indexOf("</button>", at);
+      if (end < 0) break;
+      const tag = withoutExpressions(source.slice(at, end));
+      const label = tag.slice(tag.indexOf(">") + 1).replace(/<[^>]*>/g, "").trim();
+      if (symbol.test(label)) offenders.push(`${path.relative(RENDERER, file)}: ${label.slice(0, 30)}`);
+      at = end;
+    }
+  }
+  check("no button is labelled by a glyph", offenders.length === 0, offenders.join("; "));
+
+  /*
+   * The check has to be able to fail, and a walk that matched nothing would
+   * pass forever: the button that was reported is the one it must see.
+   */
+  const seen = withoutExpressions('<button class="browse" onclick={() => x > 1}>&#x229E;</button>');
+  check(
+    "...and the walk does see a glyph through an attribute holding a `>`",
+    symbol.test(seen.slice(seen.indexOf(">") + 1).replace(/<[^>]*>/g, "")),
+  );
+
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8");
+  const rule = css.slice(css.indexOf("button.icon {"), css.indexOf("}", css.indexOf("button.icon {")));
+  check(
+    "an icon button centres what it holds and gives up the global padding",
+    rule.includes("place-items: center") && rule.includes("padding: 0"),
+  );
+
+  const mix = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
+  const browse = mix.slice(mix.indexOf("  .browse {"), mix.indexOf("}", mix.indexOf("  .browse {")));
+  check(
+    "...and so does the browse button beside a block field, where it was reported",
+    browse.includes("place-items: center") && browse.includes("padding: 0"),
+  );
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

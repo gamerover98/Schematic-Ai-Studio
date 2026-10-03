@@ -16,6 +16,7 @@
    */
   import type { DocumentVersion } from "../../../shared/ipc.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
   import VersionList from "./VersionList.svelte";
 
   interface Props {
@@ -69,7 +70,7 @@
     >
       <header>
         <h2>{t("versions.legend")}</h2>
-        <button class="icon close" onclick={onclose} aria-label={t("common.close")}>&#x00d7;</button>
+        <button class="icon close" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
       </header>
 
       <div class="body">

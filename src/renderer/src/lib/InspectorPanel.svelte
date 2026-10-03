@@ -53,6 +53,7 @@
   import type { BlockInspection } from "../../../shared/ipc.js";
   import { propertyRows } from "./inspector_rows.js";
   import BannerPatternEditor from "./BannerPatternEditor.svelte";
+  import Icon from "./Icon.svelte";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import { t } from "./i18n.svelte.js";
 
@@ -200,7 +201,7 @@
                   aria-label={t("inspector.removeProperty", { name: row.name })}
                   onclick={() => onchangeproperty(row.name, "")}
                 >
-                  ×
+                  <Icon name="close" size={12} weight={2.4} />
                 </button>
               {/if}
               {#if row.values}
@@ -306,12 +307,13 @@
   }
 
   .props li button.remove {
+    display: grid;
+    place-items: center;
     background: none;
     border: none;
     padding: 0;
     width: 18px;
-    line-height: 1;
-    font-size: 15px;
+    height: 18px;
     color: var(--text-dim);
     cursor: pointer;
   }

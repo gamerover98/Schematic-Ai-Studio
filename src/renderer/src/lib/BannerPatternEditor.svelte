@@ -40,6 +40,7 @@
   import BannerPatternHint from "./BannerPatternHint.svelte";
   import { placePopover, type Point } from "./floating.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Layer {
     pattern: string;
@@ -236,21 +237,21 @@
             disabled={busy || index === 0}
             title={t("banner.editor.moveUp", { n: index + 1 })}
             aria-label={t("banner.editor.moveUp", { n: index + 1 })}
-            onclick={() => move(index, -1)}>&#x2191;</button
+            onclick={() => move(index, -1)}><Icon name="arrowUp" size={13} /></button
           >
           <button
             class="icon"
             disabled={busy || index === rows.length - 1}
             title={t("banner.editor.moveDown", { n: index + 1 })}
             aria-label={t("banner.editor.moveDown", { n: index + 1 })}
-            onclick={() => move(index, 1)}>&#x2193;</button
+            onclick={() => move(index, 1)}><Icon name="arrowDown" size={13} /></button
           >
           <button
             class="icon remove"
             disabled={busy}
             title={t("banner.editor.remove", { n: index + 1 })}
             aria-label={t("banner.editor.remove", { n: index + 1 })}
-            onclick={() => remove(index)}>&#x00d7;</button
+            onclick={() => remove(index)}><Icon name="close" size={13} /></button
           >
         </li>
       {/each}
@@ -389,7 +390,8 @@
   }
 
   .icon {
-    width: 16px;
+    width: 18px;
+    height: 18px;
     padding: 0;
     border: none;
     background: none;
@@ -405,10 +407,6 @@
   .icon:disabled {
     cursor: default;
     opacity: 0.35;
-  }
-
-  .remove {
-    font-size: 15px;
   }
 
   .add {

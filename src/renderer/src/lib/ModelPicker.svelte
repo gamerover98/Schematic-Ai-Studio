@@ -23,6 +23,7 @@
   } from "../../../shared/settings.js";
   import { placePopover } from "./floating.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
   import { findOpenCodeModel, openCodeCatalogue, openCodeFetchFailed } from "./models.svelte.js";
 
   interface Props {
@@ -125,7 +126,7 @@
     title={t("chat.modelPickerHint")}
   >
     <span class="label">{selected?.name ?? (settings.model || settings.provider)}</span>
-    <span class="caret" aria-hidden="true">&#x25be;</span>
+    <span class="caret"><Icon name="chevronDown" size={12} weight={2.4} /></span>
   </button>
 
   {#if open}
@@ -262,7 +263,8 @@
 
   .caret {
     flex: none;
-    font-size: 10px;
+    display: grid;
+    place-items: center;
   }
 
   /*

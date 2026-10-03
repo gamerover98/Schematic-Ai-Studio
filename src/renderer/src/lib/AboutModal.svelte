@@ -20,6 +20,7 @@
   import type { AppInfo } from "../../../shared/ipc.js";
   import { REPOSITORY_URL } from "../../../shared/app_version.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
   /*
    * The only asset import in the renderer. Vite emits it under
    * `out/renderer/assets/` and references it by relative URL, which the CSP's
@@ -98,7 +99,7 @@
       <header>
         <h2>{t("about.title")}</h2>
         <button class="icon close" onclick={onclose} aria-label={t("common.close")}
-          >&#x00d7;</button
+          ><Icon name="close" /></button
         >
       </header>
 

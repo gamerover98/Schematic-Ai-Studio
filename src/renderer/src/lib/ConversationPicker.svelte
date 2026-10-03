@@ -17,6 +17,7 @@
   import { ageLabel } from "./age_label.js";
   import { placePopover } from "./floating.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     conversations: ConversationSummary[];
@@ -91,7 +92,7 @@
     title={t("chat.historyHint")}
   >
     <span class="label">{label}</span>
-    <span class="caret" aria-hidden="true">&#x25be;</span>
+    <span class="caret"><Icon name="chevronDown" size={12} weight={2.4} /></span>
   </button>
 
   {#if open}
@@ -124,7 +125,7 @@
                 class="remove"
                 title={t("chat.deleteChat")}
                 aria-label={t("chat.deleteChat")}
-                onclick={() => ondelete(one.id)}>&#x00d7;</button
+                onclick={() => ondelete(one.id)}><Icon name="close" size={13} /></button
               >
             </li>
           {/each}
@@ -165,7 +166,8 @@
 
   .caret {
     flex: none;
-    font-size: 10px;
+    display: grid;
+    place-items: center;
   }
 
   /* Against the window; see the note at the top of the component. */
@@ -228,11 +230,13 @@
 
   .remove {
     flex: none;
-    padding: 2px 8px;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    padding: 0;
     border: none;
     background: none;
     color: var(--text-dim);
-    font-size: 14px;
     /* Hidden until the row is pointed at: a delete button on every row of a
        list you are only reading is an invitation to a mistake. */
     opacity: 0;

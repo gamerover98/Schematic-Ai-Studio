@@ -25,6 +25,7 @@
    */
   import type { TraceItem } from "../../../shared/ipc.js";
   import { t, tn } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     items: readonly TraceItem[];
@@ -89,11 +90,11 @@
             aria-expanded={isOpen(item)}
             onclick={() => toggle(item.id)}
           >
-            <span class="caret" aria-hidden="true">{isOpen(item) ? "▾" : "▸"}</span>
+            <span class="caret"><Icon name={isOpen(item) ? "chevronDown" : "chevronRight"} size={10} weight={2.6} /></span>
             <span class="kind {item.kind}">{label(item)}</span>
             <span class="gist">{item.kind === "tool" ? item.text : ""}</span>
             {#if item.running}
-              <span class="spinner" aria-hidden="true">●</span>
+              <span class="spinner"><Icon name="dot" size={10} /></span>
             {:else if duration(item) !== ""}
               <span class="ms">{duration(item)}</span>
             {/if}
@@ -182,8 +183,9 @@
 
   .caret {
     flex: none;
-    width: 9px;
-    font-size: 9px;
+    display: grid;
+    place-items: center;
+    width: 10px;
   }
 
   .kind {
@@ -222,6 +224,8 @@
 
   .spinner {
     flex: none;
+    display: grid;
+    place-items: center;
     color: var(--accent);
     animation: pulse 1.1s ease-in-out infinite;
   }

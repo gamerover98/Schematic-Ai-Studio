@@ -17,6 +17,7 @@
   import { MC_VERSION_NAMES, mcVersion, refusalFor } from "../../../shared/mc_versions.js";
   import type { SchematicFormat } from "../../../shared/schematic.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     open: boolean;
@@ -113,7 +114,7 @@
     >
       <header>
         <h2>{t("convert.title")}</h2>
-        <button class="icon" onclick={onclose} aria-label={t("common.close")}>&times;</button>
+        <button class="icon" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
       </header>
 
       <p class="hint">{t("convert.hint")}</p>
@@ -215,11 +216,8 @@
   }
 
   .icon {
-    padding: 2px 8px;
     border: none;
     background: transparent;
-    font-size: 18px;
-    line-height: 1;
   }
 
   .hint {

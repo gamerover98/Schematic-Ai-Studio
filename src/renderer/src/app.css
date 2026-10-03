@@ -230,9 +230,21 @@ button.primary {
   border-color: var(--accent);
 }
 
-/* Square, text-free affordances: panel collapse, toast dismiss. */
+/*
+ * Square, text-free affordances: panel collapse, toast dismiss, every close
+ * button. What goes inside is an `<Icon>`, never a typed glyph -- see
+ * `lib/icons.ts` for why.
+ *
+ * Centred by the grid, and the padding is zeroed **here**, which is the half
+ * that was missing: the `button` rule above gives every button 8px 14px, and a
+ * fixed-width button that kept it had a content box narrower than nothing, so
+ * whatever it held was pushed off to the right. The browse button beside every
+ * block field was reported that way.
+ */
 button.icon {
   flex: none;
+  display: inline-grid;
+  place-items: center;
   width: 28px;
   height: 28px;
   padding: 0;

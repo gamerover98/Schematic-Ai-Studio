@@ -19,6 +19,8 @@
 -->
 <script lang="ts">
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
+  import type { IconName } from "./icons.js";
   import type { Axis, GizmoMode } from "./gizmo.js";
 
   interface Props {
@@ -85,13 +87,13 @@
     mode: GizmoMode;
     label: string;
     hint: string;
-    glyph: string;
+    icon: IconName;
     key: string;
   }[] = [
-    { mode: "move", label: "gizmo.move", hint: "gizmo.move.hint", glyph: "✥", key: "G" },
-    { mode: "rotate", label: "gizmo.rotate", hint: "gizmo.rotate.hint", glyph: "↻", key: "T" },
-    { mode: "scale", label: "gizmo.scale", hint: "gizmo.scale.hint", glyph: "⤢", key: "Y" },
-    { mode: "pivot", label: "gizmo.pivot", hint: "gizmo.pivot.hint", glyph: "⌖", key: "P" },
+    { mode: "move", label: "gizmo.move", hint: "gizmo.move.hint", icon: "move", key: "G" },
+    { mode: "rotate", label: "gizmo.rotate", hint: "gizmo.rotate.hint", icon: "rotate", key: "T" },
+    { mode: "scale", label: "gizmo.scale", hint: "gizmo.scale.hint", icon: "scale", key: "Y" },
+    { mode: "pivot", label: "gizmo.pivot", hint: "gizmo.pivot.hint", icon: "pivot", key: "P" },
   ];
 
   const AXES: readonly Axis[] = ["x", "y", "z"];
@@ -116,7 +118,7 @@
       aria-label={t("gizmo.copy")}
       title={`${t("gizmo.copy")} (Ctrl+C) — ${t("gizmo.copy.hint")}`}
     >
-      ⧉
+      <Icon name="copy" />
     </button>
     <button
       onclick={onpaste}
@@ -124,7 +126,7 @@
       aria-label={t("gizmo.paste")}
       title={`${t("gizmo.paste")} (Ctrl+V) — ${t("gizmo.paste.hint")}`}
     >
-      ⤓
+      <Icon name="paste" />
     </button>
     <button
       class:active={emptyIsAir || skipEmpty}
@@ -136,7 +138,7 @@
         ? `${t("gizmo.skipEmpty")} — ${t("gizmo.skipEmpty.air")}`
         : `${t("gizmo.skipEmpty")} — ${t("gizmo.skipEmpty.hint", { block: emptyBlock })}`}
     >
-      ⬚
+      <Icon name="air" weight={1.8} />
     </button>
   </div>
 
@@ -150,7 +152,7 @@
         aria-pressed={mode === entry.mode}
         title={`${t(entry.label)} (${entry.key}) — ${t(entry.hint)}`}
       >
-        {entry.glyph}
+        <Icon name={entry.icon} />
       </button>
     {/each}
   </div>
@@ -165,11 +167,11 @@
     The axis letters carry their own colours rather than a glyph each, because
     X and Z are both horizontal and any mirror glyph would draw them
     identically. The colour is the language the gizmo has already taught in the
-    viewport, so it is read without being explained; the `⇄` in front says which
-    verb the three letters belong to and is decorative.
+    viewport, so it is read without being explained; the mirror icon in front
+    says which verb the three letters belong to and is decorative.
   -->
   <div class="group mirrors">
-    <span class="marker" aria-hidden="true">⇄</span>
+    <span class="marker"><Icon name="swapHorizontal" size={13} /></span>
     {#each AXES as axis (axis)}
       <button
         class={`axis-${axis}`}
@@ -191,7 +193,7 @@
       aria-label={t("gizmo.resetPivot")}
       title={`${t("gizmo.resetPivot")} — ${t("gizmo.resetPivotHint")}`}
     >
-      ⌾
+      <Icon name="anchor" />
     </button>
   {/if}
 </div>
@@ -230,8 +232,8 @@
     border-radius: 5px;
     background: none;
     color: var(--text-dim);
+    padding: 0;
     font: inherit;
-    /* The glyphs are drawn small by most families; the letters are not. */
     font-size: 15px;
     line-height: 1;
     cursor: pointer;
@@ -271,9 +273,10 @@
   }
 
   .marker {
+    display: grid;
+    place-items: center;
     padding-right: 2px;
     color: var(--text-dim);
-    font-size: 13px;
     opacity: 0.7;
   }
 

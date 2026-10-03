@@ -41,6 +41,7 @@
   import BlockPicker from "./BlockPicker.svelte";
   import BlockStateModal from "./BlockStateModal.svelte";
   import BlockTooltip from "./BlockTooltip.svelte";
+  import Icon from "./Icon.svelte";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { canonicalBlock, isAirBlock, shortName } from "./block_spelling.js";
   import type { AnchorRect } from "./floating.js";
@@ -211,7 +212,7 @@
       >
         <div class="tile">
           {#if isAirBlock(entry.block)}
-            <span class="glyph" aria-hidden="true">&#x2B1A;</span>
+            <span class="glyph"><Icon name="air" size={20} weight={1.6} /></span>
           {:else if icons.get(entry.block)}
             <img src={icons.get(entry.block)} alt="" width="26" height="26" />
           {:else}
@@ -224,7 +225,7 @@
             aria-label={t("mix.remove", { block: shortName(entry.block) })}
             onclick={() => emit(removeFromMix(mix, index))}
           >
-            ×
+            <Icon name="close" size={10} weight={3} />
           </button>
         </div>
         {#if showWeights}
@@ -263,7 +264,7 @@
       title={t("selection.browse")}
       aria-label={t("selection.browse")}
     >
-      &#x229E;
+      <Icon name="browse" size={14} weight={1.8} />
     </button>
   {/if}
 </div>
@@ -291,7 +292,7 @@
         aria-label={t("mix.tune")}
         onclick={() => (tuning = !tuning)}
       >
-        &#x2699;
+        <Icon name="gear" size={14} weight={1.8} />
       </button>
     {/if}
     <label>
@@ -311,7 +312,7 @@
       aria-label={t("mix.reroll")}
       onclick={() => emit({ ...mix, distribution: { ...mix.distribution, seed: freshSeed() } })}
     >
-      🎲
+      <Icon name="dice" size={16} weight={1.8} />
     </button>
   </div>
   {#if tuning && specs.length > 0}
@@ -432,7 +433,8 @@
   }
 
   .glyph {
-    font-size: 16px;
+    display: grid;
+    place-items: center;
     color: var(--text-dim);
   }
 
@@ -441,6 +443,7 @@
     top: -4px;
     right: -4px;
     display: none;
+    place-items: center;
     width: 14px;
     height: 14px;
     padding: 0;
@@ -448,14 +451,12 @@
     border-radius: 50%;
     background: var(--danger);
     color: var(--bg-panel);
-    font-size: 11px;
-    line-height: 14px;
     cursor: pointer;
   }
 
   .chip:hover .remove,
   .remove:focus-visible {
-    display: block;
+    display: grid;
   }
 
   .weight {
@@ -484,10 +485,23 @@
     padding: 4px 2px;
   }
 
+  /*
+   * Its padding is zeroed here, and that was the bug: the global `button` rule
+   * gives 8px 14px, which in a 26px-wide button left a content box narrower
+   * than nothing, and the icon was pushed off to the right of it.
+   */
   .browse {
     flex: none;
+    display: grid;
+    place-items: center;
     width: 26px;
+    padding: 0;
     align-self: stretch;
+    color: var(--text-dim);
+  }
+
+  .browse:hover:not(:disabled) {
+    color: var(--text);
   }
 
   /* Wraps rather than overflowing: the tool window is narrow by default. */
@@ -522,9 +536,11 @@
   }
 
   .gear {
-    padding: 0 4px;
-    font-size: 13px;
-    line-height: 18px;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 20px;
+    padding: 0;
   }
 
   .gear.open {
@@ -567,10 +583,18 @@
   }
 
   .dice {
-    padding: 0 4px;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 20px;
+    padding: 0;
     border: none;
     background: none;
-    font-size: 14px;
+    color: var(--text-dim);
     cursor: pointer;
+  }
+
+  .dice:hover {
+    color: var(--text);
   }
 </style>

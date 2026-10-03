@@ -17,6 +17,7 @@
   import { legacyIdForState, legacyVariantsOf, type LegacyIndex } from "../../../shared/legacy_ids.js";
   import { defaultStateFor } from "../../../shared/block_states.js";
   import { blockIcons, requestBlockIcons } from "./block_icons.svelte.js";
+  import Icon from "./Icon.svelte";
   import { canonicalBlock, readSpelling, writeSpelling } from "./block_spelling.js";
   import { placePopover, type AnchorRect } from "./floating.js";
   import { propertyRows } from "./inspector_rows.js";
@@ -132,7 +133,9 @@
       <span class="pending" aria-hidden="true"></span>
     {/if}
     <code class="id">{block}</code>
-    <button class="close" onclick={onclose} title={t("common.close")} aria-label={t("common.close")}>×</button>
+    <button class="close" onclick={onclose} title={t("common.close")} aria-label={t("common.close")}>
+      <Icon name="close" size={14} weight={2.2} />
+    </button>
   </div>
 
   {#if legacy !== null}
@@ -260,12 +263,19 @@
 
   .close {
     flex: none;
-    padding: 0 6px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
     border: none;
     background: none;
     color: var(--text-dim);
-    font-size: 16px;
     cursor: pointer;
+  }
+
+  .close:hover {
+    color: var(--text);
   }
 
   .rows {

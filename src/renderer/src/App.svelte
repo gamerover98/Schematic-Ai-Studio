@@ -16,6 +16,7 @@
     import ChatPanel from "./lib/ChatPanel.svelte";
   import CommandPalette, { type Command } from "./lib/CommandPalette.svelte";
   import DocumentBar from "./lib/DocumentBar.svelte";
+  import Icon from "./lib/Icon.svelte";
   import McpIndicator from "./lib/McpIndicator.svelte";
   import UpdateIndicator from "./lib/UpdateIndicator.svelte";
   import { showsIndicator } from "./lib/mcp_status.js";
@@ -5023,7 +5024,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       class="icon gear"
       onclick={() => (settingsOpen = true)}
       title={t("settings.openShortcut")}
-      aria-label={t("settings.title")}>&#x2699;</button
+      aria-label={t("settings.title")}><Icon name="gear" size={18} weight={1.7} /></button
     >
   </header>
 
@@ -5033,7 +5034,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         class="icon"
         onclick={toggleSidebar}
         title={t("sidebar.hideShortcut")}
-        aria-label={t("sidebar.hide")}>&#x203a;</button
+        aria-label={t("sidebar.hide")}><Icon name="chevronRight" /></button
       >
     </header>
 
@@ -5124,7 +5125,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         class="icon show-panel"
         onclick={toggleSidebar}
         title={t("sidebar.showShortcut")}
-        aria-label={t("sidebar.show")}>&#x2039;</button
+        aria-label={t("sidebar.show")}><Icon name="chevronLeft" /></button
       >
     {/if}
 
@@ -5196,7 +5197,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           {#if status.detail}<br /><small>{status.detail}</small>{/if}
         </div>
         <button class="icon" onclick={() => (status = null)} aria-label={t("common.dismiss")}>
-          &#x00d7;
+          <Icon name="close" size={14} />
         </button>
       </div>
     {/if}
@@ -5642,7 +5643,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   /* Floated to the trailing edge, away from the title-and-mode group. */
   .gear {
     margin-left: auto;
-    font-size: 18px;
   }
 
   /* Sized like the camera-mode buttons beside it rather than like a `.icon`,

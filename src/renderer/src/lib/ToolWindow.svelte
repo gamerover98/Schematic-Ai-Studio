@@ -16,6 +16,7 @@
   import { PANEL_SIZE } from "../../../shared/settings.js";
   import { clampPanelSize, clampToBounds, isWithinBounds, type Bounds } from "./floating.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     title: string;
@@ -269,10 +270,10 @@
     onpointercancel={endDrag}
     onkeydown={onKeyDown}
   >
-    <span class="grip" aria-hidden="true">⠿</span>
+    <span class="grip"><Icon name="grip" size={12} /></span>
     <span class="title">{title}</span>
     <button class="icon" onclick={onclose} aria-label={closeLabel} title={closeLabel}>
-      &#x00d7;
+      <Icon name="close" size={12} weight={2.4} />
     </button>
   </header>
 
@@ -349,9 +350,9 @@
   }
 
   .grip {
+    display: grid;
+    place-items: center;
     color: var(--text-dim);
-    font-size: 11px;
-    letter-spacing: -1px;
   }
 
   .title {
@@ -369,7 +370,6 @@
   header .icon {
     width: 20px;
     height: 20px;
-    font-size: 14px;
   }
 
   /* No `max-height`: the panel's own height is the limit now, and it is the

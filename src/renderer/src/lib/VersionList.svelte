@@ -19,6 +19,7 @@
   import type { DocumentVersion } from "../../../shared/ipc.js";
   import { ageLabel } from "./age_label.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     versions: readonly DocumentVersion[];
@@ -95,7 +96,7 @@
                     title={t("versions.delete")}
                     aria-label={t("versions.delete")}
                   >
-                    &#x00d7;
+                    <Icon name="close" size={14} />
                   </button>
                 </span>
               {/if}

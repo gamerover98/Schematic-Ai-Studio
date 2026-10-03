@@ -28,6 +28,7 @@
   import Markdown from "./Markdown.svelte";
   import TraceView from "./TraceView.svelte";
   import { t, tn } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     entries: ChatEntry[];
@@ -219,7 +220,7 @@
       onclick={onforget}
       disabled={busy || (entries.length === 0 && remembered === 0)}
       title={t("chat.newChatHint")}
-      aria-label={t("chat.newChat")}>&#x002b;</button
+      aria-label={t("chat.newChat")}><Icon name="plus" /></button
     >
   </header>
 
@@ -252,7 +253,7 @@
         </div>
       {/if}
       <article class={`turn ${entry.role}`}>
-        <div class="avatar" aria-hidden="true">{entry.role === "user" ? "●" : "✦"}</div>
+        <div class="avatar"><Icon name={entry.role === "user" ? "dot" : "sparkle"} size={12} /></div>
         <div class="body">
           <span class="who">{who(entry.role)}</span>
 
@@ -271,7 +272,7 @@
               aria-expanded={expanded[index] === true}
               onclick={() => (expanded = { ...expanded, [index]: !expanded[index] })}
             >
-              <span class="caret" aria-hidden="true">{expanded[index] ? "▾" : "▸"}</span>
+              <span class="caret"><Icon name={expanded[index] ? "chevronDown" : "chevronRight"} size={10} weight={2.6} /></span>
               {tn("chat.toolsUsed", entry.steps.length)}
             </button>
             {#if expanded[index]}
@@ -354,7 +355,7 @@
 
     {#if live.length > 0 || progress !== null}
       <article class="turn agent">
-        <div class="avatar pulse" aria-hidden="true">&#x2726;</div>
+        <div class="avatar pulse"><Icon name="sparkle" size={12} /></div>
         <div class="body">
           <span class="who">{t("chat.ai")}</span>
           {#if live.length > 0}
@@ -544,7 +545,6 @@
     border-radius: 50%;
     background: var(--bg-input);
     border: 1px solid var(--border);
-    font-size: 10px;
     color: var(--text-dim);
   }
 
@@ -614,7 +614,9 @@
   }
 
   .caret {
-    font-size: 9px;
+    display: inline-grid;
+    place-items: center;
+    vertical-align: middle;
   }
 
   .steps {

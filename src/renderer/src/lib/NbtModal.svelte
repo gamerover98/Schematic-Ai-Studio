@@ -18,6 +18,7 @@
     type SchematicFormat,
   } from "../../../shared/schematic.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     open: boolean;
@@ -141,7 +142,7 @@
     >
       <header>
         <h2>{t("nbt.title")}</h2>
-        <button class="icon close" onclick={onclose} aria-label={t("common.close")}>&#x00d7;</button>
+        <button class="icon close" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
       </header>
 
       <section class="origin">

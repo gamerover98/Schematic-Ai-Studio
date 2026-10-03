@@ -16,6 +16,7 @@
   import type { PaletteCount, RegionSpec } from "../../../shared/ipc.js";
   import BlockMixField from "./BlockMixField.svelte";
   import BannerPatternHint from "./BannerPatternHint.svelte";
+  import Icon from "./Icon.svelte";
   import MaterialsInventory from "./MaterialsInventory.svelte";
   import { isBannerBlock } from "../../../shared/banner_patterns.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
@@ -235,7 +236,7 @@
               title={t("selection.areaRemove")}
               aria-label={t("selection.areaRemove")}
             >
-              &#x2715;
+              <Icon name="close" size={10} weight={2.6} />
             </button>
           </li>
         {/each}
@@ -295,7 +296,7 @@
       title={t("selection.swap")}
       aria-label={t("selection.swap")}
     >
-      &#x21C5;
+      <Icon name="swapVertical" size={14} weight={1.8} />
     </button>
   </div>
 
@@ -429,7 +430,10 @@
   }
 
   .areas .remove {
-    padding: 2px 5px;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    padding: 0;
     color: var(--text-dim);
   }
 
@@ -463,9 +467,11 @@
   }
 
   .swap {
-    padding: 0 10px;
-    font-size: 14px;
-    line-height: 20px;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 22px;
+    padding: 0;
   }
 
   .tools :global(.hint) {
