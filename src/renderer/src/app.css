@@ -206,6 +206,19 @@ code,
   user-select: text;
 }
 
+/*
+ * No picture in the window can be dragged out of it as a file.
+ *
+ * Every image here is a block's icon or a piece of chrome, and Chromium hands
+ * an image dragged from the page over as a file called `download.png` -- so
+ * pulling a material's icon onto the viewport was reported as "download.png
+ * cannot be opened as a schematic". A block is carried by the slot it is in,
+ * under a type of its own (`lib/block_drag.ts`), not by its picture.
+ */
+img {
+  -webkit-user-drag: none;
+}
+
 button {
   font: inherit;
   color: var(--text);

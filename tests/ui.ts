@@ -214,6 +214,7 @@ import {
   writeSpelling,
 } from "../src/renderer/src/lib/block_spelling.js";
 import { formatCount, materialAction, materialRows } from "../src/renderer/src/lib/materials.js";
+import { BLOCK_MIME, isFileDrop, trackPageDrags } from "../src/renderer/src/lib/block_drag.js";
 import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/shared/block_mix.js";
 import { MAP_PLANES } from "../src/shared/distribution_map.js";
 import { averageColour } from "../src/renderer/src/lib/icon_colour.js";
@@ -5369,6 +5370,66 @@ console.log("\n--- the materials, as an inventory ---");
       !/patchUi\(\{[^}]*query/.test(app),
   );
 }
+
+// --- a block dragged onto the viewport is not a file ----------------------------
+//
+// Chromium hands an image dragged from inside the page over as a file called
+// `download.png`, and the viewport opened what it was handed: pulling a
+// material's icon onto the canvas said "download.png cannot be opened as a
+// schematic".
+console.log("\n--- a block dragged onto the viewport is not a file ---");
+await (async () => {
+  equal(
+    "a file from outside is a file, and only that",
+    [
+      isFileDrop(["Files"], false),
+      isFileDrop(["text/plain"], false),
+      isFileDrop(["Files", BLOCK_MIME], false),
+      isFileDrop(["Files"], true),
+      isFileDrop(undefined, false),
+    ],
+    [true, false, false, false, false],
+  );
+
+  // A window stand-in: the listeners are all the tracker touches.
+  const listeners = new Map<string, (() => void)[]>();
+  const fake = {
+    addEventListener: (type: string, listener: () => void) =>
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]),
+    removeEventListener: (type: string, listener: () => void) =>
+      listeners.set(type, (listeners.get(type) ?? []).filter((each) => each !== listener)),
+  };
+  const fire = (type: string): void => (listeners.get(type) ?? []).forEach((listener) => listener());
+  const drags = trackPageDrags(fake as unknown as Window);
+  equal("no drag is from the page until one starts", drags.fromPage(), false);
+  fire("dragstart");
+  equal("a drag that starts in the page is from the page", drags.fromPage(), true);
+  fire("dragend");
+  equal("...until it ends", drags.fromPage(), false);
+  fire("dragstart");
+  fire("drop");
+  equal("a drop's own listeners still see it as the page's", drags.fromPage(), true);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  equal("...and it is over once they have run, with no dragend", drags.fromPage(), false);
+  fire("dragstart");
+  fire("pointermove");
+  equal("the next pointer move ends one that lost its dragend", drags.fromPage(), false);
+  drags.dispose();
+  fire("dragstart");
+  equal("disposed, it hears nothing", drags.fromPage(), false);
+
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8");
+  check("no picture in the window can be dragged out as a file", /img\s*\{\s*-webkit-user-drag:\s*none;/.test(css));
+  const page = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const drop = page.slice(page.indexOf("async function onDrop("), page.indexOf("async function resolveRecovery("));
+  check(
+    "the drop asks before it reads a file",
+    drop.indexOf("if (!fileDragged(event)) return;") !== -1 &&
+      drop.indexOf("if (!fileDragged(event)) return;") < drop.indexOf("dataTransfer?.files"),
+  );
+  const enter = page.slice(page.indexOf("function onDragEnter("), page.indexOf("function onDragOver("));
+  check("...and so does the highlight", enter.includes("if (!fileDragged(event)) return;"));
+})();
 
 // --- when a block arrived, as far as the table can see -------------------------
 //

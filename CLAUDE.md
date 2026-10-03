@@ -1937,6 +1937,20 @@ full-bleed cover is the reasoning that makes it safe: the handlers are on
 does to its painting, drag events bubble, and `App.svelte` counts enters against
 leaves *because* children fire them — so one more child changes nothing.
 
+**A drag that starts in the window is never a file.** The viewport decided a
+drop was a file by the drag carrying `Files`, and Chromium says yes for an
+image dragged from inside the page: it hands it over as `download.png`. So
+pulling a material's icon onto the canvas came back as "download.png cannot
+be opened as a schematic". `lib/block_drag.ts` has three answers, each for
+what the others miss: `img { -webkit-user-drag: none }` in `app.css`, so no
+picture starts a drag at all; `BLOCK_MIME`, which a block dragged on purpose
+carries and nothing else, not even `text/plain`; and `trackPageDrags`, which
+marks any drag that began in the page. Its `dragend` does not arrive when the
+source left the page mid-drag, as a keyed list does, so a `drop` caught on the
+way down clears it after its own listeners have run, and so does the next
+pointer move, which no drag lets through. The guard is asked at the drop as
+well as at the highlight, before anything reads `files`.
+
 Dismissable because **with nothing open a chat message goes to the generator**.
 That is how a schematic gets built from a sentence, and this screen is the only
 place that says so; a screen covering the chat that could not be put away would

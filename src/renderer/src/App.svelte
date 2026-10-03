@@ -53,6 +53,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { api, bridgeAvailable, forIpc, bridgeMissingMessage } from "./lib/bridge.svelte.js";
   import { diagnosing, recordEvent } from "./lib/frame_profiler.js";
   import { coalesce } from "./lib/coalesce.js";
+  import { isFileDrop, trackPageDrags } from "./lib/block_drag.js";
   import { applyTraceEvent } from "./lib/trace.js";
   import { primeBlockIcons } from "./lib/block_icons.svelte.js";
   import {
@@ -1386,12 +1387,29 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     return SCHEMATIC_EXTENSIONS.some((extension) => lower.endsWith(extension));
   }
 
+  /**
+   * Whether the drag over the viewport started inside the window, which makes
+   * it never a file: Chromium hands an image dragged from the page over as
+   * `download.png`. See `block_drag.ts`.
+   */
+  let pageDrags: { fromPage(): boolean; dispose(): void } | null = null;
+  onMount(() => {
+    pageDrags = trackPageDrags(window);
+    return () => pageDrags?.dispose();
+  });
+
+  /** A file from outside the window, which is the only thing a drop opens. */
+  function fileDragged(event: DragEvent): boolean {
+    const types = event.dataTransfer ? [...event.dataTransfer.types] : undefined;
+    return isFileDrop(types, pageDrags?.fromPage() ?? false);
+  }
+
   function onDragEnter(event: DragEvent): void {
     if (!bridgeAvailable) return;
     // The dragged file's *name* is not readable during a drag — only its type,
     // for privacy — so the highlight cannot promise the file is supported. It
     // says "you can drop here"; the drop itself says whether it worked.
-    if (!event.dataTransfer?.types.includes("Files")) return;
+    if (!fileDragged(event)) return;
     event.preventDefault();
     dragDepth += 1;
     dropActive = true;
@@ -1417,6 +1435,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     event.preventDefault();
     dragDepth = 0;
     dropActive = false;
+    // Asked again here and not only on the way in: a drop is what opens, and
+    // a drag that began in the page is never somebody's file.
+    if (!fileDragged(event)) return;
 
     const file = event.dataTransfer?.files?.[0];
     if (!file) return;
