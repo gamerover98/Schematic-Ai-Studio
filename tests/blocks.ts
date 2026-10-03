@@ -59,7 +59,7 @@ import { atlasAnimations, buildDocumentPreview } from "../src/main/services/prev
 import { createDocument, setBlock, setBlockEntity } from "../src/main/domain/document.js";
 import type { BakedFace, PaletteEntry, StructureData } from "../src/main/pipeline/types.js";
 import { paletteEntryCacheKey, paletteEntryIsAir } from "../src/main/pipeline/types.js";
-import { connectedState, COPPER_CHESTS } from "../src/shared/block_connections.js";
+import { connectedState, COPPER_CHESTS, HORIZONTAL_FACES } from "../src/shared/block_connections.js";
 import {
   describeProperty,
   documentedProperties,
@@ -3147,6 +3147,20 @@ console.log("\n--- a tripwire is laid along the look ---");
   equal("looking east lays it east-west", lay(1, 0.2), { ...WIRE, east: "true", west: "true" });
   equal("...and so does looking west", lay(-1, -0.2), { ...WIRE, east: "true", west: "true" });
   equal("looking north lays it north-south", lay(0.2, -1), WIRE);
+
+  /*
+   * A rail is laid along the look too: `BaseRailBlock.getStateForPlacement`.
+   * Every one used to land north-south, so the first rail of a run laid east
+   * came out across its own track.
+   */
+  const track = (name: string, x: number, z: number) =>
+    orientPlacement(`minecraft:${name}`, { direction: { x, y: -0.3, z }, against: "up", cursorY: 0, run: null });
+  equal("a rail placed looking east runs east-west", track("rail", 1, 0.2), { shape: "east_west" });
+  equal("...and looking west", track("rail", -1, -0.2), { shape: "east_west" });
+  equal("...and looking south runs north-south", track("rail", -0.2, 1), { shape: "north_south" });
+  for (const name of ["powered_rail", "detector_rail", "activator_rail"]) {
+    equal(`the ${name.replace("_", " ")} is laid along the look as well`, track(name, 1, 0), { shape: "east_west" });
+  }
   if (pack !== null) {
     const faces = (await baker.bakeBlockstate(block("tripwire", { ...WIRE, east: "true", west: "true" })))
       .extraFaces;
@@ -8006,7 +8020,7 @@ console.log("\n--- neighbour-derived state ---");
   equal("...nor a copper chest and a wooden one", pairs("copper_chest", "chest"), "single");
   equal("...and a trapped chest still pairs with neither", pairs("trapped_chest", "chest"), "single");
 
-  // Rails: flat shapes only, which is the whole visible difference.
+  // Rails: straight, curved, and climbing a step.
   equal("a lone rail lies north-south", connectedState(self("rail"), {}).shape, "north_south");
   equal(
     "a rail with a neighbour east lies east-west",
@@ -8025,6 +8039,130 @@ console.log("\n--- neighbour-derived state ---");
       .shape,
     "north_south",
   );
+
+  /*
+   * A rail climbs to a rail one block up, which is `RailState.place`: a side
+   * has a rail if one is beside it, above it or below it, and a straight answer
+   * then ascends towards the one above. Each direction by name, because the
+   * mistake a table of four invites is a swapped pair, and a rail sloping the
+   * wrong way still looks exactly like a rail sloping.
+   */
+  const rail = (props: Record<string, string> = {}) => thin("rail", props);
+  for (const side of ["north", "south", "east", "west"] as const) {
+    equal(
+      `a rail with a rail one up to the ${side} ascends ${side}`,
+      connectedState(self("rail"), { [`${side}_up`]: rail() }).shape,
+      `ascending_${side}`,
+    );
+  }
+  equal(
+    "...and it still does with the run continuing behind it",
+    connectedState(self("rail"), { west: rail(), east_up: rail() }).shape,
+    "ascending_east",
+  );
+  equal(
+    "a rail one down is a flat link: the lower rail is the one that climbs",
+    connectedState(self("rail"), { east_down: rail() }).shape,
+    "east_west",
+  );
+  equal(
+    "...so the top of a step lies flat",
+    connectedState(self("rail"), { west_down: rail(), east: rail() }).shape,
+    "east_west",
+  );
+  equal(
+    "a curve does not climb",
+    connectedState(self("rail"), { north_up: rail(), east: rail() }).shape,
+    "north_east",
+  );
+  // A valley is two climbs at once, which no rail is. Vanilla asks north then
+  // south, east then west, and the second answer stands.
+  equal(
+    "with rails above both ends, it ascends south",
+    connectedState(self("rail"), { north_up: rail(), south_up: rail() }).shape,
+    "ascending_south",
+  );
+  equal(
+    "...or west",
+    connectedState(self("rail"), { east_up: rail(), west_up: rail() }).shape,
+    "ascending_west",
+  );
+  for (const name of ["powered_rail", "detector_rail", "activator_rail"]) {
+    equal(
+      `the ${name.replace("_", " ")} climbs too`,
+      connectedState(self(name, { shape: "north_south", powered: "false" }), { east_up: thin(name) }).shape,
+      "ascending_east",
+    );
+  }
+
+  /*
+   * The south-east rule: a junction cannot be one rail, and an unpowered one
+   * takes south before north and east before west. A straight-only rail keeps
+   * the run it has.
+   */
+  equal(
+    "a T-junction curves south-east",
+    connectedState(self("rail"), { north: rail(), east: rail(), south: rail() }).shape,
+    "south_east",
+  );
+  equal(
+    "...and so does a crossing",
+    connectedState(self("rail"), { north: rail(), east: rail(), south: rail(), west: rail() }).shape,
+    "south_east",
+  );
+  equal(
+    "a T-junction with nothing to the south curves north-east",
+    connectedState(self("rail"), { north: rail(), east: rail(), west: rail() }).shape,
+    "north_east",
+  );
+  equal(
+    "a powered rail at a junction keeps its run",
+    connectedState(self("powered_rail", { shape: "east_west", powered: "false" }), {
+      north: thin("powered_rail"),
+      east: thin("powered_rail"),
+      south: thin("powered_rail"),
+    }).shape,
+    "east_west",
+  );
+
+  // With nothing beside it a rail keeps the shape it has, which is what lets
+  // one placed along the look stay that way. A shape the block cannot hold is
+  // not kept.
+  equal(
+    "a lone rail laid east-west stays east-west",
+    connectedState(self("rail", { shape: "east_west" }), {}).shape,
+    "east_west",
+  );
+  equal(
+    "a lone powered rail out of a file with a corner on it lies north-south",
+    connectedState(self("powered_rail", { shape: "south_east", powered: "false" }), {}).shape,
+    "north_south",
+  );
+
+  /*
+   * Every answer is a value the rail can hold, over every arrangement of the
+   * twelve cells a rail reads and every shape it may already have. The guard
+   * that matters is the straight-only rails: a corner on a powered rail is a
+   * real property with an illegal value, which `hasProperty` cannot see.
+   */
+  {
+    const keys = HORIZONTAL_FACES.flatMap((face) => [face, `${face}_up`, `${face}_down`]);
+    const illegal: string[] = [];
+    for (const name of ["rail", "powered_rail", "detector_rail", "activator_rail"]) {
+      const legal = legalValuesFor(name, "shape") ?? [];
+      for (const own of legal) {
+        for (let mask = 0; mask < 1 << keys.length; mask += 1) {
+          const around: Record<string, ReturnType<typeof thin>> = {};
+          keys.forEach((key, bit) => {
+            if (mask & (1 << bit)) around[key] = rail();
+          });
+          const shape = connectedState(self(name, { shape: own }), around).shape;
+          if (shape === undefined || !legal.includes(shape)) illegal.push(`${name}[${own}] ${mask} -> ${shape}`);
+        }
+      }
+    }
+    equal("no arrangement gives a rail a shape it cannot hold", illegal.slice(0, 5), []);
+  }
 
   // Grass under snow.
   equal(

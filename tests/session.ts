@@ -8,10 +8,12 @@
  * with nothing open is refused rather than crashing the main process.
  */
 
-import { mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+
+import { parse as parseNbt } from "prismarine-nbt";
 
 import {
   documentSize,
@@ -3693,6 +3695,97 @@ console.log("\n--- redstone needs a floor ---");
     }),
     4,
   );
+}
+
+/*
+ * A rail climbing a step, end to end, and in a 1.12.2 document saved as MCEdit.
+ *
+ * The rule reads the cells above and below each side, which `connect.ts`
+ * already gathers for redstone; what the block-level checks cannot see is that
+ * placing the upper rail revisits the lower one, which is one block down and
+ * one along. And legacy is where this has to land exactly: `legacy_blocks.json`
+ * spells `66:2..5` and `27:2..5` as the four climbs, and the MCEdit writer
+ * matches the whole state, so a climb with one property too many would be
+ * written as a flat rail and reported as degraded.
+ */
+console.log("\n--- a rail climbs a step, in both eras ---");
+{
+  const dir = await mkdtemp(path.join(tmpdir(), "sas-rail-"));
+  try {
+    const session = newDocument({ width: 3, height: 4, length: 3 }, "mcedit", dataVersionOf("JE_1_12_2"));
+    const put = (x: number, y: number, z: number, name: string, properties: Record<string, string> = {}) =>
+      applyEdit(session, {
+        kind: "setBlock",
+        x,
+        y,
+        z,
+        block: { namespacedName: `minecraft:${name}`, properties },
+      });
+    const shapeAt = (x: number, y: number, z: number) => getBlock(session.doc, x, y, z).properties.shape;
+
+    // A staircase of stone two steps high, with a track up it at z = 0 and a
+    // powered one at z = 2. The row between is left empty, so the two are not
+    // neighbours of each other.
+    for (const z of [0, 2]) {
+      for (let x = 0; x < 3; x += 1) {
+        for (let y = 0; y <= x; y += 1) put(x, y, z, "stone");
+      }
+    }
+    for (let x = 0; x < 3; x += 1) {
+      put(x, x + 1, 0, "rail");
+      put(x, x + 1, 2, "powered_rail", { powered: "false" });
+    }
+    equal("the foot of the step climbs east", shapeAt(0, 1, 0), "ascending_east");
+    equal("...and so does the middle", shapeAt(1, 2, 0), "ascending_east");
+    equal("...and the top lies flat", shapeAt(2, 3, 0), "east_west");
+    equal(
+      "a powered track climbs the same step",
+      [shapeAt(0, 1, 2), shapeAt(1, 2, 2), shapeAt(2, 3, 2)],
+      ["ascending_east", "ascending_east", "east_west"],
+    );
+
+    const saved = await saveSession(session, {
+      filePath: path.join(dir, "climb.schematic"),
+      format: "mcedit",
+      legacyBlocksPath: LEGACY_BLOCKS,
+    });
+    equal("nothing is degraded on the way out", saved.degraded, []);
+
+    // The bytes themselves: MCEdit indexes (y * length + z) * width + x.
+    const { parsed } = await parseNbt(await readFile(saved.filePath));
+    const root = parsed.value as unknown as NbtCompound;
+    const number = (key: string) => Number((root[key] as { value: number }).value);
+    const bytes = (key: string) => (root[key] as { value: number[] }).value;
+    const [width, length] = [number("Width"), number("Length")];
+    const at = (x: number, y: number, z: number) => (y * length + z) * width + x;
+    const cells = [at(0, 1, 0), at(1, 2, 0), at(2, 3, 0)];
+    const powered = [at(0, 1, 2), at(1, 2, 2), at(2, 3, 2)];
+    equal("the file holds rails", cells.map((i) => bytes("Blocks")[i] & 0xff), [66, 66, 66]);
+    equal("...climbing east, which is data 2, and flat at the top", cells.map((i) => bytes("Data")[i]), [2, 2, 1]);
+    equal("the powered track is 27 with the same data", powered.map((i) => [bytes("Blocks")[i] & 0xff, bytes("Data")[i]]), [
+      [27, 2],
+      [27, 2],
+      [27, 1],
+    ]);
+
+    const reopened = await openDocument(saved.filePath, { legacyBlocksPath: LEGACY_BLOCKS });
+    equal(
+      "...and it opens again as the same climb",
+      [0, 1, 2].map((x) => getBlock(reopened.doc, x, x + 1, 0).properties.shape),
+      ["ascending_east", "ascending_east", "east_west"],
+    );
+
+    // Breaking the top lays the middle flat again: it has nothing to climb to.
+    applyEdit(reopened, { kind: "setBlock", x: 2, y: 3, z: 0, block: { namespacedName: "minecraft:air" } });
+    equal(
+      "breaking the top rail lays the one below it flat",
+      getBlock(reopened.doc, 1, 2, 0).properties.shape,
+      "east_west",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    closeDocument();
+  }
 }
 
 /*

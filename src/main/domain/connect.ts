@@ -91,8 +91,9 @@ const OFFSETS: ReadonlyArray<readonly [NeighbourKey, number, number, number]> = 
 /**
  * The eight cells above and below the four horizontal neighbours.
  *
- * Redstone's: a wire runs up the side of the block next door and down onto a
- * step, so its answer depends on two cells that are not faces of it.
+ * Redstone's and the rails': a wire runs up the side of the block next door
+ * and down onto a step, and a rail climbs to a rail one block up and over, so
+ * both answers depend on cells that are not faces of the block.
  *
  * They are in the **same list** as the six rather than beside it, and that is
  * the part that matters: phase one uses this array to decide which cells an

@@ -3618,6 +3618,37 @@ no texture. Two stages side by side stay two single chests rather than a double
 one drawn in two colours — chosen by the user with the game's answer in front of
 them. `COPPER_CHESTS` is one list for this and for the placement.
 
+**A rail climbs to a rail one block up, and it never did.** `railShape` was
+written when `Neighbours` was the six faces, and said so: a climb is towards a
+rail up *and over*, a diagonal, so it was left out on purpose. Redstone then
+gave `Neighbours` the eight diagonals and `connect.ts` started filling them for
+every cell and revisiting them after an edit, and nobody went back. A track up a
+hillside came out as flat rails with a ledge at every step, and a legacy
+`.schematic` that arrived climbing was flattened by the first edit beside it.
+
+It is `RailState.place` now, read as the answer it settles on (the
+`mc-vanilla-rules` skill is how it was looked up). A side has a rail if one is
+beside it, one up or one down; a straight answer then climbs towards the one
+up, asking north then south and east then west, so a valley ascends south or
+west. A rail one down is a flat link, because the lower one is the one that
+climbs, and a curve never climbs. A junction takes the south-east rule in its
+unpowered order, since power is not simulated. A rail with nothing beside it
+keeps the shape it has, which is vanilla's fallback and is what lets
+`orientPlacement` lay one along the look.
+
+**What it does not do is remember**, and that is the deviation. Vanilla's rail
+keeps a list of what it is joined to, and one joined at both ends ignores a
+third built beside it later. This pass knows only who is next door, so a rail
+laid against a finished line turns the line into a junction. That was already
+true on one level; reading up and down widens it to a rail on a ledge beside the
+track.
+
+`tests/session.ts` builds a real two-step climb in a 1.12.2 document, saves it
+as MCEdit and reads the bytes back: `66:2` and `27:2` up the step, `:1` at the
+top. That is the check that sees `connect.ts` revisit the lower rail when the
+upper one goes down. Walking `OFFSETS` instead of `AROUND` fails it, and so does
+reading the side cells alone.
+
 **`EditRequest.setState` is the one caller that derives nothing, and without it
 the feature would not exist.** The inspector sends its block-state edit down the
 same channel as a placement, so a hand-typed `north=false` would be re-derived
