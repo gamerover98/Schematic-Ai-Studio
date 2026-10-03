@@ -5287,15 +5287,17 @@ console.log("\n--- the materials, as an inventory ---");
     /setTimeout\(\(\) => \{[\s\S]{0,300}refreshMaterials\(\)/.test(app),
   );
   /*
-   * With nothing selected the list was read off `DocumentState.palette`,
-   * which counts the states the file holds -- a bed was two beds. Main pairs
-   * the halves, so the whole document is asked for as well.
+   * The list is drawn in the tool window, which is only there with a
+   * selection. It used to be read off `DocumentState.palette` with nothing
+   * selected, which counts the states the file holds -- a bed was two beds --
+   * for a window that could not show it; asking main for the whole schematic
+   * on every edit instead would be the same answer to nobody, paid for.
    */
   check(
-    "with nothing selected the whole schematic is asked of main",
-    app.includes('regions: of === "selection" ? areasForIpc() : null'),
+    "nothing is counted while the list is not on screen",
+    app.includes("if (!toolsOpen || selection === null || docState === null) {"),
   );
-  check("...and not read off the document's state", !app.includes("documentMaterials("));
+  check("...and nothing is read off the document's state", !app.includes("documentMaterials("));
   const replaceArm = tools.slice(tools.indexOf('case "replace":'), tools.indexOf('case "state":'));
   check(
     "Replace takes a slot's other half with it",

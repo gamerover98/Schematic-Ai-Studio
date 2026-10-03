@@ -1998,10 +1998,13 @@ selection did not hold. `selectionPalette` in `session.ts` counts the union of
 the areas, overlaps once, through `forEachUnionCell`, the walk the fill takes.
 It is **asked for, not pushed**: the selection is the renderer's, so
 `App.svelte` asks once the selection has held still for 120 ms, one request in
-flight through `coalesce`. A 256x64x256 selection is about 35 ms in main. With
-nothing selected it asks for the whole schematic, `regions: null`.
+flight through `coalesce`. A 256x64x256 selection is about 35 ms in main.
+Only while the list is on screen, which is the tool window, which is only
+there with a selection: it used to be read off `DocumentState.palette` with
+nothing selected, for a window that could not show it. Main counts the whole
+schematic for `regions: null`, which nothing in the window asks yet.
 
-**A bed is one bed, and that is why the whole schematic is asked for too.** The
+**A bed is one bed.** The
 list counted a bed as two -- a foot and a head, which is true of the file and
 false of the build -- and the same for a door, a two-tall plant and an extended
 piston with its `piston_head`. `countMaterials` in `domain/materials.ts` leaves
@@ -2012,8 +2015,8 @@ half a bed, and is told so. The near half's row carries the far one as
 `PaletteCount.pair`, and Shift+click puts both in Replace, or replacing the
 beds would leave their heads.
 
-The whole document is not counted by walking its box, which is 52 ms on a
-256x96x256 asked on every edit. Whether an entry is a far half is decided once
+The whole document -- `get_palette`, `regions: null` -- is not counted by
+walking its box, which is 52 ms on a 256x96x256. Whether an entry is a far half is decided once
 per palette entry; with none present the answer is `doc.counts` as it stands,
 and otherwise one pass reads a byte per cell. `DocumentState.palette` still
 counts states as the file holds them, because it runs on every edit.

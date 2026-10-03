@@ -2882,8 +2882,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   });
 
   /**
-   * What the selection is made of, or the whole schematic with nothing
-   * selected, as main last counted it.
+   * What the selection is made of, as main last counted it.
    *
    * Asked for rather than pushed, because the selection is the renderer's and
    * main cannot know when it moved. A face drag moves it many times a second,
@@ -2891,53 +2890,43 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * `coalesce` keeps it to one count in flight: on a large selection a count
    * is a walk over millions of cells.
    *
-   * The whole schematic is asked for too, and was not: it was read off
-   * `DocumentState.palette`, which counts states as the file holds them -- so
-   * a bed was two beds. Pairing the halves is main's (`countMaterials`), and
-   * with nothing of two cells in the document it costs no walk at all.
+   * Only while the list is on screen, which is the tool window, which is only
+   * there with a selection. Main can count the whole schematic too
+   * (`regions: null`), and it pairs a bed's halves there as it does here; a
+   * window with nothing selected has nowhere to show it, so it does not ask
+   * on every edit for an answer nobody reads.
    *
    * The last answer stays on screen until the next one lands, so the slots do
-   * not blank and refill on every edit -- but only while it is an answer to
-   * the same question: the selection's list under "the schematic" would be a
-   * wrong list, where a late one is merely late.
+   * not blank and refill on every edit.
    */
-  let materialsAnswer = $state<{ of: "selection" | "document"; counted: SelectionPaletteSuccess } | null>(
-    null,
-  );
+  let selectionMaterials = $state<SelectionPaletteSuccess | null>(null);
   const refreshMaterials = coalesce(fetchMaterials);
 
-  const materialsScope = $derived<"selection" | "document">(selection === null ? "document" : "selection");
-
   async function fetchMaterials(): Promise<void> {
-    if (docState === null || !bridgeAvailable) {
-      materialsAnswer = null;
+    if (selection === null || docState === null || !bridgeAvailable) {
+      selectionMaterials = null;
       return;
     }
-    const of = materialsScope;
     // Every area, a cell two of them share counted once -- main walks the union.
-    const response = await api().selectionPalette({ regions: of === "selection" ? areasForIpc() : null });
-    // Closed or moved meanwhile: a late answer must not put back the
-    // materials of a selection that is gone.
-    if (!response.ok || docState === null || materialsScope !== of) return;
-    materialsAnswer = {
-      of,
-      counted: {
-        palette: response.palette,
-        air: response.air,
-        outside: response.outside,
-        cells: response.cells,
-      },
+    const response = await api().selectionPalette({ regions: areasForIpc() });
+    // Dropped meanwhile: the effect has already cleared it, and a late answer
+    // must not put back the materials of a selection that is gone.
+    if (!response.ok || selection === null || docState === null) return;
+    selectionMaterials = {
+      palette: response.palette,
+      air: response.air,
+      outside: response.outside,
+      cells: response.cells,
     };
   }
 
   $effect(() => {
-    if (!toolsOpen || docState === null) {
-      materialsAnswer = null;
+    if (!toolsOpen || selection === null || docState === null) {
+      selectionMaterials = null;
       return;
     }
     void docState.revision;
     void selectionAreas;
-    void materialsScope;
     const timer = setTimeout(() => {
       // A count that fails is no count, not a banner: nothing the user did
       // has failed, and the slots simply keep the last answer.
@@ -2946,12 +2935,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     return () => clearTimeout(timer);
   });
 
-  /** The selection's materials, or the whole schematic's with nothing selected. */
-  const materials = $derived(
-    docState !== null && materialsAnswer !== null && materialsAnswer.of === materialsScope
-      ? materialsAnswer.counted
-      : null,
-  );
+  /** The selection's materials; the list is only drawn with one. */
+  const materials = $derived(docState === null || selection === null ? null : selectionMaterials);
 
   /** Main's step timings to a tenth of a millisecond, for a readable report. */
   function roundTimings(timings: Record<string, number>): Record<string, number> {
