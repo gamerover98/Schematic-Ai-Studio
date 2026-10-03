@@ -269,6 +269,26 @@ function shadeGeometry(geometry: THREE.BufferGeometry, normals: Float32Array): v
   geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 }
 
+/**
+ * How far from the middle of the picture a box centred on the origin reaches,
+ * on whichever of the two screen axes it reaches furthest.
+ */
+function viewExtent(width: number, height: number, length: number): number {
+  if (!camera) return 1;
+  camera.updateMatrixWorld();
+  let extent = 0;
+  const corner = new THREE.Vector3();
+  for (const x of [-width / 2, width / 2]) {
+    for (const y of [-height / 2, height / 2]) {
+      for (const z of [-length / 2, length / 2]) {
+        corner.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+        extent = Math.max(extent, Math.abs(corner.x), Math.abs(corner.y));
+      }
+    }
+  }
+  return extent;
+}
+
 /** Renders one block and returns its `data:` URL, or `null` if it drew nothing. */
 function paint(icon: BlockIcon): string | null {
   if (!gl || !scene || !camera || icon.geometry === null || !atlasTexture) return null;
@@ -281,8 +301,10 @@ function paint(icon: BlockIcon): string | null {
   shadeGeometry(geometry, icon.geometry.normals);
   /*
    * The cells sit at 0..size; centring them is what puts them in the frame,
-   * and a block of two -- a bed, a door -- is drawn at half scale so the
-   * whole of it fits where one block does.
+   * and a block of two -- a bed, a door -- is shrunk until its box covers no
+   * more of the picture than a cube's does, which is 0.74 for a bed and 0.65
+   * for a door. Half, which is the obvious number, left both looking lost in
+   * their slots.
    *
    * The box framed is the cells main reports, never the geometry's own: a
    * torch, a slab or a model that hangs over its cell is framed exactly as it
@@ -290,7 +312,7 @@ function paint(icon: BlockIcon): string | null {
    */
   const [width, height, length] = icon.size;
   geometry.translate(-width / 2, -height / 2, -length / 2);
-  const scale = 1 / Math.max(width, height, length);
+  const scale = viewExtent(1, 1, 1) / viewExtent(width, height, length);
   geometry.scale(scale, scale, scale);
 
   const material = new THREE.MeshBasicMaterial({

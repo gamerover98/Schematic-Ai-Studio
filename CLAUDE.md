@@ -2021,9 +2021,11 @@ counts states as the file holds them, because it runs on every edit.
 `TWO_PART` moved to `shared/two_part.ts` for the third reader: **icons draw
 the whole block**. `iconCells` in `services/block_icons.ts` reads it the way
 placement does -- a bare bed or a foot is both halves, a head on its own is a
-head -- and `BlockIcon.size` says how many cells, which `paint()` frames at
-`1 / max(size)`. It frames the cells and never the geometry, so a torch or a
-slab is drawn exactly as before. `prime` decodes both halves, or the head's
+head -- and `BlockIcon.size` says how many cells, which `paint()` shrinks
+until their box covers no more of the picture than a cube's (`viewExtent`:
+0.74 for a bed, 0.65 for a door; half left both lost in their slots). It
+frames the cells and never the geometry, so a torch or a slab is drawn
+exactly as before. `prime` decodes both halves, or the head's
 textures would arrive mid-batch and move the atlas under the icons.
 
 Two rules in it are easy to undo by tidying:
