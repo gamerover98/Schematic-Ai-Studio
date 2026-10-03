@@ -14,6 +14,7 @@
    */
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import type { PaletteCount, RegionSpec } from "../../../shared/ipc.js";
+  import type { MaterialsSort } from "../../../shared/settings.js";
   import type { Box } from "../../../shared/regions.js";
   import BlockMixField from "./BlockMixField.svelte";
   import BannerPatternHint from "./BannerPatternHint.svelte";
@@ -69,6 +70,11 @@
       outside: number;
       cells: number;
     } | null;
+    /** How the materials list is read: `UiSettings.materialsUnify` and `materialsSort`. */
+    materialsUnify?: boolean;
+    onmaterialsunifychange?: (unify: boolean) => void;
+    materialsSort?: MaterialsSort;
+    onmaterialssortchange?: (sort: MaterialsSort) => void;
     /**
      * The block Replace looks for.
      *
@@ -122,6 +128,10 @@
     block,
     onblockchange,
     materials,
+    materialsUnify = false,
+    onmaterialsunifychange = () => {},
+    materialsSort = "countDesc",
+    onmaterialssortchange = () => {},
     replaceFrom,
     onreplacefromchange,
     onbrowse,
@@ -283,14 +293,18 @@
 
   {#if materials !== null && (materials.palette.length > 0 || materials.air > 0 || materials.outside > 0)}
     <div class="group">
-      <span class="heading">{selection ? t("materials.ofSelection") : t("materials.ofDocument")}</span>
       <MaterialsInventory
+        title={selection ? t("materials.ofSelection") : t("materials.ofDocument")}
         palette={materials.palette}
         air={materials.air}
         outside={materials.outside}
         cells={materials.cells}
         scope={selection ? "selection" : "document"}
         {legacy}
+        unify={materialsUnify}
+        onunifychange={onmaterialsunifychange}
+        sort={materialsSort}
+        onsortchange={onmaterialssortchange}
         onaction={onMaterial}
       />
     </div>
@@ -511,9 +525,5 @@
 
   .tools :global(.hint) {
     margin: 0;
-  }
-
-  .heading {
-    font-weight: 600;
   }
 </style>

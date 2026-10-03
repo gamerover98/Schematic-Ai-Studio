@@ -2041,6 +2041,17 @@ Ctrl adds to the mix, Shift is Replace, the right button opens the states.
 `coerceHotbar` refuses a slot of it. A slot carries the exact state, so a
 replace of it finds exactly the cells the slot counted.
 
+**A bar over the slots searches, orders and merges states**, and the rules
+are `materialRows` in the same module. Merged, a block is one slot under its
+bare id (`unifyStates` in `shared/material_list.ts`, which `get_palette`'s
+`unify` also calls), and a bare id is a pattern, so a replace of the slot
+still finds exactly what it counted; a pair whose other half is another
+block, a piston's head, keeps its exact spellings. **Air stays last whatever
+the order**, because it is the leftover rather than a material. The search
+is `blockQuery`'s reading and matches the states too. The merge and the order
+are `UiSettings` (`materialsUnify`, `materialsSort`); the search is not saved,
+because it is what you are looking for now rather than how you read the list.
+
 **A Svelte prop may not be called `state`.** A local binding of that name makes
 every `$state(...)` in the same component parse as a store subscription to it
 (`store_rune_conflict`), and the fields silently stop being reactive.

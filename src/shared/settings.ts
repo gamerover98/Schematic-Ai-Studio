@@ -562,6 +562,24 @@ export interface UiSettings {
   inspectorWindowY: number;
   inspectorWindowW: number;
   inspectorWindowH: number;
+  /**
+   * The materials list with every state of a block merged into one slot:
+   * vines on four walls are one slot of vines rather than four.
+   */
+  materialsUnify: boolean;
+  /** The order the materials list is in. */
+  materialsSort: MaterialsSort;
+}
+
+/**
+ * The orders a materials list can be in: most of first, least of first, and
+ * by name either way. Most first is the default and was the only order.
+ */
+export const MATERIALS_SORTS = ["countDesc", "countAsc", "nameAsc", "nameDesc"] as const;
+export type MaterialsSort = (typeof MATERIALS_SORTS)[number];
+
+export function isMaterialsSort(value: unknown): value is MaterialsSort {
+  return typeof value === "string" && (MATERIALS_SORTS as readonly string[]).includes(value);
 }
 
 /*
@@ -667,6 +685,8 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   inspectorWindowY: 500,
   inspectorWindowW: 300,
   inspectorWindowH: 320,
+  materialsUnify: false,
+  materialsSort: "countDesc",
 };
 
 /**

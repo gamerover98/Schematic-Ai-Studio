@@ -5369,6 +5369,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           documentSize={docState?.size ?? null}
           onswap={swapBlockFields}
           {materials}
+          materialsUnify={settings.ui.materialsUnify}
+          onmaterialsunifychange={(unify) => void patchUi({ materialsUnify: unify })}
+          materialsSort={settings.ui.materialsSort}
+          onmaterialssortchange={(sort) => void patchUi({ materialsSort: sort })}
           onfill={fillSelection}
           onreplace={replaceInSelection}
           ondelete={() => void deleteSelection()}

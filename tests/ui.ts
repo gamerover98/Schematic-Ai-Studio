@@ -213,7 +213,7 @@ import {
   withBlocksAdded,
   writeSpelling,
 } from "../src/renderer/src/lib/block_spelling.js";
-import { formatCount, materialAction } from "../src/renderer/src/lib/materials.js";
+import { formatCount, materialAction, materialRows } from "../src/renderer/src/lib/materials.js";
 import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/shared/block_mix.js";
 import { MAP_PLANES } from "../src/shared/distribution_map.js";
 import { averageColour } from "../src/renderer/src/lib/icon_colour.js";
@@ -5260,7 +5260,7 @@ console.log("\n--- the materials, as an inventory ---");
   const slots = readFileSync(path.join(RENDERER, "lib", "MaterialsInventory.svelte"), "utf8");
   check("the corner of a slot carries the short count", slots.includes("{formatCount(slot.count)}"));
   check("...and the hover the exact one", /count=\{hoveredSlot\?\.count \?\? null\}/.test(slots));
-  check("air is the last slot", /\.\.\.palette\.map[\s\S]{0,200}\.\.\.\(air > 0 \? \[\{ block: AIR/.test(slots));
+  check("the slots are drawn from the rows, air among them", /materialRows\(palette, air,/.test(slots));
 
   const tools = readFileSync(path.join(RENDERER, "lib", "SelectionTools.svelte"), "utf8");
   const stateArm = tools.slice(tools.indexOf('case "state":'), tools.indexOf('case "none":'));
@@ -5300,6 +5300,71 @@ console.log("\n--- the materials, as an inventory ---");
   check(
     "Replace takes a slot's other half with it",
     (replaceArm.match(/\[material, \.\.\.slot\.pair\]/g) ?? []).length === 2,
+  );
+
+  /*
+   * The bar over the slots: states merged, a search, an order. A long list
+   * -- a redstone build is a slot per wire shape and power -- is read by
+   * name as often as by count.
+   */
+  const palette = [
+    { block: "minecraft:vine[east=true,north=false]", count: 3 },
+    { block: "minecraft:vine[east=false,north=true]", count: 2 },
+    { block: "minecraft:stone", count: 4 },
+    { block: "minecraft:piston[extended=true,facing=up]", count: 1, pair: ["minecraft:piston_head[facing=up,short=false,type=normal]"] },
+    { block: "minecraft:piston[extended=false,facing=up]", count: 1 },
+  ];
+  const listed = (options: Partial<{ unify: boolean; sort: "countDesc" | "countAsc" | "nameAsc" | "nameDesc"; query: string }>, air = 7) =>
+    materialRows(palette, air, { unify: false, sort: "countDesc", query: "", ...options }).map(
+      (row) => row.block.replace(/^minecraft:/, "") + " " + row.count,
+    );
+  equal("most first, air last", listed({}), [
+    "stone 4",
+    "vine[east=true,north=false] 3",
+    "vine[east=false,north=true] 2",
+    "piston[extended=false,facing=up] 1",
+    "piston[extended=true,facing=up] 1",
+    "air 7",
+  ]);
+  equal("fewest first, and air is still last", listed({ sort: "countAsc" }).at(-1), "air 7");
+  equal("by name, either way", [listed({ sort: "nameAsc" })[0], listed({ sort: "nameDesc" })[0]], [
+    "piston[extended=false,facing=up] 1",
+    "vine[east=true,north=false] 3",
+  ]);
+  equal("merged, a block is one slot whatever its states", listed({ unify: true }), [
+    "vine 5",
+    "stone 4",
+    "piston 2",
+    "air 7",
+  ]);
+  const mergedPiston = materialRows(palette, 0, { unify: true, sort: "countDesc", query: "" }).find(
+    (row) => row.block === "minecraft:piston",
+  );
+  equal(
+    "...and keeps a pair whose other half is another block",
+    mergedPiston?.pair,
+    ["minecraft:piston_head[facing=up,short=false,type=normal]"],
+  );
+  equal("a search matches the states too", listed({ query: "east=true" }), ["vine[east=true,north=false] 3"]);
+  equal(
+    "...reads a space as an underscore",
+    materialRows([{ block: "minecraft:oak_slab[type=top]", count: 1 }], 0, {
+      unify: false,
+      sort: "countDesc",
+      query: "oak slab",
+    }).length,
+    1,
+  );
+  equal("...ignores the namespace", listed({ query: "minecraft:stone" }), ["stone 4"]);
+  equal("...and finds air when asked for it", listed({ query: "air" }), ["air 7"]);
+  equal("no air slot when there is none", listed({}, 0).includes("air 0"), false);
+
+  const inventory = readFileSync(path.join(RENDERER, "lib", "MaterialsInventory.svelte"), "utf8");
+  check("the slots are the rows the bar asks for", inventory.includes("materialRows(palette, air, { unify, sort, query })"));
+  check(
+    "the merge and the order are settings, the search is not",
+    app.includes("patchUi({ materialsUnify: unify })") && app.includes("patchUi({ materialsSort: sort })") &&
+      !/patchUi\(\{[^}]*query/.test(app),
   );
 }
 

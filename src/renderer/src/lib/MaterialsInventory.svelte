@@ -12,18 +12,28 @@
    * A slot is also the quickest way to say "this one" to the tools above it.
    * What each click means is `materialAction`'s, a plain module, so it can be
    * stated in a check rather than found in a handler.
+   *
+   * The bar above the slots is for the lists that outgrew a glance: a search,
+   * an order, and states merged into one slot per block. What each of those
+   * does is `materialRows`, in the same module. The search is the window's
+   * and forgotten with it; the order and the merge are settings, because they
+   * are how somebody likes to read the list rather than what they are looking
+   * for now.
    */
   import type { PaletteCount } from "../../../shared/ipc.js";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
+  import { MATERIALS_SORTS, type MaterialsSort } from "../../../shared/settings.js";
   import BlockTooltip from "./BlockTooltip.svelte";
   import Icon from "./Icon.svelte";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { shortName } from "./block_spelling.js";
   import type { AnchorRect } from "./floating.js";
   import { t } from "./i18n.svelte.js";
-  import { AIR, formatCount, materialAction, type MaterialAction } from "./materials.js";
+  import { formatCount, materialAction, materialRows, type MaterialAction, type MaterialRow } from "./materials.js";
 
   interface Props {
+    /** The heading the bar sits beside: whose materials these are. */
+    title: string;
     /** Most common first, air left out: `DocumentState.palette`'s rule. */
     palette: readonly PaletteCount[];
     air: number;
@@ -34,6 +44,11 @@
     /** Whose materials these are, for what the share in the hover is of. */
     scope: "selection" | "document";
     legacy?: LegacyIndex | null;
+    /** One slot per block whatever its states; `UiSettings.materialsUnify`. */
+    unify: boolean;
+    onunifychange: (unify: boolean) => void;
+    sort: MaterialsSort;
+    onsortchange: (sort: MaterialsSort) => void;
     /**
      * A slot, clicked. `pair` is the far halves the slot also stands for --
      * a bed's head beside its foot -- which a replace has to name as well.
@@ -41,12 +56,35 @@
     onaction: (slot: { block: string; pair: readonly string[] }, action: MaterialAction) => void;
   }
 
-  const { palette, air, outside, cells, scope, legacy = null, onaction }: Props = $props();
+  const {
+    title,
+    palette,
+    air,
+    outside,
+    cells,
+    scope,
+    legacy = null,
+    unify,
+    onunifychange,
+    sort,
+    onsortchange,
+    onaction,
+  }: Props = $props();
 
-  const slots = $derived<{ block: string; count: number; air: boolean; pair: readonly string[] }[]>([
-    ...palette.map((entry) => ({ block: entry.block, count: entry.count, air: false, pair: entry.pair ?? [] })),
-    ...(air > 0 ? [{ block: AIR, count: air, air: true, pair: [] }] : []),
-  ]);
+  let query = $state("");
+
+  const slots = $derived<MaterialRow[]>(materialRows(palette, air, { unify, sort, query }));
+
+  /*
+   * Written out once per order rather than built from the value, because the
+   * catalogue is checked against the keys the source asks for by name.
+   */
+  const sortLabels = $derived<Record<MaterialsSort, string>>({
+    countDesc: t("materials.sort.countDesc"),
+    countAsc: t("materials.sort.countAsc"),
+    nameAsc: t("materials.sort.nameAsc"),
+    nameDesc: t("materials.sort.nameDesc"),
+  });
 
   /** What the shares are of: the cells that hold something, air included. */
   const inside = $derived(Math.max(1, cells - outside));
@@ -54,7 +92,7 @@
   const icons = $derived(blockIcons());
   $effect(() => {
     void iconsReady();
-    requestBlockIcons(palette.map((entry) => entry.block));
+    requestBlockIcons(slots.filter((slot) => !slot.air).map((slot) => slot.block));
   });
 
   let elements = $state<(HTMLButtonElement | null)[]>([]);
@@ -77,11 +115,7 @@
     hovered = null;
   }
 
-  function act(
-    slot: { block: string; air: boolean; pair: readonly string[] },
-    event: MouseEvent,
-    button: number,
-  ): void {
+  function act(slot: MaterialRow, event: MouseEvent, button: number): void {
     const action = materialAction(
       { button, ctrl: event.ctrlKey || event.metaKey, shift: event.shiftKey },
       slot.air,
@@ -94,36 +128,73 @@
   const hoveredSlot = $derived(hovered === null ? null : (slots[hovered.index] ?? null));
 </script>
 
-<div class="inventory">
-  <!-- Keyed on the block: a palette names each state once, and air is not in it. -->
-  {#each slots as slot, index (slot.block)}
-    <button
-      type="button"
-      class="slot"
-      class:air={slot.air}
-      bind:this={elements[index]}
-      aria-label={t("materials.slot", { block: slot.block, count: slot.count.toLocaleString() })}
-      onclick={(event) => act(slot, event, 0)}
-      oncontextmenu={(event) => {
-        event.preventDefault();
-        act(slot, event, 2);
-      }}
-      onpointerenter={() => hoverStart(index)}
-      onpointerleave={hoverEnd}
-      onfocus={() => hoverStart(index)}
-      onblur={hoverEnd}
-    >
-      {#if slot.air}
-        <span class="glyph"><Icon name="air" size={22} weight={1.6} /></span>
-      {:else if icons.get(slot.block)}
-        <img src={icons.get(slot.block)} alt="" width="32" height="32" />
-      {:else}
-        <span class="pending" aria-hidden="true">{shortName(slot.block).slice(0, 2)}</span>
-      {/if}
-      <span class="count" aria-hidden="true">{formatCount(slot.count)}</span>
-    </button>
-  {/each}
+<div class="head">
+  <span class="heading">{title}</span>
+  <label class="unify" title={t("materials.unifyHint")}>
+    <input
+      type="checkbox"
+      checked={unify}
+      onchange={(event) => onunifychange((event.currentTarget as HTMLInputElement).checked)}
+    />
+    {t("materials.unify")}
+  </label>
 </div>
+
+<div class="bar">
+  <input
+    class="search"
+    type="search"
+    placeholder={t("materials.search")}
+    aria-label={t("materials.search")}
+    bind:value={query}
+  />
+  <select
+    class="order"
+    aria-label={t("materials.sort")}
+    title={t("materials.sort")}
+    value={sort}
+    onchange={(event) => onsortchange((event.currentTarget as HTMLSelectElement).value as MaterialsSort)}
+  >
+    {#each MATERIALS_SORTS as option (option)}
+      <option value={option}>{sortLabels[option]}</option>
+    {/each}
+  </select>
+</div>
+
+{#if slots.length === 0}
+  <p class="note">{t("materials.noMatch", { query: query.trim() })}</p>
+{:else}
+  <div class="inventory">
+    <!-- Keyed on the block: a palette names each state once, and air is not in it. -->
+    {#each slots as slot, index (slot.block)}
+      <button
+        type="button"
+        class="slot"
+        class:air={slot.air}
+        bind:this={elements[index]}
+        aria-label={t("materials.slot", { block: slot.block, count: slot.count.toLocaleString() })}
+        onclick={(event) => act(slot, event, 0)}
+        oncontextmenu={(event) => {
+          event.preventDefault();
+          act(slot, event, 2);
+        }}
+        onpointerenter={() => hoverStart(index)}
+        onpointerleave={hoverEnd}
+        onfocus={() => hoverStart(index)}
+        onblur={hoverEnd}
+      >
+        {#if slot.air}
+          <span class="glyph"><Icon name="air" size={22} weight={1.6} /></span>
+        {:else if icons.get(slot.block)}
+          <img src={icons.get(slot.block)} alt="" width="32" height="32" />
+        {:else}
+          <span class="pending" aria-hidden="true">{shortName(slot.block).slice(0, 2)}</span>
+        {/if}
+        <span class="count" aria-hidden="true">{formatCount(slot.count)}</span>
+      </button>
+    {/each}
+  </div>
+{/if}
 
 {#if outside > 0}
   <p class="note">{t("materials.outside", { count: outside.toLocaleString() })}</p>
@@ -140,6 +211,51 @@
 />
 
 <style>
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .heading {
+    font-weight: 600;
+  }
+
+  .unify {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .unify input {
+    margin: 0;
+  }
+
+  .bar {
+    display: flex;
+    gap: 4px;
+  }
+
+  .search {
+    flex: 1;
+    min-width: 0;
+    padding: 3px 6px;
+    font-size: 11px;
+  }
+
+  .order {
+    flex: 0 0 auto;
+    max-width: 45%;
+    padding: 3px 4px;
+    font-size: 11px;
+  }
+
   /*
    * Scrolls inside itself rather than growing the window, at a share of the
    * window's height -- the list's old rule, kept: drag the panel taller and the

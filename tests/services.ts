@@ -2019,6 +2019,9 @@ console.log("\n--- settings coercion ---");
     inspectorWindowY: 480,
     inspectorWindowW: 380,
     inspectorWindowH: 400,
+    // Neither the default, for the same reason.
+    materialsUnify: true,
+    materialsSort: "nameDesc",
     /*
      * `hotbar` and `hotbarSlot` were here and belong to a *document* now,
      * keyed on its path, so they are no longer part of the window's state.
@@ -2028,6 +2031,11 @@ console.log("\n--- settings coercion ---");
   } satisfies UiSettings;
 
   equal("every ui field survives a round-trip", coerceUi(ui), ui);
+  equal(
+    "an order the materials list does not have falls back to most first",
+    coerceUi({ ...ui, materialsSort: "sideways" }).materialsSort,
+    "countDesc",
+  );
 
   // Every field the opposite of its default, so a `coerceMcp` that dropped one
   // and substituted the default could not survive the comparison below.

@@ -39,6 +39,7 @@ import {
   type UpdateSettings,
   PANEL_SIZE,
   bindAddressRefusal,
+  isMaterialsSort,
 } from "../../shared/settings.js";
 
 function isProvider(value: unknown): value is Provider {
@@ -91,6 +92,10 @@ export function coerceUi(raw: unknown): UiSettings {
       DEFAULT_UI_SETTINGS.inspectorWindowH,
       PANEL_SIZE.minHeight,
     ),
+    materialsUnify: source.materialsUnify === true,
+    materialsSort: isMaterialsSort(source.materialsSort)
+      ? source.materialsSort
+      : DEFAULT_UI_SETTINGS.materialsSort,
     /*
      * `hotbar` and `hotbarSlot` were here and are gone: a hotbar belongs to a
      * document now, keyed on its path, not to the window. `sidebarTab` went
