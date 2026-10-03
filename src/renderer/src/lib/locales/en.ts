@@ -503,6 +503,8 @@ export const en = {
   "blockState.title": "Block states",
   "blockState.none": "This block has no block states.",
   "blockState.default": "default ({value})",
+  "blockState.defaultShort": "default",
+  "blockState.useDefault": "Back to the default ({value})",
   "blockState.hint": "Only this block of the mix changes; neighbour rules still apply when it is placed.",
   "blockState.reset": "Reset",
   "blockState.legacyVariants": "Data values of this block",
@@ -515,7 +517,7 @@ export const en = {
   "inspector.at": "at ({x}, {y}, {z})",
   "inspector.blockStates": "Block states",
   "inspector.blockStatesHint":
-    "Changing one places the block again — undoable like any edit. Greyed rows are states this block can hold but does not; type a value to add one.",
+    "Changing one places the block again — undoable like any edit. Greyed rows are states this block can hold but does not; type a value, or tick the box, to add one.",
   "inspector.noBlockStates": "This block has no block states.",
   "inspector.unset": "not set",
   "inspector.removeProperty": "Remove {name}",

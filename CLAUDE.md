@@ -3659,6 +3659,18 @@ the same reasoning that keeps `waterlogged` out of what a placed block is born
 with. Removing something that was not there costs nothing, because
 `runTransaction` pushes no undo step for a recorder with no commands.
 
+**A true-or-false state is a checkbox, and it has three states, not two.**
+`PropertyRow.kind` is `boolean` exactly when the legal values are `true` and
+`false`, so it is read off the registry rather than kept as a list of names.
+Unset is the checkbox's `indeterminate` state (`lib/indeterminate.ts`, because
+that is a DOM property with no HTML attribute). Drawing it as an unticked box
+would claim `false` about a property the block does not carry and the game
+fills in itself. A value from a file that is neither word keeps its text field
+(`showsAsCheckbox`), or the first click would overwrite something nobody chose.
+In `BlockStateModal` the box shows the *effective* value, dimmed when it is the
+default, with a button that takes the property back off. That is what the
+other rows' "default (…)" option means.
+
 One consequence worth knowing before it is reported as a bug: the pass
 **normalises**, so a lone staircase carrying `shape=inner_left` becomes
 `straight` on the next edit near it. That is faithful — a schematic's stored

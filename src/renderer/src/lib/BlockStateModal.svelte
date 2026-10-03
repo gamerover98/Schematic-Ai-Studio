@@ -20,7 +20,7 @@
   import Icon from "./Icon.svelte";
   import { canonicalBlock, readSpelling, writeSpelling } from "./block_spelling.js";
   import { placePopover, type AnchorRect } from "./floating.js";
-  import { propertyRows } from "./inspector_rows.js";
+  import { propertyRows, showsAsCheckbox } from "./inspector_rows.js";
   import { t } from "./i18n.svelte.js";
 
   interface Props {
@@ -179,7 +179,35 @@
       {#each rows as row (row.name)}
         <li>
           <label for={`state-${row.name}`} class:unset={row.value === null}>{row.name}</label>
-          {#if row.values}
+          {#if showsAsCheckbox(row)}
+            <!--
+              A true-or-false state is a checkbox showing what the block will
+              be: the value if one is written, the default dimmed if not. A
+              click writes the opposite of what is shown, and the button beside
+              it takes the property back off, which is what "default" means
+              in the select the other rows keep.
+            -->
+            <span class="bool" class:inherited={row.value === null}>
+              <input
+                id={`state-${row.name}`}
+                type="checkbox"
+                checked={(row.value ?? defaults[row.name]) === "true"}
+                onchange={(event) => setProperty(row.name, event.currentTarget.checked ? "true" : "false")}
+              />
+              {#if row.value === null}
+                <span class="note">{t("blockState.defaultShort")}</span>
+              {:else}
+                <button
+                  class="reset"
+                  onclick={() => setProperty(row.name, "")}
+                  title={t("blockState.useDefault", { value: defaults[row.name] ?? "—" })}
+                  aria-label={t("blockState.useDefault", { value: defaults[row.name] ?? "—" })}
+                >
+                  <Icon name="close" size={11} weight={2.4} />
+                </button>
+              {/if}
+            </span>
+          {:else if row.values}
             <select
               id={`state-${row.name}`}
               value={row.value ?? ""}
@@ -306,10 +334,47 @@
   }
 
   .rows select,
-  .rows input {
+  .rows input:not([type="checkbox"]) {
     width: 100%;
     min-width: 0;
     font-size: 12px;
+  }
+
+  .bool {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .bool input {
+    margin: 0;
+  }
+
+  /* The box shows the default, and says so by being quieter than a value
+     somebody wrote. */
+  .bool.inherited input {
+    opacity: 0.55;
+  }
+
+  .bool .note {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .bool .reset {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+
+  .bool .reset:hover {
+    color: var(--text);
   }
 
   .foot {

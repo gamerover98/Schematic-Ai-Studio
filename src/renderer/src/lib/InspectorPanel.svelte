@@ -51,7 +51,8 @@
    * clean -- the same reasoning that keeps `waterlogged` out of the defaults.
    */
   import type { BlockInspection } from "../../../shared/ipc.js";
-  import { propertyRows } from "./inspector_rows.js";
+  import { propertyRows, showsAsCheckbox } from "./inspector_rows.js";
+  import { indeterminate } from "./indeterminate.js";
   import BannerPatternEditor from "./BannerPatternEditor.svelte";
   import Icon from "./Icon.svelte";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
@@ -180,14 +181,35 @@
           {#each rows as row (row.name)}
             <li>
               <span class="key" class:unset={row.value === null}>{row.name}</span>
-              <input
-                value={row.value ?? ""}
-                placeholder={row.value === null ? t("inspector.unset") : undefined}
-                list={row.values ? `values-${row.name}` : undefined}
-                disabled={busy}
-                spellcheck="false"
-                onchange={(event) => onchangeproperty(row.name, event.currentTarget.value)}
-              />
+              <!--
+                A true-or-false state is a checkbox: `waterlogged`, `lit`,
+                `open`, a fence's arms. Unset is the box's third state rather
+                than "false", because the property is absent and the game
+                decides it -- and a value from a file that is neither word keeps
+                its text field, which a checkbox would overwrite on first click.
+              -->
+              {#if showsAsCheckbox(row)}
+                <label class="bool" class:unset={row.value === null}>
+                  <input
+                    type="checkbox"
+                    checked={row.value === "true"}
+                    use:indeterminate={row.value === null}
+                    disabled={busy}
+                    aria-label={row.name}
+                    onchange={(event) => onchangeproperty(row.name, event.currentTarget.checked ? "true" : "false")}
+                  />
+                  <span>{row.value ?? t("inspector.unset")}</span>
+                </label>
+              {:else}
+                <input
+                  value={row.value ?? ""}
+                  placeholder={row.value === null ? t("inspector.unset") : undefined}
+                  list={row.values ? `values-${row.name}` : undefined}
+                  disabled={busy}
+                  spellcheck="false"
+                  onchange={(event) => onchangeproperty(row.name, event.currentTarget.value)}
+                />
+              {/if}
               <!--
                 Only on a row that has something to remove. The column is a
                 fixed width either way, so the fields stay lined up rather than
@@ -204,7 +226,7 @@
                   <Icon name="close" size={12} weight={2.4} />
                 </button>
               {/if}
-              {#if row.values}
+              {#if row.values && !showsAsCheckbox(row)}
                 <datalist id={`values-${row.name}`}>
                   {#each row.values as option (option)}
                     <option value={option}></option>
@@ -304,6 +326,24 @@
      not part of the block yet. */
   .key.unset {
     opacity: 0.55;
+  }
+
+  .props .bool {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  .props .bool.unset {
+    color: var(--text-dim);
+  }
+
+  .props .bool input {
+    margin: 0;
   }
 
   .props li button.remove {

@@ -204,7 +204,7 @@ import {
 } from "../src/renderer/src/lib/look_filter.js";
 import { en } from "../src/renderer/src/lib/locales/en.js";
 import { BANNER_EDITOR_URL } from "../src/shared/banner_patterns.js";
-import { propertyRows } from "../src/renderer/src/lib/inspector_rows.js";
+import { propertyKind, propertyRows, showsAsCheckbox } from "../src/renderer/src/lib/inspector_rows.js";
 import {
   canonicalBlock,
   isAirBlock,
@@ -4349,6 +4349,44 @@ console.log("\n--- the inspector's block-state rows ---");
   // into whichever row slid into its place.
   const order = propertyRows("minecraft:campfire", { waterlogged: "true" }).map((row) => row.name);
   equal("the rows are in name order however they are set", order, [...order].sort());
+
+  /*
+   * A true-or-false state is a checkbox, and was a text field you typed the
+   * word `true` into. The kind is decided from the legal values, so every
+   * boolean the registry knows is one -- not a list of names somebody keeps.
+   */
+  const kinds = Object.fromEntries(campfire.map((row) => [row.name, row.kind]));
+  equal("`lit` and `waterlogged` are booleans", [kinds.lit, kinds.waterlogged], ["boolean", "boolean"]);
+  equal("...and `facing` is a choice", kinds.facing, "choice");
+  equal(
+    "a fence's arms are booleans too",
+    propertyRows("minecraft:oak_fence", {}).filter((row) => row.kind === "boolean").map((row) => row.name),
+    ["east", "north", "south", "waterlogged", "west"],
+  );
+  equal("a property nobody knows the values of is free text", odd[0].kind, "free");
+  equal("...and so is anything on an unknown block", propertyRows("minecraft:nonsense", { a: "1" })[0].kind, "free");
+  equal("a two-value property that is not true/false is a choice", propertyKind(["top", "bottom"]), "choice");
+
+  // Unset is the box's third state, and a value from a file that is neither
+  // word keeps its text field: a checkbox would overwrite it on the first click.
+  const lantern = (value: string | null) => ({ name: "hanging", value, values: ["true", "false"], kind: "boolean" as const });
+  check("an unset boolean is drawn as a checkbox", showsAsCheckbox(lantern(null)));
+  check("...and a set one", showsAsCheckbox(lantern("false")));
+  check("...but not one holding something else, which keeps its text", !showsAsCheckbox(lantern("yes")));
+
+  for (const file of ["InspectorPanel.svelte", "BlockStateModal.svelte"]) {
+    const source = readFileSync(path.join(RENDERER, "lib", file), "utf8");
+    check(
+      `${file} draws a boolean as a checkbox`,
+      source.includes("showsAsCheckbox(row)") && source.includes('type="checkbox"'),
+    );
+  }
+  check(
+    "the inspector shows an unset boolean as the box's third state",
+    readFileSync(path.join(RENDERER, "lib", "InspectorPanel.svelte"), "utf8").includes(
+      "use:indeterminate={row.value === null}",
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
