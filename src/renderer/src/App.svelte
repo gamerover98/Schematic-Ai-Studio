@@ -4304,7 +4304,16 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         to: mixSpecOf(to),
       }),
     );
-    reportChange(outcome?.changed ?? null);
+    /*
+     * Unlike a fill, a replace cannot be checked by looking: the cells it
+     * found may be anywhere in the selection, so it says how many.
+     */
+    const changed = outcome?.changed ?? null;
+    if (changed !== null && changed > 0) {
+      status = { tone: "ok", text: tn("status.replaced", changed) };
+    } else {
+      reportChange(changed);
+    }
   }
 
   /**

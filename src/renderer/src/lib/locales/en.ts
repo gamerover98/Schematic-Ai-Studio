@@ -973,6 +973,8 @@ export const en = {
   "status.copied": "Copied {count} blocks. Move the selection, Ctrl+V to paste, Esc to stop.",
   "status.cut": "Cut {count} blocks. Move the selection, Ctrl+V to paste, Esc to stop.",
   "status.nothingMatched": "No blocks matched, so nothing changed.",
+  "status.replaced.one": "Replaced 1 block.",
+  "status.replaced.other": "Replaced {count} blocks.",
   "status.restored.one": "Went back 1 edit. The conversation before it was kept.",
   "status.restored.other": "Went back {count} edits. The conversation before it was kept.",
   "startup.lead": "Getting the block library ready. This happens once per launch.",
