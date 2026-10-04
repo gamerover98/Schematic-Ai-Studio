@@ -229,6 +229,24 @@ import {
 } from "../src/renderer/src/lib/block_drag.js";
 import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/shared/block_mix.js";
 import { MAP_PLANES } from "../src/shared/distribution_map.js";
+import {
+  brushSpec,
+  cornerBox,
+  cornerClick,
+  cornerSpec,
+  creativeKey,
+  ghostFaces,
+  nextTool,
+  reachOf,
+  reached,
+  resized,
+  shouldTouch,
+  strokeSpacing,
+  takesCorners,
+  toolMode,
+} from "../src/renderer/src/lib/creative_tools.js";
+import { DEFAULT_CREATIVE_SETTINGS } from "../src/shared/creative.js";
+import { shapeCells } from "../src/shared/shapes.js";
 import { averageColour } from "../src/renderer/src/lib/icon_colour.js";
 import {
   arcBetween,
@@ -6216,6 +6234,168 @@ console.log("\n--- Icons ---");
     "...and so does the browse button beside a block field, where it was reported",
     browse.includes("place-items: center") && browse.includes("padding: 0"),
   );
+}
+
+// --- the creative tools ----------------------------------------------------
+//
+// The rules are `creative_tools.ts`'s, a plain module because the gestures run
+// from the viewer's loop and pointer handlers, which this harness composites no
+// frames for. The geometry under them is `shapes.ts`', held to WorldEdit in
+// `tests/session.ts`; here are the counts that say the tools ask it the
+// right question.
+console.log("\n--- the creative tools ---");
+{
+  const settings = DEFAULT_CREATIVE_SETTINGS;
+  equal(
+    "B steps through the tools and comes back round",
+    [nextTool("place"), nextTool("brush"), nextTool("shape"), nextTool("walls")],
+    ["brush", "shape", "walls", "place"],
+  );
+  equal("only the shape and walls tools take corners", [takesCorners("place"), takesCorners("brush"), takesCorners("shape"), takesCorners("walls")], [false, false, true, true]);
+
+  // The brush is centred on the block aimed at, VoxelSniper's ball brush.
+  const ball = brushSpec({ shape: "sphere", radius: 3, mode: "all" }, { x: 10, y: 10, z: 10 }, false);
+  equal("a brush is centred on the block aimed at", ball.box, { minX: 7, minY: 7, minZ: 7, maxX: 13, maxY: 13, maxZ: 13 });
+  equal("...and a sphere of radius 3 is //sphere 3", shapeCells(ball).count, 179);
+  const standing = brushSpec({ shape: "sphere", radius: 3, mode: "all" }, { x: 10, y: 0, z: 10 }, true);
+  equal(
+    "on the build grid it stands on the floor, so a stroke there never reaches below the origin",
+    [standing.box.minY, standing.box.maxY],
+    [0, 6],
+  );
+  const disc = brushSpec({ shape: "disc", radius: 3, mode: "all" }, { x: 0, y: 4, z: 0 }, true);
+  equal("a disc is one layer, the one aimed at, standing or not", [disc.box.minY, disc.box.maxY, disc.kind, disc.axis], [4, 4, "cylinder", "y"]);
+  equal("...and is //cyl 3 one block tall", shapeCells(disc).count, 37);
+  const cube = brushSpec({ shape: "cube", radius: 1, mode: "all" }, { x: 0, y: 0, z: 0 }, false);
+  equal("a cube brush is every cell of its box", [cube.kind, shapeCells(cube).count], ["box", 27]);
+  equal("a brush of radius 0 is one block", shapeCells(brushSpec({ shape: "sphere", radius: 0, mode: "all" }, { x: 2, y: 2, z: 2 }, false)).count, 1);
+
+  // Half a radius between touches, never less than a block.
+  equal("the stroke's spacing is half the radius, at least one block", [strokeSpacing(0), strokeSpacing(1), strokeSpacing(4), strokeSpacing(9)], [1, 1, 2, 4.5]);
+  check("the first touch of a stroke always lands", shouldTouch(null, { x: 0, y: 0, z: 0 }, 8));
+  check("...a radius-0 brush touches every next cell", shouldTouch({ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, 0));
+  check("...but not the cell it is already on", !shouldTouch({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, 0));
+  check("...a radius-4 brush waits for two blocks", !shouldTouch({ x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 0 }, 4) && shouldTouch({ x: 0, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }, 4));
+
+  /*
+   * A stroke never lands on what it has already reached, or a held button
+   * grows spheres towards the camera off the near side of the last one --
+   * which it did, in the app, until this rule.
+   */
+  {
+    const touch = brushSpec({ shape: "sphere", radius: 2, mode: "all" }, { x: 10, y: 10, z: 10 }, false);
+    const trail = [reachOf(touch)];
+    check("the top of a sphere just painted is reached: the next touch does not land on it", reached(trail, { x: 10, y: 12, z: 10 }));
+    check("...nor does the floor of a crater just rubbed out, a block past it", reached(trail, { x: 10, y: 7, z: 10 }));
+    check("...but open ground two blocks past the edge is free", !reached(trail, { x: 10, y: 10, z: 14 }));
+    check("...and a stroke with no touches has reached nothing", !reached([], { x: 10, y: 10, z: 10 }));
+  }
+
+  // Two corners.
+  equal(
+    "corners on one level build as tall as the tool is set",
+    cornerBox({ x: 5, y: 3, z: 9 }, { x: 0, y: 3, z: 0 }, 4),
+    { minX: 0, minY: 3, minZ: 0, maxX: 5, maxY: 6, maxZ: 9 },
+  );
+  equal(
+    "a corner clicked higher up builds taller",
+    cornerBox({ x: 0, y: 3, z: 0 }, { x: 5, y: 12, z: 5 }, 4),
+    { minX: 0, minY: 3, minZ: 0, maxX: 5, maxY: 12, maxZ: 5 },
+  );
+  equal(
+    "...but ground a block uneven still builds the set height, not two blocks",
+    cornerBox({ x: 0, y: 4, z: 0 }, { x: 5, y: 3, z: 5 }, 4),
+    { minX: 0, minY: 3, minZ: 0, maxX: 5, maxY: 6, maxZ: 5 },
+  );
+  const walls = cornerSpec("walls", settings, { x: 9, y: 0, z: 0 }, { x: 0, y: 0, z: 9 });
+  equal("the walls tool builds //walls, 10x4x10 being 144 cells", [walls.kind, shapeCells(walls).count], ["walls", 144]);
+  const thick = cornerSpec("walls", { ...settings, walls: { ...settings.walls, thickness: 2 } }, { x: 0, y: 0, z: 0 }, { x: 9, y: 0, z: 9 });
+  equal("...two thick, 256", shapeCells(thick).count, 256);
+  const pyramid = cornerSpec(
+    "shape",
+    { ...settings, shape: { ...settings.shape, kind: "pyramid", height: 3 } },
+    { x: 0, y: 0, z: 0 },
+    { x: 4, y: 0, z: 4 },
+  );
+  equal("the shape tool draws its kind between the corners: //pyramid 3", shapeCells(pyramid).count, 35);
+  equal("each tool writes in its own mode", [toolMode("brush", { ...settings, brush: { ...settings.brush, mode: "empty" } }), toolMode("walls", { ...settings, walls: { ...settings.walls, mode: "filled" } })], ["empty", "filled"]);
+
+  const first = cornerClick(null, { x: 1, y: 2, z: 3 });
+  equal("the first right-click fixes a corner and builds nothing", [first.corner, first.build], [{ x: 1, y: 2, z: 3 }, null]);
+  const second = cornerClick(first.corner, { x: 4, y: 2, z: 6 });
+  equal("...the second builds between the two and starts over", [second.corner, second.build], [null, [{ x: 1, y: 2, z: 3 }, { x: 4, y: 2, z: 6 }]]);
+
+  // The keys, by physical key.
+  const key = (code: string, mods: { ctrl?: boolean; alt?: boolean; meta?: boolean } = {}, flying = true) =>
+    creativeKey({ code, ctrlKey: mods.ctrl === true, altKey: mods.alt === true, metaKey: mods.meta === true }, flying);
+  equal("[ and ] by position, with AltGr held as an Italian keyboard needs", [key("BracketLeft", { ctrl: true, alt: true }), key("BracketRight", { ctrl: true, alt: true }), key("BracketLeft")], ["smaller", "bigger", "smaller"]);
+  equal("B cycles, Ctrl held for a sprint included", [key("KeyB"), key("KeyB", { ctrl: true })], ["cycle", "cycle"]);
+  equal("...but Ctrl+B is the sidebar's while the keyboard is not flying", key("KeyB", { ctrl: true }, false), null);
+  equal("...and nothing else is a tool key", [key("KeyZ"), key("Tab"), key("KeyB", { meta: true })], [null, null, null]);
+  equal("[ and ] size the brush, and how tall a shape or a wall stands", [resized(settings, "brush", 1).brush.radius, resized(settings, "shape", -1).shape.height, resized(settings, "walls", 2).walls.height], [3, 4, 6]);
+  equal("...inside their ranges", [resized({ ...settings, brush: { ...settings.brush, radius: 0 } }, "brush", -1).brush.radius, resized({ ...settings, walls: { ...settings.walls, height: 1 } }, "walls", -1).walls.height], [0, 1]);
+  equal("...and the block in your hand has no size", resized(settings, "place", 1), settings);
+
+  /*
+   * The ghost is the outside of the cells, wound so its front faces outwards:
+   * every triangle's normal has to point from a cell in the shape to a cell
+   * that is not. A face wound backwards, or an inner face left in, fails here.
+   */
+  const ghostOf = (cells: ReturnType<typeof shapeCells>) => {
+    const faces = ghostFaces(cells);
+    const win = cells.window!;
+    const h = win.maxY - win.minY + 1;
+    const l = win.maxZ - win.minZ + 1;
+    const w = win.maxX - win.minX + 1;
+    const inside = (x: number, y: number, z: number) =>
+      x >= 0 && y >= 0 && z >= 0 && x < w && y < h && z < l && cells.mask[x * h * l + y * l + z] === 1;
+    let wrong = 0;
+    for (let i = 0; i < faces.length; i += 9) {
+      const a = [faces[i], faces[i + 1], faces[i + 2]];
+      const b = [faces[i + 3], faces[i + 4], faces[i + 5]];
+      const c = [faces[i + 6], faces[i + 7], faces[i + 8]];
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const centre = [0, 1, 2].map((k) => (a[k] + b[k] + c[k]) / 3);
+      const behind = centre.map((p, k) => Math.floor(p - n[k] * 0.25));
+      const front = centre.map((p, k) => Math.floor(p + n[k] * 0.25));
+      if (!inside(behind[0], behind[1], behind[2]) || inside(front[0], front[1], front[2])) wrong += 1;
+    }
+    return { triangles: faces.length / 9, wrong };
+  };
+  const one = ghostOf(shapeCells({ kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 } }));
+  equal("a ghost of one cell is its six faces", one, { triangles: 12, wrong: 0 });
+  const pair = ghostOf(shapeCells({ kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 } }));
+  equal("...two cells side by side are ten, the shared face is not drawn", pair, { triangles: 20, wrong: 0 });
+  const hollow = ghostOf(shapeCells({ kind: "sphere", box: { minX: 0, minY: 0, minZ: 0, maxX: 8, maxY: 8, maxZ: 8 }, hollow: true }));
+  check("...and every face of a hollow sphere faces out of it, inside and out", hollow.triangles > 0 && hollow.wrong === 0, JSON.stringify(hollow));
+
+  // Wired where it has to be, which only the source can say.
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const casts = viewer.match(/raycaster\.intersectObjects?\([^)]*\)/g) ?? [];
+  check("no raycast reaches the creative ghost", casts.every((cast) => !cast.includes("creative")), casts.join(" | "));
+  check("a stroke begins at the press", /onstroke\(\{ phase: "begin"/.test(viewer));
+  check(
+    "...and ends when the pointer is let go of, whatever let go of it",
+    /fly\.addEventListener\("unlock", \(\) => \{[^}]*endStroke\(\)/s.test(viewer),
+  );
+  check("in flight the camera follows a growth below the origin", viewer.includes('moved && cameraMode === "fly" && camera'));
+  check(
+    "the bar is flight's alone",
+    /\{#if docState && cameraMode === "fly"\}\s*<CreativeToolBar/.test(app),
+  );
+  check(
+    "...and so is the tool the viewer is told about",
+    app.includes('creative={docState && cameraMode === "fly" ? { settings: creative, corner: cornerAt } : null}'),
+  );
+  check(
+    "leaving flight forgets a first corner, not only Escape",
+    /const onPointerLock = \(\) => \{[^}]*if \(!pointerLocked\) cornerAt = null;/s.test(app),
+  );
+  const escapeCorner = app.indexOf('event.key === "Escape" && cornerAt !== null');
+  check("...and Escape does too, before the glow and the selection", escapeCorner >= 0 && escapeCorner < app.indexOf('event.key === "Escape" && glow !== null'));
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

@@ -109,6 +109,21 @@ import {
     type Vec3,
   } from "./gizmo.js";
   import { isSpuriousLook } from "./look_filter.js";
+  import {
+    MAX_GHOST_CELLS,
+    brushSpec,
+    cornerSpec,
+    ghostFaces,
+    reachOf,
+    reached,
+    shouldTouch,
+    takesCorners,
+    type Cell as CreativeCell,
+    type CreativeAim,
+    type StrokeEvent,
+  } from "./creative_tools.js";
+  import { shapeCells, type ShapeSpec } from "../../../shared/shapes.js";
+  import { boxVolume } from "../../../shared/regions.js";
   import { api } from "./bridge.svelte.js";
   import { COPLANAR_OFFSET, GRID_DIVISIONS, GRID_SIZE } from "./depth.js";
   import {
@@ -548,6 +563,19 @@ import { isTyping } from "./typing.js";
     cameraRequest?: CameraAimRequest | null;
     /** The answer, sent once the frame from that camera has been drawn. */
     oncameraaimed?: (reply: CameraAimReply) => void;
+    /**
+     * The creative tool in hand, in flight, or `null` for the block alone.
+     *
+     * With a brush the buttons paint and rub out while held; with the shape
+     * and walls tools the right button is a corner. A ghost of what the
+     * button would write follows the crosshair either way. `place` is the
+     * block in your hand and changes nothing here.
+     */
+    creative?: CreativeAim | null;
+    /** A brush stroke began, touched, or ended. See `StrokeEvent`. */
+    onstroke?: (event: StrokeEvent) => void;
+    /** A corner was clicked with the shape or walls tool. */
+    oncorner?: (at: CreativeCell) => void;
   }
 
   const {
@@ -614,6 +642,9 @@ import { isTyping } from "./typing.js";
     ongizmorelease,
     cameraRequest = null,
     oncameraaimed,
+    creative = null,
+    onstroke,
+    oncorner,
   }: Props = $props();
 
   /**
@@ -1867,6 +1898,230 @@ import { isTyping } from "./typing.js";
     void gridCell;
     void cameraMode;
     updateBuildGridMesh();
+  });
+
+  // ---------------------------------------------------------------------------
+  // The creative tools: the brush's stroke, the corners, and the ghost
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The stroke in progress: which button is painting, whether it is the
+   * rubber, where the last touch landed, and what every touch so far reached
+   * (`reachOf`) -- which the next one may not land in. `null` between strokes.
+   */
+  let stroke: {
+    button: number;
+    erase: boolean;
+    last: CreativeCell | null;
+    trail: ((x: number, y: number, z: number) => boolean)[];
+  } | null = null;
+
+  /** When the tool last looked at the crosshair; the outline's throttle. */
+  let creativeAt = -Infinity;
+
+  /** The ghost: the outside of what the button would write, and its box. */
+  let creativeGhost: THREE.Mesh | null = null;
+  let creativeEdges: THREE.LineSegments | null = null;
+  /** What the ghost's geometry was built for: its size and shape, not where it stands. */
+  let creativeGhostKey = "";
+  /** The colour it was last painted, and for which geometry. */
+  let creativeTint = "";
+
+  /** Ends the stroke, wherever it was: the release, the end of flight, a new tool. */
+  function endStroke(): void {
+    if (stroke === null) return;
+    stroke = null;
+    onstroke?.({ phase: "end" });
+  }
+
+  /**
+   * The cell a corner goes in: across the face aimed at, where a placed block
+   * would go -- so a wall's corner clicked on the ground stands on the ground
+   * -- or the build grid's cell when nothing is.
+   */
+  function cornerAtCrosshair(): CreativeCell | null {
+    const target = pickAtCrosshair();
+    if (target !== null) return target.place;
+    const cell = gridCellAtCrosshair();
+    return cell === null ? null : { x: cell.x, y: cell.y, z: cell.z };
+  }
+
+  /**
+   * What the tool would write right now, and where the stroke would touch.
+   *
+   * A brush is centred on the block aimed at; with nothing aimed at it stands
+   * on the build grid, except the rubber, which has nothing there to rub out.
+   * The corner tools build between the first corner and the cell aimed at,
+   * and before the first corner show the column it would start.
+   */
+  function creativeAim(): { spec: ShapeSpec; centre: CreativeCell } | null {
+    if (creative === null) return null;
+    const settings = creative.settings;
+    if (settings.tool === "brush") {
+      const target = pickAtCrosshair();
+      if (target !== null) {
+        const centre = { x: target.x, y: target.y, z: target.z };
+        return { spec: brushSpec(settings.brush, centre, false), centre };
+      }
+      if (stroke?.erase) return null;
+      const cell = gridCellAtCrosshair();
+      if (cell === null) return null;
+      const centre = { x: cell.x, y: cell.y, z: cell.z };
+      return { spec: brushSpec(settings.brush, centre, true), centre };
+    }
+    if (takesCorners(settings.tool)) {
+      const at = cornerAtCrosshair();
+      if (at === null) return null;
+      return { spec: cornerSpec(settings.tool, settings, creative.corner ?? at, at), centre: at };
+    }
+    return null;
+  }
+
+  /**
+   * Follows the crosshair with the ghost, and touches when the stroke is due.
+   *
+   * On the outline's throttle, for the outline's reason: this is one more
+   * raycast through the crosshair, and twenty a second is as often as the eye
+   * follows a box. A stroke touches at most that often too, which is also as
+   * often as main is asked to write one.
+   */
+  function updateCreative(now: number): void {
+    const active =
+      creative !== null && creative.settings.tool !== "place" && cameraMode === "fly" && flying;
+    if (!active) {
+      hideCreativeGhost();
+      return;
+    }
+    if (now - creativeAt < HIGHLIGHT_INTERVAL_MS) return;
+    creativeAt = now;
+
+    const aim = creativeAim();
+    if (aim === null) {
+      hideCreativeGhost();
+      return;
+    }
+    showCreativeGhost(aim.spec, stroke?.erase === true);
+    if (
+      stroke !== null &&
+      shouldTouch(stroke.last, aim.centre, creative!.settings.brush.radius) &&
+      !reached(stroke.trail, aim.centre)
+    ) {
+      stroke.last = aim.centre;
+      stroke.trail.push(reachOf(aim.spec));
+      onstroke?.({ phase: "touch", shape: aim.spec });
+    }
+  }
+
+  function hideCreativeGhost(): void {
+    if (creativeGhost) creativeGhost.visible = false;
+    if (creativeEdges) creativeEdges.visible = false;
+  }
+
+  /**
+   * Draws a shape's cells as a translucent ghost, never picked.
+   *
+   * The geometry is the outside of the cells `shapeCells` finds -- the same
+   * cells the edit will write, because it is the same function -- relative
+   * to the box's corner, so it is rebuilt only when the size or the shape
+   * changes and otherwise moved. Past `MAX_GHOST_CELLS` the box alone is
+   * drawn. It is held off the faces it shares with blocks already there by
+   * a polygon offset, the floor's arrangement turned the other way, and it
+   * writes no depth, so it never hides what is behind it.
+   *
+   * Nothing raycasts it: it is not under `loaded`, and `tests/ui.ts`
+   * refuses any `intersectObject` that names it.
+   */
+  function showCreativeGhost(spec: ShapeSpec, erase: boolean): void {
+    if (!scene) return;
+    const box = {
+      minX: Math.min(spec.box.minX, spec.box.maxX),
+      minY: Math.min(spec.box.minY, spec.box.maxY),
+      minZ: Math.min(spec.box.minZ, spec.box.maxZ),
+      maxX: Math.max(spec.box.minX, spec.box.maxX),
+      maxY: Math.max(spec.box.minY, spec.box.maxY),
+      maxZ: Math.max(spec.box.minZ, spec.box.maxZ),
+    };
+    const w = box.maxX - box.minX + 1;
+    const h = box.maxY - box.minY + 1;
+    const l = box.maxZ - box.minZ + 1;
+    const key = [spec.kind, w, h, l, spec.axis ?? "y", spec.hollow === true, spec.thickness ?? 1].join(":");
+    if (key !== creativeGhostKey) {
+      creativeGhostKey = key;
+      for (const old of [creativeGhost, creativeEdges]) {
+        if (!old) continue;
+        scene.remove(old);
+        old.geometry.dispose();
+        (old.material as THREE.Material).dispose();
+      }
+      creativeGhost = null;
+      creativeEdges = null;
+
+      const local = { minX: 0, minY: 0, minZ: 0, maxX: w - 1, maxY: h - 1, maxZ: l - 1 };
+      if (boxVolume(local) <= MAX_GHOST_CELLS) {
+        const faces = ghostFaces(shapeCells({ ...spec, box: local }));
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(faces, 3));
+        creativeGhost = new THREE.Mesh(
+          geometry,
+          new THREE.MeshBasicMaterial({
+            transparent: true,
+            opacity: 0.32,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -4,
+          }),
+        );
+        creativeGhost.renderOrder = 996;
+        creativeGhost.frustumCulled = false;
+        scene.add(creativeGhost);
+      }
+      creativeEdges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(w + 0.004, h + 0.004, l + 0.004)),
+        new THREE.LineBasicMaterial({ transparent: true, opacity: 0.55, depthTest: false }),
+      );
+      creativeEdges.renderOrder = 996;
+      scene.add(creativeEdges);
+    }
+    // The colour is read from the theme only when it can have changed: this
+    // runs twenty times a second, and the answer is almost always the same.
+    const tint = [erase, theme, creativeGhostKey].join(":");
+    if (tint !== creativeTint) {
+      creativeTint = tint;
+      const colour = themeColor(erase ? "--danger" : "--selection", erase ? 0xff6b6b : 0x6ea8fe);
+      if (creativeGhost) (creativeGhost.material as THREE.MeshBasicMaterial).color.copy(colour);
+      if (creativeEdges) (creativeEdges.material as THREE.LineBasicMaterial).color.copy(colour);
+    }
+    if (creativeGhost) {
+      creativeGhost.position.set(box.minX, box.minY, box.minZ);
+      creativeGhost.visible = true;
+    }
+    if (creativeEdges) {
+      creativeEdges.position.set(box.minX + w / 2, box.minY + h / 2, box.minZ + l / 2);
+      creativeEdges.visible = true;
+    }
+  }
+
+  function disposeCreativeGhost(): void {
+    for (const old of [creativeGhost, creativeEdges]) {
+      if (!old) continue;
+      scene?.remove(old);
+      old.geometry.dispose();
+      (old.material as THREE.Material).dispose();
+    }
+    creativeGhost = null;
+    creativeEdges = null;
+    creativeGhostKey = "";
+    creativeTint = "";
+  }
+
+  /*
+   * A new tool, or no tool, ends the stroke: a brush stroke that outlived its
+   * brush would go on painting with whatever replaced it.
+   */
+  $effect(() => {
+    const tool = creative?.settings.tool ?? null;
+    if (tool !== "brush") untrack(() => endStroke());
   });
 
   // ---------------------------------------------------------------------------
@@ -3655,6 +3910,9 @@ import { isTyping } from "./typing.js";
         // Keys held when the pointer released would otherwise stay held
         // forever: the keyup lands on whatever has focus next, not here.
         held.clear();
+        // The button that was painting is still down, and its release will
+        // land somewhere else -- the same reason, for the brush.
+        endStroke();
       });
 
       /*
@@ -3796,6 +4054,9 @@ import { isTyping } from "./typing.js";
         updateBuildGrid(performance.now());
         lap("build grid", t0);
         t0 = stamp();
+        updateCreative(performance.now());
+        lap("creative tool", t0);
+        t0 = stamp();
         // Every frame rather than on the throttle: the gizmo is sized from the
         // distance to the camera, so it would visibly swell and shrink in steps
         // during an orbit if it only kept up twenty times a second.
@@ -3853,6 +4114,27 @@ import { isTyping } from "./typing.js";
             ? { x: event.clientX, y: event.clientY, button: event.button }
             : null;
         if (event.altKey) altClicked = true;
+
+        /*
+         * A brush paints from the press, not the release: a stroke is the
+         * button held down, and the first touch lands where it went down.
+         * Either button, and only one at a time -- the second button of a
+         * chord would be a stroke inside a stroke.
+         */
+        if (
+          cameraMode === "fly" &&
+          fly?.isLocked &&
+          creative?.settings.tool === "brush" &&
+          (event.button === 0 || event.button === 2) &&
+          stroke === null &&
+          onstroke
+        ) {
+          stroke = { button: event.button, erase: event.button === 0, last: null, trail: [] };
+          onstroke({ phase: "begin", erase: stroke.erase });
+          creativeAt = -Infinity;
+          updateCreative(performance.now());
+          return;
+        }
 
         /*
          * The right button rotates, so this is the moment to decide what it
@@ -4057,6 +4339,12 @@ import { isTyping } from "./typing.js";
         const start = downAt;
         downAt = null;
 
+        // The release that ends a stroke ends nothing else.
+        if (stroke !== null) {
+          if (event.button === stroke.button) endStroke();
+          return;
+        }
+
         if (gizmoDrag !== null) {
           try {
             (event.target as Element).releasePointerCapture(event.pointerId);
@@ -4161,6 +4449,20 @@ import { isTyping } from "./typing.js";
         if (cameraMode === "fly") {
           if (!fly?.isLocked) {
             fly?.lock();
+            return;
+          }
+          // A brush's buttons are its stroke, handled at the press.
+          if (creative?.settings.tool === "brush") return;
+          /*
+           * The shape and walls tools take the right button for a corner:
+           * where a block would go, which is the cell across the face aimed
+           * at, or the build grid's cell when there is no block. The left
+           * button still breaks, so a wall can be cleared without changing
+           * tools.
+           */
+          if (creative !== null && takesCorners(creative.settings.tool) && event.button === 2) {
+            const corner = cornerAtCrosshair();
+            if (corner !== null) oncorner?.(corner);
             return;
           }
           if (!onbuild) return;
@@ -4292,6 +4594,7 @@ import { isTyping } from "./typing.js";
         controls?.dispose();
         disposeAaTarget();
         disposeGlow();
+        disposeCreativeGhost();
         for (const quad of [aaQuad, compassQuad]) {
           if (!quad) continue;
           quad.geometry.dispose();
@@ -4644,6 +4947,7 @@ import { isTyping } from "./typing.js";
       autoGrow,
       pivot,
       cameraRequest,
+      creative,
     ];
     void [hovered, gizmoHover, gridCell, flying, scene, deviceRatio];
     invalidate();
@@ -6414,6 +6718,22 @@ import { isTyping } from "./typing.js";
           previous.position.y !== payload.frame[1] ||
           previous.position.z !== payload.frame[2];
         applyDelta(previous, previousVoid, previousLod, payload, map);
+        /*
+         * In flight the camera goes where the build went.
+         *
+         * A growth below the origin moves the content up in the document,
+         * and the chunks with it, while the camera stays -- so the build
+         * jumped under somebody standing in it, and with a brush the next
+         * touch landed as far from the crosshair as it had jumped. Painting
+         * on the floor of a schematic does that on the first touch. In orbit
+         * nothing is held under the crosshair from one edit to the next, and
+         * the selection follows the content there already.
+         */
+        if (moved && cameraMode === "fly" && camera) {
+          camera.position.x += payload.frame[0] - previous.position.x;
+          camera.position.y += payload.frame[1] - previous.position.y;
+          camera.position.z += payload.frame[2] - previous.position.z;
+        }
         placeChunks(payload.frame);
         rebuildLodIndex();
         applyWireframe(previous, wireframe);
@@ -6497,7 +6817,11 @@ import { isTyping } from "./typing.js";
     -->
     <div class="overlay">
       {#if cameraMode === "fly"}
-        {flying ? t("viewport.hudFlying") : t("viewport.hudClickToFly")}
+        {flying
+          ? creative !== null && creative.settings.tool !== "place"
+            ? t("viewport.hudFlyingTool")
+            : t("viewport.hudFlying")
+          : t("viewport.hudClickToFly")}
       {:else}
         {t("viewport.hudOrbit")}
       {/if}

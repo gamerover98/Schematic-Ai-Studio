@@ -16,6 +16,20 @@
 
 import { tryParseMix } from "../../shared/block_mix.js";
 import {
+  BRUSH_RADIUS,
+  BRUSH_SHAPES,
+  CORNER_SHAPES,
+  CREATIVE_TOOLS,
+  DEFAULT_CREATIVE_SETTINGS,
+  TOOL_HEIGHT,
+  TOOL_THICKNESS,
+  type BrushSettings,
+  type CreativeSettings,
+  type ShapeToolSettings,
+  type WallToolSettings,
+} from "../../shared/creative.js";
+import { SHAPE_AXES, SHAPE_MODES } from "../../shared/shapes.js";
+import {
   DEFAULT_HOTBAR,
   DEFAULT_MCP_SETTINGS,
   DEFAULT_SETTINGS,
@@ -96,6 +110,19 @@ export function coerceUi(raw: unknown): UiSettings {
     materialsSort: isMaterialsSort(source.materialsSort)
       ? source.materialsSort
       : DEFAULT_UI_SETTINGS.materialsSort,
+    creative: coerceCreative(source.creative),
+    creativeWindowX: coordinate(source.creativeWindowX, DEFAULT_UI_SETTINGS.creativeWindowX),
+    creativeWindowY: coordinate(source.creativeWindowY, DEFAULT_UI_SETTINGS.creativeWindowY),
+    creativeWindowW: extent(
+      source.creativeWindowW,
+      DEFAULT_UI_SETTINGS.creativeWindowW,
+      PANEL_SIZE.minWidth,
+    ),
+    creativeWindowH: extent(
+      source.creativeWindowH,
+      DEFAULT_UI_SETTINGS.creativeWindowH,
+      PANEL_SIZE.minHeight,
+    ),
     /*
      * `hotbar` and `hotbarSlot` were here and are gone: a hotbar belongs to a
      * document now, keyed on its path, not to the window. `sidebarTab` went
@@ -104,6 +131,54 @@ export function coerceUi(raw: unknown): UiSettings {
      * newer build no longer has a meaning for.
      */
   };
+}
+
+/**
+ * The creative tools' settings, every field named, `coerceUi`'s rule one
+ * level down.
+ *
+ * A name that is not on its list falls back to the default rather than being
+ * kept: these are read by a gesture in flight, and a brush shape this build
+ * has never heard of is a right button that does nothing. Numbers are clamped
+ * rather than refused, because a radius of 40 written by hand still means
+ * "big".
+ */
+export function coerceCreative(raw: unknown): CreativeSettings {
+  const source = (raw !== null && typeof raw === "object" ? raw : {}) as Partial<CreativeSettings>;
+  const brush = (source.brush ?? {}) as Partial<BrushSettings>;
+  const shape = (source.shape ?? {}) as Partial<ShapeToolSettings>;
+  const walls = (source.walls ?? {}) as Partial<WallToolSettings>;
+  const defaults = DEFAULT_CREATIVE_SETTINGS;
+  return {
+    tool: oneOf(CREATIVE_TOOLS, source.tool, defaults.tool),
+    brush: {
+      shape: oneOf(BRUSH_SHAPES, brush.shape, defaults.brush.shape),
+      radius: within(brush.radius, BRUSH_RADIUS, defaults.brush.radius),
+      mode: oneOf(SHAPE_MODES, brush.mode, defaults.brush.mode),
+    },
+    shape: {
+      kind: oneOf(CORNER_SHAPES, shape.kind, defaults.shape.kind),
+      axis: oneOf(SHAPE_AXES, shape.axis, defaults.shape.axis),
+      hollow: shape.hollow === true,
+      thickness: within(shape.thickness, TOOL_THICKNESS, defaults.shape.thickness),
+      height: within(shape.height, TOOL_HEIGHT, defaults.shape.height),
+      mode: oneOf(SHAPE_MODES, shape.mode, defaults.shape.mode),
+    },
+    walls: {
+      height: within(walls.height, TOOL_HEIGHT, defaults.walls.height),
+      thickness: within(walls.thickness, TOOL_THICKNESS, defaults.walls.thickness),
+      mode: oneOf(SHAPE_MODES, walls.mode, defaults.walls.mode),
+    },
+  };
+}
+
+function oneOf<T extends string>(names: readonly T[], value: unknown, fallback: T): T {
+  return typeof value === "string" && (names as readonly string[]).includes(value) ? (value as T) : fallback;
+}
+
+function within(raw: unknown, range: { readonly min: number; readonly max: number }, fallback: number): number {
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.min(range.max, Math.max(range.min, Math.round(value))) : fallback;
 }
 
 /**

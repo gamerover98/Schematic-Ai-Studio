@@ -609,6 +609,46 @@ it: an edit without the key, an undo, a redo and **a save**
 (`markHistorySaved`). A touch that changes nothing pushes nothing and keeps it
 open. `tests/history.ts` fails if the save stops closing it.
 
+**In flight the right button is a tool.** `shared/creative.ts` names them --
+place, brush, shape, walls -- and keeps their settings in
+`UiSettings.creative`; `renderer/lib/creative_tools.ts` is the rules, plain for
+`selection_drag.ts`'s reason; `CreativeToolBar.svelte` sits over the hotbar in
+flight only, and `CreativeOptions.svelte` is the tool's floating window. B
+cycles and `[` `]` size, read off `event.code` because on an Italian keyboard
+they are AltGr chords and AltGr arrives as Ctrl+Alt. Every tool writes
+`EditRequest.shape` through `queueBuild`, with the hand's mix, so the ghost the
+viewer draws is `shapeCells`' cells and cannot disagree with the edit.
+
+- **A stroke never touches down inside what it has already reached**
+  (`reachOf`: each touch's shape grown by a block). The crosshair finds the
+  first block along its ray, and after a touch that is the touch's own output,
+  so a held button grew spheres towards the camera, or bored a tunnel away from
+  it, twenty times a second. Found by doing it: one second made a 32-wide
+  schematic 51. Nothing is drawn between two touches either: the line between
+  two surface points runs through the air or the ground.
+- **The brush is centred on the block aimed at** (VoxelSniper's ball brush),
+  and **stands on the build grid** when nothing is, or every touch on an empty
+  schematic's floor would reach below the origin. The rubber writes the empty
+  space block in `filled` mode, so it never grows anything.
+- **The first corner is the app's**, `cornerAt`, because what forgets it is
+  heard there: another tool, camera or document, Escape, and **the loss of the
+  pointer lock** -- the browser spends an Escape on releasing the lock, and
+  whether the keydown arrives as well is not something to build on.
+  `followShift` moves it with the content.
+- **Two corners build from the lower one up to the higher one or to the set
+  height, whichever is taller.** "The set height when level, the span
+  otherwise" was the plan, and turned a four-high wall on ground one block
+  uneven into a two-high one.
+- **In flight the camera follows a growth below the origin** (the delta path,
+  `moved`): the build used to jump under the crosshair, and the next touch
+  landed as far from it as it had jumped. Orbit is unchanged.
+
+`patchUi` is queued, and the tools are why: each write spreads `settings.ui`,
+which only moves when main answers, so two in one instant both spread the old
+block and the second undid the first. The options window opens beside the tool
+window, not against the right edge: `ToolWindow` keeps only a margin of a panel
+inside the pane, so one pushed past it hangs over the sidebar.
+
 **A selection may be several areas, and the gap between them is nobody's.**
 Shift+Alt+drag adds an area and Alt+click removes one. Shift+Alt+click inside
 an area makes it the active one. A plain Shift-drag or a click starts the

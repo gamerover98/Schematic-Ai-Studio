@@ -74,6 +74,19 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   } from "./lib/selection_history.js";
   import SchematicDialog from "./lib/SchematicDialog.svelte";
   import Hotbar from "./lib/Hotbar.svelte";
+  import CreativeToolBar from "./lib/CreativeToolBar.svelte";
+  import CreativeOptions from "./lib/CreativeOptions.svelte";
+  import {
+    cornerClick,
+    cornerSpec,
+    nextTool,
+    resized,
+    takesCorners,
+    toolMode,
+    type Cell as CreativeCell,
+    type StrokeEvent,
+  } from "./lib/creative_tools.js";
+  import type { CreativeSettings, CreativeTool } from "../../shared/creative.js";
   import CreativeInventory from "./lib/CreativeInventory.svelte";
   import { hasTextSelection, isTyping } from "./lib/typing.js";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
@@ -1020,6 +1033,142 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // The creative tools
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The creative tools' settings, mirrored locally like the hotbar.
+   *
+   * `[` and `]` repeat while held, and a write per press through main -- whose
+   * answer replaces `settings` -- would let a slower answer put the radius
+   * back under the next press. The mirror is what is on screen and what the
+   * next press reads; the write follows behind.
+   */
+  let creative = $state<CreativeSettings>(DEFAULT_UI_SETTINGS.creative);
+  let creativeWrite: ReturnType<typeof setTimeout> | null = null;
+  let creativeOptionsOpen = $state(false);
+  let creativeWindowX = $state(DEFAULT_UI_SETTINGS.creativeWindowX);
+  let creativeWindowY = $state(DEFAULT_UI_SETTINGS.creativeWindowY);
+  let creativeWindowW = $state(DEFAULT_UI_SETTINGS.creativeWindowW);
+  let creativeWindowH = $state(DEFAULT_UI_SETTINGS.creativeWindowH);
+
+  function setCreative(next: CreativeSettings): void {
+    creative = next;
+    if (creativeWrite !== null) clearTimeout(creativeWrite);
+    creativeWrite = setTimeout(() => {
+      creativeWrite = null;
+      void patchUi({ creative: $state.snapshot(creative) });
+    }, HOTBAR_WRITE_DELAY);
+  }
+
+  /**
+   * The pointer is locked: the view is flying and the keyboard is the
+   * camera's. `document.pointerLockElement` is the truth; this is a mirror of
+   * it the template can react to.
+   */
+  let pointerLocked = $state(false);
+
+  /**
+   * The first corner of a shape or a wall, waiting for the second.
+   *
+   * The app's rather than the viewer's, because what forgets it is heard here:
+   * Escape, the end of flight, another tool, another camera, another document.
+   * Moved with the content, like the selection, by `followShift`.
+   */
+  let cornerAt = $state<CreativeCell | null>(null);
+
+  /**
+   * The brush stroke in progress: its id, which every touch carries so main
+   * folds them into one undo step, and whether it is rubbing out.
+   */
+  let strokeId: string | null = null;
+  let strokeErase = false;
+
+  const hasDocument = $derived(docState !== null);
+
+  /*
+   * Anything that ends what the first corner was for forgets it: another tool,
+   * the other camera, the document going. Not on `docState` itself, which
+   * moves with every edit.
+   */
+  $effect(() => {
+    void creative.tool;
+    void cameraMode;
+    void hasDocument;
+    void framingEpoch;
+    untrack(() => {
+      cornerAt = null;
+    });
+  });
+
+  /** A tool chosen on the bar, which opens its options: clicking it is asking for them. */
+  function chooseTool(tool: CreativeTool): void {
+    setCreative({ ...creative, tool });
+    creativeOptionsOpen = tool !== "place";
+  }
+
+  /**
+   * A touch of the brush, written through the hand's road.
+   *
+   * `queueBuild`, not `runDocument`: a stroke is twenty touches a second at
+   * most, each one waits only for the touch before it, and none of them waits
+   * for the picture. Painting writes what the hand holds, mix and distribution
+   * and all -- the values are the cell's, so the pattern runs on from one
+   * touch to the next; rubbing out writes the empty space block, and only
+   * over blocks, which is also what keeps it from ever growing the schematic.
+   */
+  function onStroke(event: StrokeEvent): void {
+    if (event.phase === "begin") {
+      strokeId = crypto.randomUUID();
+      strokeErase = event.erase;
+      return;
+    }
+    if (event.phase === "end") {
+      strokeId = null;
+      return;
+    }
+    if (strokeId === null || docState === null || busy) return;
+    const stroke = strokeId;
+    const erase = strokeErase;
+    let mix: MixSpec;
+    try {
+      mix = erase ? singleMix(parseBlock(docState.voidBlock || "minecraft:air")) : mixSpecOf(placingBlock);
+    } catch (err) {
+      failed(err, t("task.painting"));
+      return;
+    }
+    const mode = erase ? "filled" : creative.brush.mode;
+    void queueBuild(t(erase ? "task.erasing" : "task.painting"), () =>
+      api().applyEdit({ kind: "shape", shape: event.shape, mix, mode, stroke }),
+    );
+  }
+
+  /**
+   * A right-click with the shape or walls tool: the first corner, or the
+   * second and the build. One edit, so one Ctrl+Z, whatever it drew.
+   */
+  function onCorner(at: CreativeCell): void {
+    const tool = creative.tool;
+    if (docState === null || busy || !takesCorners(tool)) return;
+    const step = cornerClick(cornerAt, at);
+    cornerAt = step.corner;
+    if (step.build === null) return;
+    const [first, second] = step.build;
+    const shape = cornerSpec(tool, creative, first, second);
+    let mix: MixSpec;
+    try {
+      mix = mixSpecOf(placingBlock);
+    } catch (err) {
+      failed(err, t("task.drawingShape"));
+      return;
+    }
+    const mode = toolMode(tool, creative);
+    void queueBuild(t(tool === "walls" ? "task.buildingWalls" : "task.drawingShape"), () =>
+      api().applyEdit({ kind: "shape", shape, mix, mode }),
+    );
+  }
+
   /**
    * A drag across the build grid, meaning "select this footprint".
    *
@@ -1613,7 +1762,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * previous instance last said.
      */
     const onPointerLock = () => {
-      void api().reportPointerLock(document.pointerLockElement !== null);
+      pointerLocked = document.pointerLockElement !== null;
+      void api().reportPointerLock(pointerLocked);
+      /*
+       * Leaving flight forgets a first corner, whatever left it. Escape is the
+       * usual way, and the browser spends that Escape on releasing the lock --
+       * whether the keydown reaches this window as well is not something to
+       * build on, so the corner goes with the lock rather than with the key.
+       */
+      if (!pointerLocked) cornerAt = null;
     };
     document.addEventListener("pointerlockchange", onPointerLock);
     onPointerLock();
@@ -1649,6 +1806,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         inspectorWindowY = settings.ui.inspectorWindowY;
         inspectorWindowW = settings.ui.inspectorWindowW;
         inspectorWindowH = settings.ui.inspectorWindowH;
+        creative = settings.ui.creative;
+        creativeWindowX = settings.ui.creativeWindowX;
+        creativeWindowY = settings.ui.creativeWindowY;
+        creativeWindowW = settings.ui.creativeWindowW;
+        creativeWindowH = settings.ui.creativeWindowH;
         clockTicks = settings.preview.timeOfDay;
         keyStatus = await api().getKeyStatus();
         step("settings", "done");
@@ -1917,6 +2079,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        * lose, and putting it out with the key that also drops the selection
        * would take the list it was lit from away with it.
        */
+      // A first corner waiting is the lightest thing of all to lose.
+      if (event.key === "Escape" && cornerAt !== null) {
+        event.preventDefault();
+        cornerAt = null;
+        return;
+      }
       if (event.key === "Escape" && glow !== null) {
         event.preventDefault();
         glow = null;
@@ -3179,6 +3347,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     }
     if (pivot !== null) {
       pivot = { x: pivot.x + shift[0], y: pivot.y + shift[1], z: pivot.z + shift[2] };
+    }
+    if (cornerAt !== null) {
+      cornerAt = { x: cornerAt.x + shift[0], y: cornerAt.y + shift[1], z: cornerAt.z + shift[2] };
     }
     lastSelection = selectionNow();
   }
@@ -5432,6 +5603,56 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     {/if}
 
     <!--
+      The creative tools, in flight only: there the right button builds, and
+      this says what it builds. The options window beside it follows the tool
+      in hand.
+    -->
+    {#if docState && cameraMode === "fly"}
+      <CreativeToolBar
+        settings={creative}
+        corner={cornerAt}
+        flying={pointerLocked}
+        keys={!inventoryOpen && !settingsOpen && !paletteOpen && schematicDialog === null}
+        optionsOpen={creativeOptionsOpen && creative.tool !== "place"}
+        ontool={chooseTool}
+        oncycle={() => setCreative({ ...creative, tool: nextTool(creative.tool) })}
+        onresize={(by) => setCreative(resized(creative, creative.tool, by))}
+        onoptions={() => (creativeOptionsOpen = !creativeOptionsOpen)}
+      />
+    {/if}
+    {#if docState && cameraMode === "fly" && creativeOptionsOpen && creative.tool !== "place"}
+      <ToolWindow
+        title={t("creative.optionsTitle", { tool: t(`creative.tool.${creative.tool}`) })}
+        x={creativeWindowX}
+        y={creativeWindowY}
+        width={creativeWindowW}
+        height={creativeWindowH}
+        closeLabel={t("common.close")}
+        onmove={(x, y) => {
+          creativeWindowX = x;
+          creativeWindowY = y;
+        }}
+        oncommit={(x, y) => {
+          creativeWindowX = x;
+          creativeWindowY = y;
+          void patchUi({ creativeWindowX: x, creativeWindowY: y });
+        }}
+        onresize={(w, h) => {
+          creativeWindowW = w;
+          creativeWindowH = h;
+        }}
+        onresizecommit={(w, h) => {
+          creativeWindowW = w;
+          creativeWindowH = h;
+          void patchUi({ creativeWindowW: w, creativeWindowH: h });
+        }}
+        onclose={() => (creativeOptionsOpen = false)}
+      >
+        <CreativeOptions settings={creative} onchange={setCreative} />
+      </ToolWindow>
+    {/if}
+
+    <!--
       The way back to the tools, and the reason "close" can mean close.
       Top-left, which is where the window itself opens, so the panel appears
       more or less from under the button that summoned it -- but below the
@@ -5639,6 +5860,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       theme={resolvedTheme}
       {cameraRequest}
       oncameraaimed={(reply) => api().reportCameraAimed(reply)}
+      creative={docState && cameraMode === "fly" ? { settings: creative, corner: cornerAt } : null}
+      onstroke={onStroke}
+      oncorner={onCorner}
     />
 
     <!--

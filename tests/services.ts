@@ -2022,6 +2022,17 @@ console.log("\n--- settings coercion ---");
     // Neither the default, for the same reason.
     materialsUnify: true,
     materialsSort: "nameDesc",
+    // Every field away from its default, one object down as well.
+    creative: {
+      tool: "walls",
+      brush: { shape: "disc", radius: 7, mode: "empty" },
+      shape: { kind: "pyramid", axis: "x", hollow: true, thickness: 3, height: 12, mode: "filled" },
+      walls: { height: 9, thickness: 2, mode: "empty" },
+    },
+    creativeWindowX: 500,
+    creativeWindowY: 120,
+    creativeWindowW: 300,
+    creativeWindowH: 410,
     /*
      * `hotbar` and `hotbarSlot` were here and belong to a *document* now,
      * keyed on its path, so they are no longer part of the window's state.
@@ -2036,6 +2047,42 @@ console.log("\n--- settings coercion ---");
     coerceUi({ ...ui, materialsSort: "sideways" }).materialsSort,
     "countDesc",
   );
+  /*
+   * The creative tools are read by a gesture in flight, so what is not a
+   * tool, a shape or a mode this build has is the default rather than kept,
+   * and a number is brought inside its range rather than refused.
+   */
+  {
+    const odd = coerceUi({
+      ...ui,
+      creative: {
+        tool: "terraform",
+        brush: { shape: "star", radius: 400, mode: "sideways" },
+        shape: { kind: "walls", axis: "w", hollow: "yes", thickness: 0, height: -3, mode: "all" },
+        walls: { height: "tall" },
+      },
+    }).creative;
+    equal(
+      "a tool, a shape or a mode this build does not have is the default",
+      [odd.tool, odd.brush.shape, odd.brush.mode, odd.shape.kind, odd.shape.axis],
+      ["place", "sphere", "all", "sphere", "y"],
+    );
+    equal(
+      "...walls are a tool and not something the shape tool draws",
+      odd.shape.kind,
+      DEFAULT_UI_SETTINGS.creative.shape.kind,
+    );
+    equal(
+      "...and numbers are clamped into range, or the default when they are not numbers",
+      [odd.brush.radius, odd.shape.thickness, odd.shape.height, odd.walls.height, odd.shape.hollow],
+      [32, 1, 1, 4, false],
+    );
+    equal(
+      "a settings file from before the creative tools comes back with all of them",
+      coerceUi({ sidebarWidth: 400 }).creative,
+      DEFAULT_UI_SETTINGS.creative,
+    );
+  }
 
   // Every field the opposite of its default, so a `coerceMcp` that dropped one
   // and substituted the default could not survive the comparison below.

@@ -8,6 +8,7 @@
  */
 
 import { isPrereleaseVersion } from "./app_version.js";
+import { DEFAULT_CREATIVE_SETTINGS, type CreativeSettings } from "./creative.js";
 
 export const PROVIDERS = [
   "OpenAI",
@@ -569,6 +570,19 @@ export interface UiSettings {
   materialsUnify: boolean;
   /** The order the materials list is in. */
   materialsSort: MaterialsSort;
+  /**
+   * The creative tools: which one the right button is in flight, and each
+   * one's size and shape. See `shared/creative.ts`.
+   */
+  creative: CreativeSettings;
+  /**
+   * The creative tool's options window, the third floating panel. Its own
+   * place for the inspector's reason: all three can be open at once.
+   */
+  creativeWindowX: number;
+  creativeWindowY: number;
+  creativeWindowW: number;
+  creativeWindowH: number;
 }
 
 /**
@@ -687,6 +701,15 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   inspectorWindowH: 320,
   materialsUnify: false,
   materialsSort: "countDesc",
+  creative: DEFAULT_CREATIVE_SETTINGS,
+  // Beside the tool window rather than under it: the inspector is under it,
+  // and in flight the middle of the view is where the crosshair is. Not
+  // against the right edge -- `ToolWindow` keeps only a margin of a panel
+  // inside the pane, so a panel pushed past it hangs over the sidebar.
+  creativeWindowX: 264,
+  creativeWindowY: 64,
+  creativeWindowW: 248,
+  creativeWindowH: 340,
 };
 
 /**

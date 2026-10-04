@@ -145,6 +145,24 @@ export const ICONS = {
   dot: { circles: [dot(12, 12, 4)] },
   ring: { circles: [{ cx: 12, cy: 12, r: 4 }] },
   sparkle: { filled: ["M12 3 L13.9 10.1 L21 12 L13.9 13.9 L12 21 L10.1 13.9 L3 12 L10.1 10.1 Z"] },
+  /** The block in your hand: one block, seen from a corner. */
+  block: { paths: ["M12 3 L20 7.5 V16.5 L12 21 L4 16.5 V7.5 Z", "M4 7.5 L12 12 L20 7.5", "M12 12 V21"] },
+  /** The brush: a handle, and the tip that paints. */
+  brush: {
+    paths: [
+      "M20 4 L12.5 11.5",
+      "M12.5 11.5 C9.5 10 6.5 12 6.5 15 C6.5 17.5 5.5 19 4 20 C8.5 20.5 13 19 13.5 15 C13.7 13.6 13.3 12.3 12.5 11.5 Z",
+    ],
+  },
+  /** A shape between two corners: a ball and its equator. */
+  shape: { circles: [{ cx: 12, cy: 12, r: 8 }], paths: ["M4 12 C4 15.5 20 15.5 20 12"] },
+  /** Walls, from above: a square round a square courtyard. */
+  walls: {
+    rects: [
+      { x: 4, y: 4, w: 16, h: 16, rx: 1 },
+      { x: 8.5, y: 8.5, w: 7, h: 7, rx: 0.5 },
+    ],
+  },
 } satisfies Record<string, IconShape>;
 
 export type IconName = keyof typeof ICONS;
