@@ -119,6 +119,7 @@ import {
 } from "../domain/grow.js";
 import { peelEmptyFaces } from "../domain/shrink.js";
 import { countMaterials, listMaterials } from "../domain/materials.js";
+import { findBlocks, type FindOptions, type FoundBlocks } from "../domain/find_blocks.js";
 import {
   bannerFormatOf,
   checkBannerPatterns,
@@ -139,7 +140,7 @@ import {
   MixSyntaxError,
   normalizeDistribution,
 } from "../../shared/block_mix.js";
-import { forEachUnionCell, MAX_BOXES, unionBounds, unionVolume } from "../../shared/regions.js";
+import { forEachUnionCell, MAX_BOXES, unionBounds, unionVolume, type Box } from "../../shared/regions.js";
 import { writeMix } from "../domain/mix.js";
 
 export interface DocumentSession {
@@ -416,11 +417,21 @@ export function selectionPalette(
     const whole = countMaterials(doc, null);
     return { palette: whole.palette, air: whole.air, outside: 0, cells: whole.walked };
   }
+  const { cells, inside } = areasInDocument(doc, request);
+  const counted = countMaterials(doc, inside);
+  return { palette: counted.palette, air: counted.air, outside: cells - counted.walked, cells };
+}
+
+/**
+ * The areas a request names, each cut to the document, and how many cells
+ * their union holds before the cut. Shared by the questions about a set of
+ * areas -- what is in them, and where a block is in them.
+ */
+function areasInDocument(doc: SchematicDocument, request: readonly RegionSpec[]): { cells: number; inside: Box[] } {
   if (request.length === 0 || request.length > MAX_BOXES) {
     throw new RegionCountError(request.length);
   }
   const asked = request.map(orderRegion);
-  const cells = unionVolume(asked);
   const inside = asked
     .map((box) => ({
       minX: Math.max(0, box.minX),
@@ -431,9 +442,33 @@ export function selectionPalette(
       maxZ: Math.min(doc.length - 1, box.maxZ),
     }))
     .filter((box) => box.minX <= box.maxX && box.minY <= box.maxY && box.minZ <= box.maxZ);
+  return { cells: unionVolume(asked), inside };
+}
 
-  const counted = countMaterials(doc, inside);
-  return { palette: counted.palette, air: counted.air, outside: cells - counted.walked, cells };
+/**
+ * Where some blocks are, in the selected areas or -- for `null` -- the whole
+ * document: the glow's shell, or a count and the first few positions for a
+ * model asking `find_blocks`. See `domain/find_blocks.ts`.
+ *
+ * A pattern is a palette spelling, read as a replace reads `from`: a bare id
+ * is the block in any state. A slot standing for a bed sends both halves.
+ */
+export function findInDocument(
+  session: DocumentSession,
+  request: { regions: readonly RegionSpec[] | null; patterns: readonly string[] },
+  options: FindOptions = {},
+): FoundBlocks & { frame: [number, number, number] } {
+  const { doc } = session;
+  const boxes = request.regions === null ? null : areasInDocument(doc, request.regions).inside;
+  const patterns = request.patterns
+    .map((pattern) => pattern.trim())
+    .filter((pattern) => pattern !== "")
+    .map((pattern) => parsePaletteEntry(pattern.split("[", 1)[0].includes(":") ? pattern : `minecraft:${pattern}`));
+  const found =
+    patterns.length === 0 || (boxes !== null && boxes.length === 0)
+      ? findBlocks(doc, [], [], options)
+      : findBlocks(doc, boxes, patterns, options);
+  return { ...found, frame: [...doc.frame] };
 }
 
 // ---------------------------------------------------------------------------

@@ -174,6 +174,10 @@ function fakeLifecycle(over: Partial<Lifecycle> & { log?: string[] } = {}): Life
       log.push("announce");
     },
     capture: async () => null,
+    glow: (request) => {
+      log.push(`glow:${request.patterns.join(",")}${request.regions === null ? "" : `@${request.regions.length}`}`);
+      return true;
+    },
     drawDistance: async () => 512,
     versions: async () => [{ id: "v1", label: "before the roof", at: 1 }],
     saveVersion: async (label) => {
@@ -514,6 +518,58 @@ try {
         "minecraft:red_bed 2 ",
       ],
     );
+    closeDocument();
+  }
+
+  /*
+   * Where a block is, which get_palette cannot say, and the glow a model
+   * lights to show the user. The count is main's; the window is only told
+   * what to light, and asks main for the shell itself.
+   */
+  console.log("\n--- find_blocks and highlight_blocks ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    setBlock(session.doc, 1, 2, 3, { namespacedName: "minecraft:diamond_ore", properties: {} });
+    setBlock(session.doc, 6, 0, 6, { namespacedName: "minecraft:diamond_ore", properties: {} });
+    setBlock(session.doc, 4, 4, 4, { namespacedName: "minecraft:oak_stairs", properties: { facing: "east" } });
+
+    const found = await attempt("find_blocks", { blocks: "diamond_ore", limit: 1 }, options(sink));
+    equal("find_blocks counts the whole schematic", found.total, 2);
+    equal("...gives the box holding them", found.bounds, { minX: 1, minY: 0, minZ: 3, maxX: 6, maxY: 2, maxZ: 6 });
+    equal("...and as many positions as asked, saying there are more", [(found.positions as unknown[]).length, typeof found.note], [1, "string"]);
+    equal(
+      "...or only a region, when given one",
+      (await attempt("find_blocks", { blocks: "diamond_ore", minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 7, maxZ: 7 }, options(sink))).total,
+      1,
+    );
+    equal(
+      "a bare name finds every state, as replace_blocks matches from",
+      (await attempt("find_blocks", { blocks: "oak_stairs,diamond_ore" }, options(sink))).total,
+      3,
+    );
+
+    const log: string[] = [];
+    const lit = await attempt("highlight_blocks", { blocks: "diamond_ore" }, options(sink, fakeLifecycle({ log })));
+    equal("highlight_blocks says how many it lit", [lit.lit, lit.total], [true, 2]);
+    equal("...and tells the window what, in a spelling main reads back", log, ["glow:minecraft:diamond_ore"]);
+    await attempt(
+      "highlight_blocks",
+      { blocks: "oak_stairs", region: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 } },
+      options(sink, fakeLifecycle({ log })),
+    );
+    equal("...with the box it was given", log[1], "glow:minecraft:oak_stairs@1");
+    const none = await attempt("highlight_blocks", { blocks: "minecraft:gold_block" }, options(sink, fakeLifecycle({ log })));
+    equal("...and says so when there is nothing to light", [none.lit, typeof none.note], [false, "string"]);
+    const out = await attempt("highlight_blocks", {}, options(sink, fakeLifecycle({ log })));
+    equal("no blocks put the glow out", [out.lit, log[3]], [false, "glow:"]);
+    const windowless = await attempt(
+      "highlight_blocks",
+      { blocks: "diamond_ore" },
+      options(sink, fakeLifecycle({ glow: () => false })),
+    );
+    check("with no window it is refused by name", String(windowless.refused ?? "").includes("no window"));
+    equal("none of it touched the schematic", [session.history.undoStack.length, sink.changed], [0, 0]);
     closeDocument();
   }
 

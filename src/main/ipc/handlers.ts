@@ -73,6 +73,9 @@ import {
   type MoveRegionRequest,
   type RegionMeshResponse,
   type SelectionPaletteRequest,
+  type FindBlocksRequest,
+  type FindBlocksResponse,
+  type GlowRequest,
   type SelectionPaletteResponse,
   type ApplyNbtRequest,
   type PackTexture,
@@ -130,6 +133,7 @@ import {
   clipboardMesh,
   regionMesh,
   selectionPalette,
+  findInDocument,
   editBlockEntityValue,
   EditTooLargeError,
   EmptyClipboardError,
@@ -493,6 +497,12 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     defaultRoot: async () => generatedDir(),
     bridgeFile: mcpBridgeFile(),
     capture: async (camera) => await captureViewport(getWindow(), camera),
+    glow: (request) => {
+      const window = getWindow();
+      if (window === null || window.isDestroyed()) return false;
+      window.webContents.send(IPC.glowBlocks, request satisfies GlowRequest);
+      return true;
+    },
     onStatus: (status) => {
       const window = getWindow();
       if (window && !window.isDestroyed()) {
@@ -1705,6 +1715,27 @@ ${report.stack}`),
       }
     },
   );
+
+  /*
+   * The glow's shell. Asked, like the materials, because what to light is the
+   * window's: a click in the list, or a model through `highlight_blocks`,
+   * which only tells the window what it asked for.
+   */
+  ipcMain.handle(IPC.docFindBlocks, async (_event, request: FindBlocksRequest): Promise<FindBlocksResponse> => {
+    try {
+      const found = findInDocument(requireSession(), request);
+      return {
+        ok: true,
+        total: found.total,
+        faces: found.faces,
+        scale: found.scale,
+        capped: found.capped,
+        frame: found.frame,
+      };
+    } catch (err) {
+      return failure(err);
+    }
+  });
 
   ipcMain.handle(
     IPC.docSelectionPalette,

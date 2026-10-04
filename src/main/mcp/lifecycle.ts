@@ -62,7 +62,10 @@ import {
   resolveCameraAim,
   type CameraPlacement,
 } from "../../shared/camera_aim.js";
-import type { CameraState } from "../../shared/ipc.js";
+import type { CameraState, GlowRequest } from "../../shared/ipc.js";
+import { findBlocks } from "../domain/find_blocks.js";
+import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { paletteEntryCacheKey, type PaletteEntry } from "../pipeline/types.js";
 
 /** Everything these tools need that they must not import for themselves. */
 export interface Lifecycle {
@@ -146,6 +149,11 @@ export interface Lifecycle {
    * move, and a camera stood behind the far plane photographs an empty sky.
    */
   drawDistance(): Promise<number>;
+  /**
+   * Lights blocks up in the user's viewport, or puts the glow out for no
+   * patterns. `false` when there is no window to tell.
+   */
+  glow(request: GlowRequest): boolean;
   /** The open schematic's own version history, newest first. */
   versions(): Promise<readonly { id: string; label: string; at: number }[]>;
   /** Snapshot the current state under a label. */
@@ -500,6 +508,106 @@ const PREVIEW: LifecycleSpec = {
   },
 };
 
+/**
+ * Points at something in the build the user is looking at.
+ *
+ * Beside `capture_viewport` for its reason: it changes nothing in the
+ * schematic, the undo stack or the clipboard, only what the window shows, and
+ * it needs the window, which only this table's host can reach. Not in
+ * `TOOL_SPECS`, so the chat inside the app does not have it -- it has no
+ * way to tell the window anything, and `find_blocks` answers the question.
+ *
+ * The count is found here, from the open document, and the window is told
+ * only *what* to light: it asks main for the shell itself, as a click in the
+ * materials list does, and keeps it current as the build changes.
+ */
+const HIGHLIGHT: LifecycleSpec = {
+  name: "highlight_blocks",
+  description:
+    "Lights blocks up in the user's 3D viewport with a glow that shows through walls, so you can show them what you mean: the cracked blocks, the stray dirt, the redstone. " +
+    "`blocks` is matched as find_blocks matches it: a block named without states in every state. " +
+    "Searches the whole schematic unless a region is given. The glow stays until the user presses Escape or clicks a material, " +
+    "or you call this again; call it with no `blocks` to put it out. Changes nothing in the schematic.",
+  schema: {
+    type: "object",
+    properties: {
+      blocks: { type: "string", description: "One block or several separated by commas. Omit to put the glow out." },
+      region: {
+        type: "object",
+        description: "Only the blocks inside this box, in blocks. Default: the whole schematic.",
+        properties: {
+          minX: AXIS_INTEGER,
+          minY: AXIS_INTEGER,
+          minZ: AXIS_INTEGER,
+          maxX: AXIS_INTEGER,
+          maxY: AXIS_INTEGER,
+          maxZ: AXIS_INTEGER,
+        },
+        required: ["minX", "minY", "minZ", "maxX", "maxY", "maxZ"],
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
+  },
+  readOnly: true,
+  destructive: false,
+  async run(host, args) {
+    const input = (args ?? {}) as { blocks?: unknown; region?: Box };
+    const blocks = typeof input.blocks === "string" ? input.blocks.trim() : "";
+    if (blocks === "") {
+      return host.glow({ patterns: [], regions: null })
+        ? { lit: false, note: "The glow is out." }
+        : { lit: false, note: "There is no window open, so nothing was lit." };
+    }
+    const session = host.session();
+    if (session === null) {
+      throw new McpRefusal("No schematic is open, so there is nothing to light. Use open_document or create_document first.");
+    }
+    let patterns: PaletteEntry[];
+    try {
+      patterns = parseMix(blocks).entries.map((entry) =>
+        parsePaletteEntry(entry.block.split("[", 1)[0].includes(":") ? entry.block : `minecraft:${entry.block}`),
+      );
+    } catch (err) {
+      throw new McpRefusal(err instanceof MixSyntaxError ? err.message : String(err));
+    }
+    const { doc } = session;
+    let region: Box | null = null;
+    if (input.region !== undefined) {
+      const r = input.region;
+      if (r.minX > r.maxX || r.minY > r.maxY || r.minZ > r.maxZ) {
+        throw new McpRefusal("Each min in region has to be at most its max.");
+      }
+      region = {
+        minX: Math.max(0, r.minX),
+        minY: Math.max(0, r.minY),
+        minZ: Math.max(0, r.minZ),
+        maxX: Math.min(doc.width - 1, r.maxX),
+        maxY: Math.min(doc.height - 1, r.maxY),
+        maxZ: Math.min(doc.length - 1, r.maxZ),
+      };
+    }
+    const outside =
+      region !== null && (region.minX > region.maxX || region.minY > region.maxY || region.minZ > region.maxZ);
+    const found = outside
+      ? { total: 0, bounds: null }
+      : findBlocks(doc, region === null ? null : [region], patterns, { faces: false });
+    const spelled = patterns.map(paletteEntryCacheKey);
+    const shown = host.glow({ patterns: spelled, regions: region === null || outside ? null : [region] });
+    if (!shown) {
+      throw new McpRefusal("There is no window open to light anything in. Ask the user to bring Schematic AI Studio to the front.");
+    }
+    return {
+      lit: found.total > 0,
+      total: found.total,
+      bounds: found.bounds,
+      ...(found.total === 0
+        ? { note: "None of those blocks is there, so nothing glows. get_palette lists how the blocks in the schematic are spelled." }
+        : {}),
+    };
+  },
+};
+
 function low(frame: Box, axis: "x" | "y" | "z"): number {
   return axis === "x" ? frame.minX : axis === "y" ? frame.minY : frame.minZ;
 }
@@ -849,6 +957,7 @@ export const LIFECYCLE_SPECS: readonly LifecycleSpec[] = [
 
   CAPTURE,
   PREVIEW,
+  HIGHLIGHT,
 ];
 
 export function findLifecycle(name: string): LifecycleSpec | null {

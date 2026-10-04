@@ -64,6 +64,7 @@ import {
   type SchematicDocument,
 } from "../domain/document.js";
 import { countMaterials } from "../domain/materials.js";
+import { findBlocks } from "../domain/find_blocks.js";
 import { unifyStates } from "../../shared/material_list.js";
 import type { TransactionScope } from "../domain/history.js";
 import {
@@ -155,6 +156,10 @@ const MAX_REPORTED_BLOCKS = 2048;
  * is four chances to give up and guess instead.
  */
 const MAX_DESCRIBED_BLOCKS = 16;
+
+/** How many positions `find_blocks` lists by default, and at most. */
+const DEFAULT_FOUND_POSITIONS = 64;
+const MAX_FOUND_POSITIONS = 1024;
 
 const regionSchema = {
   type: "object",
@@ -889,6 +894,68 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       const counted = countMaterials(context.doc, null).palette;
       const rows = args.unify === true ? unifyStates(counted) : counted;
       return { blocks: rows.slice(0, 128) };
+    },
+  },
+
+  {
+    /*
+     * Where a block is, which `get_palette` cannot say: it counts and stops.
+     * The same search the glow does (`domain/find_blocks.ts`), asked for a
+     * count, a box and the first cells instead of a shell.
+     *
+     * The whole schematic by default, unlike the tools that edit: "where are
+     * the diamonds" is a question about the build, and answering it about the
+     * selection would read as "there are none" whenever the selection is
+     * somewhere else.
+     */
+    name: "find_blocks",
+    description:
+      "Where blocks are in the schematic: how many, the box holding them, and the first positions. " +
+      "`blocks` is one block or several separated by commas, matched as replace_blocks matches `from`: " +
+      "a block named without states is found in every state, and spelling the states out finds only that one. " +
+      "Searches the whole schematic unless a region is given. Changes nothing.",
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        blocks: { type: "string" },
+        limit: {
+          type: "integer",
+          minimum: 0,
+          maximum: MAX_FOUND_POSITIONS,
+          description: `How many positions to list. Default ${DEFAULT_FOUND_POSITIONS}.`,
+        },
+      },
+      required: ["blocks"],
+      additionalProperties: false,
+    },
+    async run(context, args: Partial<RegionArgs> & { blocks: string; limit?: number }, id) {
+      const patterns = readMix(args.blocks).entries.map((entry) => toPattern(entry.block));
+      const explicit = ["minX", "minY", "minZ", "maxX", "maxY", "maxZ"].every(
+        (key) => typeof (args as Record<string, unknown>)[key] === "number",
+      );
+      const resolved = explicit ? resolveRegion(context, args) : null;
+      const limit = Math.max(0, Math.min(MAX_FOUND_POSITIONS, Math.floor(args.limit ?? DEFAULT_FOUND_POSITIONS)));
+      step(
+        context,
+        "find_blocks",
+        `looking for ${patterns.map((pattern) => pattern.namespacedName).join(", ")}` +
+          (resolved === null ? "" : ` in ${describeRegion(resolved.region)}`),
+        id,
+      );
+      const found = findBlocks(context.doc, resolved === null ? null : [resolved.region], patterns, {
+        faces: false,
+        positions: limit,
+      });
+      return {
+        total: found.total,
+        bounds: found.bounds,
+        positions: found.positions.map(([x, y, z]) => ({ x, y, z })),
+        ...(found.positions.length < found.total
+          ? { note: `Listed the first ${found.positions.length} of ${found.total}; narrow the region or raise limit.` }
+          : {}),
+        ...(resolved?.clamped === undefined ? {} : { clamped: resolved.clamped }),
+      };
     },
   },
 

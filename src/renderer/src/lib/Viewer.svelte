@@ -473,6 +473,12 @@ import { isTyping } from "./typing.js";
     /** The move was confirmed: put the region's corner here. */
     onghostcommit?: (to: { x: number; y: number; z: number }) => void;
     /**
+     * Blocks to light up through walls, as main found them: four integers a
+     * face, in content coordinates, standing at `frame` as the chunks do.
+     * `null` when nothing glows. See the glow section below.
+     */
+    glow?: { faces: Int32Array; scale: number; frame: readonly [number, number, number] } | null;
+    /**
      * What the transform gizmo is doing, and what it therefore draws.
      *
      * Owned by the app rather than here, because the floating bar and the
@@ -597,6 +603,7 @@ import { isTyping } from "./typing.js";
     ghost = null,
     ghostAt = null,
     onghostcommit,
+    glow = null,
     gizmoMode = "move",
     autoGrow = true,
     pivot = null,
@@ -1278,6 +1285,9 @@ import { isTyping } from "./typing.js";
     loaded?.position.set(frame[0], frame[1], frame[2]);
     voidLoaded?.position.set(frame[0], frame[1], frame[2]);
     lodLoaded?.position.set(frame[0], frame[1], frame[2]);
+    // The glow's shell is in content coordinates too, so it stands with them.
+    glowGroup?.position.set(frame[0], frame[1], frame[2]);
+    glowGroup?.updateMatrixWorld(true);
     loaded?.updateMatrixWorld(true);
     voidLoaded?.updateMatrixWorld(true);
     lodLoaded?.updateMatrixWorld(true);
@@ -3073,6 +3083,7 @@ import { isTyping } from "./typing.js";
     applyProjection(width / height);
     renderer.setSize(width, height, false);
     sizeAaTargetSoon();
+    sizeGlowTargetSoon();
     reportRect();
     invalidate();
   }
@@ -3504,9 +3515,18 @@ import { isTyping } from "./typing.js";
       if (choosing) shadowsFromFullDetail();
       applyLevels(choosing);
       let t0 = stamp();
+      // Before the scene's target is bound: see the glow section.
+      drawGlowMask();
+      lap("glow mask", t0);
+      t0 = stamp();
       renderer.setRenderTarget(aaTarget);
       renderer.render(scene, camera);
       lap("scene pass", t0);
+      if (aaTarget === null) {
+        t0 = stamp();
+        compositeGlow();
+        lap("glow", t0);
+      }
       t0 = stamp();
       drawCompass();
       lap("compass", t0);
@@ -3522,6 +3542,7 @@ import { isTyping } from "./typing.js";
         const wasAutoClear = renderer.autoClear;
         renderer.autoClear = false;
         renderer.render(aaScene, aaCamera);
+        compositeGlow();
         compositeCompass();
         renderer.autoClear = wasAutoClear;
         lap("anti-aliasing copy", t0);
@@ -4270,6 +4291,7 @@ import { isTyping } from "./typing.js";
         fly?.dispose();
         controls?.dispose();
         disposeAaTarget();
+        disposeGlow();
         for (const quad of [aaQuad, compassQuad]) {
           if (!quad) continue;
           quad.geometry.dispose();
@@ -4283,6 +4305,281 @@ import { isTyping } from "./typing.js";
       error = err instanceof Error ? err.message : String(err);
       return () => {};
     }
+  });
+
+  // --- the glow --------------------------------------------------------------
+
+  /*
+   * Blocks lit up through walls: what a click on a material shows, and what
+   * `highlight_blocks` asks for. The game's Glowing effect is the model -- an
+   * outline round the thing, seen wherever it is -- because "where are the
+   * diamonds" is asked about blocks that are mostly *inside* the build.
+   *
+   * Two passes, and only while something glows:
+   *
+   * 1. **The mask.** The shell main found (`domain/find_blocks.ts`: one quad
+   *    per face of a matching cell that does not touch another) drawn white,
+   *    with no depth test, into a target of its own -- before the scene's
+   *    target is bound, so the frame still binds that target once and draws
+   *    the world in one render. The target has no depth buffer and no
+   *    samples, so it resolves nothing.
+   * 2. **The outline**, laid on the *canvas* by a fullscreen quad: wherever
+   *    the mask is empty but a pixel within a couple of pixels of it is not,
+   *    plus a light veil over the inside. On the canvas and never into the
+   *    multisampled target, because a second render into that one is a second
+   *    resolve. With anti-aliasing it goes after the copy, and without it
+   *    after the scene pass; either way before the compass, which stays on top.
+   *
+   * `glowScene` is its own scene, never `scene` and never under `loaded`, so
+   * no raycast reaches it and no light or shadow pass sees it. A
+   * `capture_viewport` photographs it, which is meant: the model sees what it
+   * pointed at.
+   */
+  let glowScene: THREE.Scene | null = null;
+  let glowGroup: THREE.Group | null = null;
+  let glowMesh: THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial> | null = null;
+  let glowTarget: THREE.WebGLRenderTarget | null = null;
+  let glowComposite: THREE.Scene | null = null;
+  let glowCamera: THREE.OrthographicCamera | null = null;
+  let glowQuad: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial> | null = null;
+  let glowResizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * A face from four integers: the corner of its cell, `uScale` blocks a side
+   * -- one, or more when main had too many faces to send one block at a time
+   * -- and the side in `FACE_STEPS`' order
+   * (east, west, up, down, south, north). `o` puts the quad on that side of
+   * the cell, and `u` and `v` are chosen so `u x v` points outwards: the
+   * corners then wind anticlockwise seen from outside, which is what
+   * `FrontSide` keeps. Only the silhouette matters to the mask, so the back
+   * faces are not worth drawing.
+   */
+  const GLOW_FACE_VERTEX = `
+    uniform float uScale;
+    attribute vec2 corner;
+    attribute ivec4 face;
+    void main() {
+      vec3 o = vec3(0.0);
+      vec3 u;
+      vec3 v;
+      if (face.w == 0) { o = vec3(1.0, 0.0, 0.0); u = vec3(0.0, 1.0, 0.0); v = vec3(0.0, 0.0, 1.0); }
+      else if (face.w == 1) { u = vec3(0.0, 0.0, 1.0); v = vec3(0.0, 1.0, 0.0); }
+      else if (face.w == 2) { o = vec3(0.0, 1.0, 0.0); u = vec3(0.0, 0.0, 1.0); v = vec3(1.0, 0.0, 0.0); }
+      else if (face.w == 3) { u = vec3(1.0, 0.0, 0.0); v = vec3(0.0, 0.0, 1.0); }
+      else if (face.w == 4) { o = vec3(0.0, 0.0, 1.0); u = vec3(1.0, 0.0, 0.0); v = vec3(0.0, 1.0, 0.0); }
+      else { u = vec3(0.0, 1.0, 0.0); v = vec3(1.0, 0.0, 0.0); }
+      vec3 at = vec3(face.xyz) + (o + u * corner.x + v * corner.y) * uScale;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(at, 1.0);
+    }
+  `;
+
+  const GLOW_MASK_FRAGMENT = `
+    void main() {
+      gl_FragColor = vec4(1.0);
+    }
+  `;
+
+  const GLOW_COPY_VERTEX = `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `;
+
+  /**
+   * The outline: the mask's largest value on two rings round the pixel,
+   * minus the mask at the pixel, so only the outside of the silhouette is
+   * drawn -- and a fifth of the colour over the inside, so a block lit in
+   * plain view reads as lit too. Linear filtering softens the stair-steps an
+   * edge would otherwise carry.
+   *
+   * The colour arrives in sRGB and goes out as it came: this is a
+   * `ShaderMaterial` drawing onto the canvas, so nothing converts it.
+   */
+  const GLOW_COPY_FRAGMENT = `
+    uniform sampler2D uMask;
+    uniform vec2 uTexel;
+    uniform float uRadius;
+    uniform vec3 uColor;
+    varying vec2 vUv;
+    void main() {
+      float inside = texture2D(uMask, vUv).r;
+      float near = 0.0;
+      for (int i = 0; i < 16; i++) {
+        float angle = float(i) * 0.39269908;
+        vec2 reach = vec2(cos(angle), sin(angle)) * uRadius * uTexel;
+        near = max(near, texture2D(uMask, vUv + reach).r);
+        near = max(near, texture2D(uMask, vUv + reach * 0.5).r);
+      }
+      float alpha = max(clamp(near - inside, 0.0, 1.0), inside * 0.2);
+      if (alpha <= 0.0) discard;
+      gl_FragColor = vec4(uColor, alpha);
+    }
+  `;
+
+  /** The two scenes, built at the first glow and kept: they cost nothing. */
+  function ensureGlowScene(): void {
+    if (glowScene !== null) return;
+    glowScene = new THREE.Scene();
+    glowGroup = new THREE.Group();
+    glowScene.add(glowGroup);
+    glowMesh = new THREE.Mesh(
+      new THREE.InstancedBufferGeometry(),
+      new THREE.ShaderMaterial({
+        uniforms: { uScale: { value: 1 } },
+        vertexShader: GLOW_FACE_VERTEX,
+        fragmentShader: GLOW_MASK_FRAGMENT,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.FrontSide,
+      }),
+    );
+    // Its geometry has no positions to take a bounding sphere of, and the
+    // shell is wherever the blocks are; the GPU clips what is off screen.
+    glowMesh.frustumCulled = false;
+    glowMesh.visible = false;
+    glowGroup.add(glowMesh);
+
+    glowComposite = new THREE.Scene();
+    glowCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    glowQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      new THREE.ShaderMaterial({
+        uniforms: {
+          uMask: { value: null },
+          uTexel: { value: new THREE.Vector2(1, 1) },
+          uRadius: { value: 2 },
+          uColor: { value: new THREE.Color() },
+        },
+        vertexShader: GLOW_COPY_VERTEX,
+        fragmentShader: GLOW_COPY_FRAGMENT,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    );
+    glowQuad.frustumCulled = false;
+    glowComposite.add(glowQuad);
+    applyGlowColour();
+  }
+
+  /** `--glow`, in sRGB: see `GLOW_COPY_FRAGMENT`. */
+  function applyGlowColour(): void {
+    glowQuad?.material.uniforms.uColor.value.copy(themeColor("--glow", 0xffd84a)).convertLinearToSRGB();
+  }
+
+  /** Whether anything glows this frame. */
+  function glowing(): boolean {
+    return glowMesh !== null && glowMesh.visible;
+  }
+
+  /**
+   * Puts the shell main sent on screen, or takes the glow down.
+   *
+   * The faces go to the GPU as they came, an `Int32Array` read as an
+   * integer attribute: four numbers a quad, where vertex positions would be
+   * thirty-six. They are content coordinates, so the group stands at the
+   * document's frame, where `placeChunks` stands the chunks.
+   */
+  function setGlow(shell: { faces: Int32Array; scale: number; frame: readonly [number, number, number] } | null): void {
+    if (shell === null || shell.faces.length === 0) {
+      if (glowMesh !== null && glowMesh.visible) {
+        glowMesh.visible = false;
+        glowMesh.geometry.dispose();
+        glowMesh.geometry = new THREE.InstancedBufferGeometry();
+      }
+      glowTarget?.dispose();
+      glowTarget = null;
+      invalidate();
+      return;
+    }
+    ensureGlowScene();
+    if (!glowMesh || !glowGroup) return;
+    const geometry = new THREE.InstancedBufferGeometry();
+    geometry.setIndex([0, 1, 2, 0, 2, 3]);
+    geometry.setAttribute("corner", new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+    geometry.setAttribute("face", new THREE.InstancedBufferAttribute(shell.faces, 4));
+    geometry.instanceCount = shell.faces.length / 4;
+    glowMesh.geometry.dispose();
+    glowMesh.geometry = geometry;
+    glowMesh.material.uniforms.uScale.value = shell.scale;
+    glowMesh.visible = true;
+    glowGroup.position.set(shell.frame[0], shell.frame[1], shell.frame[2]);
+    glowGroup.updateMatrixWorld(true);
+    invalidate();
+  }
+
+  /** The mask, into its own target; see the section's header. */
+  function drawGlowMask(): void {
+    if (!renderer || !camera || !glowScene || !glowing()) return;
+    if (glowTarget === null) {
+      const size = renderer.getDrawingBufferSize(viewSize);
+      glowTarget = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+    }
+    renderer.getClearColor(clearColour);
+    const clearAlpha = renderer.getClearAlpha();
+    renderer.setClearColor(0x000000, 0);
+    renderer.setRenderTarget(glowTarget);
+    renderer.render(glowScene, camera);
+    renderer.setClearColor(clearColour, clearAlpha);
+  }
+
+  /** The outline, onto whatever is bound -- the canvas, by the time it is called. */
+  function compositeGlow(): void {
+    if (!renderer || !glowComposite || !glowCamera || !glowQuad || glowTarget === null || !glowing()) return;
+    const uniforms = glowQuad.material.uniforms;
+    uniforms.uMask.value = glowTarget.texture;
+    (uniforms.uTexel.value as THREE.Vector2).set(1 / glowTarget.width, 1 / glowTarget.height);
+    // Two CSS pixels wide, on any display.
+    uniforms.uRadius.value = Math.max(1, Math.min(4, Math.round(2 * renderer.getPixelRatio())));
+    const wasAutoClear = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.render(glowComposite, glowCamera);
+    renderer.autoClear = wasAutoClear;
+  }
+
+  /**
+   * The mask follows the canvas on `AA_RESIZE_MS`' terms: a resize fires on
+   * every step of a drag, and until it catches up the outline is drawn from
+   * the old mask stretched over the new canvas, which nobody can tell apart.
+   */
+  function sizeGlowTargetSoon(): void {
+    if (glowTarget === null) return;
+    if (glowResizeTimer !== null) clearTimeout(glowResizeTimer);
+    glowResizeTimer = setTimeout(() => {
+      glowResizeTimer = null;
+      if (!renderer || glowTarget === null) return;
+      const size = renderer.getDrawingBufferSize(viewSize);
+      glowTarget.setSize(Math.max(1, size.x), Math.max(1, size.y));
+      invalidate();
+    }, AA_RESIZE_MS);
+  }
+
+  function disposeGlow(): void {
+    if (glowResizeTimer !== null) clearTimeout(glowResizeTimer);
+    glowTarget?.dispose();
+    glowTarget = null;
+    for (const mesh of [glowMesh, glowQuad]) {
+      if (!mesh) continue;
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+    }
+  }
+
+  $effect(() => {
+    const shell = glow;
+    untrack(() => setGlow(shell));
+  });
+
+  $effect(() => {
+    void theme;
+    applyGlowColour();
+    invalidate();
   });
 
   // --- reactive prop application -------------------------------------------
@@ -4342,6 +4639,7 @@ import { isTyping } from "./typing.js";
       documentSizeProp,
       ghost,
       ghostAt,
+      glow,
       gizmoMode,
       autoGrow,
       pivot,

@@ -47,6 +47,9 @@
   --grid-major: #516079;
   --grid-minor: #202937;
   --selection: #6ea8fe;
+  /* What a click on a material lights up, through walls. Warm, so it is never
+     read as the selection, which is the cool colour beside it. */
+  --glow: #ffd84a;
 
   /* The compass gizmo. X red, Y green, Z blue is the convention every CAD
      and 3D package shares, so it is read without being told; the *labels*
@@ -104,6 +107,7 @@
   --grid-major: #97a5ba;
   --grid-minor: #c4cedc;
   --selection: #1f5fd0;
+  --glow: #d97700;
 
   --axis-x: #c23b3b;
   --axis-y: #2f8f3f;
@@ -136,6 +140,7 @@
     --grid-major: #97a5ba;
     --grid-minor: #c4cedc;
     --selection: #1f5fd0;
+  --glow: #d97700;
 
     --axis-x: #c23b3b;
     --axis-y: #2f8f3f;

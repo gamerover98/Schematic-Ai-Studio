@@ -92,6 +92,7 @@ import {
   saveSession,
   scaleRegion,
   selectionPalette,
+  findInDocument,
   transformRegion,
   undoEdit,
 } from "../src/main/services/session.js";
@@ -117,6 +118,7 @@ import {
 } from "../src/main/services/checkpoints.js";
 import { contentShiftSince, isDirty, undo } from "../src/main/domain/history.js";
 import { anchorOf, countBlocks, createDocument, documentFromLoaded } from "../src/main/domain/document.js";
+import { findBlocks } from "../src/main/domain/find_blocks.js";
 import { UnrepresentableBlocksError } from "../src/main/services/writers.js";
 import { SpongeSchematicWriter } from "../src/main/services/schematic.js";
 import { dataVersionFor } from "../src/main/services/versions.js";
@@ -6102,6 +6104,111 @@ console.log("\n--- a block of two cells is counted once ---");
       "minecraft:piston_head[facing=east,short=false,type=normal] 1",
     ),
   );
+  closeDocument();
+}
+
+console.log("\n--- where a block is, as the shell the glow is drawn from ---");
+{
+  /*
+   * A material clicked in the list glows in the viewport, which has no blocks:
+   * main sends the faces of the matching cells that touch no other matching
+   * cell, four integers each. Written straight into the document, so the
+   * cells are exactly these.
+   */
+  const session = newDocument({ width: 8, height: 3, length: 3 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  const put = (x: number, y: number, z: number, namespacedName: string, properties: Record<string, string> = {}): void => {
+    setBlock(session.doc, x, y, z, { namespacedName, properties });
+  };
+  put(0, 0, 0, "minecraft:stone");
+  put(1, 0, 0, "minecraft:stone");
+  put(5, 1, 1, "minecraft:stone");
+  put(3, 0, 2, "minecraft:oak_stairs", { facing: "east" });
+  put(4, 0, 2, "minecraft:oak_stairs", { facing: "north" });
+
+  /** The faces, as "x,y,z/side", sorted. */
+  const faces = (found: { faces: Int32Array }): string[] => {
+    const out: string[] = [];
+    for (let at = 0; at < found.faces.length; at += 4) {
+      out.push(`${found.faces[at]},${found.faces[at + 1]},${found.faces[at + 2]}/${found.faces[at + 3]}`);
+    }
+    return out.sort();
+  };
+  const find = (patterns: string[], regions: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }[] | null = null) =>
+    findInDocument(session, { regions, patterns });
+
+  const stone = find(["minecraft:stone"]);
+  equal("every stone is found", stone.total, 3);
+  equal("...and two that touch share no face: 10 for the pair, 6 for the one alone", stone.faces.length / 4, 16);
+  check(
+    "...the face between the pair is the one left out",
+    !faces(stone).includes("0,0,0/0") && !faces(stone).includes("1,0,0/1") && faces(stone).includes("1,0,0/0"),
+  );
+  equal("a bare name finds the block in every state", find(["oak_stairs"]).total, 2);
+  equal("...and a stated one only that state", find(["minecraft:oak_stairs[facing=east]"]).total, 1);
+  equal("two patterns are one set", find(["stone", "oak_stairs"]).total, 5);
+
+  // A selection holding one of the pair: the shell ends at its edge.
+  const half = find(["stone"], [{ minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 2, maxZ: 2 }]);
+  equal("in the selected areas only", half.total, 1);
+  check("...with a face where the selection ends, though the block carries on", faces(half).includes("0,0,0/0"));
+  equal(
+    "areas overlapping find a cell once",
+    find(["stone"], [
+      { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+      { minX: 1, minY: 0, minZ: 0, maxX: 5, maxY: 2, maxZ: 2 },
+    ]).total,
+    3,
+  );
+  equal("a block the document does not hold is found nowhere", find(["minecraft:diamond_block"]).total, 0);
+  equal("no patterns find nothing", find([]).faces.length, 0);
+
+  /*
+   * Past the cap the shell is drawn in coarser cells rather than cut off: cut
+   * off, the glow lit the first part of the walk and left the rest dark,
+   * which read as a fault. Only past the coarsest cell is it cut, and then
+   * the answer says so.
+   */
+  const capped = findBlocks(session.doc, null, [{ namespacedName: "minecraft:stone", properties: {} }], { maxFaces: 3 });
+  equal(
+    "a shell that fits nowhere stops at the cap and says so",
+    [capped.faces.length / 4, capped.capped, capped.total, capped.scale],
+    [3, true, 3, 16],
+  );
+  {
+    // Sixteen stones on a checkerboard: 96 faces one at a time, 18 in cells of two.
+    const board = newDocument({ width: 8, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    for (let x = 0; x < 8; x += 1) {
+      for (let y = 0; y < 2; y += 1) {
+        for (let z = 0; z < 2; z += 1) {
+          if ((x + y + z) % 2 === 0) setBlock(board.doc, x, y, z, { namespacedName: "minecraft:stone", properties: {} });
+        }
+      }
+    }
+    const stoneOnly = [{ namespacedName: "minecraft:stone", properties: {} }];
+    const fine = findBlocks(board.doc, null, stoneOnly);
+    equal("one block at a time while it fits", [fine.faces.length / 4, fine.scale, fine.capped], [96, 1, false]);
+    const coarse = findBlocks(board.doc, null, stoneOnly, { maxFaces: 20 });
+    equal("past the cap, the whole set in cells of two", [coarse.faces.length / 4, coarse.scale, coarse.capped, coarse.total], [18, 2, false, 16]);
+    const xs: number[] = [];
+    for (let at = 0; at < coarse.faces.length; at += 4) xs.push(coarse.faces[at]);
+    equal("...from one end of the set to the other, on the coarse grid", [Math.min(...xs), Math.max(...xs), xs.every((x) => x % 2 === 0)], [0, 6, true]);
+    closeDocument();
+  }
+
+  /*
+   * Content coordinates: a growth below the origin moves the content and the
+   * frame together, so the shell's numbers do not move and the viewport
+   * stands it where it stands the chunks.
+   */
+  const before = faces(stone);
+  applyEdit(session, {
+    kind: "fill",
+    regions: [{ minX: -2, minY: 0, minZ: 0, maxX: -2, maxY: 0, maxZ: 0 }],
+    mix: singleMix({ namespacedName: "minecraft:dirt" }),
+  });
+  const after = find(["stone"]);
+  equal("a growth below the origin leaves the shell where it was", faces(after), before);
+  equal("...and says where the content now stands", after.frame, [2, 0, 0]);
   closeDocument();
 }
 

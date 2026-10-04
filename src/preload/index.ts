@@ -60,6 +60,9 @@ import {
   type MoveRegionRequest,
   type RegionMeshResponse,
   type SelectionPaletteRequest,
+  type FindBlocksRequest,
+  type FindBlocksResponse,
+  type GlowRequest,
   type SelectionPaletteResponse,
   type SkyTextures,
   type ApplyNbtRequest,
@@ -101,6 +104,11 @@ const api: BgptApi = {
   // `send`, because the request came as an event too: `invoke` only runs from
   // the renderer to main, and this is the other half of a question main asked.
   reportCameraAimed: (reply: CameraAimReply) => ipcRenderer.send(IPC.cameraAimed, reply),
+  onGlow(listener) {
+    const wrapped = (_event: unknown, payload: GlowRequest) => listener(payload);
+    ipcRenderer.on(IPC.glowBlocks, wrapped);
+    return () => ipcRenderer.removeListener(IPC.glowBlocks, wrapped);
+  },
   copyToClipboard: (text: string) =>
     ipcRenderer.invoke(IPC.clipboardWrite, text) as Promise<void>,
   getDefaultOutputDir: () => ipcRenderer.invoke(IPC.defaultOutputDir) as Promise<string>,
@@ -175,6 +183,8 @@ const api: BgptApi = {
   clipboardMesh: () => ipcRenderer.invoke(IPC.docClipboardMesh) as Promise<RegionMeshResponse>,
   selectionPalette: (request: SelectionPaletteRequest) =>
     ipcRenderer.invoke(IPC.docSelectionPalette, request) as Promise<SelectionPaletteResponse>,
+  findBlocks: (request: FindBlocksRequest) =>
+    ipcRenderer.invoke(IPC.docFindBlocks, request) as Promise<FindBlocksResponse>,
   getSkyTextures: () => ipcRenderer.invoke(IPC.skyTextures) as Promise<SkyTextures>,
   getAnchorTexture: () => ipcRenderer.invoke(IPC.anchorTexture) as Promise<PackTexture | null>,
   setWorldEditAnchor: (anchor: [number, number, number] | null) =>

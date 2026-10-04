@@ -9,9 +9,11 @@
    * game puts a stack's, air last, and the exact count and its share of the
    * selection in the hover.
    *
-   * A slot is also the quickest way to say "this one" to the tools above it.
-   * What each click means is `materialAction`'s, a plain module, so it can be
-   * stated in a check rather than found in a handler.
+   * A click on a slot lights its block up in the viewport, through walls, and
+   * Ctrl lights several; the slots lit are drawn pressed, and a button under
+   * them puts the glow out. What each click means is `materialAction`'s, a
+   * plain module, so it can be stated in a check rather than found in a
+   * handler.
    *
    * The bar above the slots is for the lists that outgrew a glance: a search,
    * an order, and states merged into one slot per block. What each of those
@@ -34,7 +36,7 @@
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { shortName } from "./block_spelling.js";
   import type { AnchorRect } from "./floating.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
   import { formatCount, materialAction, materialRows, type MaterialAction, type MaterialRow } from "./materials.js";
 
   interface Props {
@@ -60,6 +62,16 @@
      * a bed's head beside its foot -- which a replace has to name as well.
      */
     onaction: (slot: { block: string; pair: readonly string[] }, action: MaterialAction) => void;
+    /** The slots lit in the viewport, by their `block`. */
+    glowing?: readonly string[];
+    /** How many cells glow, once the viewport's answer is in; `null` before. */
+    glowTotal?: number | null;
+    /** The viewport draws part of them: there were more faces than it takes. */
+    glowCapped?: boolean;
+    /** The viewport outlines them in cells of several blocks, there being so many. */
+    glowCoarse?: boolean;
+    /** Puts the glow out. */
+    onglowclear?: () => void;
   }
 
   const {
@@ -75,7 +87,14 @@
     sort,
     onsortchange,
     onaction,
+    glowing = [],
+    glowTotal = null,
+    glowCapped = false,
+    glowCoarse = false,
+    onglowclear = () => {},
   }: Props = $props();
+
+  const lit = $derived(new Set(glowing));
 
   let query = $state("");
 
@@ -192,6 +211,8 @@
         type="button"
         class="slot"
         class:air={slot.air}
+        class:lit={lit.has(slot.block)}
+        aria-pressed={slot.air ? undefined : lit.has(slot.block)}
         bind:this={elements[index]}
         draggable={!slot.air}
         ondragstart={(event) => dragStart(slot, event)}
@@ -216,6 +237,23 @@
         <span class="count" aria-hidden="true">{formatCount(slot.count)}</span>
       </button>
     {/each}
+  </div>
+{/if}
+
+{#if glowing.length > 0}
+  <div class="glow">
+    <span class="note">
+      {glowTotal === null
+        ? t("materials.glowFinding")
+        : glowCapped
+          ? tn("materials.glowCapped", glowTotal)
+          : glowCoarse
+            ? tn("materials.glowCoarse", glowTotal)
+            : tn("materials.glowLit", glowTotal)}
+    </span>
+    <button type="button" class="off" onclick={onglowclear} title={t("materials.glowOffHint")}>
+      {t("materials.glowOff")}
+    </button>
   </div>
 {/if}
 
@@ -323,6 +361,30 @@
       inset 2px 2px 0 rgba(0, 0, 0, 0.35),
       inset -2px -2px 0 rgba(255, 255, 255, 0.1);
     cursor: pointer;
+  }
+
+  /*
+   * Lit: the glow's own colour round the slot and the slot raised rather than
+   * sunk, which is the pressed state of a toggle read the other way up -- a
+   * slot is already a hollow, so "pressed in" would look like every other.
+   */
+  .slot.lit {
+    box-shadow:
+      inset 0 0 0 2px var(--glow),
+      inset 3px 3px 0 rgba(255, 255, 255, 0.12);
+  }
+
+  .glow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .glow .off {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    font-size: 11px;
   }
 
   .slot:hover::after,

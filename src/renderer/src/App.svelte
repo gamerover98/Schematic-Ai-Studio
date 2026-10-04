@@ -53,6 +53,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { api, bridgeAvailable, forIpc, bridgeMissingMessage } from "./lib/bridge.svelte.js";
   import { diagnosing, recordEvent } from "./lib/frame_profiler.js";
   import { coalesce } from "./lib/coalesce.js";
+  import { glowPatterns, nextGlow, type GlowSlot } from "./lib/materials.js";
   import { isFileDrop, trackPageDrags } from "./lib/block_drag.js";
   import { applyTraceEvent } from "./lib/trace.js";
   import { primeBlockIcons } from "./lib/block_icons.svelte.js";
@@ -130,6 +131,7 @@ import {
     type MixSpec,
     type RegionSpec,
     type SelectionPaletteSuccess,
+    type FindBlocksSuccess,
     type TransformRequest,
     singleMix,
   } from "../../shared/ipc.js";
@@ -1771,6 +1773,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       }
       cameraRequest = request;
     });
+    /*
+     * A model lighting blocks up, or putting the glow out. It replaces
+     * whatever was lit, the list's included: the last one to point at
+     * something is the one being listened to.
+     */
+    const unsubscribeGlow = api().onGlow((request) => {
+      glow =
+        request.patterns.length === 0
+          ? null
+          : { slots: [], patterns: [...request.patterns], scope: request.regions === null ? null : [...request.regions] };
+    });
     const unsubscribeDocument = api().onDocumentChanged((state) => {
       docState = state;
       void refreshDocument();
@@ -1826,6 +1839,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       unsubscribeTrace();
       unsubscribeDocument();
       unsubscribeCamera();
+      unsubscribeGlow();
       unsubscribeMcp();
       unsubscribeUpdates();
       for (const off of unsubscribeMenu) off();
@@ -1898,6 +1912,16 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       !inventoryOpen &&
       schematicDialog === null
     ) {
+      /*
+       * The glow first, then the selection: the glow is the lighter thing to
+       * lose, and putting it out with the key that also drops the selection
+       * would take the list it was lit from away with it.
+       */
+      if (event.key === "Escape" && glow !== null) {
+        event.preventDefault();
+        glow = null;
+        return;
+      }
       if (event.key === "Escape" && selection !== null) {
         event.preventDefault();
         clearSelection();
@@ -2959,6 +2983,83 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   /** The selection's materials; the list is only drawn with one. */
   const materials = $derived(docState === null || selection === null ? null : selectionMaterials);
 
+  /**
+   * What the viewport lights up, through walls, and why.
+   *
+   * Two ways in. A click on a slot of the materials list lights that block in
+   * the selected areas, and follows them as they move -- `scope: "selection"`,
+   * with the slots so the list can draw them pressed. A model over MCP
+   * (`highlight_blocks`) names blocks and a box or the whole schematic, and
+   * that glow stays where it was put whatever the selection does.
+   *
+   * Either way the window asks main for the shell (`findBlocks`), on the
+   * materials' schedule: when the glow, the document or the areas move,
+   * after they have held still for a moment, one question in flight. Main
+   * has the blocks; this only knows what was asked for.
+   */
+  interface GlowState {
+    slots: GlowSlot[];
+    patterns: string[];
+    scope: "selection" | RegionSpec[] | null;
+  }
+  let glow = $state.raw<GlowState | null>(null);
+  /** The last shell main sent, and the glow it was found for. */
+  let glowShell = $state.raw<(FindBlocksSuccess & { for: GlowState }) | null>(null);
+  const refreshGlow = coalesce(fetchGlow);
+
+  async function fetchGlow(): Promise<void> {
+    const wanted = glow;
+    if (wanted === null || docState === null || !bridgeAvailable) {
+      glowShell = null;
+      return;
+    }
+    if (wanted.scope === "selection" && selection === null) return;
+    const response = await api().findBlocks({
+      regions: wanted.scope === "selection" ? areasForIpc() : wanted.scope,
+      patterns: wanted.patterns,
+    });
+    // Put out or changed meanwhile: a late answer must not light what is no
+    // longer asked for. The effect has already asked again.
+    if (!response.ok || glow !== wanted || docState === null) return;
+    glowShell = { ...response, for: wanted };
+  }
+
+  $effect(() => {
+    if (glow === null || docState === null) {
+      glowShell = null;
+      return;
+    }
+    void docState.revision;
+    if (glow.scope === "selection") void selectionAreas;
+    const timer = setTimeout(() => {
+      // A search that fails leaves the last glow up, as a count that fails
+      // leaves the last slots: nothing the user did has failed.
+      refreshGlow().catch(() => undefined);
+    }, 120);
+    return () => clearTimeout(timer);
+  });
+
+  // Another structure on screen is another set of blocks: the glow was for
+  // the one before, and it goes with it -- as it does when nothing is open.
+  const documentOpen = $derived(docState !== null);
+  $effect(() => {
+    void framingEpoch;
+    void documentOpen;
+    untrack(() => (glow = null));
+  });
+
+  /** A slot was clicked to light it, or Ctrl-clicked: `nextGlow` decides. */
+  function glowMaterial(slot: GlowSlot, add: boolean): void {
+    const current = glow?.scope === "selection" ? glow.slots : [];
+    const slots = nextGlow(current, { block: slot.block, pair: [...slot.pair] }, add);
+    glow = slots.length === 0 ? null : { slots, patterns: glowPatterns(slots), scope: "selection" };
+  }
+
+  /** The slots the list draws pressed: only a glow it lit itself. */
+  const glowingSlots = $derived(glow?.scope === "selection" ? glow.slots.map((slot) => slot.block) : []);
+  /** How many cells glow, once main has answered for this glow. */
+  const glowAnswer = $derived(glowShell !== null && glowShell.for === glow ? glowShell : null);
+
   /** Main's step timings to a tenth of a millisecond, for a readable report. */
   function roundTimings(timings: Record<string, number>): Record<string, number> {
     const out: Record<string, number> = {};
@@ -3989,6 +4090,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     // that, so a ghost can never outlive the selection it was drawn for.
     releaseGhost(ghostFetch);
     if (moving !== null) moving = null;
+    // A glow lit from the list was of the selected areas; one a model asked
+    // for names its own box and stays.
+    if (glow !== null && glow.scope === "selection") glow = null;
   });
 
   /**
@@ -5388,6 +5492,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           onmaterialsunifychange={(unify) => void patchUi({ materialsUnify: unify })}
           materialsSort={settings.ui.materialsSort}
           onmaterialssortchange={(sort) => void patchUi({ materialsSort: sort })}
+          glowing={glowingSlots}
+          glowTotal={glowAnswer?.total ?? null}
+          glowCapped={glowAnswer?.capped ?? false}
+          glowCoarse={(glowAnswer?.scale ?? 1) > 1}
+          onglow={glowMaterial}
+          onglowclear={() => (glow = null)}
           onfill={fillSelection}
           onreplace={replaceInSelection}
           ondelete={() => void deleteSelection()}
@@ -5460,6 +5570,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       {cameraMode}
       flySpeed={settings.preview.flySpeed}
       framingKey={framingEpoch}
+      glow={docState ? glowShell : null}
       onbuild={docState ? (action, at, look) => void onBuild(action, at, look) : undefined}
       onselectionchange={docState ? onSelectionDragged : undefined}
       onselectiongesture={docState ? onSelectionGesture : undefined}

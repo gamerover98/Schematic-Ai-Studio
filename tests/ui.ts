@@ -213,7 +213,13 @@ import {
   withBlocksAdded,
   writeSpelling,
 } from "../src/renderer/src/lib/block_spelling.js";
-import { formatCount, materialAction, materialRows } from "../src/renderer/src/lib/materials.js";
+import {
+  formatCount,
+  glowPatterns,
+  materialAction,
+  materialRows,
+  nextGlow,
+} from "../src/renderer/src/lib/materials.js";
 import {
   BLOCK_MIME,
   decodeDragged,
@@ -5213,10 +5219,27 @@ console.log("\n--- the materials, as an inventory ---");
   );
 
   const click = (button: number, ctrl = false, shift = false) => ({ button, ctrl, shift });
+  /*
+   * A plain click used to put the block in With. It lights the block up in
+   * the viewport now, which is the question the list raises -- where is it --
+   * and With and Replace are filled by dragging a slot onto them.
+   */
   equal(
-    "a plain click puts the block in With, Ctrl adds it to the mix",
+    "a plain click lights the block up, Ctrl lights several",
     [materialAction(click(0), false), materialAction(click(0, true), false)],
-    ["with", "addWith"],
+    ["glow", "addGlow"],
+  );
+  const foot = { block: "minecraft:red_bed[facing=north,part=foot]", pair: ["minecraft:red_bed[facing=north,part=head]"] };
+  const stone = { block: "minecraft:stone", pair: [] };
+  equal("a click lights that block alone", nextGlow([foot], stone, false), [stone]);
+  equal("...and puts it out when it was the only one lit", nextGlow([stone], stone, false), []);
+  equal("...but lights it alone when others were lit with it", nextGlow([foot, stone], stone, false), [stone]);
+  equal("Ctrl adds a block to what is lit", nextGlow([foot], stone, true), [foot, stone]);
+  equal("...and takes one out", nextGlow([foot, stone], foot, true), [stone]);
+  equal(
+    "a lit bed looks for both halves, each spelling once",
+    glowPatterns([foot, stone, { block: foot.block, pair: foot.pair }]),
+    [foot.block, foot.pair[0], "minecraft:stone"],
   );
   equal(
     "Shift is Replace, Ctrl+Shift adds to it",
@@ -5234,7 +5257,7 @@ console.log("\n--- the materials, as an inventory ---");
    * Air cannot be held -- `coerceHotbar` refuses a slot of it -- so a plain
    * click means the one thing air is for in that panel.
    */
-  equal("a plain click on air fills Replace, not the hand", materialAction(click(0), true), "replace");
+  equal("a plain click on air fills Replace, rather than lighting every empty cell", materialAction(click(0), true), "replace");
   equal("...Ctrl still adds it to With, which makes a ruin", materialAction(click(0, true), true), "addWith");
   equal("...and air has no states to open", materialAction(click(2), true), "none");
   // Its two-letter stand-in would read "AI", so a chip of it is an empty slot.
@@ -5812,6 +5835,58 @@ console.log("\n--- the frame costs less ---");
   const invalidation = between("void [\n      mesh,", "invalidate();\n  });");
   const missing = locals.filter((name) => !new RegExp(`\\b${name}\\b`).test(invalidation));
   check("every prop is read by the invalidation effect", locals.length > 30 && missing.length === 0, `${locals.length} props; missing: ${missing.join(", ")}`);
+
+  /*
+   * The glow: a mask drawn before the scene's target is bound, so the frame
+   * still binds that target once; an outline laid on the canvas, never into
+   * the multisampled target, under the compass; and a scene of its own that
+   * no raycast, light or shadow reaches.
+   */
+  const maskAt = frame.indexOf("drawGlowMask();");
+  check("the glow's mask is drawn before the scene's target is bound", maskAt > 0 && maskAt < frame.indexOf("setRenderTarget(aaTarget)"));
+  check(
+    "...its outline after the anti-aliased copy, under the compass",
+    /render\(aaScene, aaCamera\);\s*compositeGlow\(\);\s*compositeCompass\(\);/.test(frame),
+  );
+  const plainAt = frame.indexOf("if (aaTarget === null) {");
+  check(
+    "...and without anti-aliasing after the scene pass, under the compass",
+    plainAt > frame.indexOf("renderer.render(scene, camera)") &&
+      frame.indexOf("compositeGlow();", plainAt) > plainAt &&
+      frame.indexOf("compositeGlow();", plainAt) < frame.indexOf("drawCompass();"),
+  );
+  check(
+    "the mask has no depth buffer and no samples to resolve",
+    /new THREE\.WebGLRenderTarget\([^;]*\{\s*depthBuffer: false,\s*stencilBuffer: false,\s*\}\)/.test(
+      between("function drawGlowMask", "function compositeGlow"),
+    ),
+  );
+  check(
+    "no raycast reaches the glow",
+    !(viewer.match(/raycaster\.intersectObjects?\([^)]*\)/g) ?? []).some((cast) => /glow/i.test(cast)),
+  );
+  check(
+    "the shell is never put in the world's scene",
+    !/\bscene\.add\(glow/.test(stripped) && !/loaded\??\.add\(glow/.test(stripped),
+  );
+  check("the glow stands where the chunks stand", /glowGroup\?\.position\.set\(frame\[0\], frame\[1\], frame\[2\]\)/.test(between("function placeChunks", "function pickBlockAt")));
+  check("the mask follows a resize on the targets' delay", resizeBody.includes("sizeGlowTargetSoon();"));
+
+  const appGlow = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const escapeGlow = appGlow.indexOf('event.key === "Escape" && glow !== null');
+  check(
+    "Escape puts the glow out before it drops the selection",
+    escapeGlow > 0 && escapeGlow < appGlow.indexOf('event.key === "Escape" && selection !== null'),
+  );
+  check(
+    "a glow lit from the list goes with the selection, one a model lit stays",
+    /if \(selection !== null\) return;[\s\S]*?if \(glow !== null && glow\.scope === "selection"\) glow = null;\n {2}\}\);/.test(appGlow),
+  );
+  check("a model's glow reaches the window", appGlow.includes("api().onGlow("));
+  check(
+    "the glow's colour is in all three palettes",
+    (readFileSync(path.join(RENDERER, "app.css"), "utf8").match(/--glow: #/g) ?? []).length === 3,
+  );
 }
 
 // --- a click in creative mode is never dropped -------------------------------

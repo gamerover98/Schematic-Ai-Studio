@@ -77,6 +77,18 @@
     materialsSort?: MaterialsSort;
     onmaterialssortchange?: (sort: MaterialsSort) => void;
     /**
+     * What the viewport is lighting up: the slots by their block, and how
+     * many cells that came to. The set is the app's, because Escape and a
+     * model over MCP put it out as well as the list does.
+     */
+    glowing?: readonly string[];
+    glowTotal?: number | null;
+    glowCapped?: boolean;
+    glowCoarse?: boolean;
+    /** A slot was clicked to light it, or Ctrl-clicked to add or take it out. */
+    onglow?: (slot: DraggedBlock, add: boolean) => void;
+    onglowclear?: () => void;
+    /**
      * The block Replace looks for.
      *
      * A prop rather than local state because the block list can fill it in too,
@@ -133,6 +145,12 @@
     onmaterialsunifychange = () => {},
     materialsSort = "countDesc",
     onmaterialssortchange = () => {},
+    glowing = [],
+    glowTotal = null,
+    glowCapped = false,
+    glowCoarse = false,
+    onglow = () => {},
+    onglowclear = () => {},
     replaceFrom,
     onreplacefromchange,
     onbrowse,
@@ -147,7 +165,8 @@
 
   /**
    * A slot of the inventory, clicked: `materialAction` decides what the click
-   * means, and this is where each meaning lands. The state comes along -- the
+   * means, and this is where each meaning lands. Lighting a block up is the
+   * app's (`onglow`), because Escape and a model over MCP put it out too. The state comes along -- the
    * count on the slot is of exactly that state, and a replace naming it finds
    * exactly those.
    *
@@ -162,6 +181,10 @@
   function onMaterial(slot: DraggedBlock, action: MaterialAction): void {
     const material = slot.block;
     switch (action) {
+      case "glow":
+      case "addGlow":
+        onglow(slot, action === "addGlow");
+        break;
       case "with":
         onblockchange(canonicalBlock(material, legacy));
         break;
@@ -307,6 +330,11 @@
         sort={materialsSort}
         onsortchange={onmaterialssortchange}
         onaction={onMaterial}
+        {glowing}
+        {glowTotal}
+        {glowCapped}
+        {glowCoarse}
+        {onglowclear}
       />
     </div>
   {/if}

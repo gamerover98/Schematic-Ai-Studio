@@ -212,6 +212,8 @@ export const IPC = {
   docClipboardMesh: "bgpt:doc:clipboard:mesh",
   /** What the selected areas are made of, for the materials inventory. */
   docSelectionPalette: "bgpt:doc:selection:palette",
+  /** Where some blocks are, as the shell the viewport glows. */
+  docFindBlocks: "bgpt:doc:find",
   /**
    * renderer → main: where the 3D canvas sits in the window.
    *
@@ -252,6 +254,15 @@ export const IPC = {
   cameraAim: "bgpt:viewport:camera:aim",
   /** renderer → main: the answer to `cameraAim`, after the frame was drawn. */
   cameraAimed: "bgpt:viewport:camera:aimed",
+  /**
+   * main → renderer: light these blocks up, or put the glow out.
+   *
+   * What `highlight_blocks` sends, so a model can point at something in the
+   * build the user is looking at. Fire and forget: the tool answers with its
+   * own count, found in main, and the window asks for the shell itself
+   * through `docFindBlocks` exactly as a click in the materials list does.
+   */
+  glowBlocks: "bgpt:viewport:glow",
   /**
    * The renderer telling main it has just thrown something it did not catch.
    *
@@ -1224,6 +1235,46 @@ export interface SelectionPaletteSuccess {
 }
 
 export type SelectionPaletteResponse = Result<SelectionPaletteSuccess>;
+
+/**
+ * Some blocks to find, in the areas or -- `null` -- the whole document.
+ *
+ * A pattern is a palette spelling, matched the way a replace matches `from`:
+ * a bare id is the block in any state. A slot that stands for a bed sends its
+ * `pair` too, or the glow would light the foot and not the head.
+ */
+export interface FindBlocksRequest {
+  regions: RegionSpec[] | null;
+  patterns: string[];
+}
+
+/**
+ * The shell of the cells found: four integers a face -- the cell, in
+ * content coordinates (minus `frame`), and the side, in
+ * `FACE_STEPS`' order. See `domain/find_blocks.ts`.
+ */
+export interface FindBlocksSuccess {
+  /** How many cells matched. */
+  total: number;
+  faces: Int32Array;
+  /**
+   * How many blocks a side a face's cell is: 1, or more when there were too
+   * many faces to outline one block at a time.
+   */
+  scale: number;
+  /** Faces were left out even at the coarsest cells; `total` counts every cell. */
+  capped: boolean;
+  /** The document's frame when this was found, where the chunks stand. */
+  frame: [number, number, number];
+}
+
+export type FindBlocksResponse = Result<FindBlocksSuccess>;
+
+/** `IPC.glowBlocks`: what to light, and where. No patterns puts it out. */
+export interface GlowRequest {
+  patterns: string[];
+  regions: RegionSpec[] | null;
+}
 
 /**
  * Everything the renderer knows about the open schematic.
@@ -2261,6 +2312,8 @@ export interface BgptApi {
   onCameraAim(listener: (request: CameraAimRequest) => void): () => void;
   /** The answer, once the frame is drawn. Fire and forget, like the request. */
   reportCameraAimed(reply: CameraAimReply): void;
+  /** Main asking for blocks to glow. See `IPC.glowBlocks`. */
+  onGlow(listener: (request: GlowRequest) => void): () => void;
   /** Put text on the system clipboard. Main's, because the preload is sandboxed. */
   copyToClipboard(text: string): Promise<void>;
   getDefaultOutputDir(): Promise<string>;
@@ -2322,6 +2375,8 @@ export interface BgptApi {
   clipboardMesh(): Promise<RegionMeshResponse>;
   /** What the selected areas are made of, for the materials inventory. */
   selectionPalette(request: SelectionPaletteRequest): Promise<SelectionPaletteResponse>;
+  /** Where some blocks are, as the shell the glow is drawn from. */
+  findBlocks(request: FindBlocksRequest): Promise<FindBlocksResponse>;
   getSkyTextures(): Promise<SkyTextures>;
   applyEdit(request: EditRequest): Promise<EditResponse>;
   /** Set the schematic's size. Refuses a lossy shrink without `confirmLoss`. */

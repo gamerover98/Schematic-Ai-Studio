@@ -2054,16 +2054,53 @@ Two rules in it are easy to undo by tidying:
   `100.0k`, the wrong unit and more than there is. `formatCount` in
   `renderer/lib/materials.ts`, with the exact number in the hover.
 
-What a click on a slot means is `materialAction` in the same module: With,
-Ctrl adds to the mix, Shift is Replace, the right button pins the slot's
-reading open (`BlockTooltip`'s `pinned`: id, states, count and share, the
-pair, and Copy id). It used to put the block in With and open its states
-there, two things at once; editing a state is the With chip's right-click.
-The pinned reading takes Escape on the way down, because the window's own
-Escape drops the selection and the list with it. **A plain click on air
-fills Replace**, because air cannot be held and `coerceHotbar` refuses a
-slot of it. A slot carries the exact state, so a replace of it finds exactly
-the cells the slot counted.
+What a click on a slot means is `materialAction` in the same module: plain
+lights the block up in the viewport (below), Ctrl lights several, Shift is
+Replace, the right button pins the slot's reading open (`BlockTooltip`'s
+`pinned`: id, states, count and share, the pair, and Copy id). A plain click
+used to put the block in With; With and Replace are filled by dragging now,
+which is the gesture that says which field, and editing a state is the With
+chip's right-click. The pinned reading takes Escape on the way down, because
+the window's own Escape drops the selection and the list with it. **A plain
+click on air fills Replace**, because air cannot be held and every empty
+cell glowing would be the outline of everything else; Ctrl adds air to With,
+since a slot of it cannot be dragged. A slot carries the exact state, so a
+replace of it finds exactly the cells the slot counted.
+
+**A click on a slot lights the block up, through walls.** The game's Glowing
+effect is the model: an outline round the thing wherever it is, because
+"where are the diamonds" is asked about blocks inside the build. The viewport
+has no blocks, so main finds them -- `findBlocks` in `domain/find_blocks.ts`,
+`matchesBlockPattern`'s rule, a bed's `pair` sent beside it -- and sends the
+**shell**: one face per side of a matching cell that touches no other, four
+integers each (`IPC.docFindBlocks`), in content coordinates so it stands
+where `placeChunks` stands the chunks. Asked, like the materials: on the
+glow, the revision and the areas, 120 ms, through `coalesce`.
+
+`Viewer.svelte` draws it in two passes and only while something glows. A
+mask -- the faces in white, no depth test, into a target with no depth and no
+samples -- before the scene's target is bound, so the frame still binds that
+target once; then a fullscreen quad on the **canvas**, the outline where the
+mask is empty within two pixels of it and a fifth of the colour inside, after
+the anti-aliased copy (or the scene pass without one) and under the compass.
+Never a render into the multisampled target, which would be a second resolve.
+`glowScene` is its own scene, so no raycast, light or shadow reaches it.
+`--glow` is the colour, warm so it is never read as the selection.
+
+Past `MAX_GLOW_FACES` (300,000, 4.8 MB) the shell is built again in cells of
+two blocks, then four, up to `MAX_GLOW_SCALE`, and `scale` says which. It was
+cut off at the cap at first, and a field of scattered stone lit its first
+third and left the rest dark, which reads as a fault rather than a limit.
+
+Plain lights one slot and puts it out when it was the only one lit; Ctrl adds
+or takes out (`nextGlow`). Escape puts the glow out before it drops the
+selection, and a glow lit from the list goes with the selection. Over MCP
+`highlight_blocks` (`mcp/lifecycle.ts`, beside `capture_viewport`, because it
+reaches the window) lights blocks in a box or the whole schematic and stays
+until put out; it tells the window *what* to light (`IPC.glowBlocks`) and the
+window asks for the shell itself. `find_blocks` is in `TOOL_SPECS`: a count,
+the box and the first positions, the whole schematic by default, because
+"where is it" answered about a selection somewhere else reads as "nowhere".
 
 **A slot is also dragged, onto a field or the hotbar.** It carries
 `DraggedBlock` -- the block and its pair -- under `BLOCK_MIME`, and the

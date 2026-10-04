@@ -38,26 +38,38 @@ export function formatCount(count: number): string {
   return String(n);
 }
 
-/** What a click on a slot does. */
-export type MaterialAction = "with" | "addWith" | "replace" | "addReplace" | "info" | "none";
+/**
+ * What a click on a slot does. `with` and `addWith` are what a drop on With
+ * means; a click reaches With only from air, below.
+ */
+export type MaterialAction =
+  | "glow"
+  | "addGlow"
+  | "with"
+  | "addWith"
+  | "replace"
+  | "addReplace"
+  | "info"
+  | "none";
 
 /**
  * The click on a slot, read.
  *
- * Plain is With, Ctrl adds to With's mix, Shift is Replace and Ctrl+Shift adds
- * to it, the right button opens what there is to know about the slot -- its
+ * Plain lights the block up in the viewport, through walls, and Ctrl adds it
+ * to what is lit or takes it out. Shift is Replace and Ctrl+Shift adds to it,
+ * and the right button pins open what there is to know about the slot -- its
  * id, its states, how many and what share. Cmd counts as Ctrl.
  *
- * The right button used to put the block in With and open its states there,
- * which was two things at once and the second of them belongs to the chip:
- * editing a state is editing what you are about to write, and right-clicking
- * the chip in With still does exactly that.
+ * A plain click used to put the block in With. The list answers "where is
+ * this" now, which is the question it raises, and With and Replace are filled
+ * by dragging a slot onto them -- which is the gesture that says which field.
  *
- * **Air cannot be held**, so a plain click on it means Replace: "replace the
- * air in here" is the one thing air is useful for in that panel, and putting
- * it in the hand would be a slot `coerceHotbar` refuses. Ctrl still adds it to
- * With's mix, because a mix with some air in it is a ruin and is legal. There
- * is nothing to read about it that its slot does not already say.
+ * **Air cannot be held or lit**: every empty cell glowing is the outline of
+ * everything else. So a plain click on it means Replace, "replace the air in
+ * here" being the one thing air is useful for in that panel, and Ctrl adds it
+ * to With's mix, because a mix with some air in it is a ruin, is legal, and a
+ * slot of air cannot be dragged. There is nothing to read about it that its
+ * slot does not already say.
  */
 export function materialAction(
   click: { button: number; ctrl: boolean; shift: boolean },
@@ -66,8 +78,32 @@ export function materialAction(
   if (click.button === 2) return air ? "none" : "info";
   if (click.button !== 0) return "none";
   if (click.shift) return click.ctrl ? "addReplace" : "replace";
-  if (click.ctrl) return "addWith";
-  return air ? "replace" : "with";
+  if (air) return click.ctrl ? "addWith" : "replace";
+  return click.ctrl ? "addGlow" : "glow";
+}
+
+/** A slot that is lit: its block, and the far halves it stands for. */
+export interface GlowSlot {
+  readonly block: string;
+  readonly pair: readonly string[];
+}
+
+/**
+ * What is lit after a click on `slot`.
+ *
+ * Plain lights that slot alone, and puts it out when it was the only one lit
+ * -- so the same click is the way in and the way out, as a toggle in the game
+ * is. Ctrl adds it to the set or takes it out of it.
+ */
+export function nextGlow(current: readonly GlowSlot[], slot: GlowSlot, add: boolean): GlowSlot[] {
+  const lit = current.some((entry) => entry.block === slot.block);
+  if (add) return lit ? current.filter((entry) => entry.block !== slot.block) : [...current, slot];
+  return lit && current.length === 1 ? [] : [slot];
+}
+
+/** The spellings to look for: every slot's block and its far halves, once. */
+export function glowPatterns(slots: readonly GlowSlot[]): string[] {
+  return [...new Set(slots.flatMap((slot) => [slot.block, ...slot.pair]))];
 }
 
 /** The spelling an air slot stands for. */
