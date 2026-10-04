@@ -2038,6 +2038,8 @@ console.log("\n--- settings coercion ---");
         subsoilDepth: 5,
         rock: "minecraft:deepslate",
       },
+      smooth: { radius: 9, footprint: "square", iterations: 7 },
+      erode: { radius: 6, preset: "floatclean" },
     },
     creativeWindowX: 500,
     creativeWindowY: 120,
@@ -2080,6 +2082,8 @@ console.log("\n--- settings coercion ---");
           subsoilDepth: 99,
           rock: 7,
         },
+        smooth: { radius: -4, footprint: "star", iterations: 400 },
+        erode: { radius: "big", preset: "none" },
       },
     }).creative;
     equal(
@@ -2106,6 +2110,11 @@ console.log("\n--- settings coercion ---");
       "...a layer that is not a mix is the default, and its numbers are clamped",
       [odd.terrain.surface, odd.terrain.subsoil, odd.terrain.rock, odd.terrain.radius, odd.terrain.subsoilDepth],
       ["minecraft:grass_block", "minecraft:dirt", "minecraft:stone", 32, 32],
+    );
+    equal(
+      "the smooth and erode brushes clamp their numbers, and VoxelSniper's none is not a preset here",
+      [odd.smooth.radius, odd.smooth.footprint, odd.smooth.iterations, odd.erode.radius, odd.erode.preset],
+      [0, "disc", 32, DEFAULT_UI_SETTINGS.creative.erode.radius, DEFAULT_UI_SETTINGS.creative.erode.preset],
     );
     equal(
       "...and a base past the range is brought back inside it rather than refused",

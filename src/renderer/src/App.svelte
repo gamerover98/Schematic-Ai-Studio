@@ -88,7 +88,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
     type StrokeEvent,
   } from "./lib/creative_tools.js";
   import type { CreativeSettings, CreativeTool, TerrainToolSettings } from "../../shared/creative.js";
-  import type { TerrainMode } from "../../shared/terrain.js";
+  import { erosionRule, type TerrainMode } from "../../shared/terrain.js";
   import CreativeInventory from "./lib/CreativeInventory.svelte";
   import { hasTextSelection, isTyping } from "./lib/typing.js";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
@@ -1169,6 +1169,36 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       );
       return;
     }
+    /*
+     * The smooth brush blurs what is under it with either button; the erode
+     * brush runs its preset with the right one and the inverse with the left,
+     * VoxelSniper's arrow and gunpowder.
+     */
+    if (creative.tool === "smooth" || creative.tool === "erode") {
+      const { x, y, z } = event.at;
+      if (creative.tool === "smooth") {
+        const settings = creative.smooth;
+        void queueBuild(t("task.smoothing"), () =>
+          api().applyEdit({
+            kind: "smooth",
+            area: { kind: "brush", x, y, z, radius: settings.radius, footprint: settings.footprint },
+            iterations: settings.iterations,
+            stroke,
+          }),
+        );
+      } else {
+        const settings = creative.erode;
+        void queueBuild(t("task.eroding"), () =>
+          api().applyEdit({
+            kind: "erode",
+            area: { kind: "brush", x, y, z, radius: settings.radius, footprint: "disc" },
+            rule: erosionRule(settings.preset, erase),
+            stroke,
+          }),
+        );
+      }
+      return;
+    }
     if (event.shape === null) return;
     const shape = event.shape;
     let mix: MixSpec;
@@ -1209,6 +1239,26 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         area: { kind: "regions", regions },
         terrain: terrainRequestOf(creative.terrain, creative.terrain.mode),
       }),
+    );
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /** The ground of every selected area smoothed, `//smooth` over each in turn. */
+  async function smoothSelection(): Promise<void> {
+    if (!selection) return;
+    const regions = areasForIpc();
+    const outcome = await runDocument(t("task.smoothing"), () =>
+      api().applyEdit({ kind: "smooth", area: { kind: "regions", regions }, iterations: creative.smooth.iterations }),
+    );
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /** The selected cells eroded by the erode brush's preset. */
+  async function erodeSelection(): Promise<void> {
+    if (!selection) return;
+    const regions = areasForIpc();
+    const outcome = await runDocument(t("task.eroding"), () =>
+      api().applyEdit({ kind: "erode", area: { kind: "regions", regions }, rule: erosionRule(creative.erode.preset) }),
     );
     reportChange(outcome?.changed ?? null);
   }
@@ -5840,6 +5890,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           onterrainchange={(terrain) => setCreative({ ...creative, terrain })}
           onlayterrain={() => void layTerrain()}
           onfitterrain={fitTerrain}
+          smooth={creative.smooth}
+          onsmoothchange={(smooth) => setCreative({ ...creative, smooth })}
+          onsmooth={() => void smoothSelection()}
+          erode={creative.erode}
+          onerodechange={(erode) => setCreative({ ...creative, erode })}
+          onerode={() => void erodeSelection()}
           origin={docState?.frame ?? [0, 0, 0]}
         />
       </ToolWindow>

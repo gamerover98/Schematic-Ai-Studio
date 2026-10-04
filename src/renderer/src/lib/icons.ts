@@ -163,6 +163,13 @@ export const ICONS = {
       { x: 8.5, y: 8.5, w: 7, h: 7, rx: 0.5 },
     ],
   },
+  /** Smoothing: a jagged line becoming a wave. */
+  smooth: { paths: ["M3 15 L6 10 L8 13 L11 8", "M11 13 C14 9 17 9 21 13"] },
+  /** Erosion: a block with its corner worn away, and the grains. */
+  erode: {
+    paths: ["M4 20 V8 H11 L16 13 V20 Z"],
+    circles: [dot(18.5, 9.5, 1.2), dot(20.5, 6, 0.9), dot(16, 6.5, 0.9)],
+  },
   /** Terrain: two hills on a line of ground. */
   terrain: {
     paths: ["M2.5 19 H21.5", "M2.5 19 L8.5 9 L12.5 15 L15.5 11 L21.5 19"],

@@ -112,14 +112,21 @@ import {
   type BlockMix,
 } from "../../shared/block_mix.js";
 import { regionCellSet, shapeCellSet, writeMix } from "../domain/mix.js";
-import { writeTerrain, type LayerMix } from "../domain/terrain.js";
+import { erodeCells, groundFor, isLiquid, smoothHeights, writeTerrain, type LayerMix } from "../domain/terrain.js";
 import {
+  EROSION_PRESET_NAMES,
+  EROSION_RECURSION,
+  erosionRule,
   heightField,
+  normalizeErosionRule,
   normalizeHeightField,
+  SMOOTH_ITERATIONS,
   SUBSOIL_DEPTH,
   TERRAIN_AMPLITUDE,
   TERRAIN_MODES,
   TERRAIN_NOISES,
+  type ErosionPreset,
+  type ErosionRule,
   type TerrainMode,
 } from "../../shared/terrain.js";
 import { MAX_DOCUMENT_VOLUME, MAX_EDIT_VOLUME } from "../services/session.js";
@@ -1704,6 +1711,133 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
             `are empty. Move base, change amplitude or the region if that is not what you meant.`
           : undefined;
       return { changed, region, surface: { lowest, highest }, ...notes, ...(cut === undefined ? {} : { cut }) };
+    },
+  },
+
+  {
+    /**
+     * WorldEdit's `//smooth` over a region, the same pass the creative smooth
+     * brush makes. Inside the region and the schematic only: smoothing
+     * reshapes ground that is there, and grows nothing.
+     */
+    name: "smooth_terrain",
+    description:
+      "Smooth the ground in a region, as WorldEdit's //smooth does. Defaults to the user's selection. " +
+      "Takes a heightmap of the region (per column, the highest block that fills its cell or covers its " +
+      "floor or ceiling -- not flowers, torches or fences), blurs it iterations times with WorldEdit's " +
+      "Gaussian (radius 5, sigma 1), and stretches each column to its new height, keeping its top block. " +
+      "Good for terrain, wrong for buildings, walls or caves. iterations defaults to 1.",
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        iterations: { type: "integer", minimum: SMOOTH_ITERATIONS.min, maximum: SMOOTH_ITERATIONS.max },
+      },
+      additionalProperties: false,
+    },
+    async run(context, args: Partial<RegionArgs> & { iterations?: number }, id) {
+      const given = args ?? ({} as typeof args);
+      const { region, ...notes } = resolveRegion(context, given);
+      const iterations = given.iterations ?? 1;
+      if (!Number.isInteger(iterations) || iterations < SMOOTH_ITERATIONS.min || iterations > SMOOTH_ITERATIONS.max) {
+        throw new Error(`iterations is a whole number from ${SMOOTH_ITERATIONS.min} to ${SMOOTH_ITERATIONS.max}.`);
+      }
+      if (regionVolume(region) > MAX_EDIT_VOLUME) {
+        throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
+      }
+      const { doc } = context;
+      const voidEntry = emptySpaceOf(doc);
+      const isEmpty = (entry: PaletteEntry): boolean =>
+        entry.namespacedName === "minecraft:air" || (voidEntry !== null && matchesBlockPattern(entry, voidEntry));
+      step(context, "smooth_terrain", `smoothing ${describeRegion(region)} ${iterations} time${iterations === 1 ? "" : "s"}`, id);
+      const changed = smoothHeights(
+        doc,
+        context.tx,
+        region,
+        iterations,
+        groundFor(isEmpty),
+        voidEntry ?? { namespacedName: "minecraft:air", properties: {} },
+      );
+      return { changed, region, ...notes };
+    },
+  },
+
+  {
+    /**
+     * VoxelSniper's erode brush over a region rather than a sphere: the same
+     * passes, the same presets, the creative erode brush's rule.
+     */
+    name: "erode",
+    description:
+      "Erode or fill the blocks in a region with VoxelSniper's erode rules. Defaults to the user's selection. " +
+      "Erosion turns a block with at least erosion_faces of its six neighbours empty or liquid into empty " +
+      "space, erosion_recursion times; then a fill turns an empty or liquid cell with at least fill_faces " +
+      "solid neighbours into the commonest of them, fill_recursion times. Each pass reads the one before. " +
+      "preset: melt (wears edges away), fill (fills hollows), smooth (rounds both), lift (raises the " +
+      "surface a layer), floatclean (removes lone floating blocks). inverse swaps erosion and fill, as " +
+      "VoxelSniper's gunpowder does. The four numbers, when given, replace the preset's. Never grows the " +
+      "schematic.",
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        preset: { type: "string", enum: [...EROSION_PRESET_NAMES] },
+        inverse: { type: "boolean" },
+        erosion_faces: { type: "integer", minimum: 0, maximum: 6 },
+        erosion_recursion: { type: "integer", minimum: EROSION_RECURSION.min, maximum: EROSION_RECURSION.max },
+        fill_faces: { type: "integer", minimum: 0, maximum: 6 },
+        fill_recursion: { type: "integer", minimum: EROSION_RECURSION.min, maximum: EROSION_RECURSION.max },
+      },
+      additionalProperties: false,
+    },
+    async run(
+      context,
+      args: Partial<RegionArgs> & {
+        preset?: ErosionPreset;
+        inverse?: boolean;
+        erosion_faces?: number;
+        erosion_recursion?: number;
+        fill_faces?: number;
+        fill_recursion?: number;
+      },
+      id,
+    ) {
+      const given = args ?? ({} as typeof args);
+      const { region, ...notes } = resolveRegion(context, given);
+      const preset = given.preset ?? "smooth";
+      if (!(EROSION_PRESET_NAMES as readonly string[]).includes(preset)) {
+        throw new Error(`preset must be one of ${EROSION_PRESET_NAMES.join(", ")}, not "${String(preset)}".`);
+      }
+      const base = erosionRule(preset, given.inverse === true);
+      let rule: ErosionRule;
+      try {
+        rule = normalizeErosionRule({
+          erosionFaces: given.erosion_faces ?? base.erosionFaces,
+          erosionRecursion: given.erosion_recursion ?? base.erosionRecursion,
+          fillFaces: given.fill_faces ?? base.fillFaces,
+          fillRecursion: given.fill_recursion ?? base.fillRecursion,
+        });
+      } catch (err) {
+        throw new Error(err instanceof Error ? err.message : String(err));
+      }
+      if (regionVolume(region) > MAX_EDIT_VOLUME) {
+        throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
+      }
+      const { doc } = context;
+      const voidEntry = emptySpaceOf(doc);
+      const isEmpty = (entry: PaletteEntry): boolean =>
+        entry.namespacedName === "minecraft:air" || (voidEntry !== null && matchesBlockPattern(entry, voidEntry));
+      step(context, "erode", `eroding ${describeRegion(region)} (${preset}${given.inverse === true ? ", inverse" : ""})`, id);
+      const changed = erodeCells(
+        doc,
+        context.tx,
+        region,
+        () => true,
+        rule,
+        (entry) => isEmpty(entry) || isLiquid(entry),
+        voidEntry ?? { namespacedName: "minecraft:air", properties: {} },
+      );
+      return { changed, region, rule, ...notes };
     },
   },
 

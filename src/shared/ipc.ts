@@ -11,7 +11,7 @@ import type { GpuPreference, Hotbar } from "./settings.js";
 import type { CameraPlacement, Vec3 } from "./camera_aim.js";
 import type { DyeName } from "./banner_patterns.js";
 import type { ShapeMode, ShapeSpec } from "./shapes.js";
-import type { Footprint, HeightField, TerrainMode } from "./terrain.js";
+import type { ErosionRule, Footprint, HeightField, TerrainMode } from "./terrain.js";
 import { DEFAULT_DISTRIBUTION, type Distribution } from "./block_mix.js";
 import { SCHEMATIC_FORMAT_LABEL, SCHEMATIC_FORMATS } from "./schematic.js";
 import type {
@@ -1468,7 +1468,21 @@ export type EditRequest =
    * under its footprint, from the floor -- or the base, when that is lower --
    * to the top of the schematic or of the terrain, whichever is higher.
    */
-  | { kind: "terrain"; area: ToolArea; terrain: TerrainRequest; stroke?: string };
+  | { kind: "terrain"; area: ToolArea; terrain: TerrainRequest; stroke?: string }
+  /**
+   * WorldEdit's `//smooth`: the ground's heights through a Gaussian,
+   * `iterations` times, each column stretched to its new height. Over every
+   * selected area in turn, or a brush touch, which is `SmoothBrush`'s box --
+   * the radius round the cell aimed at, ten blocks more above -- written only
+   * in the footprint's columns. Never grows the document.
+   */
+  | { kind: "smooth"; area: ToolArea; iterations: number; stroke?: string }
+  /**
+   * VoxelSniper's erosion (`shared/terrain.ts`' `ErosionRule`) over the
+   * selection's cells, or a brush touch, which is VoxelSniper's sphere round
+   * the cell aimed at. Never grows the document.
+   */
+  | { kind: "erode"; area: ToolArea; rule: ErosionRule; stroke?: string };
 
 /**
  * Where a terrain tool works: the selection's areas, or a brush touch.

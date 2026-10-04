@@ -142,7 +142,15 @@ import {
   MixSyntaxError,
   normalizeDistribution,
 } from "../../shared/block_mix.js";
-import { forEachUnionCell, intersectBox, MAX_BOXES, unionBounds, unionVolume, type Box } from "../../shared/regions.js";
+import {
+  boxContains,
+  forEachUnionCell,
+  intersectBox,
+  MAX_BOXES,
+  unionBounds,
+  unionVolume,
+  type Box,
+} from "../../shared/regions.js";
 import { regionCellSet, shapeCellSet, writeMix, type CellFilter, type CellSet } from "../domain/mix.js";
 import {
   normalizeShape,
@@ -154,8 +162,11 @@ import {
 import {
   FOOTPRINTS,
   heightField,
+  inErodeSphere,
   inFootprint,
+  normalizeErosionRule,
   normalizeHeightField,
+  SMOOTH_ITERATIONS,
   SUBSOIL_DEPTH,
   TERRAIN_MODES,
   TerrainError,
@@ -163,7 +174,7 @@ import {
   type Footprint,
   type TerrainMode,
 } from "../../shared/terrain.js";
-import { writeTerrain } from "../domain/terrain.js";
+import { erodeCells, groundFor, isLiquid, smoothHeights, writeTerrain } from "../domain/terrain.js";
 
 export interface DocumentSession {
   readonly doc: SchematicDocument;
@@ -1639,6 +1650,89 @@ export function applyEdit(
         // landscape is the content's.
         return writeTerrain(doc, tx, area.cells, area.bounds, heightField(field, doc.frame), layers, mode as TerrainMode, emptiness, empty);
       },
+      { mergeKey: request.stroke },
+    );
+  }
+
+  /*
+   * Smoothing reshapes the ground that is there, so it writes only inside the
+   * document and never grows it: `//smooth` reads and writes its selection,
+   * and outside the box there is no ground to read. Several areas are
+   * smoothed one after another, as several `//smooth`s would be, so where two
+   * overlap the overlap is smoothed twice.
+   */
+  if (request.kind === "smooth") {
+    const iterations = request.iterations;
+    if (!Number.isInteger(iterations) || iterations < SMOOTH_ITERATIONS.min || iterations > SMOOTH_ITERATIONS.max) {
+      throw new TerrainError(
+        `Smoothing runs a whole number of times, from ${SMOOTH_ITERATIONS.min} to ${SMOOTH_ITERATIONS.max}.`,
+      );
+    }
+    const whole = { minX: 0, minY: 0, minZ: 0, maxX: doc.width - 1, maxY: doc.height - 1, maxZ: doc.length - 1 };
+    let boxes: Region[];
+    let columns: ((x: number, z: number) => boolean) | null = null;
+    if (request.area.kind === "regions") {
+      if (request.area.regions.length === 0 || request.area.regions.length > MAX_BOXES) {
+        throw new RegionCountError(request.area.regions.length);
+      }
+      boxes = request.area.regions.flatMap((region) => {
+        const cut = intersectBox(orderRegion(region), whole);
+        return cut === null ? [] : [cut];
+      });
+    } else {
+      const { x, y, z, radius, footprint } = request.area;
+      // `SmoothBrush`: the radius round the cell aimed at, and ten more above.
+      const place = toolPlace(doc, request.area, { minY: y - radius, maxY: y + radius + 10 });
+      const cut = intersectBox(place.bounds, whole);
+      boxes = cut === null ? [] : [cut];
+      columns = (cx, cz) => inFootprint(footprint, cx - x, cz - z, radius);
+    }
+    if (boxes.length === 0) return 0;
+    const volume = boxes.reduce((sum, box) => sum + regionVolume(box), 0);
+    if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+    const empty = emptyEntry(session, options.voidBlock);
+    const ground = groundFor(emptiness);
+    return runTransaction(
+      doc,
+      history,
+      "Smooth terrain",
+      (tx) => boxes.reduce((changed, box) => changed + smoothHeights(doc, tx, box, iterations, ground, empty, columns), 0),
+      { mergeKey: request.stroke },
+    );
+  }
+
+  /*
+   * Erosion opens and closes cells that are there, so it too stays inside the
+   * document: a fill reaches for the commonest neighbour, and outside the box
+   * there is none.
+   */
+  if (request.kind === "erode") {
+    const rule = normalizeErosionRule(request.rule);
+    const whole = { minX: 0, minY: 0, minZ: 0, maxX: doc.width - 1, maxY: doc.height - 1, maxZ: doc.length - 1 };
+    let bounds: Region | null;
+    let inside: (x: number, y: number, z: number) => boolean;
+    if (request.area.kind === "regions") {
+      if (request.area.regions.length === 0 || request.area.regions.length > MAX_BOXES) {
+        throw new RegionCountError(request.area.regions.length);
+      }
+      const boxes = request.area.regions.map(orderRegion);
+      bounds = intersectBox(unionBounds(boxes) as Region, whole);
+      inside = (x, y, z) => boxes.some((box) => boxContains(box, x, y, z));
+    } else {
+      const { x, y, z, radius } = request.area;
+      const place = toolPlace(doc, request.area, { minY: y - radius, maxY: y + radius });
+      bounds = intersectBox(place.bounds, whole);
+      inside = (cx, cy, cz) => inErodeSphere(cx - x, cy - y, cz - z, radius);
+    }
+    if (bounds === null) return 0;
+    if (regionVolume(bounds) > MAX_EDIT_VOLUME) throw new EditTooLargeError(regionVolume(bounds));
+    const empty = emptyEntry(session, options.voidBlock);
+    const area = bounds;
+    return runTransaction(
+      doc,
+      history,
+      "Erode",
+      (tx) => erodeCells(doc, tx, area, inside, rule, (entry) => emptiness(entry) || isLiquid(entry), empty),
       { mergeKey: request.stroke },
     );
   }

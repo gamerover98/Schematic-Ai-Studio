@@ -113,11 +113,14 @@ import {
     brushSpec,
     columnReach,
     cornerSpec,
+    erodeGhost,
     ghostFaces,
     reachOf,
     reached,
     shapeGhost,
     shouldTouch,
+    smoothSpec,
+    sphereReach,
     strokeRadius,
     takesCorners,
     takesStroke,
@@ -2000,6 +2003,30 @@ import { isTyping } from "./typing.js";
         reach: columnReach(centre, settings.terrain.radius, settings.terrain.footprint),
       };
     }
+    // The smooth brush reads heights, so on the grid it smooths the floor.
+    if (settings.tool === "smooth") {
+      const cell = pickAtCrosshair() ?? gridCellAtCrosshair();
+      if (cell === null) return null;
+      const centre = { x: cell.x, y: cell.y, z: cell.z };
+      return {
+        ghost: shapeGhost(smoothSpec(settings.smooth, centre)),
+        spec: null,
+        centre,
+        reach: columnReach(centre, settings.smooth.radius, settings.smooth.footprint),
+      };
+    }
+    // Erosion works on blocks, so it needs one aimed at: VoxelSniper's target.
+    if (settings.tool === "erode") {
+      const target = pickAtCrosshair();
+      if (target === null) return null;
+      const centre = { x: target.x, y: target.y, z: target.z };
+      return {
+        ghost: erodeGhost(centre, settings.erode.radius),
+        spec: null,
+        centre,
+        reach: sphereReach(centre, settings.erode.radius),
+      };
+    }
     if (takesCorners(settings.tool)) {
       const at = cornerAtCrosshair();
       if (at === null) return null;
@@ -2032,8 +2059,10 @@ import { isTyping } from "./typing.js";
       hideCreativeGhost();
       return;
     }
-    showCreativeGhost(aim.ghost, stroke?.erase === true);
     const settings = creative!.settings;
+    // Both of the smooth brush's buttons smooth; every other stroke's left
+    // button takes away, and its ghost says so.
+    showCreativeGhost(aim.ghost, stroke?.erase === true && settings.tool !== "smooth");
     if (
       stroke !== null &&
       shouldTouch(stroke.last, aim.centre, strokeRadius(settings, settings.tool)) &&

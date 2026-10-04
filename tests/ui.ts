@@ -236,12 +236,15 @@ import {
   cornerClick,
   cornerSpec,
   creativeKey,
+  erodeGhost,
   ghostFaces,
   nextTool,
   reachOf,
   reached,
   resized,
   shouldTouch,
+  smoothSpec,
+  sphereReach,
   strokeRadius,
   strokeSpacing,
   takesCorners,
@@ -6253,18 +6256,18 @@ console.log("\n--- the creative tools ---");
   const settings = DEFAULT_CREATIVE_SETTINGS;
   equal(
     "B steps through the tools and comes back round",
-    [nextTool("place"), nextTool("brush"), nextTool("shape"), nextTool("walls"), nextTool("terrain")],
-    ["brush", "shape", "walls", "terrain", "place"],
+    [nextTool("place"), nextTool("brush"), nextTool("shape"), nextTool("walls"), nextTool("terrain"), nextTool("smooth"), nextTool("erode")],
+    ["brush", "shape", "walls", "terrain", "smooth", "erode", "place"],
   );
   equal(
-    "the brush and the terrain are held strokes, and nothing else is",
-    [takesStroke("place"), takesStroke("brush"), takesStroke("shape"), takesStroke("walls"), takesStroke("terrain")],
-    [false, true, false, false, true],
+    "the brushes are held strokes -- paint, terrain, smooth, erode -- and the corner tools and the hand are not",
+    (["place", "brush", "shape", "walls", "terrain", "smooth", "erode"] as const).map((tool) => takesStroke(tool)),
+    [false, true, false, false, true, true, true],
   );
   equal(
     "...each spaced by its own radius",
-    [strokeRadius(settings, "brush"), strokeRadius(settings, "terrain")],
-    [settings.brush.radius, settings.terrain.radius],
+    (["brush", "terrain", "smooth", "erode"] as const).map((tool) => strokeRadius(settings, tool)),
+    [settings.brush.radius, settings.terrain.radius, settings.smooth.radius, settings.erode.radius],
   );
   equal("only the shape and walls tools take corners", [takesCorners("place"), takesCorners("brush"), takesCorners("shape"), takesCorners("walls")], [false, false, true, true]);
 
@@ -6351,6 +6354,26 @@ console.log("\n--- the creative tools ---");
   equal("...inside their ranges", [resized({ ...settings, brush: { ...settings.brush, radius: 0 } }, "brush", -1).brush.radius, resized({ ...settings, walls: { ...settings.walls, height: 1 } }, "walls", -1).walls.height], [0, 1]);
   equal("...and the block in your hand has no size", resized(settings, "place", 1), settings);
   equal("[ and ] size the terrain brush's radius", resized(settings, "terrain", 2).terrain.radius, settings.terrain.radius + 2);
+  equal(
+    "...and the smooth and erode brushes', each its own",
+    [resized(settings, "smooth", -1).smooth.radius, resized(settings, "erode", 1).erode.radius],
+    [settings.smooth.radius - 1, settings.erode.radius + 1],
+  );
+
+  /*
+   * The erode brush is VoxelSniper's sphere, which is not WorldEdit's: radius
+   * 1 is the cell and its six faces, where //sphere 1 is nineteen.
+   */
+  {
+    const one = erodeGhost({ x: 0, y: 0, z: 0 }, 1).cells()!;
+    const two = erodeGhost({ x: 5, y: 5, z: 5 }, 2).cells()!;
+    equal("the erode brush's ghost is VoxelSniper's sphere: 7 cells at radius 1, 33 at 2", [one.count, two.count], [7, 33]);
+    equal("...the same geometry wherever it stands", erodeGhost({ x: 9, y: 1, z: -4 }, 2).key, erodeGhost({ x: 0, y: 0, z: 0 }, 2).key);
+    const reach = sphereReach({ x: 0, y: 10, z: 0 }, 2);
+    check("...and a touch has reached its sphere and a block round it, not two", reach(0, 13, 0) && !reach(0, 14, 0));
+    const flat = smoothSpec({ radius: 3, footprint: "disc", iterations: 4 }, { x: 4, y: 7, z: 4 });
+    equal("the smooth brush's ghost is its columns, one layer on the cell aimed at", [flat.box.minY, flat.box.maxY, shapeCells(flat).count], [7, 7, 37]);
+  }
 
   /*
    * The terrain: a stroke reaches the columns it laid, at every height --
@@ -6425,6 +6448,8 @@ console.log("\n--- the creative tools ---");
   check("...and every face of a hollow sphere faces out of it, inside and out", hollow.triangles > 0 && hollow.wrong === 0, JSON.stringify(hollow));
   const surface = ghostOf(terrainGhost({ ...settings.terrain, radius: 6 }, { x: 3, y: 0, z: 3 }, [0, 0, 0]).cells()!);
   check("...and so does every face of a terrain's stepped surface", surface.triangles > 0 && surface.wrong === 0, JSON.stringify(surface));
+  const sphere = ghostOf(erodeGhost({ x: 0, y: 0, z: 0 }, 4).cells()!);
+  check("...and of the erode brush's sphere", sphere.triangles > 0 && sphere.wrong === 0, JSON.stringify(sphere));
 
   // Wired where it has to be, which only the source can say.
   const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");

@@ -685,6 +685,38 @@ and the three put down the same landscape for the same settings.
 - **`random` and `gradient` are not terrains.** One is a bed of nails, the
   other a coordinate, which calibrates to nothing; they are refused by name.
 
+**Smoothing is WorldEdit's `//smooth` and erosion is VoxelSniper's erode
+brush, each transcribed and each held to a port.** `smoothHeights` and
+`erodeCells` in `domain/terrain.ts`; `tests/session.ts` carries a literal port
+of `HeightMap` and of `ErodeBrush` and compares block for block, every preset
+both ways. The creative Smooth and Erode tools, the selection's two buttons and
+`smooth_terrain` / `erode` over MCP all write through them, and none of them
+grows the document: they reshape what is there.
+
+- **Smoothing is in Java's `float`** (`Math.fround`), the kernel included, and
+  a neighbour past the map's edge is read from the column itself, not the
+  nearest edge -- both are WorldEdit's and both move heights by one. Columns
+  are *stretched*: the top block is kept and moved, the cells under it copy
+  from the old column at the same proportion.
+- **Ground is a block that fills its cell or covers its floor or ceiling**
+  (`groundFor`): WorldEdit asks whether a block stops movement, which this app
+  cannot ask. A flower or a fence on the ground is not ground, and neither is
+  water or the empty space block.
+- **The smooth brush is `SmoothBrush`'s box**, the radius round the cell aimed
+  at and ten blocks more above, written only in the footprint's columns.
+  Several selected areas are smoothed one after another, as several
+  `//smooth`s would be, so an overlap is smoothed twice.
+- **Erosion's passes each read the one before** (the tracker), outside the
+  document counts as open, and the fill's commonest neighbour is counted by
+  the whole state -- FastAsyncVoxelSniper's copy; Reimagined counts by
+  material and would stand every log upright. A tie goes to the last of the
+  tied blocks in the order first met, because Java walks a `HashMap`, which has
+  no order to be faithful to.
+- **VoxelSniper's `none` preset is not offered**: zero faces erodes every solid
+  cell and fills every open one, which turns a sphere inside out. The brush is
+  VoxelSniper's sphere, `d^2 <= r^2`, not WorldEdit's `r + 0.5`, and its left
+  button runs the inverse, the gunpowder.
+
 `noise(kind, x, y, z, params)` in a build script is `cellValues` behind a host
 callback that answers a number (`registerHostQuery` in `core.ts`). It is the
 third thing across the sandbox's bridge and the first that returns anything,

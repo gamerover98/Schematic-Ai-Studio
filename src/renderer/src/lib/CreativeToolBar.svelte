@@ -44,6 +44,8 @@
     shape: "shape",
     walls: "walls",
     terrain: "terrain",
+    smooth: "smooth",
+    erode: "erode",
   };
 
   /** What the tool in hand will do, in a few words. */
@@ -72,6 +74,17 @@
           footprint: t(`terrain.footprint.${settings.terrain.footprint}`),
           radius: settings.terrain.radius,
         });
+      case "smooth":
+        return t("creative.summary.smooth", {
+          footprint: t(`terrain.footprint.${settings.smooth.footprint}`),
+          radius: settings.smooth.radius,
+          passes: settings.smooth.iterations,
+        });
+      case "erode":
+        return t("creative.summary.erode", {
+          preset: t(`erode.preset.${settings.erode.preset}`),
+          radius: settings.erode.radius,
+        });
     }
   });
 
@@ -82,6 +95,8 @@
     if (takesCorners(settings.tool)) return t("creative.hint.firstCorner");
     if (settings.tool === "brush") return t("creative.hint.brush");
     if (settings.tool === "terrain") return t("creative.hint.terrain");
+    if (settings.tool === "smooth") return t("creative.hint.smooth");
+    if (settings.tool === "erode") return t("creative.hint.erode");
     return t("creative.hint.place");
   });
 

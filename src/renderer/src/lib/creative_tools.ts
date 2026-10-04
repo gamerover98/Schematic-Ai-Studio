@@ -42,6 +42,14 @@
  * changes nothing. Its ghost is that surface, and what it has reached is the
  * columns it laid, at any height -- the crosshair lands on the ground just
  * laid, and the next touch waits until it is off it.
+ *
+ * ## Smoothing and erosion are touches too
+ *
+ * The smooth brush blurs the ground's heights round the crosshair and the
+ * erode brush wears away or fills in VoxelSniper's sphere round it; both are
+ * strokes, one undo step each, and each touch changes what is under the
+ * crosshair. So the smooth brush's reach is its columns, as the terrain's is,
+ * and the erode brush's is its sphere grown by a block.
  */
 
 import {
@@ -53,7 +61,7 @@ import {
   type CreativeTool,
 } from "../../../shared/creative.js";
 import { orderBox, boxVolume, type Box } from "../../../shared/regions.js";
-import { heightField, inFootprint, type Footprint } from "../../../shared/terrain.js";
+import { heightField, inErodeSphere, inFootprint, type Footprint } from "../../../shared/terrain.js";
 import {
   normalizeShape,
   shapeCells,
@@ -93,7 +101,7 @@ export type StrokeEvent =
       readonly phase: "touch";
       /** The cell the touch is centred on. */
       readonly at: Cell;
-      /** The brush's shape; `null` for the terrain, which is columns round `at`. */
+      /** The brush's shape; `null` for the tools that work round `at` by their own rule. */
       readonly shape: ShapeSpec | null;
     }
   | { readonly phase: "end" };
@@ -110,13 +118,22 @@ export function takesCorners(tool: CreativeTool): tool is "shape" | "walls" {
 }
 
 /** The tools a held button paints with: a stroke of touches. */
-export function takesStroke(tool: CreativeTool): tool is "brush" | "terrain" {
-  return tool === "brush" || tool === "terrain";
+export function takesStroke(tool: CreativeTool): tool is "brush" | "terrain" | "smooth" | "erode" {
+  return tool === "brush" || tool === "terrain" || tool === "smooth" || tool === "erode";
 }
 
 /** How far a stroking tool reaches, which is also what spaces its touches. */
 export function strokeRadius(settings: CreativeSettings, tool: CreativeTool): number {
-  return tool === "terrain" ? settings.terrain.radius : settings.brush.radius;
+  switch (tool) {
+    case "terrain":
+      return settings.terrain.radius;
+    case "smooth":
+      return settings.smooth.radius;
+    case "erode":
+      return settings.erode.radius;
+    default:
+      return settings.brush.radius;
+  }
 }
 
 /**
@@ -205,6 +222,26 @@ export function reachOf(spec: ShapeSpec): (x: number, y: number, z: number) => b
  */
 export function columnReach(at: Cell, radius: number, footprint: Footprint): (x: number, y: number, z: number) => boolean {
   return (x, _y, z) => inFootprint(footprint, x - at.x, z - at.z, radius + 1);
+}
+
+/** What one touch of the erode brush reached: its sphere, grown by a block. */
+export function sphereReach(at: Cell, radius: number): (x: number, y: number, z: number) => boolean {
+  return (x, y, z) => inErodeSphere(x - at.x, y - at.y, z - at.z, radius + 1);
+}
+
+/**
+ * What the smooth brush covers seen from above, as a shape one layer tall on
+ * the cell aimed at: the columns it writes. Its heightmap reads the square
+ * round them and ten blocks over (WorldEdit's `SmoothBrush`), which a ghost
+ * the height of that box would only hide the ground behind.
+ */
+export function smoothSpec(smooth: CreativeSettings["smooth"], at: Cell): ShapeSpec {
+  const r = smooth.radius;
+  return {
+    kind: smooth.footprint === "disc" ? "cylinder" : "box",
+    axis: "y",
+    box: { minX: at.x - r, minY: at.y, minZ: at.z - r, maxX: at.x + r, maxY: at.y, maxZ: at.z + r },
+  };
 }
 
 /** Whether a stroke has already reached `at`: any of its touches did. */
@@ -312,6 +349,10 @@ export function resized(settings: CreativeSettings, tool: CreativeTool, by: numb
       return { ...settings, walls: { ...settings.walls, height: clamp(settings.walls.height + by, TOOL_HEIGHT) } };
     case "terrain":
       return { ...settings, terrain: { ...settings.terrain, radius: clamp(settings.terrain.radius + by, BRUSH_RADIUS) } };
+    case "smooth":
+      return { ...settings, smooth: { ...settings.smooth, radius: clamp(settings.smooth.radius + by, BRUSH_RADIUS) } };
+    case "erode":
+      return { ...settings, erode: { ...settings.erode, radius: clamp(settings.erode.radius + by, BRUSH_RADIUS) } };
     case "place":
       return settings;
   }
@@ -349,6 +390,34 @@ export function shapeGhost(spec: ShapeSpec): Ghost {
     box,
     key: [spec.kind, w, h, l, spec.axis ?? "y", spec.hollow === true, spec.thickness ?? 1].join(":"),
     cells: () => (boxVolume(local) <= MAX_GHOST_CELLS ? shapeCells({ ...spec, box: local }) : null),
+  };
+}
+
+/**
+ * The erode brush's ghost: VoxelSniper's sphere round the cell aimed at, the
+ * cells a touch may change. Its geometry depends on the radius alone.
+ */
+export function erodeGhost(at: Cell, radius: number): Ghost {
+  const r = radius;
+  const side = 2 * r + 1;
+  return {
+    box: { minX: at.x - r, minY: at.y - r, minZ: at.z - r, maxX: at.x + r, maxY: at.y + r, maxZ: at.z + r },
+    key: `erode:${r}`,
+    cells: () => {
+      if (side * side * side > MAX_GHOST_CELLS) return null;
+      const mask = new Uint8Array(side * side * side);
+      let count = 0;
+      for (let x = 0; x < side; x += 1) {
+        for (let y = 0; y < side; y += 1) {
+          for (let z = 0; z < side; z += 1) {
+            if (!inErodeSphere(x - r, y - r, z - r, r)) continue;
+            mask[x * side * side + y * side + z] = 1;
+            count += 1;
+          }
+        }
+      }
+      return { window: { minX: 0, minY: 0, minZ: 0, maxX: side - 1, maxY: side - 1, maxZ: side - 1 }, mask, count };
+    },
   };
 }
 

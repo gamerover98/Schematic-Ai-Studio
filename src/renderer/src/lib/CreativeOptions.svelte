@@ -23,6 +23,7 @@
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
   import type { Box } from "../../../shared/regions.js";
   import TerrainOptions from "./TerrainOptions.svelte";
+  import { EROSION_PRESET_NAMES, FOOTPRINTS, SMOOTH_ITERATIONS, type ErosionPreset } from "../../../shared/terrain.js";
   import { t } from "./i18n.svelte.js";
 
   interface Props {
@@ -64,6 +65,14 @@
 
   function walls(patch: Partial<CreativeSettings["walls"]>): void {
     onchange({ ...settings, walls: { ...settings.walls, ...patch } });
+  }
+
+  function smooth(patch: Partial<CreativeSettings["smooth"]>): void {
+    onchange({ ...settings, smooth: { ...settings.smooth, ...patch } });
+  }
+
+  function erode(patch: Partial<CreativeSettings["erode"]>): void {
+    onchange({ ...settings, erode: { ...settings.erode, ...patch } });
   }
 </script>
 
@@ -204,8 +213,68 @@
       idPrefix="creative-terrain"
     />
     <p class="note">{t("creative.terrainHint")}</p>
+  {:else if settings.tool === "smooth"}
+    <div class="segmented" role="group" aria-label={t("terrain.footprint")}>
+      {#each FOOTPRINTS as footprint (footprint)}
+        <button
+          class:active={settings.smooth.footprint === footprint}
+          aria-pressed={settings.smooth.footprint === footprint}
+          onclick={() => smooth({ footprint })}
+        >
+          {t(`terrain.footprint.${footprint}`)}
+        </button>
+      {/each}
+    </div>
+    <label class="row">
+      <span>{t("creative.radius")}</span>
+      <input
+        type="range"
+        min={BRUSH_RADIUS.min}
+        max={BRUSH_RADIUS.max}
+        value={settings.smooth.radius}
+        oninput={(event) => smooth({ radius: bounded(event.currentTarget.value, BRUSH_RADIUS, settings.smooth.radius) })}
+      />
+      <output>{settings.smooth.radius}</output>
+    </label>
+    <label class="row">
+      <span>{t("creative.passes")}</span>
+      <input
+        type="number"
+        min={SMOOTH_ITERATIONS.min}
+        max={SMOOTH_ITERATIONS.max}
+        value={settings.smooth.iterations}
+        onchange={(event) =>
+          smooth({ iterations: bounded(event.currentTarget.value, SMOOTH_ITERATIONS, settings.smooth.iterations) })}
+      />
+    </label>
+    <p class="note">{t("creative.smoothHint")}</p>
+  {:else if settings.tool === "erode"}
+    <label class="row">
+      <span>{t("creative.preset")}</span>
+      <select
+        value={settings.erode.preset}
+        onchange={(event) => erode({ preset: event.currentTarget.value as ErosionPreset })}
+      >
+        {#each EROSION_PRESET_NAMES as preset (preset)}
+          <option value={preset}>{t(`erode.preset.${preset}`)}</option>
+        {/each}
+      </select>
+    </label>
+    <p class="note">{t(`erode.presetHint.${settings.erode.preset}`)}</p>
+    <label class="row">
+      <span>{t("creative.radius")}</span>
+      <input
+        type="range"
+        min={BRUSH_RADIUS.min}
+        max={BRUSH_RADIUS.max}
+        value={settings.erode.radius}
+        oninput={(event) => erode({ radius: bounded(event.currentTarget.value, BRUSH_RADIUS, settings.erode.radius) })}
+      />
+      <output>{settings.erode.radius}</output>
+    </label>
+    <p class="note">{t("creative.erodeHint")}</p>
   {/if}
-  {#if settings.tool !== "terrain"}
+  {#if settings.tool !== "terrain" && settings.tool !== "smooth" && settings.tool !== "erode"}
     <p class="note">{t("creative.blockHint")}</p>
   {/if}
 </div>

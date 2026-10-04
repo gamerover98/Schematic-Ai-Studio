@@ -13,21 +13,32 @@
  *   one after the other;
  * - **walls**, the same two clicks, and the four sides of the box between;
  * - **terrain**, a landscape from a noise painted in under the crosshair, the
- *   columns of a disc or a square at a time (`shared/terrain.ts`).
+ *   columns of a disc or a square at a time (`shared/terrain.ts`);
+ * - **smooth**, WorldEdit's smooth brush: the ground's heights blurred under
+ *   the crosshair;
+ * - **erode**, VoxelSniper's erode brush: edges worn away or hollows filled
+ *   in a sphere, by a preset, the left button running its inverse.
  *
  * The first four write through `EditRequest.shape`, so the geometry is
  * `shapes.ts`' -- WorldEdit's -- and the renderer's ghost is the same cells
  * the edit writes. Terrain writes through `EditRequest.terrain`, and its
  * ghost is the surface `heightField` gives, which is what the edit lays.
+ * Smoothing and erosion go through `EditRequest.smooth` and `erode`.
  *
  * Here rather than in `settings.ts` because main coerces it and the renderer
  * reasons about it, and neither of those wants the other's half.
  */
 
 import type { ShapeAxis, ShapeMode } from "./shapes.js";
-import { DEFAULT_HEIGHT_FIELD, type Footprint, type HeightField, type TerrainMode } from "./terrain.js";
+import {
+  DEFAULT_HEIGHT_FIELD,
+  type ErosionPreset,
+  type Footprint,
+  type HeightField,
+  type TerrainMode,
+} from "./terrain.js";
 
-export const CREATIVE_TOOLS = ["place", "brush", "shape", "walls", "terrain"] as const;
+export const CREATIVE_TOOLS = ["place", "brush", "shape", "walls", "terrain", "smooth", "erode"] as const;
 export type CreativeTool = (typeof CREATIVE_TOOLS)[number];
 
 /**
@@ -106,6 +117,22 @@ export interface TerrainToolSettings {
   rock: string;
 }
 
+/**
+ * The smooth brush, and the selection's Smooth button: one number of passes
+ * for both, since a pass is the same filter however it was asked for.
+ */
+export interface SmoothToolSettings {
+  radius: number;
+  footprint: Footprint;
+  iterations: number;
+}
+
+/** The erode brush, and the selection's Erode button. */
+export interface ErodeToolSettings {
+  radius: number;
+  preset: ErosionPreset;
+}
+
 export interface CreativeSettings {
   /** The tool the right button is. Kept, so flight comes back holding it. */
   tool: CreativeTool;
@@ -113,6 +140,8 @@ export interface CreativeSettings {
   shape: ShapeToolSettings;
   walls: WallToolSettings;
   terrain: TerrainToolSettings;
+  smooth: SmoothToolSettings;
+  erode: ErodeToolSettings;
 }
 
 export const DEFAULT_CREATIVE_SETTINGS: CreativeSettings = {
@@ -134,4 +163,8 @@ export const DEFAULT_CREATIVE_SETTINGS: CreativeSettings = {
     subsoilDepth: 3,
     rock: "minecraft:stone",
   },
+  // WorldEdit's smooth brush takes four passes unless told otherwise.
+  smooth: { radius: 5, footprint: "disc", iterations: 4 },
+  // Smooth rounds edges and fills hollows alike, which is the safe first try.
+  erode: { radius: 4, preset: "smooth" },
 };

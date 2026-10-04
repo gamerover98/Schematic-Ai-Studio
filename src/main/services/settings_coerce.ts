@@ -25,14 +25,18 @@ import {
   TOOL_THICKNESS,
   type BrushSettings,
   type CreativeSettings,
+  type ErodeToolSettings,
   type ShapeToolSettings,
+  type SmoothToolSettings,
   type TerrainToolSettings,
   type WallToolSettings,
 } from "../../shared/creative.js";
 import { SHAPE_AXES, SHAPE_MODES } from "../../shared/shapes.js";
 import {
+  EROSION_PRESET_NAMES,
   FOOTPRINTS,
   normalizeHeightField,
+  SMOOTH_ITERATIONS,
   SUBSOIL_DEPTH,
   TERRAIN_MODES,
   type HeightField,
@@ -157,6 +161,8 @@ export function coerceCreative(raw: unknown): CreativeSettings {
   const shape = (source.shape ?? {}) as Partial<ShapeToolSettings>;
   const walls = (source.walls ?? {}) as Partial<WallToolSettings>;
   const terrain = (source.terrain ?? {}) as Partial<TerrainToolSettings>;
+  const smooth = (source.smooth ?? {}) as Partial<SmoothToolSettings>;
+  const erode = (source.erode ?? {}) as Partial<ErodeToolSettings>;
   const defaults = DEFAULT_CREATIVE_SETTINGS;
   return {
     tool: oneOf(CREATIVE_TOOLS, source.tool, defaults.tool),
@@ -187,6 +193,15 @@ export function coerceCreative(raw: unknown): CreativeSettings {
       subsoil: mixOr(terrain.subsoil, defaults.terrain.subsoil),
       subsoilDepth: within(terrain.subsoilDepth, SUBSOIL_DEPTH, defaults.terrain.subsoilDepth),
       rock: mixOr(terrain.rock, defaults.terrain.rock),
+    },
+    smooth: {
+      radius: within(smooth.radius, BRUSH_RADIUS, defaults.smooth.radius),
+      footprint: oneOf(FOOTPRINTS, smooth.footprint, defaults.smooth.footprint),
+      iterations: within(smooth.iterations, SMOOTH_ITERATIONS, defaults.smooth.iterations),
+    },
+    erode: {
+      radius: within(erode.radius, BRUSH_RADIUS, defaults.erode.radius),
+      preset: oneOf(EROSION_PRESET_NAMES, erode.preset, defaults.erode.preset),
     },
   };
 }

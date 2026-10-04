@@ -654,6 +654,35 @@ try {
     closeDocument();
   }
 
+  /*
+   * Smoothing and erosion from the tools. The rules are `tests/session.ts`'s,
+   * held to WorldEdit and VoxelSniper; this is the wire.
+   */
+  console.log("\n--- smooth_terrain and erode ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    for (let x = 0; x < 8; x += 1) {
+      for (let z = 0; z < 8; z += 1) {
+        const top = (x * 3 + z * 5) % 6;
+        for (let y = 0; y <= top; y += 1) setBlock(session.doc, x, y, z, { namespacedName: "minecraft:stone", properties: {} });
+      }
+    }
+    const smoothed = await attempt("smooth_terrain", { iterations: 3 }, options(sink));
+    check("smooth_terrain smooths the whole schematic by default", (smoothed.changed as number) > 0, JSON.stringify(smoothed));
+    equal("...as one step, telling the window", [session.history.undoStack.length, sink.changed > 0], [1, true]);
+    equal("...and grows nothing", [session.doc.width, session.doc.height, session.doc.length], [8, 8, 8]);
+    setBlock(session.doc, 4, 7, 4, { namespacedName: "minecraft:stone", properties: {} });
+    const cleaned = await attempt("erode", { preset: "floatclean", minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 }, options(sink));
+    check("erode with floatclean takes away a block floating on its own", getBlock(session.doc, 4, 7, 4)?.namespacedName === "minecraft:air" && (cleaned.changed as number) > 0, JSON.stringify(cleaned));
+    equal("...and says which rule it ran", cleaned.rule, { erosionFaces: 6, erosionRecursion: 1, fillFaces: 6, fillRecursion: 1 });
+    const inverted = await attempt("erode", { preset: "melt", inverse: true, fill_recursion: 2 }, options(sink));
+    equal("inverse swaps erosion and fill, and a number given replaces the preset's", inverted.rule, { erosionFaces: 5, erosionRecursion: 1, fillFaces: 2, fillRecursion: 2 });
+    const refused = await attempt("erode", { preset: "none" }, options(sink));
+    check("VoxelSniper's none is not offered, by name", String(refused.refused ?? "").includes("none"));
+    closeDocument();
+  }
+
   console.log("\n--- a tool places a block in the state the game would give it ---");
   {
     const session = open();

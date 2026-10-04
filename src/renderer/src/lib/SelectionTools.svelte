@@ -21,7 +21,8 @@
   import Icon from "./Icon.svelte";
   import MaterialsInventory from "./MaterialsInventory.svelte";
   import TerrainOptions from "./TerrainOptions.svelte";
-  import type { TerrainToolSettings } from "../../../shared/creative.js";
+  import type { ErodeToolSettings, SmoothToolSettings, TerrainToolSettings } from "../../../shared/creative.js";
+  import { EROSION_PRESET_NAMES, SMOOTH_ITERATIONS, type ErosionPreset } from "../../../shared/terrain.js";
   import { isBannerBlock } from "../../../shared/banner_patterns.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
   import { tryParseMix } from "../../../shared/block_mix.js";
@@ -137,6 +138,13 @@
     onfitterrain?: () => void;
     /** `DocumentState.frame`, where the terrain's noise is read. */
     origin?: readonly [number, number, number];
+    /** The smooth and erode brushes' settings, which the selection's buttons use too. */
+    smooth?: SmoothToolSettings | null;
+    onsmoothchange?: (next: SmoothToolSettings) => void;
+    onsmooth?: () => void;
+    erode?: ErodeToolSettings | null;
+    onerodechange?: (next: ErodeToolSettings) => void;
+    onerode?: () => void;
   }
 
   const {
@@ -178,6 +186,12 @@
     onlayterrain = () => {},
     onfitterrain = () => {},
     origin = [0, 0, 0],
+    smooth = null,
+    onsmoothchange = () => {},
+    onsmooth = () => {},
+    erode = null,
+    onerodechange = () => {},
+    onerode = () => {},
   }: Props = $props();
 
   /** Whether the terrain section is open. Closed by default: most selections are not hills. */
@@ -499,6 +513,48 @@
             {t("selection.layTerrain")}
           </button>
         </div>
+        {#if smooth !== null}
+          <div class="subtool">
+            <label for="selection-smooth-passes">{t("selection.smoothPasses")}</label>
+            <input
+              id="selection-smooth-passes"
+              type="number"
+              min={SMOOTH_ITERATIONS.min}
+              max={SMOOTH_ITERATIONS.max}
+              value={smooth.iterations}
+              onchange={(event) => {
+                const value = Math.round(Number(event.currentTarget.value));
+                if (Number.isFinite(value)) {
+                  onsmoothchange({
+                    ...smooth,
+                    iterations: Math.min(SMOOTH_ITERATIONS.max, Math.max(SMOOTH_ITERATIONS.min, value)),
+                  });
+                }
+              }}
+            />
+            <button onclick={onsmooth} disabled={busy || none} title={t("selection.smoothHint")}>
+              {t("selection.smooth")}
+            </button>
+          </div>
+        {/if}
+        {#if erode !== null}
+          <div class="subtool">
+            <label for="selection-erode-preset">{t("selection.erodePreset")}</label>
+            <select
+              id="selection-erode-preset"
+              value={erode.preset}
+              onchange={(event) => onerodechange({ ...erode, preset: event.currentTarget.value as ErosionPreset })}
+            >
+              {#each EROSION_PRESET_NAMES as preset (preset)}
+                <option value={preset}>{t(`erode.preset.${preset}`)}</option>
+              {/each}
+            </select>
+            <button onclick={onerode} disabled={busy || none} title={t("selection.erodeHint")}>
+              {t("selection.erode")}
+            </button>
+          </div>
+          <p class="hint">{t(`erode.presetHint.${erode.preset}`)}</p>
+        {/if}
       {/if}
     </div>
   {/if}
@@ -621,6 +677,30 @@
   .terrain {
     padding-top: 6px;
     border-top: 1px solid var(--border);
+  }
+
+  .subtool {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+  }
+
+  .subtool label {
+    flex: 0 0 64px;
+    margin: 0;
+    color: var(--text-dim);
+  }
+
+  .subtool input,
+  .subtool select {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .subtool button {
+    flex: 0 0 auto;
+    padding: 5px 8px;
+    font-size: 12px;
   }
 
   .disclosure {

@@ -128,6 +128,8 @@ import {
 } from "../src/shared/shapes.js";
 import { UnrepresentableBlocksError } from "../src/main/services/writers.js";
 import {
+  EROSION_PRESET_NAMES,
+  erosionRule,
   heightField,
   inFootprint,
   normalizeHeightField,
@@ -6737,6 +6739,378 @@ console.log("\n--- terrain from a noise ---");
       outside = err instanceof OutsideDocumentError;
     }
     check("with resizing off, a terrain outside the box is refused by name", outside);
+    closeDocument();
+  }
+}
+
+console.log("\n--- smoothing and erosion, held to WorldEdit and VoxelSniper ---");
+{
+  type World = string[][][];
+  const W = 24;
+  const H = 16;
+  const L = 24;
+  const AIR = "minecraft:air";
+  const blank = (): World => Array.from({ length: W }, () => Array.from({ length: H }, () => new Array<string>(L).fill(AIR)));
+  const copyOf = (world: World): World => world.map((plane) => plane.map((row) => [...row]));
+  const at = (world: World, x: number, y: number, z: number): string =>
+    x < 0 || y < 0 || z < 0 || x >= W || y >= H || z >= L ? AIR : world[x][y][z];
+
+  /** A rough landscape: stone under dirt under grass, spikes, a pond, and flowers on top. */
+  const landscape = (seed: number): World => {
+    const world = blank();
+    const random = (x: number, z: number, salt: number) => {
+      let h = Math.imul(x * 374761393 + z * 668265263 + seed * 2147483647 + salt, 1274126177);
+      h = (h ^ (h >>> 13)) >>> 0;
+      return h / 4294967296;
+    };
+    for (let x = 0; x < W; x += 1) {
+      for (let z = 0; z < L; z += 1) {
+        const top = 3 + Math.floor(random(x, z, 1) * 9);
+        for (let y = 0; y <= top; y += 1) world[x][y][z] = y === top ? "minecraft:grass_block" : y >= top - 2 ? "minecraft:dirt" : "minecraft:stone";
+        if (random(x, z, 2) < 0.15 && top + 1 < H) world[x][top + 1][z] = "minecraft:poppy";
+        if (x > 15 && z > 15 && top < 6) for (let y = top + 1; y <= 6; y += 1) world[x][y][z] = "minecraft:water";
+      }
+    }
+    return world;
+  };
+
+  const docOf = (world: World) => {
+    const session = newDocument({ width: W, height: H, length: L }, "sponge3", dataVersionOf("JE_1_21_4"));
+    for (let x = 0; x < W; x += 1) {
+      for (let y = 0; y < H; y += 1) {
+        for (let z = 0; z < L; z += 1) {
+          if (world[x][y][z] !== AIR) setBlock(session.doc, x, y, z, { namespacedName: world[x][y][z], properties: {} });
+        }
+      }
+    }
+    return session;
+  };
+  const differences = (session: DocumentSession, world: World): number => {
+    let wrong = 0;
+    for (let x = 0; x < W; x += 1) {
+      for (let y = 0; y < H; y += 1) {
+        for (let z = 0; z < L; z += 1) {
+          if (getBlock(session.doc, x, y, z).namespacedName !== world[x][y][z]) wrong += 1;
+        }
+      }
+    }
+    return wrong;
+  };
+
+  /*
+   * A literal port of WorldEdit's HeightMap, HeightMapFilter and
+   * GaussianKernel: the same loops, the same clamps, the same reads of the
+   * session after its own writes, in Java's float arithmetic. Kept apart from
+   * domain/terrain.ts on purpose, so the two can disagree.
+   */
+  const weSmooth = (source: World, box: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }, iterations: number): World => {
+    const world = copyOf(source);
+    const blocks = (name: string) => name === "minecraft:stone" || name === "minecraft:dirt" || name === "minecraft:grass_block";
+    const width = box.maxX - box.minX + 1;
+    const height = box.maxZ - box.minZ + 1;
+    const getHighest = (x: number, z: number, minY: number, maxY: number) => {
+      for (let y = maxY; y >= minY; --y) if (blocks(world[x][y][z])) return y;
+      return minY;
+    };
+    const data: number[] = new Array(width * height);
+    for (let z = 0; z < height; ++z) for (let x = 0; x < width; ++x) data[z * width + x] = getHighest(x + box.minX, z + box.minZ, box.minY, box.maxY);
+    // GaussianKernel(5, 1.0)
+    const radius = 5;
+    const diameter = radius * 2 + 1;
+    const kernel: number[] = new Array(diameter * diameter);
+    const sigma22 = 2 * 1.0 * 1.0;
+    const constant = Math.PI * sigma22;
+    let sum = 0;
+    for (let y = -radius; y <= radius; ++y) {
+      for (let x = -radius; x <= radius; ++x) {
+        const value = Math.fround(Math.exp(-(x * x + y * y) / sigma22) / constant);
+        kernel[(y + radius) * diameter + x + radius] = value;
+        sum = Math.fround(sum + value);
+      }
+    }
+    for (let i = 0; i < kernel.length; i++) kernel[i] = Math.fround(kernel[i] / sum);
+    const filter = (inData: number[]): number[] => {
+      const out: number[] = new Array(inData.length);
+      let index = 0;
+      for (let y = 0; y < height; ++y) {
+        for (let x = 0; x < width; ++x) {
+          let z = 0;
+          for (let ky = 0; ky < diameter; ++ky) {
+            let offsetY = y + ky - radius;
+            if (offsetY < 0 || offsetY >= height) offsetY = y;
+            offsetY *= width;
+            for (let kx = 0; kx < diameter; ++kx) {
+              const f = kernel[ky * diameter + kx];
+              if (f === 0) continue;
+              let offsetX = x + kx - radius;
+              if (offsetX < 0 || offsetX >= width) offsetX = x;
+              z = Math.fround(z + Math.fround(f * Math.fround(inData[offsetY + offsetX])));
+            }
+          }
+          out[index++] = Math.floor(Math.fround(z + 0.5));
+        }
+      }
+      return out;
+    };
+    let newData = [...data];
+    for (let i = 0; i < iterations; ++i) newData = filter(newData);
+    const originY = box.minY;
+    for (let z = 0; z < height; ++z) {
+      for (let x = 0; x < width; ++x) {
+        const index = z * width + x;
+        const curHeight = data[index];
+        const newHeight = Math.min(box.maxY, newData[index]);
+        const xr = x + box.minX;
+        const zr = z + box.minZ;
+        const scale = (curHeight - originY) / (newHeight - originY);
+        if (newHeight > curHeight) {
+          const existing = world[xr][curHeight][zr];
+          if (existing !== "minecraft:water" && existing !== "minecraft:lava") {
+            world[xr][newHeight][zr] = existing;
+            for (let y = newHeight - 1 - originY; y >= 0; --y) {
+              const copyFrom = Math.floor(y * scale);
+              world[xr][originY + y][zr] = world[xr][originY + copyFrom][zr];
+            }
+          }
+        } else if (curHeight > newHeight) {
+          for (let y = 0; y < newHeight - originY; ++y) {
+            const copyFrom = Math.floor(y * scale);
+            world[xr][originY + y][zr] = world[xr][originY + copyFrom][zr];
+          }
+          world[xr][newHeight][zr] = world[xr][curHeight][zr];
+          for (let y = newHeight + 1; y <= curHeight; ++y) world[xr][y][zr] = AIR;
+        }
+      }
+    }
+    return world;
+  };
+
+  const smooth = (session: DocumentSession, regions: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }[], iterations: number) =>
+    applyEdit(session, { kind: "smooth", area: { kind: "regions", regions }, iterations });
+
+  const whole = { minX: 0, minY: 0, minZ: 0, maxX: W - 1, maxY: H - 1, maxZ: L - 1 };
+  for (const [seed, iterations, box] of [
+    [1, 1, whole],
+    [2, 4, whole],
+    [3, 2, { minX: 3, minY: 2, minZ: 1, maxX: 19, maxY: 13, maxZ: 22 }],
+    [4, 6, { minX: 0, minY: 4, minZ: 0, maxX: 11, maxY: 9, maxZ: 23 }],
+  ] as const) {
+    const world = landscape(seed);
+    const session = docOf(world);
+    smooth(session, [box], iterations);
+    equal(`//smooth ${iterations} over ${JSON.stringify(box)} is WorldEdit's, block for block`, differences(session, weSmooth(world, box, iterations)), 0);
+    closeDocument();
+  }
+  {
+    const world = landscape(5);
+    const session = docOf(world);
+    const heights = (s: DocumentSession) => {
+      const out: number[] = [];
+      for (let x = 0; x < W; x += 1) {
+        for (let z = 0; z < L; z += 1) {
+          let y = H - 1;
+          while (y > 0 && !["minecraft:stone", "minecraft:dirt", "minecraft:grass_block"].includes(getBlock(s.doc, x, y, z).namespacedName)) y -= 1;
+          out.push(y);
+        }
+      }
+      return out;
+    };
+    const spread = (values: number[]) => {
+      const mean = values.reduce((a, b) => a + b, 0) / values.length;
+      return values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+    };
+    const before = spread(heights(session));
+    smooth(session, [whole], 4);
+    const after = spread(heights(session));
+    check("smoothing takes the spikes out of the heights", after < before / 2, `${before.toFixed(2)} -> ${after.toFixed(2)}`);
+    equal("...as one step", session.history.undoStack.length, 1);
+    equal("...and never grows the document", [session.doc.width, session.doc.height, session.doc.length], [W, H, L]);
+    closeDocument();
+  }
+  {
+    const world = blank();
+    for (let x = 0; x < W; x += 1) for (let z = 0; z < L; z += 1) for (let y = 0; y <= 4; y += 1) world[x][y][z] = "minecraft:stone";
+    const session = docOf(world);
+    equal("flat ground is already smooth", smooth(session, [whole], 3), 0);
+    closeDocument();
+  }
+  {
+    // The brush: SmoothBrush's box round the cell aimed at, its disc written.
+    const world = landscape(6);
+    const session = docOf(world);
+    applyEdit(session, { kind: "smooth", area: { kind: "brush", x: 12, y: 6, z: 12, radius: 4, footprint: "disc" }, iterations: 4, stroke: "smooth-1" });
+    let outside = 0;
+    for (let x = 0; x < W; x += 1) {
+      for (let z = 0; z < L; z += 1) {
+        if (inFootprint("disc", x - 12, z - 12, 4)) continue;
+        for (let y = 0; y < H; y += 1) if (getBlock(session.doc, x, y, z).namespacedName !== world[x][y][z]) outside += 1;
+      }
+    }
+    equal("the smooth brush writes only the columns of its disc", outside, 0);
+    const reference = weSmooth(world, { minX: 8, minY: 2, minZ: 8, maxX: 16, maxY: 15, maxZ: 16 }, 4);
+    let inside = 0;
+    for (let x = 0; x < W; x += 1) {
+      for (let z = 0; z < L; z += 1) {
+        if (!inFootprint("disc", x - 12, z - 12, 4)) continue;
+        for (let y = 0; y < H; y += 1) if (getBlock(session.doc, x, y, z).namespacedName !== reference[x][y][z]) inside += 1;
+      }
+    }
+    equal("...and inside it, WorldEdit's smooth of the box round it, ten more above, cut by the schematic", inside, 0);
+    applyEdit(session, { kind: "smooth", area: { kind: "brush", x: 6, y: 6, z: 6, radius: 3, footprint: "square" }, iterations: 4, stroke: "smooth-1" });
+    equal("...and a stroke is one step", session.history.undoStack.length, 1);
+    closeDocument();
+  }
+
+  /*
+   * A literal port of VoxelSniper's ErodeBrush: the tracker keyed by pass,
+   * every read of a pass from the passes before it, the HashMap tally walked
+   * in insertion order -- which is what this app breaks ties by.
+   */
+  const vsErode = (
+    source: World,
+    inside: (x: number, y: number, z: number) => boolean,
+    bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number },
+    rule: { erosionFaces: number; erosionRecursion: number; fillFaces: number; fillRecursion: number },
+  ): World => {
+    const changes = new Map<number, Map<string, string>>();
+    const flat = new Map<string, string>();
+    let nextIteration = 0;
+    const get = (x: number, y: number, z: number, iteration: number): string => {
+      for (let i = iteration - 1; i >= 0; --i) {
+        const found = changes.get(i)?.get(`${x},${y},${z}`);
+        if (found !== undefined) return found;
+      }
+      return at(source, x, y, z);
+    };
+    const put = (x: number, y: number, z: number, value: string, iteration: number) => {
+      if (!changes.has(iteration)) changes.set(iteration, new Map());
+      changes.get(iteration)!.set(`${x},${y},${z}`, value);
+      flat.set(`${x},${y},${z}`, value);
+    };
+    const open = (name: string) => name === AIR || name === "minecraft:water" || name === "minecraft:lava";
+    const faces = [[0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0]];
+    for (let i = 0; i < rule.erosionRecursion; ++i) {
+      const current = nextIteration++;
+      for (let x = bounds.minX; x <= bounds.maxX; ++x) {
+        for (let z = bounds.minZ; z <= bounds.maxZ; ++z) {
+          for (let y = bounds.minY; y <= bounds.maxY; ++y) {
+            if (!inside(x, y, z)) continue;
+            if (open(get(x, y, z, current))) continue;
+            let count = 0;
+            for (const [dx, dy, dz] of faces) if (open(get(x + dx, y + dy, z + dz, current))) count++;
+            if (count >= rule.erosionFaces) put(x, y, z, AIR, current);
+          }
+        }
+      }
+    }
+    for (let i = 0; i < rule.fillRecursion; ++i) {
+      const current = nextIteration++;
+      for (let x = bounds.minX; x <= bounds.maxX; ++x) {
+        for (let z = bounds.minZ; z <= bounds.maxZ; ++z) {
+          for (let y = bounds.minY; y <= bounds.maxY; ++y) {
+            if (!inside(x, y, z)) continue;
+            if (!open(get(x, y, z, current))) continue;
+            let count = 0;
+            const blockCount = new Map<string, number>();
+            for (const [dx, dy, dz] of faces) {
+              const relative = get(x + dx, y + dy, z + dz, current);
+              if (!open(relative)) {
+                count++;
+                blockCount.set(relative, (blockCount.get(relative) ?? 0) + 1);
+              }
+            }
+            let material = AIR;
+            let amount = 0;
+            for (const [wrapper, currentCount] of blockCount) {
+              if (amount <= currentCount) {
+                material = wrapper;
+                amount = currentCount;
+              }
+            }
+            if (count >= rule.fillFaces) put(x, y, z, material, current);
+          }
+        }
+      }
+    }
+    const world = copyOf(source);
+    for (const [key, value] of flat) {
+      const [x, y, z] = key.split(",").map(Number);
+      if (x >= 0 && y >= 0 && z >= 0 && x < W && y < H && z < L) world[x][y][z] = value;
+    }
+    return world;
+  };
+
+  /** A lumpy rock with ore in it, a pond against it and a few loose blocks. */
+  const rock = (seed: number): World => {
+    const world = blank();
+    const field = cellValues(normalizeDistribution({ kind: "simplex", seed, params: { frequency: 0.18 } }));
+    for (let x = 0; x < W; x += 1) {
+      for (let y = 0; y < H; y += 1) {
+        for (let z = 0; z < L; z += 1) {
+          const v = field(x, y, z) + (6 - y) * 0.06;
+          if (v > 0.05) world[x][y][z] = v > 0.45 ? "minecraft:andesite" : (x + y + z) % 7 === 0 ? "minecraft:coal_ore" : "minecraft:stone";
+          else if (y < 3) world[x][y][z] = "minecraft:water";
+        }
+      }
+    }
+    return world;
+  };
+  for (const preset of EROSION_PRESET_NAMES) {
+    for (const inverse of [false, true]) {
+      const world = rock(preset.length * 7 + (inverse ? 1 : 0));
+      const session = docOf(world);
+      const rule = erosionRule(preset, inverse);
+      applyEdit(session, { kind: "erode", area: { kind: "brush", x: 12, y: 7, z: 11, radius: 6, footprint: "disc" }, rule });
+      const centre = { x: 12, y: 7, z: 11 };
+      const expected = vsErode(
+        world,
+        (x, y, z) => (x - centre.x) ** 2 + (y - centre.y) ** 2 + (z - centre.z) ** 2 <= 36,
+        { minX: 6, minY: 1, minZ: 5, maxX: 18, maxY: 13, maxZ: 17 },
+        rule,
+      );
+      equal(`the erode brush, ${preset}${inverse ? " inverted" : ""}, is VoxelSniper's, block for block`, differences(session, expected), 0);
+      closeDocument();
+    }
+  }
+  {
+    const world = rock(40);
+    const session = docOf(world);
+    const region = { minX: 2, minY: 0, minZ: 3, maxX: 20, maxY: 12, maxZ: 15 };
+    applyEdit(session, { kind: "erode", area: { kind: "regions", regions: [region] }, rule: erosionRule("melt") });
+    const inBox = (x: number, y: number, z: number) => x >= 2 && x <= 20 && y >= 0 && y <= 12 && z >= 3 && z <= 15;
+    equal("over a selection it erodes every cell of the box, VoxelSniper's passes", differences(session, vsErode(world, inBox, region, erosionRule("melt"))), 0);
+    closeDocument();
+  }
+  {
+    // What the presets are for, said in blocks.
+    const world = blank();
+    for (let x = 0; x < W; x += 1) for (let z = 0; z < L; z += 1) for (let y = 0; y <= 4; y += 1) world[x][y][z] = "minecraft:stone";
+    world[5][10][5] = "minecraft:stone";
+    world[9][4][9] = AIR;
+    const session = docOf(world);
+    applyEdit(session, { kind: "erode", area: { kind: "regions", regions: [whole] }, rule: erosionRule("floatclean") });
+    equal("floatclean takes away a block floating on its own", getBlock(session.doc, 5, 10, 5).namespacedName, AIR);
+    equal("...but leaves a hole open to the sky, which has only five solid sides", getBlock(session.doc, 9, 4, 9).namespacedName, AIR);
+    applyEdit(session, { kind: "erode", area: { kind: "regions", regions: [whole] }, rule: erosionRule("fill") });
+    equal("fill fills a hole in the ground", getBlock(session.doc, 9, 4, 9).namespacedName, "minecraft:stone");
+    equal("...and erosion never grows the document", session.doc.height, H);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const refusedTerrain = (request: Parameters<typeof applyEdit>[1], words: string): boolean => {
+      try {
+        applyEdit(session, request);
+        return false;
+      } catch (err) {
+        return err instanceof TerrainError && err.message.includes(words);
+      }
+    };
+    check("smoothing no times is refused by name", refusedTerrain({ kind: "smooth", area: { kind: "regions", regions: [whole] }, iterations: 0 }, "Smoothing"));
+    check(
+      "...and so is an erosion that counts seven faces of a cube",
+      refusedTerrain({ kind: "erode", area: { kind: "regions", regions: [whole] }, rule: { ...erosionRule("melt"), erosionFaces: 7 } }, "erosionFaces"),
+    );
     closeDocument();
   }
 }

@@ -312,3 +312,87 @@ export function heightMap(
   });
   return { width: xs.length, height: zs.length, tops, lowest, highest };
 }
+
+/**
+ * How many times a smoothing pass runs the filter. WorldEdit's `//smooth`
+ * takes one by default and its brush four; each pass is the same Gaussian, so
+ * more is rounder rather than different.
+ */
+export const SMOOTH_ITERATIONS = { min: 1, max: 32 } as const;
+
+/**
+ * VoxelSniper's erosion, as four numbers.
+ *
+ * Erosion turns a solid cell with at least `erosionFaces` of its six
+ * neighbours open (empty, or a liquid) into empty space, `erosionRecursion`
+ * times; then a fill turns an open cell with at least `fillFaces` solid
+ * neighbours into the commonest of them, `fillRecursion` times. Each pass
+ * reads what the one before left. `main/domain/terrain.ts` is the loop.
+ */
+export interface ErosionRule {
+  readonly erosionFaces: number;
+  readonly erosionRecursion: number;
+  readonly fillFaces: number;
+  readonly fillRecursion: number;
+}
+
+/**
+ * The presets, from `ErodeBrush.java` in VoxelSniper-Reimagined and the same
+ * five numbers in FastAsyncVoxelSniper's copy.
+ *
+ * VoxelSniper's `none` -- 0, 1, 0, 1 -- is left out, and that is a decision
+ * rather than an omission: with zero faces every solid cell erodes and every
+ * open one fills, so it turns a sphere of the world inside out. It is the
+ * value a brush starts with before a preset is picked, not a tool.
+ */
+export const EROSION_PRESETS = {
+  melt: { erosionFaces: 2, erosionRecursion: 1, fillFaces: 5, fillRecursion: 1 },
+  fill: { erosionFaces: 5, erosionRecursion: 1, fillFaces: 2, fillRecursion: 1 },
+  smooth: { erosionFaces: 3, erosionRecursion: 1, fillFaces: 3, fillRecursion: 1 },
+  lift: { erosionFaces: 6, erosionRecursion: 0, fillFaces: 1, fillRecursion: 1 },
+  floatclean: { erosionFaces: 6, erosionRecursion: 1, fillFaces: 6, fillRecursion: 1 },
+} as const satisfies Record<string, ErosionRule>;
+
+export type ErosionPreset = keyof typeof EROSION_PRESETS;
+export const EROSION_PRESET_NAMES = Object.keys(EROSION_PRESETS) as ErosionPreset[];
+
+/**
+ * A preset, or its inverse: erosion and fill swapped, which is what
+ * VoxelSniper's gunpowder does where its arrow runs the preset.
+ */
+export function erosionRule(preset: ErosionPreset, inverse = false): ErosionRule {
+  const rule = EROSION_PRESETS[preset];
+  return inverse
+    ? { erosionFaces: rule.fillFaces, erosionRecursion: rule.fillRecursion, fillFaces: rule.erosionFaces, fillRecursion: rule.erosionRecursion }
+    : { ...rule };
+}
+
+/** At most this many passes of each: a pass over a sphere of radius 64 is a quarter of a second. */
+export const EROSION_RECURSION = { min: 0, max: 8 } as const;
+
+/** A rule off the wire, checked: faces 0..6, passes 0..8, whole numbers. */
+export function normalizeErosionRule(raw: Partial<Record<keyof ErosionRule, unknown>>): ErosionRule {
+  const read = (key: keyof ErosionRule, range: { readonly min: number; readonly max: number }): number => {
+    const value = Number(raw[key]);
+    if (!Number.isInteger(value) || value < range.min || value > range.max) {
+      throw new TerrainError(`${key} is a whole number from ${range.min} to ${range.max}, not ${String(raw[key])}.`);
+    }
+    return value;
+  };
+  return {
+    erosionFaces: read("erosionFaces", { min: 0, max: 6 }),
+    erosionRecursion: read("erosionRecursion", EROSION_RECURSION),
+    fillFaces: read("fillFaces", { min: 0, max: 6 }),
+    fillRecursion: read("fillRecursion", EROSION_RECURSION),
+  };
+}
+
+/**
+ * VoxelSniper's sphere, which is not WorldEdit's: a cell is in when its
+ * squared distance from the centre is at most `r^2`, where WorldEdit measures
+ * against `r + 0.5`. So VoxelSniper's radius 1 is seven cells and
+ * WorldEdit's nineteen. The erode brush is VoxelSniper's, so it is this one.
+ */
+export function inErodeSphere(dx: number, dy: number, dz: number, radius: number): boolean {
+  return dx * dx + dy * dy + dz * dz <= radius * radius;
+}

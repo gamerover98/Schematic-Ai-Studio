@@ -18,7 +18,7 @@ of the original rather than against a description of it.
 | shapes over MCP and in the chat | `draw_shape` in `src/main/agent/tools.ts` (`TOOL_SPECS`) |
 | a brush stroke as one undo | `TransactionOptions.mergeKey`, `commit` in `src/main/domain/history.ts` |
 | terrain from a noise | `src/shared/terrain.ts` (the surface), `src/main/domain/terrain.ts` (the layers), `generate_terrain` in `TOOL_SPECS` |
-| smooth, erode | the algorithms are below |
+| smooth, erode | `smoothHeights` and `erodeCells` in `src/main/domain/terrain.ts`, ported from the sources below and held to a second port in `tests/session.ts`; `smooth_terrain` and `erode` in `TOOL_SPECS` |
 
 ## Sources and the two-source rule
 
@@ -129,7 +129,7 @@ away along one of the shape's hollow axes is outside it. Every shape is convex,
 so that one look stands for every step in between, and at thickness 1 it is
 WorldEdit's own test.
 
-## Terrain (for F8)
+## Terrain
 
 ### `//smooth` -- `HeightMap.applyFilter`
 
@@ -172,8 +172,10 @@ Presets `(erosionFaces, erosionRecursion, fillFaces, fillRecursion)`:
 The arrow runs the preset, the gunpowder its inverse (erosion and fill swapped).
 The modes are corroborated by the VoxelSniper guides (melt pushes land away,
 fill pulls it out, smooth rounds edges, lift raises, floatclean removes
-floating blocks); the numbers are the code's alone, so confirm them against a
-second copy (FAWE's port) before relying on them.
+floating blocks); the numbers are the code's, and FastAsyncVoxelSniper's copy
+(IntellectualSites/FastAsyncVoxelSniper, `brush/type/ErodeBrush.java`) gives the
+same five. VoxelSniper's sphere is `d^2 <= r^2`, not WorldEdit's `r + 0.5`;
+the `none` preset (0, 1, 0, 1) inverts a sphere and is not offered here.
 
 ## Rules for transcribing a tool
 
