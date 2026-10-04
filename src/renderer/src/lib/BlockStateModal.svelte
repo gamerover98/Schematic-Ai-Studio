@@ -250,10 +250,6 @@
     overflow-y: auto;
     box-sizing: border-box;
     padding: 8px 10px 10px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-panel);
-    box-shadow: 0 8px 24px var(--shadow);
     font-size: 12px;
   }
 

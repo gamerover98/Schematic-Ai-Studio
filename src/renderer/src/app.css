@@ -1,12 +1,15 @@
 /*
- * Palette taken from app/viewer/index.html (#0b0f14 background, #f3f6fb text,
- * #2a3546 borders) so the 3D viewport and the surrounding chrome are one
- * surface rather than an iframe pasted onto a white Streamlit page.
+ * The design system: palette, scales and base components, in one file.
+ *
+ * The look is the game's inventory -- slabs of stone raised with a light edge
+ * up and to the left and a dark one down and to the right, slots sunk into
+ * them, numbers in a pixel face -- laid out as a workbench, with panels docked
+ * to the edges of the window. Deepslate and stone, an emerald accent, gold for
+ * what glows, redstone for what destroys.
  *
  * Three themes out of two token sets. The dark palette stays on bare `:root`,
- * which is what makes this safe to add: every component written before themes
- * existed keeps rendering exactly as it did, because the values it reads have
- * not moved. Light is layered over it twice --
+ * which is what makes the themes safe: a component reads the same names in
+ * every theme, and the values move under it. Light is layered over it twice --
  *
  *   [data-theme="light"]        an explicit choice
  *   prefers-color-scheme: light the "system" setting, which stores no attribute
@@ -14,46 +17,74 @@
  * -- and the media query excludes [data-theme="dark"] so an explicit dark
  * choice survives a light desktop. `App.svelte` writes the attribute; "system"
  * removes it rather than setting a third value, because there is no third
- * palette to select.
+ * palette to select. The two light blocks are identical and must stay so.
  *
- * The last six tokens have no `--bg`/`--text` counterpart because they are read
- * from script, not from CSS: the 3D scene's background, grid and selection
- * colours are three.js `Color`s, and `Viewer.svelte` resolves them through
- * getComputedStyle. Without them a light window keeps a black viewport.
+ * Some tokens are read from script, not from CSS: the 3D scene's background,
+ * grid, selection and glow are three.js `Color`s, and `Viewer.svelte` resolves
+ * them through getComputedStyle. Without them a light window keeps a black
+ * viewport.
+ *
+ * ## The scales
+ *
+ * Colours were tokens before anything else was; the rest of a component's
+ * style was decided again in every file -- 24 distinct spacings, 16 radii, 11
+ * stacking levels, counted in the UX audit. These are the values a component
+ * picks from, and a value outside them is a decision somebody should be able
+ * to explain.
  */
 
 :root {
-  --bg: #0b0f14;
-  --bg-panel: #121821;
-  --bg-input: #0e141c;
-  --border: #2a3546;
-  --text: #f3f6fb;
-  --text-dim: #97a3b6;
-  --accent: #4f8cff;
-  --accent-dim: #2f5fb3;
-  --accent-contrast: #ffffff;
-  --accent-tint: rgb(110 168 254 / 8%);
-  --danger: #ff6b6b;
-  --warn: #ffc857;
-  --ok: #5ddc9a;
+  /* ---- palette: deepslate ---- */
+  --bg: #18181c;
+  /* A slab: the surface every panel, bar and window is made of. */
+  --bg-panel: #26262c;
+  /* A raised control on a slab -- a button -- and the same under the pointer. */
+  --bg-raised: #303037;
+  --bg-hover: #3a3a42;
+  /* A field: what you type into, sunk into the slab. */
+  --bg-input: #121215;
+  /* The inside of an inventory slot, dark in every theme. The count on it is
+     the game's white with a hard shadow, and on the old light theme's white
+     slot that came out at 1:1 -- the main number of the materials list, gone. */
+  --slot: #121215;
+  /* The groove a scrollbar runs in: a well, but not a slot -- on the light
+     theme a slot-dark groove down every panel would be the loudest thing on it. */
+  --well: #121215;
+  /* The two edges of a bevel: lit from up and to the left. */
+  --bevel-hi: #4a4a53;
+  --bevel-lo: #0e0e10;
+  /* Lines between things on a slab. Decorative: nothing is told apart by one. */
+  --border: #3a3a42;
+  /* The edge of a field, which does tell it apart: 4.5:1 on a slab. */
+  --field-edge: #8b8b93;
+  --text: #f1efe6;
+  --text-dim: #b3b1a8;
+  /* Emerald. As a fill under --accent-contrast, as text, and as the focus ring. */
+  --accent: #4cc779;
+  /* A selected row: deep enough for --text on it. */
+  --accent-dim: #1f5c38;
+  --accent-contrast: #0b1a10;
+  --accent-tint: rgb(76 199 121 / 12%);
+  /* Redstone, gold, emerald. */
+  --danger: #ff6f61;
+  --warn: #f5c542;
+  --ok: #5fd38a;
 
-  --scrim: rgb(0 0 0 / 55%);
-  --shadow: rgb(0 0 0 / 45%);
-  --overlay-bg: rgb(10 14 20 / 65%);
-  --viewport-bg: #0b0f14;
+  --scrim: rgb(0 0 0 / 60%);
+  --shadow: rgb(0 0 0 / 50%);
+  --overlay-bg: rgb(24 24 28 / 82%);
+  --viewport-bg: #18181c;
   /* The virtual floor under a build: a shade off the background, so the
      horizon reads as a horizon rather than as nothing. */
-  --viewport-ground: #161d27;
-  --grid-major: #516079;
-  --grid-minor: #202937;
+  --viewport-ground: #26262c;
+  --grid-major: #5a5a63;
+  --grid-minor: #2c2c33;
+  /* Blue, and the one colour here that is not the game's stone: the box has to
+     read against grass, stone and sky alike, and against the gold glow. */
   --selection: #6ea8fe;
-  /* What a click on a material lights up, through walls. Warm, so it is never
+  /* What a click on a material lights up, through walls. Gold, so it is never
      read as the selection, which is the cool colour beside it. */
-  --glow: #ffd84a;
-  /* The inside of an inventory slot, dark in every theme. The count on it is
-     the game's white with a hard shadow, and on the light theme's white slot
-     that came out at 1:1 -- the main number of the materials list, gone. */
-  --slot: #0e141c;
+  --glow: #f5c542;
 
   /* The compass gizmo. X red, Y green, Z blue is the convention every CAD
      and 3D package shares, so it is read without being told; the *labels*
@@ -67,52 +98,102 @@
   --axis-z: #5588e0;
 
   color-scheme: dark;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-size: 14px;
 
-  /* Where the hotbar sits, and how much room it takes.
-
-     Not colours, so they are defined once here and never redefined per theme,
-     for `--mono`'s reason below. They are a *pair*: the hotbar reads the
-     first, and anything stacking above it -- today the gizmo's toolbar --
-     clears both. The height is measured off `Hotbar.svelte`'s own rules
-     (icon 26 + name 10 + gap 2 + slot padding 7 + slot borders 4 + bar
-     padding 8 + bar borders 2 = 59), so changing the slot moves it. That is a
-     failure you can see -- two bars overlapping -- rather than a silent one. */
-  --hotbar-inset: 16px;
-  --hotbar-height: 60px;
-
+  /* ---- type ----
+     Atkinson Hyperlegible for everything that is read, because it was drawn
+     for exactly that; Pixelify Sans for the titles of panels and the numbers
+     on slots, and nowhere else -- a pixel face in a paragraph is a toy. Both
+     ship in the app (OFL), so a machine without them draws the same window. */
+  --font-body: "Atkinson Hyperlegible", system-ui, "Segoe UI", sans-serif;
+  --font-pixel: "Pixelify Sans", "Atkinson Hyperlegible", system-ui, sans-serif;
   /* Not a colour, so it is defined once here and never redefined per theme.
      `TraceView` has been asking for this token since it was written and always
      falling through to its own inline fallback. */
   --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 19px;
+  --text-2xl: 24px;
+
+  /* ---- space, shape, depth, motion ---- */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 48px;
+  /* Hard corners, as stone has. Round only for what is a dot. */
+  --radius: 0;
+  --radius-round: 999px;
+  /* A control is 28px tall: above WCAG 2.2's 24px target with room to spare. */
+  --control-h: 28px;
+  --bevel: 2px;
+  /* The stacking tiers, by name. A number between them is a new tier and
+     should be added here with its reason. */
+  --z-window: 20;
+  --z-popover: 40;
+  --z-modal: 100;
+  --z-toast: 150;
+  --z-top: 200;
+  --shadow-raised: 0 2px 0 rgb(0 0 0 / 30%);
+  --shadow-float: 0 8px 24px var(--shadow);
+  --shadow-modal: 0 18px 48px var(--shadow);
+  --duration-fast: 100ms;
+  --duration: 180ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+
+  /* Where the hotbar sits, and how much room it takes.
+
+     Not colours, so they are defined once here and never redefined per theme,
+     for `--mono`'s reason. They are a *pair*: the hotbar reads the first, and
+     anything stacking above it -- today the gizmo's toolbar -- clears both.
+     The height is measured off `Hotbar.svelte`'s own rules (icon 26 + name 10
+     + gap 2 + slot padding 7 + slot borders 4 + bar padding 8 + bar borders 2
+     = 59), so changing the slot moves it. That is a failure you can see -- two
+     bars overlapping -- rather than a silent one. */
+  --hotbar-inset: 16px;
+  --hotbar-height: 60px;
 }
 
 :root[data-theme="light"] {
-  --bg: #f4f6fa;
-  --bg-panel: #ffffff;
-  --bg-input: #ffffff;
-  --border: #d2dae6;
-  --text: #101720;
-  --text-dim: #5b6879;
-  --accent: #2f6fe0;
-  --accent-dim: #cfe0fb;
+  /* ---- palette: polished stone ---- */
+  --bg: #b9b9bf;
+  --bg-panel: #d9d9dd;
+  --bg-raised: #e6e6ea;
+  --bg-hover: #efeff2;
+  --bg-input: #f3f3f5;
+  --slot: #3a3a40;
+  --well: #a9a9b0;
+  --bevel-hi: #f6f6f8;
+  --bevel-lo: #8a8a92;
+  --border: #a5a5ad;
+  --field-edge: #6f6f78;
+  --text: #1c1c20;
+  --text-dim: #44444c;
+  --accent: #17713a;
+  --accent-dim: #b5dcc2;
   --accent-contrast: #ffffff;
-  --accent-tint: rgb(47 111 224 / 10%);
-  --danger: #c8332f;
-  --warn: #8a5d00;
-  --ok: #15794a;
+  --accent-tint: rgb(23 113 58 / 12%);
+  --danger: #b3261e;
+  --warn: #7a5200;
+  --ok: #136133;
 
-  --scrim: rgb(15 23 35 / 35%);
-  --shadow: rgb(20 30 45 / 18%);
-  --overlay-bg: rgb(255 255 255 / 82%);
-  --viewport-bg: #e7ecf4;
-  --viewport-ground: #d3dae6;
-  --grid-major: #97a5ba;
-  --grid-minor: #c4cedc;
+  --scrim: rgb(20 20 24 / 40%);
+  --shadow: rgb(20 20 24 / 25%);
+  --overlay-bg: rgb(217 217 221 / 88%);
+  --viewport-bg: #c9c9ce;
+  --viewport-ground: #b4b4ba;
+  --grid-major: #85858e;
+  --grid-minor: #a9a9b0;
   --selection: #1f5fd0;
-  --glow: #d97700;
-  --slot: #3a414c;
+  --glow: #9a4f00;
 
   --axis-x: #c23b3b;
   --axis-y: #2f8f3f;
@@ -123,30 +204,36 @@
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --bg: #f4f6fa;
-    --bg-panel: #ffffff;
-    --bg-input: #ffffff;
-    --border: #d2dae6;
-    --text: #101720;
-    --text-dim: #5b6879;
-    --accent: #2f6fe0;
-    --accent-dim: #cfe0fb;
+    --bg: #b9b9bf;
+    --bg-panel: #d9d9dd;
+    --bg-raised: #e6e6ea;
+    --bg-hover: #efeff2;
+    --bg-input: #f3f3f5;
+    --slot: #3a3a40;
+    --well: #a9a9b0;
+    --bevel-hi: #f6f6f8;
+    --bevel-lo: #8a8a92;
+    --border: #a5a5ad;
+    --field-edge: #6f6f78;
+    --text: #1c1c20;
+    --text-dim: #44444c;
+    --accent: #17713a;
+    --accent-dim: #b5dcc2;
     --accent-contrast: #ffffff;
-    --accent-tint: rgb(47 111 224 / 10%);
-    --danger: #c8332f;
-    --warn: #8a5d00;
-    --ok: #15794a;
+    --accent-tint: rgb(23 113 58 / 12%);
+    --danger: #b3261e;
+    --warn: #7a5200;
+    --ok: #136133;
 
-    --scrim: rgb(15 23 35 / 35%);
-    --shadow: rgb(20 30 45 / 18%);
-    --overlay-bg: rgb(255 255 255 / 82%);
-    --viewport-bg: #e7ecf4;
-  --viewport-ground: #d3dae6;
-    --grid-major: #97a5ba;
-    --grid-minor: #c4cedc;
+    --scrim: rgb(20 20 24 / 40%);
+    --shadow: rgb(20 20 24 / 25%);
+    --overlay-bg: rgb(217 217 221 / 88%);
+    --viewport-bg: #c9c9ce;
+    --viewport-ground: #b4b4ba;
+    --grid-major: #85858e;
+    --grid-minor: #a9a9b0;
     --selection: #1f5fd0;
-    --glow: #d97700;
-    --slot: #3a414c;
+    --glow: #9a4f00;
 
     --axis-x: #c23b3b;
     --axis-y: #2f8f3f;
@@ -250,18 +337,37 @@ textarea:focus-visible {
   outline-offset: 0;
 }
 
+/*
+ * ---- base components ----
+ *
+ * A button is a raised slab: light edge up and to the left, dark down and to
+ * the right, and the two swap while it is held down -- the game's own button,
+ * which every player has already pressed a thousand times. A field is the
+ * game's text box: a dark well with a light edge.
+ *
+ * The bevel is a 2px border rather than a box-shadow so that it takes room:
+ * a control is the same size pressed and unpressed, and nothing beside it
+ * moves.
+ */
 button {
   font: inherit;
+  min-height: var(--control-h);
+  padding: 0 var(--space-4);
   color: var(--text);
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 14px;
+  background: var(--bg-raised);
+  border: var(--bevel) solid;
+  border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+  border-radius: var(--radius);
+  line-height: 1.2;
   cursor: pointer;
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--accent-dim);
+  background: var(--bg-hover);
+}
+
+button:active:not(:disabled) {
+  border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
 }
 
 button:disabled {
@@ -269,9 +375,27 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* Emerald, with its own bevel cut from the same colour. */
 button.primary {
-  background: var(--accent-dim);
-  border-color: var(--accent);
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, white) color-mix(in srgb, var(--accent) 55%, black)
+    color-mix(in srgb, var(--accent) 55%, black) color-mix(in srgb, var(--accent) 55%, white);
+  font-weight: 700;
+}
+
+button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, white);
+}
+
+button.primary:active:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, black) color-mix(in srgb, var(--accent) 55%, white)
+    color-mix(in srgb, var(--accent) 55%, white) color-mix(in srgb, var(--accent) 55%, black);
+}
+
+/* Destroys something: redstone text on an ordinary slab, never a red fill. */
+button.danger {
+  color: var(--danger);
 }
 
 /*
@@ -280,25 +404,34 @@ button.primary {
  * `lib/icons.ts` for why.
  *
  * Centred by the grid, and the padding is zeroed **here**, which is the half
- * that was missing: the `button` rule above gives every button 8px 14px, and a
- * fixed-width button that kept it had a content box narrower than nothing, so
- * whatever it held was pushed off to the right. The browse button beside every
- * block field was reported that way.
+ * that was missing: the `button` rule above gives every button its padding,
+ * and a fixed-width button that kept it had a content box narrower than
+ * nothing, so whatever it held was pushed off to the right. The browse button
+ * beside every block field was reported that way.
+ *
+ * Flat until the pointer is on it: a row of them is a toolbar, and a row of
+ * bevels would be a row of buttons shouting at once. The border stays, in no
+ * colour, so the size does not change under the pointer.
  */
 button.icon {
   flex: none;
   display: inline-grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: var(--control-h);
+  height: var(--control-h);
+  min-height: 0;
   padding: 0;
   line-height: 1;
-  font-size: 16px;
+  font-size: var(--text-lg);
   color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
 }
 
 button.icon:hover:not(:disabled) {
   color: var(--text);
+  background: var(--bg-hover);
+  border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
 }
 
 input,
@@ -306,21 +439,93 @@ select,
 textarea {
   font: inherit;
   width: 100%;
+  min-height: var(--control-h);
+  padding: var(--space-2) var(--space-3);
   color: var(--text);
   background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border: 1px solid var(--field-edge);
+  border-radius: var(--radius);
 }
 
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-dim);
+  opacity: 1;
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.55;
+}
+
+/*
+ * A check box is a small slot: a dark well that holds an emerald tick, or a
+ * bar for the third state the inspector uses (`lib/indeterminate.ts`) --
+ * "not set" rather than "false". Drawn rather than native, because the native
+ * box is 13px, under the 24px target, and in no colour of this palette.
+ */
 input[type="checkbox"] {
+  appearance: none;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 3px;
+  padding: 0;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+input[type="checkbox"]::after {
+  content: "";
+  width: 9px;
+  height: 5px;
+  margin-top: -2px;
+  border: solid var(--accent-contrast);
+  border-width: 0 0 2px 2px;
+  transform: rotate(-45deg);
+  visibility: hidden;
+}
+
+input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate {
+  background: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 60%, black);
+}
+
+input[type="checkbox"]:checked::after {
+  visibility: visible;
+}
+
+input[type="checkbox"]:indeterminate::after {
+  width: 8px;
+  height: 0;
+  margin-top: 0;
+  border-width: 0 0 2px;
+  transform: none;
+  visibility: visible;
+}
+
+input[type="radio"] {
   width: auto;
+  min-height: 0;
+  accent-color: var(--accent);
 }
 
 input[type="range"] {
+  min-height: 0;
   padding: 0;
   background: transparent;
   border: none;
+  accent-color: var(--accent);
+}
+
+input[type="color"] {
+  padding: var(--space-1);
+  cursor: pointer;
 }
 
 textarea {
@@ -330,38 +535,118 @@ textarea {
 
 label {
   display: block;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-2);
 }
 
 fieldset {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px 16px;
-  margin: 0 0 16px;
+  border: var(--bevel) solid;
+  border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-4) var(--space-5);
+  margin: 0 0 var(--space-5);
 }
 
 legend {
-  padding: 0 6px;
-  font-size: 12px;
+  padding: 0 var(--space-2);
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  font-weight: 500;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--text-dim);
+}
+
+/*
+ * The scrollbars are the game's slider: a raised slab running in a dark well.
+ * The system's own were drawn light inside dark panels on some desktops.
+ */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--well);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-raised);
+  border: var(--bevel) solid;
+  border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--well);
+}
+
+/* ---- utilities ---- */
+
+/* A raised slab, for a surface that is not a button. */
+.slab {
+  background: var(--bg-panel);
+  border: var(--bevel) solid;
+  border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+}
+
+/* A well sunk into a slab: what a slot or a list sits in. */
+.inset {
+  background: var(--slot);
+  border: var(--bevel) solid;
+  border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+}
+
+/* The pixel face: titles of panels and numbers on slots. */
+.pixel {
+  font-family: var(--font-pixel);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+/*
+ * Every dialog is one of these: a slab over a scrim, with its title in the
+ * pixel face. The components keep their own sizes and layouts; what a dialog
+ * *looks like* is decided here, once, so the next one written cannot drift.
+ */
+.modal {
+  background: var(--bg-panel);
+  border: var(--bevel) solid;
+  border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-modal);
+}
+
+.modal h2 {
+  font-family: var(--font-pixel);
+  font-weight: 500;
+  letter-spacing: 0.02em;
 }
 
 .row {
   display: grid;
-  gap: 12px;
+  gap: var(--space-4);
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
 .field {
-  margin-bottom: 12px;
+  margin-bottom: var(--space-4);
 }
 
 .hint {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-dim);
-  margin: 4px 0 0;
+  margin: var(--space-2) 0 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }

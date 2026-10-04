@@ -215,7 +215,6 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
     align-items: center;
     justify-content: center;
     background: var(--scrim);
-    backdrop-filter: blur(2px);
   }
 
   .modal {
@@ -223,10 +222,6 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
     flex-direction: column;
     width: min(620px, calc(100vw - 48px));
     height: min(560px, calc(100vh - 64px));
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
     outline: none;
     overflow: hidden;
   }

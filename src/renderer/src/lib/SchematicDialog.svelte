@@ -233,7 +233,6 @@
     align-items: center;
     justify-content: center;
     background: var(--scrim);
-    backdrop-filter: blur(2px);
   }
 
   .modal {
@@ -242,10 +241,6 @@
     gap: 12px;
     width: min(400px, calc(100vw - 48px));
     padding: 18px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
     outline: none;
   }
 

@@ -232,10 +232,6 @@
     max-height: calc(100vh - 64px);
     overflow: auto;
     padding: 16px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--bg-panel);
-    box-shadow: 0 18px 48px var(--shadow);
   }
 
   header {

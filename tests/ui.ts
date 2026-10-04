@@ -6498,6 +6498,123 @@ console.log("\n--- the creative tools ---");
   check("...and Escape does too, before the glow and the selection", escapeCorner >= 0 && escapeCorner < app.indexOf('event.key === "Escape" && glow !== null'));
 }
 
+// --- the design system: one palette per theme, scales, base components -----
+console.log("\n--- design system ---");
+{
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  /** The custom properties declared directly in the block that opens at `opener`. */
+  const tokens = (opener: string): Map<string, string> => {
+    const start = css.indexOf(opener);
+    const body = css.slice(start + opener.length, css.indexOf("\n}", start));
+    return new Map([...body.matchAll(/^\s*(--[\w-]+):\s*([^;]+);/gm)].map((m) => [m[1], m[2].trim()]));
+  };
+  const dark = tokens(":root {");
+  const light = tokens(':root[data-theme="light"] {');
+  const system = tokens(':root:not([data-theme="dark"]) {');
+
+  check("the dark palette was found", dark.size > 40, String(dark.size));
+  equal("the system light palette is the explicit one, value for value", [...system], [...light]);
+  const colour = (value: string): boolean => /^(#|rgb)/.test(value);
+  const unthemed = [...dark].filter(([name, value]) => colour(value) && !light.has(name)).map(([name]) => name);
+  equal("every colour the dark palette names, the light one names too", unthemed, []);
+
+  const scales = [
+    ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => `--space-${n}`),
+    ...["xs", "sm", "md", "lg", "xl", "2xl"].map((n) => `--text-${n}`),
+    "--radius",
+    "--control-h",
+    "--bevel",
+    "--z-window",
+    "--z-popover",
+    "--z-modal",
+    "--z-toast",
+    "--z-top",
+    "--shadow-raised",
+    "--shadow-float",
+    "--shadow-modal",
+    "--font-body",
+    "--font-pixel",
+  ];
+  equal("the scales are all declared", scales.filter((name) => !dark.has(name)), []);
+  check("a control is at least WCAG 2.2's 24px target", parseFloat(dark.get("--control-h") ?? "0") >= 24);
+
+  /*
+   * Contrast, computed from the palette rather than claimed in a comment: a
+   * token edited tomorrow fails here by name. 4.5:1 for text, 3:1 for the
+   * edges that tell a control apart and for the focus ring (WCAG 1.4.3,
+   * 1.4.11).
+   */
+  const luminance = (hex: string): number => {
+    const [r, g, b] = [1, 3, 5].map((i) => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a: string, b: string): number => {
+    const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p);
+    return (x + 0.05) / (y + 0.05);
+  };
+  const pairs: [string, string, number][] = [
+    ["--text", "--bg-panel", 4.5],
+    ["--text", "--bg", 4.5],
+    ["--text", "--bg-input", 4.5],
+    ["--text", "--bg-raised", 4.5],
+    ["--text-dim", "--bg-panel", 4.5],
+    ["--text-dim", "--bg", 4.5],
+    ["--text-dim", "--bg-input", 4.5],
+    ["--accent-contrast", "--accent", 4.5],
+    ["--text", "--accent-dim", 4.5],
+    ["--danger", "--bg-panel", 4.5],
+    ["--warn", "--bg-panel", 4.5],
+    ["--ok", "--bg-panel", 4.5],
+    ["--field-edge", "--bg-panel", 3],
+    ["--accent", "--bg-panel", 3],
+    ["--accent", "--bg", 3],
+  ];
+  for (const [name, palette] of [["dark", dark], ["light", light]] as const) {
+    const weak = pairs
+      .map(([fg, bg, need]) => [fg, bg, need, ratio(palette.get(fg)!, palette.get(bg)!)] as const)
+      .filter(([, , need, got]) => !(got >= need))
+      .map(([fg, bg, need, got]) => `${fg} on ${bg} ${got.toFixed(2)} < ${need}`);
+    equal(`every pair reads in the ${name} theme`, weak, []);
+    check(`...and the white count on a slot, in the ${name} theme`, ratio("#ffffff", palette.get("--slot")!) >= 4.5);
+  }
+
+  const rule = (selector: string): string => {
+    const start = css.indexOf(`\n${selector} {`);
+    return start < 0 ? "" : css.slice(start, css.indexOf("\n}", start));
+  };
+  const raised = "border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi)";
+  const pressed = "border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo)";
+  check("a button is a raised slab", rule("button").includes(raised) && rule("button").includes("min-height: var(--control-h)"));
+  check("...that sinks while it is held down", rule("button:active:not(:disabled)").includes(pressed));
+  check("every dialog is drawn by app.css's .modal", rule(".modal").includes(raised));
+  const drawnLocally = readdirSync(path.join(RENDERER, "lib"))
+    .filter((name) => name.endsWith(".svelte"))
+    .filter((name) => {
+      const source = readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+      const start = source.indexOf("\n  .modal {\n");
+      if (start < 0) return false;
+      const block = source.slice(start, source.indexOf("\n  }\n", start));
+      return /\n    (border|border-radius|background|box-shadow): /.test(block);
+    });
+  equal("...and no component draws its own", drawnLocally, []);
+
+  const main = readFileSync(path.join(RENDERER, "main.ts"), "utf8");
+  check(
+    "both faces ship with the app, imported before the sheet that names them",
+    main.indexOf("@fontsource/atkinson-hyperlegible") >= 0 &&
+      main.indexOf("@fontsource/pixelify-sans") >= 0 &&
+      main.indexOf("@fontsource/pixelify-sans") < main.indexOf('"./app.css"'),
+  );
+  // An inlined font is a data: URL, and the CSP refuses data: for fonts.
+  check(
+    "...and no font is inlined as a data: URL",
+    /assetsInlineLimit: \(file\) => \(\/\\\.\(woff2\?/.test(readFileSync(path.join(here, "..", "electron.vite.config.ts"), "utf8")),
+  );
+}
+
 // --- what the UX audit found, each pinned where a tidy-up would undo it -----
 console.log("\n--- audit fixes ---");
 {

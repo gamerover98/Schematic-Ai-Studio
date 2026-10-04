@@ -3350,7 +3350,42 @@ looks. As a plain `$effect` the two race and the viewport trails by one change.
 rebuilt rather than recoloured.
 
 `BrowserWindow`'s `backgroundColor` in `main/index.ts` is outside all of this on
-purpose — it is painted before there is a renderer to ask.
+purpose — it is painted before there is a renderer to ask. It is the dark
+theme's `--bg` and has to be moved with it.
+
+**The look is the game's inventory, and `app.css` is the whole design system.**
+Chosen by the user from three directions in the UX audit: the workbench's
+structure (panels docked to the edges, the settings-like windows floating) in
+the inventory's material -- slabs raised with a light edge up and to the left,
+slots and fields sunk into them, titles and slot numbers in a pixel face.
+Deepslate and polished stone, an emerald accent, gold for what glows, redstone
+for what destroys.
+
+- **The bevel is a 2px border, never a box-shadow**, so a control is the same
+  size pressed and unpressed. `--bevel-hi`/`--bevel-lo` swap on `:active`.
+- **The scales are tokens**: `--space-1..8`, `--text-xs..2xl`, `--radius` (0:
+  stone has corners), `--control-h` (28px, over WCAG 2.2's 24px), the stacking
+  tiers `--z-window`/`--z-popover`/`--z-modal`/`--z-toast`/`--z-top`, three
+  shadows and the motion. The audit counted 24 spacings, 16 radii and 11
+  z-indexes decided again per file; a value outside the scales should come
+  with its reason.
+- **Every dialog's look is `.modal` in `app.css`**: the components keep their
+  sizes and layouts and draw no border, radius, background or shadow of their
+  own. `tests/ui.ts` walks `lib/` and refuses one that does -- it found
+  `BlockStateModal` on its first run.
+- **Contrast is computed, not claimed.** `tests/ui.ts` parses both palettes and
+  holds text pairs to 4.5:1 and field edges and the focus ring to 3:1 (WCAG
+  1.4.3, 1.4.11), and requires the system light block to equal the explicit
+  one value for value. The white count on a slot is checked against `--slot`,
+  which is dark in every theme for exactly that reason.
+- **Two faces ship with the app**, OFL, from `@fontsource` (devDependencies,
+  bundled by vite like `marked`): Atkinson Hyperlegible for everything read,
+  Pixelify Sans for panel titles and slot numbers only. **A font is never
+  inlined**: vite turns assets under 4 kB into `data:` URLs, the CSP has no
+  `font-src`, and `default-src 'self'` refuses them in silence --
+  `assetsInlineLimit` in `electron.vite.config.ts` says no for font files.
+- **One focus ring**: `:focus-visible`, 2px of `--accent`. Chromium's own was
+  orange and 2.4:1 on the old light theme.
 
 **The left mouse button pans, so anything else that drags must take it.** The
 viewer maps `LEFT` to `THREE.MOUSE.PAN`. A selection-face drag therefore sets

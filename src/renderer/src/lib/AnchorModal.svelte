@@ -271,7 +271,6 @@
     align-items: center;
     justify-content: center;
     background: var(--scrim);
-    backdrop-filter: blur(2px);
   }
 
   .modal {
@@ -280,10 +279,6 @@
     grid-template-rows: auto minmax(0, 1fr);
     width: min(620px, calc(100vw - 48px));
     max-height: min(660px, calc(100vh - 64px));
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
     outline: none;
     overflow: hidden;
   }

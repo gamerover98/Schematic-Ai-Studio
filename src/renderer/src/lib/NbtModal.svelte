@@ -221,7 +221,6 @@
     align-items: center;
     justify-content: center;
     background: var(--scrim);
-    backdrop-filter: blur(2px);
   }
 
   /* Rows, not columns: the text is the point and everything else is trim, so
@@ -232,10 +231,6 @@
     grid-template-rows: auto auto minmax(0, 1fr) auto;
     width: min(820px, calc(100vw - 48px));
     height: min(680px, calc(100vh - 64px));
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
     outline: none;
     overflow: hidden;
   }
