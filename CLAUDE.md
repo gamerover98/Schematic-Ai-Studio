@@ -2106,7 +2106,9 @@ the box and the first positions, the whole schematic by default, because
 `DraggedBlock` -- the block and its pair -- under `BLOCK_MIME`, and the
 target decides what it takes, through the same `onMaterial` a click goes
 through: With takes the foot alone, because placing a foot places the bed,
-Replace both halves, a hotbar slot the block alone. Plain fills, Ctrl adds.
+Replace both halves, a hotbar slot the block alone. A field adds the block to
+its list and never replaces it, so several materials are gathered one drop at
+a time; a block already there is not added twice.
 A field takes the drop only with `ondropblock`, and stops it there, or the
 text box under the pointer would type what it was handed. Air is not
 dragged. The creative inventory's tiles drag too, and the hotbar rises over

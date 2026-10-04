@@ -5324,10 +5324,10 @@ console.log("\n--- the materials, as an inventory ---");
   );
   check("a slot is dragged, air is not", slots.includes("draggable={!slot.air}"));
   check(
-    "a drop on Replace is Replace, Ctrl adds",
-    tools.includes('onMaterial(dragged, add ? "addReplace" : "replace")'),
+    "a drop on Replace adds to the list, never replaces it",
+    tools.includes('onMaterial(dragged, "addReplace")') && !tools.includes("(dragged, add)"),
   );
-  check("...and on With is With", tools.includes('onMaterial(dragged, add ? "addWith" : "with")'));
+  check("...and so does a drop on With", tools.includes('onMaterial(dragged, "addWith")'));
   const field = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
   const fieldDrop = field.slice(field.indexOf("function drop("), field.indexOf("function edit("));
   check(

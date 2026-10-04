@@ -361,7 +361,7 @@
       {legacy}
       onchange={onreplacefromchange}
       onbrowse={() => onbrowse("replace")}
-      ondropblock={(dragged, add) => onMaterial(dragged, add ? "addReplace" : "replace")}
+      ondropblock={(dragged) => onMaterial(dragged, "addReplace")}
     />
   </div>
 
@@ -390,7 +390,7 @@
       frame={mapFrame}
       onchange={onblockchange}
       onbrowse={() => onbrowse("fill")}
-      ondropblock={(dragged, add) => onMaterial(dragged, add ? "addWith" : "with")}
+      ondropblock={(dragged) => onMaterial(dragged, "addWith")}
     />
     {#if holdsBanner}
       <BannerPatternHint where="place" />

@@ -71,7 +71,8 @@
      * a bed's head as well, or not -- is the caller's, so a field without
      * this takes no drop at all.
      */
-    ondropblock?: (dragged: DraggedBlock, add: boolean) => void;
+    /** A block dropped on the field; it joins the list rather than replacing it. */
+    ondropblock?: (dragged: DraggedBlock) => void;
   }
 
   const {
@@ -116,7 +117,7 @@
     // otherwise type whatever it was handed.
     event.preventDefault();
     event.stopPropagation();
-    ondropblock(dragged, event.ctrlKey || event.metaKey);
+    ondropblock(dragged);
   }
 
   const EMPTY: BlockMix = { entries: [], distribution: DEFAULT_DISTRIBUTION };
