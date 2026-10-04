@@ -20,6 +20,8 @@
   import BannerPatternHint from "./BannerPatternHint.svelte";
   import Icon from "./Icon.svelte";
   import MaterialsInventory from "./MaterialsInventory.svelte";
+  import TerrainOptions from "./TerrainOptions.svelte";
+  import type { TerrainToolSettings } from "../../../shared/creative.js";
   import { isBannerBlock } from "../../../shared/banner_patterns.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
   import { tryParseMix } from "../../../shared/block_mix.js";
@@ -125,6 +127,16 @@
     ondelete: () => void;
     onclearselection: () => void;
     onselectall: () => void;
+    /**
+     * The terrain, shared with the creative brush (`CreativeSettings.terrain`):
+     * one landscape, painted in or laid over a box.
+     */
+    terrain?: TerrainToolSettings | null;
+    onterrainchange?: (next: TerrainToolSettings) => void;
+    onlayterrain?: () => void;
+    onfitterrain?: () => void;
+    /** `DocumentState.frame`, where the terrain's noise is read. */
+    origin?: readonly [number, number, number];
   }
 
   const {
@@ -161,7 +173,15 @@
     ondelete,
     onclearselection,
     onselectall,
+    terrain = null,
+    onterrainchange = () => {},
+    onlayterrain = () => {},
+    onfitterrain = () => {},
+    origin = [0, 0, 0],
   }: Props = $props();
+
+  /** Whether the terrain section is open. Closed by default: most selections are not hills. */
+  let terrainOpen = $state(false);
 
   /**
    * A slot of the inventory, clicked: `materialAction` decides what the click
@@ -441,6 +461,47 @@
       {t("selection.delete")}
     </button>
   </div>
+
+  {#if terrain !== null}
+    <div class="group terrain">
+      <button
+        type="button"
+        class="disclosure"
+        aria-expanded={terrainOpen}
+        title={t("selection.terrainHint")}
+        onclick={() => (terrainOpen = !terrainOpen)}
+      >
+        <Icon name={terrainOpen ? "chevronDown" : "chevronRight"} size={12} weight={2} />
+        <Icon name="terrain" size={14} weight={1.8} />
+        <span>{t("selection.terrain")}</span>
+      </button>
+      {#if terrainOpen}
+        <TerrainOptions
+          settings={terrain}
+          onchange={onterrainchange}
+          {blocks}
+          {placeable}
+          {legacy}
+          frame={mapFrame ?? { minX: 0, minY: 0, minZ: 0, maxX: 63, maxY: 63, maxZ: 63 }}
+          {origin}
+          idPrefix="selection-terrain"
+        />
+        <div class="row">
+          <button onclick={onfitterrain} disabled={busy || none} title={t("selection.fitTerrainHint")}>
+            {t("selection.fitTerrain")}
+          </button>
+          <button
+            class="primary"
+            onclick={onlayterrain}
+            disabled={busy || none}
+            title={none ? t("selection.selectFirst") : t("selection.layTerrainHint")}
+          >
+            {t("selection.layTerrain")}
+          </button>
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -555,5 +616,24 @@
 
   .tools :global(.hint) {
     margin: 0;
+  }
+
+  .terrain {
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+
+  .disclosure {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 3px 4px;
+    border: 0;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
   }
 </style>

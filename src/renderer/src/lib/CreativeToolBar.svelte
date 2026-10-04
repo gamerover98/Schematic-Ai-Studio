@@ -43,6 +43,7 @@
     brush: "brush",
     shape: "shape",
     walls: "walls",
+    terrain: "terrain",
   };
 
   /** What the tool in hand will do, in a few words. */
@@ -65,6 +66,12 @@
           height: settings.walls.height,
           thickness: settings.walls.thickness,
         });
+      case "terrain":
+        return t("creative.summary.terrain", {
+          mode: t(`terrain.mode.${settings.terrain.mode}`),
+          footprint: t(`terrain.footprint.${settings.terrain.footprint}`),
+          radius: settings.terrain.radius,
+        });
     }
   });
 
@@ -74,6 +81,7 @@
     if (corner !== null) return t("creative.hint.secondCorner", { x: corner.x, y: corner.y, z: corner.z });
     if (takesCorners(settings.tool)) return t("creative.hint.firstCorner");
     if (settings.tool === "brush") return t("creative.hint.brush");
+    if (settings.tool === "terrain") return t("creative.hint.terrain");
     return t("creative.hint.place");
   });
 

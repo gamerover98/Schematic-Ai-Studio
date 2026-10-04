@@ -20,14 +20,33 @@
     type CreativeSettings,
   } from "../../../shared/creative.js";
   import { SHAPE_AXES, SHAPE_MODES, type ShapeMode } from "../../../shared/shapes.js";
+  import type { LegacyIndex } from "../../../shared/legacy_ids.js";
+  import type { Box } from "../../../shared/regions.js";
+  import TerrainOptions from "./TerrainOptions.svelte";
   import { t } from "./i18n.svelte.js";
 
   interface Props {
     settings: CreativeSettings;
     onchange: (next: CreativeSettings) => void;
+    /** For the terrain's layers, which are block fields of their own. */
+    blocks?: readonly string[];
+    placeable?: ReadonlySet<string> | null;
+    legacy?: LegacyIndex | null;
+    /** What the terrain's picture shows: the schematic's footprint. */
+    frame?: Box;
+    /** `DocumentState.frame`, where the terrain's noise is read. */
+    origin?: readonly [number, number, number];
   }
 
-  const { settings, onchange }: Props = $props();
+  const {
+    settings,
+    onchange,
+    blocks = [],
+    placeable = null,
+    legacy = null,
+    frame = { minX: 0, minY: 0, minZ: 0, maxX: 63, maxY: 63, maxZ: 63 },
+    origin = [0, 0, 0],
+  }: Props = $props();
 
   /** A whole number inside a range, or the value it replaces when it is not one. */
   function bounded(raw: string, range: { readonly min: number; readonly max: number }, fallback: number): number {
@@ -172,8 +191,23 @@
     </label>
     {@render modes(settings.walls.mode, (mode) => walls({ mode }))}
     <p class="note">{t("creative.cornersHint")}</p>
+  {:else if settings.tool === "terrain"}
+    <TerrainOptions
+      settings={settings.terrain}
+      onchange={(terrain) => onchange({ ...settings, terrain })}
+      brush
+      {blocks}
+      {placeable}
+      {legacy}
+      {frame}
+      {origin}
+      idPrefix="creative-terrain"
+    />
+    <p class="note">{t("creative.terrainHint")}</p>
   {/if}
-  <p class="note">{t("creative.blockHint")}</p>
+  {#if settings.tool !== "terrain"}
+    <p class="note">{t("creative.blockHint")}</p>
+  {/if}
 </div>
 
 <style>

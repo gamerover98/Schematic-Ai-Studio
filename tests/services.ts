@@ -2028,6 +2028,16 @@ console.log("\n--- settings coercion ---");
       brush: { shape: "disc", radius: 7, mode: "empty" },
       shape: { kind: "pyramid", axis: "x", hollow: true, thickness: 3, height: 12, mode: "filled" },
       walls: { height: 9, thickness: 2, mode: "empty" },
+      terrain: {
+        radius: 11,
+        footprint: "square",
+        mode: "raise",
+        field: { noise: { kind: "ridged", seed: 42, params: { frequency: 0.02, octaves: 5 } }, base: -8, amplitude: 40 },
+        surface: "70%minecraft:grass_block,30%minecraft:moss_block",
+        subsoil: "minecraft:coarse_dirt",
+        subsoilDepth: 5,
+        rock: "minecraft:deepslate",
+      },
     },
     creativeWindowX: 500,
     creativeWindowY: 120,
@@ -2060,6 +2070,16 @@ console.log("\n--- settings coercion ---");
         brush: { shape: "star", radius: 400, mode: "sideways" },
         shape: { kind: "walls", axis: "w", hollow: "yes", thickness: 0, height: -3, mode: "all" },
         walls: { height: "tall" },
+        terrain: {
+          radius: 400,
+          footprint: "hexagon",
+          mode: "flood",
+          field: { noise: { kind: "gradient", seed: 3 }, base: 4, amplitude: 9 },
+          surface: "",
+          subsoil: "0%minecraft:dirt",
+          subsoilDepth: 99,
+          rock: 7,
+        },
       },
     }).creative;
     equal(
@@ -2076,6 +2096,22 @@ console.log("\n--- settings coercion ---");
       "...and numbers are clamped into range, or the default when they are not numbers",
       [odd.brush.radius, odd.shape.thickness, odd.shape.height, odd.walls.height, odd.shape.hollow],
       [32, 1, 1, 4, false],
+    );
+    equal(
+      "a terrain's footprint, mode and noise this build does not have are the default",
+      [odd.terrain.footprint, odd.terrain.mode, odd.terrain.field],
+      ["disc", "set", DEFAULT_UI_SETTINGS.creative.terrain.field],
+    );
+    equal(
+      "...a layer that is not a mix is the default, and its numbers are clamped",
+      [odd.terrain.surface, odd.terrain.subsoil, odd.terrain.rock, odd.terrain.radius, odd.terrain.subsoilDepth],
+      ["minecraft:grass_block", "minecraft:dirt", "minecraft:stone", 32, 32],
+    );
+    equal(
+      "...and a base past the range is brought back inside it rather than refused",
+      coerceUi({ ...ui, creative: { ...ui.creative, terrain: { ...ui.creative.terrain, field: { ...ui.creative.terrain.field, base: 99999 } } } })
+        .creative.terrain.field.base,
+      1024,
     );
     equal(
       "a settings file from before the creative tools comes back with all of them",

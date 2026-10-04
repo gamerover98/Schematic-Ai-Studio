@@ -649,6 +649,47 @@ block and the second undid the first. The options window opens beside the tool
 window, not against the right edge: `ToolWindow` keeps only a margin of a panel
 inside the pane, so one pushed past it hangs over the sidebar.
 
+**Terrain is a surface from a noise, and it is the same surface everywhere.**
+`shared/terrain.ts` gives every column the height of its top block,
+`heightField`; under it one block of surface, `subsoilDepth` of subsoil, then
+rock, and empty space above. `domain/terrain.ts` writes the four layers with
+`writeMix`, so each is a mix met exactly and the whole is one transaction. The
+creative brush paints it in (`CreativeSettings.terrain`), the selection's
+Terrain section lays it over the areas, `generate_terrain` is in `TOOL_SPECS`,
+and the three put down the same landscape for the same settings.
+
+- **The noise is calibrated in its own units, never against the area.** Its
+  half-percentile and its 99.5th, sampled on a lattice spaced by a frequency's
+  reciprocal or a Voronoi cell's size, are the bottom and the top, so the
+  surface runs from `base` to `base + amplitude`. Stretched to the area
+  instead, two touches of the brush would be two landscapes with a cliff
+  between them.
+- **It is read in the content, `x - frame[0]`** (`DocumentState.frame`, the
+  sum of every growth below the origin). A touch past the low edge moves every
+  block; read in the grid, the landscape stays put while the ground already
+  laid moves, and the next touch meets it with a step the size of the growth.
+  The ghost and the panel's picture read the frame too. The frame starts at
+  zero when a file is opened, so a landscape continued after reopening a
+  schematic that had grown below the origin does not meet the old one.
+- **`set` leaves a cell that already holds its layer's block**, so a second
+  touch changes nothing. Written again, grass is not the same block: the
+  connection pass gives it `snowy` after the write, so the bare spelling
+  differs from what is there, and a mix would be shared out again over other
+  cells and shimmer under the crosshair. `raise` writes only into empty cells,
+  `dig` only empties cells above the surface; the left button always digs.
+- **What grows the document is what is built**: ground, up to the highest
+  column. Over a selection `set` grows to the selection, as a fill of it
+  would; `dig` never grows. A brush touch is the columns under its footprint
+  from `min(0, base)` to the higher of the schematic's top and the
+  landscape's.
+- **`random` and `gradient` are not terrains.** One is a bed of nails, the
+  other a coordinate, which calibrates to nothing; they are refused by name.
+
+`noise(kind, x, y, z, params)` in a build script is `cellValues` behind a host
+callback that answers a number (`registerHostQuery` in `core.ts`). It is the
+third thing across the sandbox's bridge and the first that returns anything,
+and it may cross because it computes from numbers and touches nothing.
+
 **A selection may be several areas, and the gap between them is nobody's.**
 Shift+Alt+drag adds an area and Alt+click removes one. Shift+Alt+click inside
 an area makes it the active one. A plain Shift-drag or a click starts the

@@ -11,6 +11,7 @@ import type { GpuPreference, Hotbar } from "./settings.js";
 import type { CameraPlacement, Vec3 } from "./camera_aim.js";
 import type { DyeName } from "./banner_patterns.js";
 import type { ShapeMode, ShapeSpec } from "./shapes.js";
+import type { Footprint, HeightField, TerrainMode } from "./terrain.js";
 import { DEFAULT_DISTRIBUTION, type Distribution } from "./block_mix.js";
 import { SCHEMATIC_FORMAT_LABEL, SCHEMATIC_FORMATS } from "./schematic.js";
 import type {
@@ -1345,6 +1346,16 @@ export interface DocumentState {
    * renderer can have it right the instant a different schematic opens.
    */
   voidBlock: string;
+  /**
+   * Where the content sits in the grid since the document was opened: the sum
+   * of every growth below the origin (`SchematicDocument.frame`).
+   *
+   * The terrain tools read their noise at a column's place in the content,
+   * `x - frame[0]`, so a landscape painted on both sides of such a growth is
+   * one landscape; the panel and the brush's ghost need it to draw the same
+   * heights the edit will write.
+   */
+  frame: [number, number, number];
   /** Monotonic; the renderer uses it to tell whether its mesh is stale. */
   revision: number;
 }
@@ -1448,7 +1459,36 @@ export type EditRequest =
    * stroke are one undo step (`TransactionOptions.mergeKey`), so a stroke is
    * taken back by one Ctrl+Z however many touches it took.
    */
-  | { kind: "shape"; shape: ShapeSpec; mix: MixSpec; mode?: ShapeMode; stroke?: string };
+  | { kind: "shape"; shape: ShapeSpec; mix: MixSpec; mode?: ShapeMode; stroke?: string }
+  /**
+   * Terrain from a noise, in three layers, over an area (`shared/terrain.ts`).
+   *
+   * Over a selection it grows the document like a fill, except where it only
+   * takes away (`dig`, `replace`'s reason). A brush touch is the columns
+   * under its footprint, from the floor -- or the base, when that is lower --
+   * to the top of the schematic or of the terrain, whichever is higher.
+   */
+  | { kind: "terrain"; area: ToolArea; terrain: TerrainRequest; stroke?: string };
+
+/**
+ * Where a terrain tool works: the selection's areas, or a brush touch.
+ *
+ * A touch is the cell aimed at and a radius. A terrain takes the columns
+ * under the footprint around it, whatever their height.
+ */
+export type ToolArea =
+  | { kind: "regions"; regions: RegionSpec[] }
+  | { kind: "brush"; x: number; y: number; z: number; radius: number; footprint: Footprint };
+
+/** What a terrain is made of, and how it meets what is there. */
+export interface TerrainRequest {
+  field: HeightField;
+  surface: MixSpec;
+  subsoil: MixSpec;
+  rock: MixSpec;
+  subsoilDepth: number;
+  mode: TerrainMode;
+}
 
 /**
  * Several blocks with weights, and the rule for which cell gets which.

@@ -26,9 +26,17 @@ import {
   type BrushSettings,
   type CreativeSettings,
   type ShapeToolSettings,
+  type TerrainToolSettings,
   type WallToolSettings,
 } from "../../shared/creative.js";
 import { SHAPE_AXES, SHAPE_MODES } from "../../shared/shapes.js";
+import {
+  FOOTPRINTS,
+  normalizeHeightField,
+  SUBSOIL_DEPTH,
+  TERRAIN_MODES,
+  type HeightField,
+} from "../../shared/terrain.js";
 import {
   DEFAULT_HOTBAR,
   DEFAULT_MCP_SETTINGS,
@@ -148,6 +156,7 @@ export function coerceCreative(raw: unknown): CreativeSettings {
   const brush = (source.brush ?? {}) as Partial<BrushSettings>;
   const shape = (source.shape ?? {}) as Partial<ShapeToolSettings>;
   const walls = (source.walls ?? {}) as Partial<WallToolSettings>;
+  const terrain = (source.terrain ?? {}) as Partial<TerrainToolSettings>;
   const defaults = DEFAULT_CREATIVE_SETTINGS;
   return {
     tool: oneOf(CREATIVE_TOOLS, source.tool, defaults.tool),
@@ -169,7 +178,36 @@ export function coerceCreative(raw: unknown): CreativeSettings {
       thickness: within(walls.thickness, TOOL_THICKNESS, defaults.walls.thickness),
       mode: oneOf(SHAPE_MODES, walls.mode, defaults.walls.mode),
     },
+    terrain: {
+      radius: within(terrain.radius, BRUSH_RADIUS, defaults.terrain.radius),
+      footprint: oneOf(FOOTPRINTS, terrain.footprint, defaults.terrain.footprint),
+      mode: oneOf(TERRAIN_MODES, terrain.mode, defaults.terrain.mode),
+      field: heightFieldOr(terrain.field, defaults.terrain.field),
+      surface: mixOr(terrain.surface, defaults.terrain.surface),
+      subsoil: mixOr(terrain.subsoil, defaults.terrain.subsoil),
+      subsoilDepth: within(terrain.subsoilDepth, SUBSOIL_DEPTH, defaults.terrain.subsoilDepth),
+      rock: mixOr(terrain.rock, defaults.terrain.rock),
+    },
   };
+}
+
+/**
+ * A terrain's noise as the store read it, or the default. `normalizeHeightField`
+ * is the one reading of it -- the wire's -- so a noise this build cannot make
+ * a terrain of is the same refusal here as there, answered with the default.
+ */
+function heightFieldOr(raw: unknown, fallback: HeightField): HeightField {
+  if (raw === null || typeof raw !== "object") return fallback;
+  try {
+    return normalizeHeightField(raw as Parameters<typeof normalizeHeightField>[0]);
+  } catch {
+    return fallback;
+  }
+}
+
+/** A layer's mix spelling, or the default when it is not one. */
+function mixOr(raw: unknown, fallback: string): string {
+  return typeof raw === "string" && raw.trim() !== "" && tryParseMix(raw) !== null ? raw : fallback;
 }
 
 function oneOf<T extends string>(names: readonly T[], value: unknown, fallback: T): T {

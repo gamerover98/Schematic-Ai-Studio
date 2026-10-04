@@ -81,6 +81,7 @@ import {
   undoEdit,
 } from "../src/main/services/session.js";
 import type { DocumentSession } from "../src/main/services/session.js";
+import { heightField, normalizeHeightField } from "../src/shared/terrain.js";
 
 let failures = 0;
 
@@ -606,6 +607,50 @@ try {
 
     const refused = await attempt("draw_shape", { shape: "cone", block: "stone" }, options(sink));
     check("a shape that does not exist is refused by name", String(refused.refused ?? "").includes("not a shape"));
+    closeDocument();
+  }
+
+  /*
+   * The terrain the creative brush paints, from one tool. The landscape is
+   * `tests/session.ts`'s; this is the wire: the region, the defaults, and
+   * what it says when the surface does not fit the region.
+   */
+  console.log("\n--- generate_terrain ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const region = { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 };
+    // The defaults are grass, dirt and stone, which the small set above lacks.
+    const lands = { ...options(sink), allowedBlocks: new Set([...ALLOWED, "minecraft:grass_block", "minecraft:dirt"]) };
+    const laid = await attempt(
+      "generate_terrain",
+      { noise: "perlin", seed: 3, params: { frequency: 0.1 }, base: 1, amplitude: 4, ...region },
+      lands,
+    );
+    check("generate_terrain lays a landscape", (laid.changed as number) > 0, JSON.stringify(laid));
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...and the window is told the schematic moved", sink.changed > 0);
+    const surface = laid.surface as { lowest: number; highest: number };
+    check("...and it says where its surface runs", surface.lowest >= 1 && surface.highest <= 5, JSON.stringify(surface));
+    const top = heightField(
+      normalizeHeightField({ noise: { kind: "perlin", seed: 3, params: { frequency: 0.1 } }, base: 1, amplitude: 4 }),
+      session.doc.frame,
+    );
+    let wrong = 0;
+    for (let x = 0; x < 8; x += 1) {
+      for (let z = 0; z < 8; z += 1) {
+        const y = top(x, z);
+        if (getBlock(session.doc, x, y, z)?.namespacedName !== "minecraft:grass_block") wrong += 1;
+        if (getBlock(session.doc, x, y + 1, z)?.namespacedName !== "minecraft:air") wrong += 1;
+        if (getBlock(session.doc, x, y - 1, z)?.namespacedName !== "minecraft:dirt") wrong += 1;
+      }
+    }
+    equal("...grass on dirt by default, on the surface the brush paints for the same settings", wrong, 0);
+    const tall = await attempt("generate_terrain", { noise: "simplex", base: 6, amplitude: 10, ...region }, lands);
+    check("a surface the region cannot hold says where it was cut", typeof tall.cut === "string" && String(tall.cut).includes("y="));
+    equal("...and does not grow the schematic", session.doc.height, 8);
+    const refused = await attempt("generate_terrain", { noise: "gradient" }, options(sink));
+    check("a noise a terrain cannot be made of is refused by name", String(refused.refused ?? "").includes("gradient"));
     closeDocument();
   }
 

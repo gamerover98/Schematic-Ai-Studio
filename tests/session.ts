@@ -127,6 +127,14 @@ import {
   type ShapeSpec,
 } from "../src/shared/shapes.js";
 import { UnrepresentableBlocksError } from "../src/main/services/writers.js";
+import {
+  heightField,
+  inFootprint,
+  normalizeHeightField,
+  TerrainError,
+  terrainLayer,
+  type HeightField,
+} from "../src/shared/terrain.js";
 import { SpongeSchematicWriter } from "../src/main/services/schematic.js";
 import { dataVersionFor } from "../src/main/services/versions.js";
 
@@ -6484,6 +6492,251 @@ console.log("\n--- shapes ---");
     draw(session, { shape: { kind: "box", box: { minX: 1, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 } } });
     draw(session, { shape: { kind: "box", box: { minX: 2, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 } }, stroke: "stroke-2" });
     equal("a shape with no stroke between two touches closes the stroke", session.history.undoStack.length, 3);
+    closeDocument();
+  }
+}
+
+console.log("\n--- terrain from a noise ---");
+{
+  const field: HeightField = {
+    noise: { kind: "perlin", seed: 7, params: { frequency: 0.05, octaves: 3 } },
+    base: 3,
+    amplitude: 9,
+  };
+
+  // --- the surface ---------------------------------------------------------
+  const top = heightField(field);
+  let lowest = Infinity;
+  let highest = -Infinity;
+  let strays = 0;
+  for (let x = -120; x < 120; x += 1) {
+    for (let z = -120; z < 120; z += 1) {
+      const y = top(x, z);
+      if (y < lowest) lowest = y;
+      if (y > highest) highest = y;
+      if (!Number.isInteger(y) || y < 3 || y > 12) strays += 1;
+    }
+  }
+  equal("the surface is a whole height between the base and the base plus the relief", strays, 0);
+  equal("...and over a wide area it reaches both", [lowest, highest], [3, 12]);
+  {
+    // The calibration is in the noise's own units, so a landscape four times
+    // as wide still runs the whole relief rather than a quarter of it.
+    const wide = heightField({ ...field, noise: { ...field.noise, params: { frequency: 0.0125, octaves: 3 } } });
+    let low = Infinity;
+    let high = -Infinity;
+    for (let x = -480; x < 480; x += 4) {
+      for (let z = -480; z < 480; z += 4) {
+        const y = wide(x, z);
+        low = Math.min(low, y);
+        high = Math.max(high, y);
+      }
+    }
+    equal("...whatever the frequency, the relief is the one asked for", [low, high], [3, 12]);
+  }
+  equal("the same settings are the same landscape", heightField(field)(17, -4), top(17, -4));
+  let differs = 0;
+  const reseeded = heightField({ ...field, noise: { ...field.noise, seed: 8 } });
+  for (let x = 0; x < 64; x += 1) if (reseeded(x, x) !== top(x, x)) differs += 1;
+  check("...and another seed is another one", differs > 16, String(differs));
+  equal("no relief is flat ground at the base", [heightField({ ...field, amplitude: 0 })(5, 5), heightField({ ...field, amplitude: 0 })(-90, 3)], [3, 3]);
+  equal(
+    "the noise is read in the content, so the frame moves the landscape with the blocks",
+    [heightField(field, [4, 0, -2])(14, 8), heightField(field, [4, 0, -2])(4, -2)],
+    [top(10, 10), top(0, 0)],
+  );
+  equal(
+    "a column is its surface block, the subsoil under it, then rock; empty space above",
+    [10, 11, 9, 8, 7, 6].map((y) => terrainLayer(y, 10, 3)),
+    ["surface", "above", "subsoil", "subsoil", "subsoil", "rock"],
+  );
+  equal("...and with no subsoil the rock starts right under the surface", terrainLayer(9, 10, 0), "rock");
+
+  const refusedField = (raw: Parameters<typeof normalizeHeightField>[0], words: string): boolean => {
+    try {
+      normalizeHeightField(raw);
+      return false;
+    } catch (err) {
+      return err instanceof TerrainError && err.message.includes(words);
+    }
+  };
+  check("a gradient is not a terrain, and says so", refusedField({ noise: { kind: "gradient" } }, "gradient"));
+  check("...nor is salt and pepper", refusedField({ noise: { kind: "random" } }, "random"));
+  check("...a parameter the noise does not take is refused by name", refusedField({ noise: { kind: "perlin", params: { size: 3 } } }, "size"));
+  check("...and so is a base that is not a number", refusedField({ noise: { kind: "perlin" }, base: "high" }, "base"));
+  equal(
+    "a base or a relief past its range is brought inside it",
+    (({ base, amplitude }) => [base, amplitude])(normalizeHeightField({ noise: { kind: "simplex" }, base: 99999, amplitude: -5 })),
+    [1024, 0],
+  );
+
+  // --- laid into a document ------------------------------------------------
+  const grass = { namespacedName: "minecraft:grass_block" };
+  const dirt = { namespacedName: "minecraft:dirt" };
+  const stone = { namespacedName: "minecraft:stone" };
+  const gold = { namespacedName: "minecraft:gold_block", properties: {} };
+  type TerrainEdit = Extract<Parameters<typeof applyEdit>[1], { kind: "terrain" }>;
+  const lay = (area: TerrainEdit["area"], mode: TerrainEdit["terrain"]["mode"], extra: Partial<TerrainEdit> = {}): TerrainEdit => ({
+    kind: "terrain",
+    area,
+    terrain: { field, surface: singleMix(grass), subsoil: singleMix(dirt), rock: singleMix(stone), subsoilDepth: 2, mode },
+    ...extra,
+  });
+  const expected = (y: number, surface: number): string =>
+    ({ above: "minecraft:air", surface: "minecraft:grass_block", subsoil: "minecraft:dirt", rock: "minecraft:stone" })[
+      terrainLayer(y, surface, 2)
+    ];
+  /** Cells of the columns `inside` that are not what the terrain says, read in the content. */
+  const misplaced = (session: DocumentSession, inside: (x: number, z: number) => boolean): number => {
+    const surface = heightField(field, session.doc.frame);
+    let wrong = 0;
+    for (let x = 0; x < session.doc.width; x += 1) {
+      for (let z = 0; z < session.doc.length; z += 1) {
+        if (!inside(x, z)) continue;
+        const at = surface(x, z);
+        for (let y = 0; y < session.doc.height; y += 1) {
+          if (getBlock(session.doc, x, y, z).namespacedName !== expected(y, at)) wrong += 1;
+        }
+      }
+    }
+    return wrong;
+  };
+  const whole = (n: number) => ({ minX: 0, minY: 0, minZ: 0, maxX: n - 1, maxY: n - 1, maxZ: n - 1 });
+
+  {
+    const session = newDocument({ width: 16, height: 16, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const wrote = applyEdit(session, lay({ kind: "regions", regions: [whole(16)] }, "set"));
+    check("set: something was laid", wrote > 0, String(wrote));
+    equal("...every column is the terrain, layer by layer", misplaced(session, () => true), 0);
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...labelled as terrain", (session.history.undoStack[0]?.label ?? "").includes("terrain"));
+    equal("laying the same terrain again changes nothing", applyEdit(session, lay({ kind: "regions", regions: [whole(16)] }, "set")), 0);
+    undoEdit(session);
+    equal("...and one undo takes it all back", documentState(session).blockCount, 0);
+    closeDocument();
+  }
+  {
+    // Raise fills only empty cells: a block in the ground and one above it stay.
+    const session = newDocument({ width: 16, height: 16, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 5, 0, 5, gold);
+    setBlock(session.doc, 6, 15, 6, gold);
+    applyEdit(session, lay({ kind: "regions", regions: [whole(16)] }, "raise"));
+    equal(
+      "raise: what was there stays, under the ground and over it",
+      [getBlock(session.doc, 5, 0, 5).namespacedName, getBlock(session.doc, 6, 15, 6).namespacedName],
+      ["minecraft:gold_block", "minecraft:gold_block"],
+    );
+    equal(
+      "...and every other cell is the terrain",
+      misplaced(session, (x, z) => !(x === 5 && z === 5) && !(x === 6 && z === 6)),
+      0,
+    );
+    closeDocument();
+  }
+  {
+    // Dig clears only what stands over the surface, and adds nothing.
+    const session = newDocument({ width: 16, height: 16, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, { kind: "fill", regions: [whole(16)], mix: singleMix(gold) });
+    applyEdit(session, lay({ kind: "regions", regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 15, maxY: 30, maxZ: 15 }] }, "dig"));
+    let wrong = 0;
+    for (let x = 0; x < 16; x += 1) {
+      for (let z = 0; z < 16; z += 1) {
+        const at = top(x, z);
+        for (let y = 0; y < 16; y += 1) {
+          const name = getBlock(session.doc, x, y, z).namespacedName;
+          if (name !== (y > at ? "minecraft:air" : "minecraft:gold_block")) wrong += 1;
+        }
+      }
+    }
+    equal("dig: above the surface is cleared and below it is left", wrong, 0);
+    equal("...and digging never grows the document", session.doc.height, 16);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 16, height: 16, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, { kind: "fill", regions: [whole(16)], mix: singleMix(gold) });
+    applyEdit(session, lay({ kind: "regions", regions: [whole(16)] }, "dig"), { voidBlock: "minecraft:water" });
+    equal("what is dug away becomes the document's empty space", getBlock(session.doc, 3, 15, 3).namespacedName, "minecraft:water");
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, lay({ kind: "regions", regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 11, maxY: 7, maxZ: 7 }] }, "set"));
+    equal("over a selection past the edge, set grows to the selection as a fill does", session.doc.width, 12);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, lay({ kind: "regions", regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 60, maxZ: 7 }] }, "raise"));
+    let tallest = -Infinity;
+    for (let x = 0; x < 8; x += 1) for (let z = 0; z < 8; z += 1) tallest = Math.max(tallest, top(x, z));
+    equal("...raise grows only to the highest ground it builds, not to a tall selection's ceiling", session.doc.height, Math.max(8, tallest + 1));
+    closeDocument();
+  }
+
+  // --- painted in by the brush -----------------------------------------------
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, lay({ kind: "brush", x: 4, y: 0, z: 4, radius: 2, footprint: "disc" }, "set", { stroke: "terrain-1" }));
+    const first = (x: number, z: number) => inFootprint("disc", x - 4, z - 4, 2);
+    equal("a touch lays the columns under its footprint", misplaced(session, first), 0);
+    let outside = 0;
+    for (let x = 0; x < session.doc.width; x += 1) {
+      for (let z = 0; z < session.doc.length; z += 1) {
+        if (first(x, z)) continue;
+        for (let y = 0; y < session.doc.height; y += 1) if (getBlock(session.doc, x, y, z).namespacedName !== "minecraft:air") outside += 1;
+      }
+    }
+    equal("...the columns beside it are left empty", outside, 0);
+    const mark = historyMark(session.history);
+    applyEdit(session, lay({ kind: "brush", x: 0, y: 0, z: 0, radius: 2, footprint: "disc" }, "set", { stroke: "terrain-1" }));
+    equal("a touch past the low edge grows the document and moves the content", contentShiftSince(session.history, mark), [2, 0, 2]);
+    const moved = (x: number, z: number) => inFootprint("disc", x - 6, z - 6, 2);
+    const second = (x: number, z: number) => inFootprint("disc", x - 2, z - 2, 2);
+    equal(
+      "...and the landscape moved with it: both touches are one surface, without a seam",
+      misplaced(session, (x, z) => moved(x, z) || second(x, z)),
+      0,
+    );
+    equal("...as one step for the stroke", session.history.undoStack.length, 1);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 16, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const square = (x: number, z: number) => Math.abs(x - 4) <= 1 && Math.abs(z - 4) <= 1;
+    applyEdit(session, lay({ kind: "brush", x: 4, y: 9, z: 4, radius: 1, footprint: "square" }, "set"));
+    equal("a square brush lays every column of its square, whatever height it was aimed at", misplaced(session, square), 0);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const refusedEdit = (request: TerrainEdit, words: string): boolean => {
+      try {
+        applyEdit(session, request);
+        return false;
+      } catch (err) {
+        return err instanceof TerrainError && err.message.includes(words);
+      }
+    };
+    const brush = { kind: "brush" as const, x: 1, y: 1, z: 1, radius: 2, footprint: "disc" as const };
+    check("a brush that is not a disc or a square is refused by name", refusedEdit(lay({ ...brush, footprint: "hexagon" as never }, "set"), "hexagon"));
+    check("...and so is a radius past the reach", refusedEdit(lay({ ...brush, radius: 65 }, "set"), "radius"));
+    check("...and a mode there is not", refusedEdit(lay(brush, "flatten" as never), "flatten"));
+    check(
+      "...and a subsoil deeper than the range",
+      refusedEdit({ ...lay(brush, "set"), terrain: { ...lay(brush, "set").terrain, subsoilDepth: 40 } }, "subsoil"),
+    );
+    check(
+      "...and a noise a terrain cannot be made of",
+      refusedEdit({ ...lay(brush, "set"), terrain: { ...lay(brush, "set").terrain, field: { ...field, noise: { kind: "gradient", seed: 1 } } } }, "gradient"),
+    );
+    let outside = false;
+    try {
+      applyEdit(session, lay({ ...brush, x: 30 }, "set"), { autoGrow: false });
+    } catch (err) {
+      outside = err instanceof OutsideDocumentError;
+    }
+    check("with resizing off, a terrain outside the box is refused by name", outside);
     closeDocument();
   }
 }

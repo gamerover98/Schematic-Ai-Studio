@@ -17,7 +17,8 @@ of the original rather than against a description of it.
 | shapes: writing them | `applyEdit`'s `shape` arm in `src/main/services/session.ts`, `writeMix` with a `CellSet` |
 | shapes over MCP and in the chat | `draw_shape` in `src/main/agent/tools.ts` (`TOOL_SPECS`) |
 | a brush stroke as one undo | `TransactionOptions.mergeKey`, `commit` in `src/main/domain/history.ts` |
-| terrain, smooth, erode | phase F8 of the roadmap; the algorithms are below |
+| terrain from a noise | `src/shared/terrain.ts` (the surface), `src/main/domain/terrain.ts` (the layers), `generate_terrain` in `TOOL_SPECS` |
+| smooth, erode | the algorithms are below |
 
 ## Sources and the two-source rule
 

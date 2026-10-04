@@ -33,6 +33,15 @@
  * the second builds between it and the cell aimed at. Until the second, a
  * ghost of what it would build follows the crosshair, and Escape -- or
  * anything else that ends flight -- forgets the first.
+ *
+ * ## Terrain is painted in, not piled up
+ *
+ * The terrain brush is a stroke as well, but what it writes is a landscape
+ * that is already decided everywhere (`shared/terrain.ts`): a touch lays the
+ * columns under its footprint, and a touch where the terrain already is
+ * changes nothing. Its ghost is that surface, and what it has reached is the
+ * columns it laid, at any height -- the crosshair lands on the ground just
+ * laid, and the next touch waits until it is off it.
  */
 
 import {
@@ -43,9 +52,11 @@ import {
   type CreativeSettings,
   type CreativeTool,
 } from "../../../shared/creative.js";
-import { orderBox, type Box } from "../../../shared/regions.js";
+import { orderBox, boxVolume, type Box } from "../../../shared/regions.js";
+import { heightField, inFootprint, type Footprint } from "../../../shared/terrain.js";
 import {
   normalizeShape,
+  shapeCells,
   shapeContains,
   type ShapeCells,
   type ShapeMode,
@@ -67,6 +78,8 @@ export interface Cell {
 export interface CreativeAim {
   readonly settings: CreativeSettings;
   readonly corner: Cell | null;
+  /** `DocumentState.frame`: where the terrain's noise is read. */
+  readonly frame: readonly [number, number, number];
 }
 
 /**
@@ -76,7 +89,13 @@ export interface CreativeAim {
  */
 export type StrokeEvent =
   | { readonly phase: "begin"; readonly erase: boolean }
-  | { readonly phase: "touch"; readonly shape: ShapeSpec }
+  | {
+      readonly phase: "touch";
+      /** The cell the touch is centred on. */
+      readonly at: Cell;
+      /** The brush's shape; `null` for the terrain, which is columns round `at`. */
+      readonly shape: ShapeSpec | null;
+    }
   | { readonly phase: "end" };
 
 /** The tool after this one, round and back to the start: what B does. */
@@ -88,6 +107,16 @@ export function nextTool(tool: CreativeTool): CreativeTool {
 /** The tools that take two corners rather than a stroke. */
 export function takesCorners(tool: CreativeTool): tool is "shape" | "walls" {
   return tool === "shape" || tool === "walls";
+}
+
+/** The tools a held button paints with: a stroke of touches. */
+export function takesStroke(tool: CreativeTool): tool is "brush" | "terrain" {
+  return tool === "brush" || tool === "terrain";
+}
+
+/** How far a stroking tool reaches, which is also what spaces its touches. */
+export function strokeRadius(settings: CreativeSettings, tool: CreativeTool): number {
+  return tool === "terrain" ? settings.terrain.radius : settings.brush.radius;
 }
 
 /**
@@ -164,6 +193,18 @@ export function reachOf(spec: ShapeSpec): (x: number, y: number, z: number) => b
       },
     }),
   );
+}
+
+/**
+ * What one touch of the terrain reached: the columns under its footprint
+ * grown by a block, at every height.
+ *
+ * Every height, because the next aim is on the ground just laid -- a hill
+ * that was not there a moment ago, or a valley dug under where the crosshair
+ * was -- and a touch there would lay the same columns again for nothing.
+ */
+export function columnReach(at: Cell, radius: number, footprint: Footprint): (x: number, y: number, z: number) => boolean {
+  return (x, _y, z) => inFootprint(footprint, x - at.x, z - at.z, radius + 1);
 }
 
 /** Whether a stroke has already reached `at`: any of its touches did. */
@@ -269,6 +310,8 @@ export function resized(settings: CreativeSettings, tool: CreativeTool, by: numb
       return { ...settings, shape: { ...settings.shape, height: clamp(settings.shape.height + by, TOOL_HEIGHT) } };
     case "walls":
       return { ...settings, walls: { ...settings.walls, height: clamp(settings.walls.height + by, TOOL_HEIGHT) } };
+    case "terrain":
+      return { ...settings, terrain: { ...settings.terrain, radius: clamp(settings.terrain.radius + by, BRUSH_RADIUS) } };
     case "place":
       return settings;
   }
@@ -282,6 +325,76 @@ export function resized(settings: CreativeSettings, tool: CreativeTool, by: numb
  * whole city is not, and its outline says what it is going to do just as well.
  */
 export const MAX_GHOST_CELLS = 1_000_000;
+
+/**
+ * A ghost to draw: where it stands, what decides its geometry, and its cells
+ * relative to its own corner -- or `null` past `MAX_GHOST_CELLS`, when the
+ * box alone is drawn. The viewer rebuilds the geometry only when `key`
+ * changes, and otherwise moves it to `box`.
+ */
+export interface Ghost {
+  readonly box: Box;
+  readonly key: string;
+  cells(): ShapeCells | null;
+}
+
+/** A shape's ghost: its geometry depends on its size and kind, not on where it is. */
+export function shapeGhost(spec: ShapeSpec): Ghost {
+  const box = orderBox(spec.box);
+  const w = box.maxX - box.minX + 1;
+  const h = box.maxY - box.minY + 1;
+  const l = box.maxZ - box.minZ + 1;
+  const local = { minX: 0, minY: 0, minZ: 0, maxX: w - 1, maxY: h - 1, maxZ: l - 1 };
+  return {
+    box,
+    key: [spec.kind, w, h, l, spec.axis ?? "y", spec.hollow === true, spec.thickness ?? 1].join(":"),
+    cells: () => (boxVolume(local) <= MAX_GHOST_CELLS ? shapeCells({ ...spec, box: local }) : null),
+  };
+}
+
+/**
+ * The terrain's ghost: the surface it would lay under the footprint, one cell
+ * a column at the height `heightField` gives it -- the edit's own answer, so
+ * the ghost is where the ground will be. It depends on where it is, so its
+ * key does too.
+ */
+export function terrainGhost(
+  terrain: CreativeSettings["terrain"],
+  at: Cell,
+  frame: readonly [number, number, number],
+): Ghost {
+  const r = terrain.radius;
+  const top = heightField(terrain.field, frame);
+  const columns: { x: number; z: number; y: number }[] = [];
+  let lowest = Infinity;
+  let highest = -Infinity;
+  for (let dx = -r; dx <= r; dx += 1) {
+    for (let dz = -r; dz <= r; dz += 1) {
+      if (!inFootprint(terrain.footprint, dx, dz, r)) continue;
+      const y = top(at.x + dx, at.z + dz);
+      columns.push({ x: dx + r, z: dz + r, y });
+      if (y < lowest) lowest = y;
+      if (y > highest) highest = y;
+    }
+  }
+  const box = { minX: at.x - r, minY: lowest, minZ: at.z - r, maxX: at.x + r, maxY: highest, maxZ: at.z + r };
+  const w = 2 * r + 1;
+  const h = highest - lowest + 1;
+  return {
+    box,
+    key: `terrain:${at.x}:${at.z}:${r}:${terrain.footprint}:${frame.join(",")}:${JSON.stringify(terrain.field)}`,
+    cells: () => {
+      if (w * h * w > MAX_GHOST_CELLS) return null;
+      const mask = new Uint8Array(w * h * w);
+      for (const column of columns) mask[column.x * h * w + (column.y - lowest) * w + column.z] = 1;
+      return {
+        window: { minX: 0, minY: 0, minZ: 0, maxX: w - 1, maxY: h - 1, maxZ: w - 1 },
+        mask,
+        count: columns.length,
+      };
+    },
+  };
+}
 
 /**
  * The four corners of each face of a unit cell, wound anticlockwise seen from

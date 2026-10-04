@@ -111,7 +111,17 @@ import {
   singleBlockMix,
   type BlockMix,
 } from "../../shared/block_mix.js";
-import { shapeCellSet, writeMix } from "../domain/mix.js";
+import { regionCellSet, shapeCellSet, writeMix } from "../domain/mix.js";
+import { writeTerrain, type LayerMix } from "../domain/terrain.js";
+import {
+  heightField,
+  normalizeHeightField,
+  SUBSOIL_DEPTH,
+  TERRAIN_AMPLITUDE,
+  TERRAIN_MODES,
+  TERRAIN_NOISES,
+  type TerrainMode,
+} from "../../shared/terrain.js";
 import { MAX_DOCUMENT_VOLUME, MAX_EDIT_VOLUME } from "../services/session.js";
 import { orderRegion } from "../domain/grow.js";
 import { boxContains, intersectBox, unionVolume } from "../../shared/regions.js";
@@ -1561,6 +1571,143 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
 
   {
+    /**
+     * A landscape from a noise, one tool. A model asked for hills wrote a
+     * build script that summed sines, which is a lot of arithmetic for a
+     * lumpy egg box; this is the terrain the creative brush paints, with the
+     * same three layers and the same surface for the same settings.
+     *
+     * The region is trimmed to the schematic like every tool here, and the
+     * surface is cut where the region ends rather than squeezed into it: a
+     * terrain is a fact about the columns, not about the box it was asked in.
+     */
+    name: "generate_terrain",
+    description:
+      "Lay terrain from a noise in a region. Defaults to the user's selection. Every column of the " +
+      "region gets a surface height from the noise, between base and base + amplitude (y of the top " +
+      "block): the surface block on top, subsoil_depth blocks of subsoil under it, rock below that, " +
+      "empty space above. noise: perlin and simplex give rolling hills, ridged gives sharp crests, " +
+      "voronoi gives plateaus (mode=patches), cones (distance) or a net of ridges (edges); params are " +
+      "the noise's own, as for a mix distribution -- " +
+      TERRAIN_NOISES.map((kind) => `${kind}{${DISTRIBUTION_PARAMS[kind].map((spec) => spec.key).join(",")}}`).join(" ") +
+      " -- and a lower frequency (or a larger voronoi size) is wider hills. The same noise, seed and " +
+      "params give the same landscape wherever it is laid, so two regions side by side meet without a " +
+      "seam. mode: set (default; the column becomes the terrain), raise (only fills empty cells under " +
+      "the surface, never removes), dig (only clears what stands above the surface, never adds). " +
+      "base defaults to the region's floor and amplitude to two thirds of its height. surface, subsoil " +
+      "and rock are a block or a mix each (default grass_block, dirt and stone). Cells outside the " +
+      "schematic are not written; use resize_document first if you need the room. " +
+      MIX_SPELLING,
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        noise: { type: "string", enum: [...TERRAIN_NOISES] },
+        seed: { type: "integer" },
+        params: { type: "object", additionalProperties: { type: ["number", "string", "boolean"] } },
+        base: { type: "integer" },
+        amplitude: { type: "integer", minimum: TERRAIN_AMPLITUDE.min, maximum: TERRAIN_AMPLITUDE.max },
+        surface: { type: "string" },
+        subsoil: { type: "string" },
+        subsoil_depth: { type: "integer", minimum: SUBSOIL_DEPTH.min, maximum: SUBSOIL_DEPTH.max },
+        rock: { type: "string" },
+        mode: { type: "string", enum: [...TERRAIN_MODES] },
+      },
+      required: ["noise"],
+      additionalProperties: false,
+    },
+    async run(
+      context,
+      args: Partial<RegionArgs> & {
+        noise: string;
+        seed?: number;
+        params?: Record<string, number | string | boolean>;
+        base?: number;
+        amplitude?: number;
+        surface?: string;
+        subsoil?: string;
+        subsoil_depth?: number;
+        rock?: string;
+        mode?: TerrainMode;
+      },
+      id,
+    ) {
+      const given = args ?? ({} as typeof args);
+      const { region, ...notes } = resolveRegion(context, given);
+      const height = region.maxY - region.minY + 1;
+      const field = normalizeHeightField({
+        noise: { kind: given.noise, seed: given.seed ?? 0, params: given.params },
+        base: given.base ?? region.minY,
+        amplitude: given.amplitude ?? Math.max(0, Math.floor(((height - 1) * 2) / 3)),
+      });
+      const mode = given.mode ?? "set";
+      if (!(TERRAIN_MODES as readonly string[]).includes(mode)) {
+        throw new Error(`mode must be one of ${TERRAIN_MODES.join(", ")}, not "${String(mode)}".`);
+      }
+      const depth = given.subsoil_depth ?? 3;
+      if (!Number.isInteger(depth) || depth < SUBSOIL_DEPTH.min || depth > SUBSOIL_DEPTH.max) {
+        throw new Error(`subsoil_depth is a whole number from ${SUBSOIL_DEPTH.min} to ${SUBSOIL_DEPTH.max}.`);
+      }
+      if (regionVolume(region) > MAX_EDIT_VOLUME) {
+        throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
+      }
+      const layerOf = async (spelling: string | undefined, fallback: string): Promise<LayerMix> => {
+        const mix = readMix(spelling ?? fallback);
+        const placements = await placeMix(context, mix);
+        return {
+          distribution: mix.distribution,
+          shares: effectiveShares(mix.entries),
+          written: placements.map((placement) => placement.entry),
+          layers: placements.map((placement) => placement.layers),
+        };
+      };
+      const layers =
+        mode === "dig"
+          ? null
+          : {
+              surface: await layerOf(given.surface, "minecraft:grass_block"),
+              subsoil: await layerOf(given.subsoil, "minecraft:dirt"),
+              rock: await layerOf(given.rock, "minecraft:stone"),
+              subsoilDepth: depth,
+            };
+
+      const { doc } = context;
+      const voidEntry = emptySpaceOf(doc);
+      const isEmpty = (entry: PaletteEntry): boolean =>
+        entry.namespacedName === "minecraft:air" || (voidEntry !== null && matchesBlockPattern(entry, voidEntry));
+      const top = heightField(field, doc.frame);
+      let lowest = Infinity;
+      let highest = -Infinity;
+      for (let x = region.minX; x <= region.maxX; x += 1) {
+        for (let z = region.minZ; z <= region.maxZ; z += 1) {
+          const value = top(x, z);
+          if (value < lowest) lowest = value;
+          if (value > highest) highest = value;
+        }
+      }
+      step(context, "generate_terrain", `laying ${given.noise} terrain in ${describeRegion(region)} (${mode})`, id);
+      const changed = writeTerrain(
+        doc,
+        context.tx,
+        regionCellSet([region]),
+        region,
+        top,
+        layers,
+        mode,
+        isEmpty,
+        voidEntry ?? { namespacedName: "minecraft:air", properties: {} },
+      );
+      const cut =
+        highest > region.maxY || lowest < region.minY
+          ? `The surface runs from y=${lowest} to y=${highest} and the region from y=${region.minY} to y=${region.maxY}, ` +
+            `so it was cut where they do not overlap: columns above the region are solid to its top, columns below it ` +
+            `are empty. Move base, change amplitude or the region if that is not what you meant.`
+          : undefined;
+      return { changed, region, surface: { lowest, highest }, ...notes, ...(cut === undefined ? {} : { cut }) };
+    },
+  },
+
+  {
     name: "set_block",
     description:
       "Place a single block at one coordinate. The block has to exist in the schematic's " +
@@ -1711,7 +1858,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "run_build_script",
     description:
-      "Run a JavaScript build script to place many blocks at once. Define `function buildCreation(startX, startY, startZ) {}` and call safeSetBlock(x,y,z,block,options) and safeFill(x1,y1,z1,x2,y2,z2,block,options) inside it. Coordinates are the schematic's own. Far cheaper than hundreds of individual calls — prefer this for anything structural.",
+      "Run a JavaScript build script to place many blocks at once. Define `function buildCreation(startX, startY, startZ) {}` and call safeSetBlock(x,y,z,block,options) and safeFill(x1,y1,z1,x2,y2,z2,block,options) inside it. Coordinates are the schematic's own. noise(kind, x, y, z, params) returns the value of a mix distribution at a point -- perlin, simplex, ridged, voronoi, random or gradient, with params such as { seed: 7, frequency: 0.03, octaves: 4 } -- the same field fills and generate_terrain read, so a script can shape what the panel previews. Perlin and simplex lie roughly in -1..1. Far cheaper than hundreds of individual calls — prefer this for anything structural.",
     schema: {
       type: "object",
       properties: { code: { type: "string" } },

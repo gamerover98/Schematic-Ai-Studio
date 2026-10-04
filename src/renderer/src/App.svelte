@@ -25,6 +25,7 @@
     CameraAimRequest,
     McpActivity,
     McpStatus,
+    TerrainRequest,
     UpdateStatus,
   } from "../../shared/ipc.js";
   import { splitBlockInput } from "../../shared/block_input.js";
@@ -86,7 +87,8 @@ import VersionsModal from "./lib/VersionsModal.svelte";
     type Cell as CreativeCell,
     type StrokeEvent,
   } from "./lib/creative_tools.js";
-  import type { CreativeSettings, CreativeTool } from "../../shared/creative.js";
+  import type { CreativeSettings, CreativeTool, TerrainToolSettings } from "../../shared/creative.js";
+  import type { TerrainMode } from "../../shared/terrain.js";
   import CreativeInventory from "./lib/CreativeInventory.svelte";
   import { hasTextSelection, isTyping } from "./lib/typing.js";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
@@ -1087,6 +1089,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   const hasDocument = $derived(docState !== null);
 
+  /**
+   * The schematic's box, or a 64-block cube with nothing open: what the
+   * terrain's picture shows in flight, where the brush paints over it.
+   */
+  const documentFootprint = $derived.by((): RegionSpec => {
+    const size = docState?.size;
+    return size === undefined
+      ? { minX: 0, minY: 0, minZ: 0, maxX: 63, maxY: 63, maxZ: 63 }
+      : { minX: 0, minY: 0, minZ: 0, maxX: size[0] - 1, maxY: size[1] - 1, maxZ: size[2] - 1 };
+  });
+
   /*
    * Anything that ends what the first corner was for forgets it: another tool,
    * the other camera, the document going. Not on `docState` itself, which
@@ -1131,6 +1144,33 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (strokeId === null || docState === null || busy) return;
     const stroke = strokeId;
     const erase = strokeErase;
+    /*
+     * The terrain's touch is the columns round the cell aimed at, and its
+     * left button digs: whatever the mode says, rubbing out a landscape is
+     * taking away what stands above its surface.
+     */
+    if (creative.tool === "terrain") {
+      const settings = creative.terrain;
+      let terrain: TerrainRequest;
+      try {
+        terrain = terrainRequestOf(settings, erase ? "dig" : settings.mode);
+      } catch (err) {
+        failed(err, t("task.layingTerrain"));
+        return;
+      }
+      const { x, y, z } = event.at;
+      void queueBuild(t(erase ? "task.diggingTerrain" : "task.layingTerrain"), () =>
+        api().applyEdit({
+          kind: "terrain",
+          area: { kind: "brush", x, y, z, radius: settings.radius, footprint: settings.footprint },
+          terrain,
+          stroke,
+        }),
+      );
+      return;
+    }
+    if (event.shape === null) return;
+    const shape = event.shape;
     let mix: MixSpec;
     try {
       mix = erase ? singleMix(parseBlock(docState.voidBlock || "minecraft:air")) : mixSpecOf(placingBlock);
@@ -1140,8 +1180,58 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     }
     const mode = erase ? "filled" : creative.brush.mode;
     void queueBuild(t(erase ? "task.erasing" : "task.painting"), () =>
-      api().applyEdit({ kind: "shape", shape: event.shape, mix, mode, stroke }),
+      api().applyEdit({ kind: "shape", shape, mix, mode, stroke }),
     );
+  }
+
+  /**
+   * The terrain's settings as main writes them: the three layers parsed here,
+   * where a mix's blocks become blocks, and the noise taken out of `$state`.
+   */
+  function terrainRequestOf(settings: TerrainToolSettings, mode: TerrainMode): TerrainRequest {
+    return {
+      field: forIpc(settings.field),
+      surface: mixSpecOf(settings.surface),
+      subsoil: mixSpecOf(settings.subsoil),
+      rock: mixSpecOf(settings.rock),
+      subsoilDepth: settings.subsoilDepth,
+      mode,
+    };
+  }
+
+  /** The terrain laid over every selected area: one edit, one Ctrl+Z. */
+  async function layTerrain(): Promise<void> {
+    if (!selection) return;
+    const regions = areasForIpc();
+    const outcome = await runDocument(t("task.layingTerrain"), () =>
+      api().applyEdit({
+        kind: "terrain",
+        area: { kind: "regions", regions },
+        terrain: terrainRequestOf(creative.terrain, creative.terrain.mode),
+      }),
+    );
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /**
+   * The surface fitted to the selection: starting at its floor and rising two
+   * thirds of its height, so the hills stay inside the box with room over them.
+   */
+  function fitTerrain(): void {
+    const bounds = selectionBounds;
+    if (bounds === null) return;
+    const height = bounds.maxY - bounds.minY + 1;
+    setCreative({
+      ...creative,
+      terrain: {
+        ...creative.terrain,
+        field: {
+          ...creative.terrain.field,
+          base: bounds.minY,
+          amplitude: Math.max(0, Math.floor(((height - 1) * 2) / 3)),
+        },
+      },
+    });
   }
 
   /**
@@ -5648,7 +5738,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         }}
         onclose={() => (creativeOptionsOpen = false)}
       >
-        <CreativeOptions settings={creative} onchange={setCreative} />
+        <CreativeOptions
+          settings={creative}
+          onchange={setCreative}
+          blocks={blockRegistry}
+          placeable={placeableBlocks}
+          legacy={legacyForDoc}
+          frame={documentFootprint}
+          origin={docState.frame}
+        />
       </ToolWindow>
     {/if}
 
@@ -5738,6 +5836,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
           ondelete={() => void deleteSelection()}
           onclearselection={clearSelection}
           onselectall={selectAll}
+          terrain={creative.terrain}
+          onterrainchange={(terrain) => setCreative({ ...creative, terrain })}
+          onlayterrain={() => void layTerrain()}
+          onfitterrain={fitTerrain}
+          origin={docState?.frame ?? [0, 0, 0]}
         />
       </ToolWindow>
     {/if}
@@ -5860,7 +5963,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       theme={resolvedTheme}
       {cameraRequest}
       oncameraaimed={(reply) => api().reportCameraAimed(reply)}
-      creative={docState && cameraMode === "fly" ? { settings: creative, corner: cornerAt } : null}
+      creative={docState && cameraMode === "fly"
+        ? { settings: creative, corner: cornerAt, frame: docState.frame }
+        : null}
       onstroke={onStroke}
       oncorner={onCorner}
     />

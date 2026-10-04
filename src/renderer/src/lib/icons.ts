@@ -163,6 +163,10 @@ export const ICONS = {
       { x: 8.5, y: 8.5, w: 7, h: 7, rx: 0.5 },
     ],
   },
+  /** Terrain: two hills on a line of ground. */
+  terrain: {
+    paths: ["M2.5 19 H21.5", "M2.5 19 L8.5 9 L12.5 15 L15.5 11 L21.5 19"],
+  },
 } satisfies Record<string, IconShape>;
 
 export type IconName = keyof typeof ICONS;

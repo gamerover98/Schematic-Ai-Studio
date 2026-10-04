@@ -110,20 +110,24 @@ import {
   } from "./gizmo.js";
   import { isSpuriousLook } from "./look_filter.js";
   import {
-    MAX_GHOST_CELLS,
     brushSpec,
+    columnReach,
     cornerSpec,
     ghostFaces,
     reachOf,
     reached,
+    shapeGhost,
     shouldTouch,
+    strokeRadius,
     takesCorners,
+    takesStroke,
+    terrainGhost,
     type Cell as CreativeCell,
     type CreativeAim,
+    type Ghost,
     type StrokeEvent,
   } from "./creative_tools.js";
-  import { shapeCells, type ShapeSpec } from "../../../shared/shapes.js";
-  import { boxVolume } from "../../../shared/regions.js";
+  import type { ShapeSpec } from "../../../shared/shapes.js";
   import { api } from "./bridge.svelte.js";
   import { COPLANAR_OFFSET, GRID_DIVISIONS, GRID_SIZE } from "./depth.js";
   import {
@@ -566,10 +570,11 @@ import { isTyping } from "./typing.js";
     /**
      * The creative tool in hand, in flight, or `null` for the block alone.
      *
-     * With a brush the buttons paint and rub out while held; with the shape
-     * and walls tools the right button is a corner. A ghost of what the
-     * button would write follows the crosshair either way. `place` is the
-     * block in your hand and changes nothing here.
+     * With a brush the buttons paint and rub out while held, and with the
+     * terrain they lay it and dig down to it; with the shape and walls tools
+     * the right button is a corner. A ghost of what the button would write
+     * follows the crosshair either way. `place` is the block in your hand and
+     * changes nothing here.
      */
     creative?: CreativeAim | null;
     /** A brush stroke began, touched, or ended. See `StrokeEvent`. */
@@ -1954,25 +1959,52 @@ import { isTyping } from "./typing.js";
    * The corner tools build between the first corner and the cell aimed at,
    * and before the first corner show the column it would start.
    */
-  function creativeAim(): { spec: ShapeSpec; centre: CreativeCell } | null {
+  function creativeAim(): {
+    ghost: Ghost;
+    spec: ShapeSpec | null;
+    centre: CreativeCell;
+    reach: (x: number, y: number, z: number) => boolean;
+  } | null {
     if (creative === null) return null;
     const settings = creative.settings;
     if (settings.tool === "brush") {
       const target = pickAtCrosshair();
+      let spec: ShapeSpec;
+      let centre: CreativeCell;
       if (target !== null) {
-        const centre = { x: target.x, y: target.y, z: target.z };
-        return { spec: brushSpec(settings.brush, centre, false), centre };
+        centre = { x: target.x, y: target.y, z: target.z };
+        spec = brushSpec(settings.brush, centre, false);
+      } else {
+        if (stroke?.erase) return null;
+        const cell = gridCellAtCrosshair();
+        if (cell === null) return null;
+        centre = { x: cell.x, y: cell.y, z: cell.z };
+        spec = brushSpec(settings.brush, centre, true);
       }
-      if (stroke?.erase) return null;
-      const cell = gridCellAtCrosshair();
+      return { ghost: shapeGhost(spec), spec, centre, reach: reachOf(spec) };
+    }
+    /*
+     * The terrain is columns, so the height of the cell aimed at decides
+     * nothing: the block under the crosshair, or the grid's cell with nothing
+     * there -- which is how an empty schematic gets its first hill.
+     */
+    if (settings.tool === "terrain") {
+      const target = pickAtCrosshair();
+      const cell = target ?? gridCellAtCrosshair();
       if (cell === null) return null;
       const centre = { x: cell.x, y: cell.y, z: cell.z };
-      return { spec: brushSpec(settings.brush, centre, true), centre };
+      return {
+        ghost: terrainGhost(settings.terrain, centre, creative.frame),
+        spec: null,
+        centre,
+        reach: columnReach(centre, settings.terrain.radius, settings.terrain.footprint),
+      };
     }
     if (takesCorners(settings.tool)) {
       const at = cornerAtCrosshair();
       if (at === null) return null;
-      return { spec: cornerSpec(settings.tool, settings, creative.corner ?? at, at), centre: at };
+      const spec = cornerSpec(settings.tool, settings, creative.corner ?? at, at);
+      return { ghost: shapeGhost(spec), spec, centre: at, reach: reachOf(spec) };
     }
     return null;
   }
@@ -2000,15 +2032,16 @@ import { isTyping } from "./typing.js";
       hideCreativeGhost();
       return;
     }
-    showCreativeGhost(aim.spec, stroke?.erase === true);
+    showCreativeGhost(aim.ghost, stroke?.erase === true);
+    const settings = creative!.settings;
     if (
       stroke !== null &&
-      shouldTouch(stroke.last, aim.centre, creative!.settings.brush.radius) &&
+      shouldTouch(stroke.last, aim.centre, strokeRadius(settings, settings.tool)) &&
       !reached(stroke.trail, aim.centre)
     ) {
       stroke.last = aim.centre;
-      stroke.trail.push(reachOf(aim.spec));
-      onstroke?.({ phase: "touch", shape: aim.spec });
+      stroke.trail.push(aim.reach);
+      onstroke?.({ phase: "touch", at: aim.centre, shape: aim.spec });
     }
   }
 
@@ -2018,33 +2051,26 @@ import { isTyping } from "./typing.js";
   }
 
   /**
-   * Draws a shape's cells as a translucent ghost, never picked.
+   * Draws a ghost's cells, translucent and never picked.
    *
-   * The geometry is the outside of the cells `shapeCells` finds -- the same
-   * cells the edit will write, because it is the same function -- relative
-   * to the box's corner, so it is rebuilt only when the size or the shape
-   * changes and otherwise moved. Past `MAX_GHOST_CELLS` the box alone is
-   * drawn. It is held off the faces it shares with blocks already there by
+   * The geometry is the outside of the cells the edit will write -- a
+   * shape's from `shapeCells`, the terrain's surface from `heightField`, the
+   * functions the edit itself asks -- relative to the box's corner, so it is
+   * rebuilt only when the ghost's key changes and otherwise moved. Past
+   * `MAX_GHOST_CELLS` the box alone is drawn. It is held off the faces it shares with blocks already there by
    * a polygon offset, the floor's arrangement turned the other way, and it
    * writes no depth, so it never hides what is behind it.
    *
    * Nothing raycasts it: it is not under `loaded`, and `tests/ui.ts`
    * refuses any `intersectObject` that names it.
    */
-  function showCreativeGhost(spec: ShapeSpec, erase: boolean): void {
+  function showCreativeGhost(ghost: Ghost, erase: boolean): void {
     if (!scene) return;
-    const box = {
-      minX: Math.min(spec.box.minX, spec.box.maxX),
-      minY: Math.min(spec.box.minY, spec.box.maxY),
-      minZ: Math.min(spec.box.minZ, spec.box.maxZ),
-      maxX: Math.max(spec.box.minX, spec.box.maxX),
-      maxY: Math.max(spec.box.minY, spec.box.maxY),
-      maxZ: Math.max(spec.box.minZ, spec.box.maxZ),
-    };
+    const box = ghost.box;
     const w = box.maxX - box.minX + 1;
     const h = box.maxY - box.minY + 1;
     const l = box.maxZ - box.minZ + 1;
-    const key = [spec.kind, w, h, l, spec.axis ?? "y", spec.hollow === true, spec.thickness ?? 1].join(":");
+    const key = ghost.key;
     if (key !== creativeGhostKey) {
       creativeGhostKey = key;
       for (const old of [creativeGhost, creativeEdges]) {
@@ -2056,9 +2082,9 @@ import { isTyping } from "./typing.js";
       creativeGhost = null;
       creativeEdges = null;
 
-      const local = { minX: 0, minY: 0, minZ: 0, maxX: w - 1, maxY: h - 1, maxZ: l - 1 };
-      if (boxVolume(local) <= MAX_GHOST_CELLS) {
-        const faces = ghostFaces(shapeCells({ ...spec, box: local }));
+      const cells = ghost.cells();
+      if (cells !== null) {
+        const faces = ghostFaces(cells);
         const geometry = new THREE.BufferGeometry();
         geometry.setAttribute("position", new THREE.BufferAttribute(faces, 3));
         creativeGhost = new THREE.Mesh(
@@ -2121,7 +2147,7 @@ import { isTyping } from "./typing.js";
    */
   $effect(() => {
     const tool = creative?.settings.tool ?? null;
-    if (tool !== "brush") untrack(() => endStroke());
+    if (tool === null || !takesStroke(tool)) untrack(() => endStroke());
   });
 
   // ---------------------------------------------------------------------------
@@ -4124,7 +4150,8 @@ import { isTyping } from "./typing.js";
         if (
           cameraMode === "fly" &&
           fly?.isLocked &&
-          creative?.settings.tool === "brush" &&
+          creative !== null &&
+          takesStroke(creative.settings.tool) &&
           (event.button === 0 || event.button === 2) &&
           stroke === null &&
           onstroke
@@ -4451,8 +4478,9 @@ import { isTyping } from "./typing.js";
             fly?.lock();
             return;
           }
-          // A brush's buttons are its stroke, handled at the press.
-          if (creative?.settings.tool === "brush") return;
+          // A brush's buttons are its stroke, handled at the press, and so
+          // are the terrain's.
+          if (creative !== null && takesStroke(creative.settings.tool)) return;
           /*
            * The shape and walls tools take the right button for a corner:
            * where a block would go, which is the cell across the face aimed

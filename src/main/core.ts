@@ -50,6 +50,7 @@ import {
   type QuickJSWASMModule,
 } from "quickjs-emscripten-core";
 import { paletteEntryIsAir, type PaletteEntry } from "./pipeline/types.js";
+import { cellValues, normalizeDistribution, type CellValue, type ParamValue } from "../shared/block_mix.js";
 
 export const VERSION = "3.0.0";
 
@@ -601,6 +602,65 @@ function registerHostFunction(
 }
 
 /**
+ * Registers one host callback that answers with a number.
+ *
+ * `registerHostFunction`'s arrangement, with a result: the arguments are
+ * copied out with `context.dump` and the answer goes back in as a fresh
+ * number handle, which the engine takes ownership of. A host error becomes an
+ * exception in the guest, so a script that asks for a noise that does not
+ * exist fails as bad generated code with the sentence saying why.
+ */
+function registerHostQuery(
+  context: QuickJSContext,
+  name: string,
+  handler: (args: unknown[]) => number,
+): void {
+  const fnHandle = context.newFunction(name, (...argHandles) =>
+    context.newNumber(handler(argHandles.map((handle) => context.dump(handle) as unknown))),
+  );
+  try {
+    context.setProp(context.global, name, fnHandle);
+  } finally {
+    fnHandle.dispose();
+  }
+}
+
+/**
+ * `noise(kind, x, y, z, params)` in a build script: the value a mix's
+ * distribution gives that point, from `shared/block_mix.ts` -- the same
+ * function a fill and the terrain tools read, so a script can build what the
+ * panel previews. `params` carries the seed and the distribution's own
+ * parameters, checked and clamped as the spelling's are.
+ *
+ * Pure arithmetic on numbers, which is why it may cross the bridge at all:
+ * nothing it is handed can name a file, a socket or the host. The field for
+ * the last parameters is kept, because a script calls this once per column and
+ * building it each time would be most of the cost.
+ */
+function makeNoise(): (args: unknown[]) => number {
+  let lastKey = "";
+  let lastField: CellValue | null = null;
+  return (args) => {
+    const [kind, x, y, z, raw] = args;
+    if (typeof kind !== "string") throw new Error("noise(kind, x, y, z, params): kind is a name, like \"perlin\".");
+    const point = [x, y, z].map(Number);
+    if (!point.every((value) => Number.isFinite(value))) {
+      throw new Error("noise(kind, x, y, z, params): x, y and z are numbers.");
+    }
+    const given = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const { seed, ...rest } = given;
+    const key = JSON.stringify([kind, seed ?? 0, rest]);
+    if (key !== lastKey || lastField === null) {
+      lastField = cellValues(
+        normalizeDistribution({ kind, seed: seed ?? 0, params: rest as Record<string, ParamValue> }),
+      );
+      lastKey = key;
+    }
+    return lastField(point[0], point[1], point[2]);
+  };
+}
+
+/**
  * `evalCode` reports failure as a returned error handle rather than a thrown
  * exception. This converts it back to a throw so the call site keeps the same
  * shape it had under isolated-vm, and so the deadline interrupt surfaces as an
@@ -665,9 +725,10 @@ export async function executeJsBuild(
     // failures propagate (matches core.py:160-165's `except: log; raise`,
     // inventory.tsv row `core.py _execute_js_build` bridge-registration row:
     // fail loudly, unlike set_block/fill_region's own internal catches).
-    // SAFETY: the ONLY two host capabilities exposed into the sandbox are
-    // these two narrow, validated block-placement callbacks -- no filesystem,
-    // network, process, or arbitrary-host-function access is bridged in.
+    // SAFETY: the ONLY host capabilities exposed into the sandbox are these
+    // two narrow, validated block-placement callbacks and one pure function
+    // of numbers (`noise`) -- no filesystem, network, process, or
+    // arbitrary-host-function access is bridged in.
     try {
       registerHostFunction(context, "pySetBlock", (args) => {
         setBlock(args[0], args[1], args[2], args[3], args[4]);
@@ -675,6 +736,9 @@ export async function executeJsBuild(
       registerHostFunction(context, "pyFill", (args) => {
         fillRegion(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
       });
+      // A third, and of a different kind: it reads nothing and writes nothing,
+      // it only computes a number from numbers. See `makeNoise`.
+      registerHostQuery(context, "pyNoise", makeNoise());
     } catch (e) {
       log(`quickjs bridge error: ${String(e)}`);
       throw e;
@@ -690,6 +754,7 @@ export async function executeJsBuild(
       function safeSetBlock(x,y,z,blockType,options){ pySetBlock(x,y,z,blockType,options); }
       function safeFill(x1,y1,z1,x2,y2,z2,blockType,options){ pyFill(x1,y1,z1,x2,y2,z2,blockType,options); }
       function safeFillBiome(x1,y1,z1,x2,y2,z2,biome){ /* biome not supported */ }
+      function noise(kind,x,y,z,params){ return pyNoise(kind,x,y,z,params === undefined ? null : params); }
       if (typeof Promise === 'undefined') {
         var Promise = {};
       }
@@ -700,7 +765,7 @@ export async function executeJsBuild(
     // SAFETY: this is where untrusted, LLM-generated JS actually runs. All
     // three evals share the deadline set on the runtime above and are confined
     // to the context created above -- the only host capabilities reachable from
-    // here are the two narrow callbacks registered above, nothing else.
+    // here are the three narrow callbacks registered above, nothing else.
     try {
       evalOrThrow(context, helperJs, "<helpers>");
       evalOrThrow(context, transformed, "<generated>");

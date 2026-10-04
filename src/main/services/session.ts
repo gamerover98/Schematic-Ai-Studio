@@ -24,6 +24,7 @@ import type {
   MixSpec,
   PaletteCount,
   RegionSpec,
+  ToolArea,
 } from "../../shared/ipc.js";
 import type { SchematicFormat } from "../../shared/schematic.js";
 import { schematicExtension } from "../../shared/schematic.js";
@@ -141,8 +142,8 @@ import {
   MixSyntaxError,
   normalizeDistribution,
 } from "../../shared/block_mix.js";
-import { forEachUnionCell, MAX_BOXES, unionBounds, unionVolume, type Box } from "../../shared/regions.js";
-import { shapeCellSet, writeMix, type CellFilter } from "../domain/mix.js";
+import { forEachUnionCell, intersectBox, MAX_BOXES, unionBounds, unionVolume, type Box } from "../../shared/regions.js";
+import { regionCellSet, shapeCellSet, writeMix, type CellFilter, type CellSet } from "../domain/mix.js";
 import {
   normalizeShape,
   SHAPE_MODES,
@@ -150,6 +151,19 @@ import {
   ShapeError,
   shapeLabel,
 } from "../../shared/shapes.js";
+import {
+  FOOTPRINTS,
+  heightField,
+  inFootprint,
+  normalizeHeightField,
+  SUBSOIL_DEPTH,
+  TERRAIN_MODES,
+  TerrainError,
+  TOOL_REACH,
+  type Footprint,
+  type TerrainMode,
+} from "../../shared/terrain.js";
+import { writeTerrain } from "../domain/terrain.js";
 
 export interface DocumentSession {
   readonly doc: SchematicDocument;
@@ -391,6 +405,7 @@ export function documentState(session: DocumentSession): DocumentState {
     undoTransactionId: nextUndoId(history),
     redoLabel: nextRedoLabel(history),
     voidBlock: session.voidBlock,
+    frame: [doc.frame[0], doc.frame[1], doc.frame[2]],
     revision: doc.revision,
   };
 }
@@ -1553,6 +1568,82 @@ export function applyEdit(
   }
 
   /*
+   * Terrain is a fill in layers: the surface from the noise, ground under it,
+   * empty space over it, each layer a mix shared out exactly -- and the
+   * document grows to hold what is written, as a fill's does.
+   *
+   * What grows it is what is *built*: ground, up to the highest column of the
+   * surface. Empty space above that is only written over blocks already
+   * there, so a terrain asked for under a tall selection does not raise the
+   * ceiling for nothing -- except over a selection in `set`, which grows to
+   * the selection like a fill of it does, because somebody drew that box.
+   * `dig` builds nothing and never grows, `replace`'s reason.
+   */
+  if (request.kind === "terrain") {
+    const field = normalizeHeightField(request.terrain.field);
+    const mode = request.terrain.mode;
+    if (!(TERRAIN_MODES as readonly string[]).includes(mode)) {
+      throw new TerrainError(`"${String(mode)}" is not a way to lay terrain. The modes are ${TERRAIN_MODES.join(", ")}.`);
+    }
+    const depth = request.terrain.subsoilDepth;
+    if (!Number.isInteger(depth) || depth < SUBSOIL_DEPTH.min || depth > SUBSOIL_DEPTH.max) {
+      throw new TerrainError(`The subsoil is a whole number of blocks deep, from ${SUBSOIL_DEPTH.min} to ${SUBSOIL_DEPTH.max}.`);
+    }
+    const layers =
+      mode === "dig"
+        ? null
+        : {
+            surface: checkedMix(doc, request.terrain.surface, placeable),
+            subsoil: checkedMix(doc, request.terrain.subsoil, placeable),
+            rock: checkedMix(doc, request.terrain.rock, placeable),
+            subsoilDepth: depth,
+          };
+    const place = toolPlace(doc, request.area, {
+      minY: Math.min(0, field.base),
+      maxY: Math.max(doc.height - 1, field.base + field.amplitude),
+    });
+    const top = heightField(field, doc.frame);
+    let highest = -Infinity;
+    place.forEachColumn((x, z) => {
+      highest = Math.max(highest, top(x, z));
+    });
+    const built = { ...place.bounds, maxY: Math.min(place.bounds.maxY, highest) };
+    const reach =
+      mode === "dig" ? null : mode === "set" && place.brush === null ? place.bounds : built.maxY < built.minY ? null : built;
+    const wantedGrowth = reach === null ? null : growthToInclude(doc, reach);
+    if (wantedGrowth !== null && !mayGrow) throw new OutsideDocumentError();
+    const growth = wantedGrowth;
+    if (growth !== null && extentVolume(growth.size) > MAX_DOCUMENT_VOLUME) {
+      throw new DocumentTooLargeError(extentVolume(growth.size));
+    }
+    const size = growth?.size ?? { width: doc.width, height: doc.height, length: doc.length };
+    const area = place.cells(growth?.shift ?? [0, 0, 0], {
+      minX: 0,
+      minY: 0,
+      minZ: 0,
+      maxX: size.width - 1,
+      maxY: size.height - 1,
+      maxZ: size.length - 1,
+    });
+    if (area === null) return 0;
+    if (area.cells.count > MAX_EDIT_VOLUME) throw new EditTooLargeError(area.cells.count);
+    const empty = emptyEntry(session, options.voidBlock);
+    const verb = mode === "set" ? "Lay" : mode === "raise" ? "Raise" : "Dig";
+    return runTransaction(
+      doc,
+      history,
+      `${verb} terrain`,
+      (tx) => {
+        if (growth !== null) tx.resize(growth.size, growth.shift);
+        // Read after the resize: the frame has moved with the content, and the
+        // landscape is the content's.
+        return writeTerrain(doc, tx, area.cells, area.bounds, heightField(field, doc.frame), layers, mode as TerrainMode, emptiness, empty);
+      },
+      { mergeKey: request.stroke },
+    );
+  }
+
+  /*
    * A region may reach outside the document, and a fill into it grows the
    * document to suit. `replace` deliberately does not: it rewrites blocks that
    * are already there, and there are none outside the box -- growing first would
@@ -1616,6 +1707,95 @@ export function applyEdit(
   return runTransaction(doc, history, `Replace ${fromLabel} with ${toLabel}`, (tx) =>
     writeMix(doc, tx, regions, distribution, shares, written, layers, from),
   );
+}
+
+/**
+ * Where a terrain tool works, resolved: the selection's boxes, or the columns
+ * under a brush's footprint.
+ */
+interface ToolPlace {
+  /** Every cell the tool reads, before any growth: what a growth is measured from. */
+  readonly bounds: Region;
+  /** The brush's footprint, or `null` over a selection. */
+  readonly brush: { readonly x: number; readonly z: number; readonly radius: number; readonly footprint: Footprint } | null;
+  /** Every column under the place, once. */
+  forEachColumn(visit: (x: number, z: number) => void): void;
+  /**
+   * The cells after a growth by `shift`, cut to `window` (the document after
+   * it), and the box that holds them; `null` when nothing is left.
+   */
+  cells(shift: readonly [number, number, number], window: Region): { cells: CellSet; bounds: Region } | null;
+}
+
+/**
+ * A tool's area off the wire, checked. A brush's columns run over `column`'s
+ * heights, which are the tool's to decide.
+ */
+function toolPlace(doc: SchematicDocument, area: ToolArea, column: { minY: number; maxY: number }): ToolPlace {
+  if (area.kind === "regions") {
+    if (area.regions.length === 0 || area.regions.length > MAX_BOXES) {
+      throw new RegionCountError(area.regions.length);
+    }
+    const boxes = area.regions.map(orderRegion);
+    const bounds = unionBounds(boxes) as Region;
+    return {
+      bounds,
+      brush: null,
+      forEachColumn(visit) {
+        for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+          for (let z = bounds.minZ; z <= bounds.maxZ; z += 1) {
+            if (boxes.some((box) => x >= box.minX && x <= box.maxX && z >= box.minZ && z <= box.maxZ)) visit(x, z);
+          }
+        }
+      },
+      cells(shift, window) {
+        const kept = boxes.flatMap((box) => {
+          const cut = intersectBox(shiftRegion(box, shift), window);
+          return cut === null ? [] : [cut];
+        });
+        if (kept.length === 0) return null;
+        return { cells: regionCellSet(kept), bounds: unionBounds(kept) as Region };
+      },
+    };
+  }
+  const { x, y, z, radius, footprint } = area;
+  if (![x, y, z].every((value) => Number.isInteger(value))) {
+    throw new TerrainError("A brush is aimed at a block, in whole coordinates.");
+  }
+  if (!Number.isInteger(radius) || radius < TOOL_REACH.min || radius > TOOL_REACH.max) {
+    throw new TerrainError(`A brush's radius is a whole number of blocks, from ${TOOL_REACH.min} to ${TOOL_REACH.max}.`);
+  }
+  if (!(FOOTPRINTS as readonly string[]).includes(footprint)) {
+    throw new TerrainError(`"${String(footprint)}" is not a brush. A brush is a ${FOOTPRINTS.join(" or a ")}.`);
+  }
+  const bounds: Region = {
+    minX: x - radius,
+    minY: column.minY,
+    minZ: z - radius,
+    maxX: x + radius,
+    maxY: column.maxY,
+    maxZ: z + radius,
+  };
+  return {
+    bounds,
+    brush: { x, z, radius, footprint },
+    forEachColumn(visit) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        for (let dz = -radius; dz <= radius; dz += 1) {
+          if (inFootprint(footprint, dx, dz, radius)) visit(x + dx, z + dz);
+        }
+      }
+    },
+    cells(shift, window) {
+      // The footprint is `shapes.ts`' cylinder, the one `inFootprint` states.
+      const found = shapeCells(
+        { kind: footprint === "disc" ? "cylinder" : "box", axis: "y", box: shiftRegion(bounds, shift) },
+        window,
+      );
+      if (found.window === null || found.count === 0) return null;
+      return { cells: shapeCellSet(found), bounds: found.window };
+    },
+  };
 }
 
 /** A mix off the wire, checked, with every block as it will be written. */

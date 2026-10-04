@@ -231,6 +231,7 @@ import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/sha
 import { MAP_PLANES } from "../src/shared/distribution_map.js";
 import {
   brushSpec,
+  columnReach,
   cornerBox,
   cornerClick,
   cornerSpec,
@@ -241,11 +242,15 @@ import {
   reached,
   resized,
   shouldTouch,
+  strokeRadius,
   strokeSpacing,
   takesCorners,
+  takesStroke,
+  terrainGhost,
   toolMode,
 } from "../src/renderer/src/lib/creative_tools.js";
 import { DEFAULT_CREATIVE_SETTINGS } from "../src/shared/creative.js";
+import { heightField, inFootprint } from "../src/shared/terrain.js";
 import { shapeCells } from "../src/shared/shapes.js";
 import { averageColour } from "../src/renderer/src/lib/icon_colour.js";
 import {
@@ -6248,8 +6253,18 @@ console.log("\n--- the creative tools ---");
   const settings = DEFAULT_CREATIVE_SETTINGS;
   equal(
     "B steps through the tools and comes back round",
-    [nextTool("place"), nextTool("brush"), nextTool("shape"), nextTool("walls")],
-    ["brush", "shape", "walls", "place"],
+    [nextTool("place"), nextTool("brush"), nextTool("shape"), nextTool("walls"), nextTool("terrain")],
+    ["brush", "shape", "walls", "terrain", "place"],
+  );
+  equal(
+    "the brush and the terrain are held strokes, and nothing else is",
+    [takesStroke("place"), takesStroke("brush"), takesStroke("shape"), takesStroke("walls"), takesStroke("terrain")],
+    [false, true, false, false, true],
+  );
+  equal(
+    "...each spaced by its own radius",
+    [strokeRadius(settings, "brush"), strokeRadius(settings, "terrain")],
+    [settings.brush.radius, settings.terrain.radius],
   );
   equal("only the shape and walls tools take corners", [takesCorners("place"), takesCorners("brush"), takesCorners("shape"), takesCorners("walls")], [false, false, true, true]);
 
@@ -6335,6 +6350,44 @@ console.log("\n--- the creative tools ---");
   equal("[ and ] size the brush, and how tall a shape or a wall stands", [resized(settings, "brush", 1).brush.radius, resized(settings, "shape", -1).shape.height, resized(settings, "walls", 2).walls.height], [3, 4, 6]);
   equal("...inside their ranges", [resized({ ...settings, brush: { ...settings.brush, radius: 0 } }, "brush", -1).brush.radius, resized({ ...settings, walls: { ...settings.walls, height: 1 } }, "walls", -1).walls.height], [0, 1]);
   equal("...and the block in your hand has no size", resized(settings, "place", 1), settings);
+  equal("[ and ] size the terrain brush's radius", resized(settings, "terrain", 2).terrain.radius, settings.terrain.radius + 2);
+
+  /*
+   * The terrain: a stroke reaches the columns it laid, at every height --
+   * the next aim is on the ground just laid, which may be far above or below
+   * the cell the touch was aimed at.
+   */
+  {
+    const reach = columnReach({ x: 10, y: 5, z: 10 }, 3, "disc");
+    check("a terrain touch has reached its columns at any height", reach(10, 200, 10) && reach(12, -40, 11));
+    check("...and a block past its footprint", reach(14, 5, 10));
+    check("...but not two blocks past it", !reach(15, 5, 10));
+    check("...and a square reaches its corners where a disc does not", columnReach({ x: 0, y: 0, z: 0 }, 3, "square")(4, 0, 4) && !reach(14, 5, 14));
+
+    const terrain = { ...settings.terrain, radius: 3, footprint: "disc" as const };
+    const ghost = terrainGhost(terrain, { x: 40, y: 9, z: -7 }, [0, 0, 0]);
+    const cells = ghost.cells()!;
+    equal("the terrain's ghost is one cell a column, //cyl 3's 37 columns", cells.count, 37);
+    const top = heightField(terrain.field);
+    let misplaced = 0;
+    const w = 7;
+    const h = ghost.box.maxY - ghost.box.minY + 1;
+    for (let dx = -3; dx <= 3; dx += 1) {
+      for (let dz = -3; dz <= 3; dz += 1) {
+        if (!inFootprint("disc", dx, dz, 3)) continue;
+        const y = top(40 + dx, -7 + dz) - ghost.box.minY;
+        if (cells.mask[(dx + 3) * h * w + y * w + (dz + 3)] !== 1) misplaced += 1;
+      }
+    }
+    equal("...each at the height the edit will lay it", misplaced, 0);
+    const moved = terrainGhost(terrain, { x: 45, y: 9, z: -7 }, [5, 0, 0]);
+    equal(
+      "...read in the content, so a growth below the origin moves the landscape with it",
+      [moved.box.minY, moved.box.maxY, [...moved.cells()!.mask]],
+      [ghost.box.minY, ghost.box.maxY, [...cells.mask]],
+    );
+    check("...and a ghost that moved is a ghost rebuilt", ghost.key !== terrainGhost(terrain, { x: 41, y: 9, z: -7 }, [0, 0, 0]).key);
+  }
 
   /*
    * The ghost is the outside of the cells, wound so its front faces outwards:
@@ -6370,6 +6423,8 @@ console.log("\n--- the creative tools ---");
   equal("...two cells side by side are ten, the shared face is not drawn", pair, { triangles: 20, wrong: 0 });
   const hollow = ghostOf(shapeCells({ kind: "sphere", box: { minX: 0, minY: 0, minZ: 0, maxX: 8, maxY: 8, maxZ: 8 }, hollow: true }));
   check("...and every face of a hollow sphere faces out of it, inside and out", hollow.triangles > 0 && hollow.wrong === 0, JSON.stringify(hollow));
+  const surface = ghostOf(terrainGhost({ ...settings.terrain, radius: 6 }, { x: 3, y: 0, z: 3 }, [0, 0, 0]).cells()!);
+  check("...and so does every face of a terrain's stepped surface", surface.triangles > 0 && surface.wrong === 0, JSON.stringify(surface));
 
   // Wired where it has to be, which only the source can say.
   const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
@@ -6377,6 +6432,10 @@ console.log("\n--- the creative tools ---");
   const casts = viewer.match(/raycaster\.intersectObjects?\([^)]*\)/g) ?? [];
   check("no raycast reaches the creative ghost", casts.every((cast) => !cast.includes("creative")), casts.join(" | "));
   check("a stroke begins at the press", /onstroke\(\{ phase: "begin"/.test(viewer));
+  check(
+    "...for every tool that strokes, the terrain as well as the brush",
+    /takesStroke\(creative\.settings\.tool\) &&[\s\S]{0,200}stroke === null/.test(viewer),
+  );
   check(
     "...and ends when the pointer is let go of, whatever let go of it",
     /fly\.addEventListener\("unlock", \(\) => \{[^}]*endStroke\(\)/s.test(viewer),
@@ -6388,7 +6447,7 @@ console.log("\n--- the creative tools ---");
   );
   check(
     "...and so is the tool the viewer is told about",
-    app.includes('creative={docState && cameraMode === "fly" ? { settings: creative, corner: cornerAt } : null}'),
+    /creative=\{docState && cameraMode === "fly"\s*\?\s*\{ settings: creative, corner: cornerAt, frame: docState\.frame \}\s*:\s*null\}/.test(app),
   );
   check(
     "leaving flight forgets a first corner, not only Escape",
