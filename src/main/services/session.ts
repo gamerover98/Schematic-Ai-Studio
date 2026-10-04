@@ -21,6 +21,7 @@ import type {
   DocumentState,
   EditRequest,
   MeshPayload,
+  MixSpec,
   PaletteCount,
   RegionSpec,
 } from "../../shared/ipc.js";
@@ -141,7 +142,14 @@ import {
   normalizeDistribution,
 } from "../../shared/block_mix.js";
 import { forEachUnionCell, MAX_BOXES, unionBounds, unionVolume, type Box } from "../../shared/regions.js";
-import { writeMix } from "../domain/mix.js";
+import { shapeCellSet, writeMix, type CellFilter } from "../domain/mix.js";
+import {
+  normalizeShape,
+  SHAPE_MODES,
+  shapeCells,
+  ShapeError,
+  shapeLabel,
+} from "../../shared/shapes.js";
 
 export interface DocumentSession {
   readonly doc: SchematicDocument;
@@ -1489,6 +1497,62 @@ export function applyEdit(
   }
 
   /*
+   * A shape is written the way a fill is: one mix over a set of cells, shared
+   * out exactly, the document growing to hold it, one transaction. Only which
+   * cells differ -- `shared/shapes.ts` -- and which of them `mode` lets
+   * through.
+   */
+  if (request.kind === "shape") {
+    const shape = normalizeShape(request.shape);
+    const mode = request.mode ?? "all";
+    if (!(SHAPE_MODES as readonly string[]).includes(mode)) {
+      throw new ShapeError(`"${String(mode)}" is not a way to draw. The modes are ${SHAPE_MODES.join(", ")}.`);
+    }
+    const mix = checkedMix(doc, request.mix, placeable);
+    /*
+     * `filled` writes only over what is there, and outside the box there is
+     * nothing -- `replace`'s reason for never growing. Past the edge the shape
+     * is cut off instead, and stays the shape it was asked to be.
+     */
+    const wantedGrowth = mode === "filled" ? null : growthToInclude(doc, shape.box);
+    if (wantedGrowth !== null && !mayGrow) throw new OutsideDocumentError();
+    const growth = wantedGrowth;
+    if (growth !== null && extentVolume(growth.size) > MAX_DOCUMENT_VOLUME) {
+      throw new DocumentTooLargeError(extentVolume(growth.size));
+    }
+    // In the document's coordinates after the resize, as a fill's regions are.
+    const box = growth === null ? shape.box : shiftRegion(shape.box, growth.shift);
+    const size = growth?.size ?? { width: doc.width, height: doc.height, length: doc.length };
+    const cells = shapeCells(
+      { ...shape, box },
+      { minX: 0, minY: 0, minZ: 0, maxX: size.width - 1, maxY: size.height - 1, maxZ: size.length - 1 },
+    );
+    if (cells.count > MAX_EDIT_VOLUME) throw new EditTooLargeError(cells.count);
+    if (cells.count === 0) return 0;
+    const filter: CellFilter | null =
+      mode === "empty" ? emptiness : mode === "filled" ? (entry) => !emptiness(entry) : null;
+    return runTransaction(
+      doc,
+      history,
+      `Draw ${shapeLabel(shape)} with ${mix.label}`,
+      (tx) => {
+        if (growth !== null) tx.resize(growth.size, growth.shift);
+        return writeMix(
+          doc,
+          tx,
+          shapeCellSet(cells),
+          mix.distribution,
+          mix.shares,
+          mix.written,
+          mix.layers,
+          filter,
+        );
+      },
+      { mergeKey: request.stroke },
+    );
+  }
+
+  /*
    * A region may reach outside the document, and a fill into it grows the
    * document to suit. `replace` deliberately does not: it rewrites blocks that
    * are already there, and there are none outside the box -- growing first would
@@ -1521,28 +1585,11 @@ export function applyEdit(
     throw new DocumentTooLargeError(extentVolume(growth.size));
   }
 
-  const mix = request.kind === "fill" ? request.mix : request.to;
-  if (mix.entries.length === 0) throw new MixSyntaxError("Name at least one block to write.");
-  if (mix.entries.length > MAX_MIX_ENTRIES) {
-    throw new MixSyntaxError(`A mix holds at most ${MAX_MIX_ENTRIES} blocks; this one names ${mix.entries.length}.`);
-  }
-  if (mix.entries.some((entry) => !Number.isFinite(entry.weight) || entry.weight < 0)) {
-    throw new MixSyntaxError("A weight in the mix is not a number of zero or more.");
-  }
-  if (mix.entries.every((entry) => entry.weight === 0)) {
-    throw new MixSyntaxError("Every weight in the mix is zero, so it would place nothing.");
-  }
-  // The wire is a structured object that never went near the parser, so the
-  // distribution is checked here as well: a kind that exists, parameters it takes.
-  const distribution = normalizeDistribution(mix.distribution);
-  const shares = effectiveShares(mix.entries);
-  const written = mix.entries.map((entry) => placeable(toEntry(entry.block)));
-  const layers = mix.entries.map((entry) => layersOf(entry.block));
-  written.forEach((entry, index) => {
-    const own = layers[index];
-    if (own !== null) checkBannerPatterns(doc, entry, own);
-  });
-  const toLabel = written.length === 1 ? written[0].namespacedName : `a mix of ${written.length} blocks`;
+  const { distribution, shares, written, layers, label: toLabel } = checkedMix(
+    doc,
+    request.kind === "fill" ? request.mix : request.to,
+    placeable,
+  );
 
   if (request.kind === "fill") {
     return runTransaction(doc, history, `Fill with ${toLabel}`, (tx) => {
@@ -1569,6 +1616,51 @@ export function applyEdit(
   return runTransaction(doc, history, `Replace ${fromLabel} with ${toLabel}`, (tx) =>
     writeMix(doc, tx, regions, distribution, shares, written, layers, from),
   );
+}
+
+/** A mix off the wire, checked, with every block as it will be written. */
+interface CheckedMix {
+  distribution: ReturnType<typeof normalizeDistribution>;
+  shares: ReturnType<typeof effectiveShares>;
+  written: PaletteEntry[];
+  layers: (BannerLayer[] | null)[];
+  /** What an undo label calls it. */
+  label: string;
+}
+
+/**
+ * Checks a mix the way every edit that writes one has to.
+ *
+ * The wire is a structured object that never went near the parser, so the
+ * distribution is checked here as well: a kind that exists, parameters it
+ * takes. Every block has to exist in the document's version, and a banner's
+ * design in it too, before anything is written.
+ */
+function checkedMix(
+  doc: SchematicDocument,
+  mix: MixSpec,
+  placeable: (entry: PaletteEntry) => PaletteEntry,
+): CheckedMix {
+  if (mix.entries.length === 0) throw new MixSyntaxError("Name at least one block to write.");
+  if (mix.entries.length > MAX_MIX_ENTRIES) {
+    throw new MixSyntaxError(`A mix holds at most ${MAX_MIX_ENTRIES} blocks; this one names ${mix.entries.length}.`);
+  }
+  if (mix.entries.some((entry) => !Number.isFinite(entry.weight) || entry.weight < 0)) {
+    throw new MixSyntaxError("A weight in the mix is not a number of zero or more.");
+  }
+  if (mix.entries.every((entry) => entry.weight === 0)) {
+    throw new MixSyntaxError("Every weight in the mix is zero, so it would place nothing.");
+  }
+  const distribution = normalizeDistribution(mix.distribution);
+  const shares = effectiveShares(mix.entries);
+  const written = mix.entries.map((entry) => placeable(toEntry(entry.block)));
+  const layers = mix.entries.map((entry) => layersOf(entry.block));
+  written.forEach((entry, index) => {
+    const own = layers[index];
+    if (own !== null) checkBannerPatterns(doc, entry, own);
+  });
+  const label = written.length === 1 ? written[0].namespacedName : `a mix of ${written.length} blocks`;
+  return { distribution, shares, written, layers, label };
 }
 
 /**

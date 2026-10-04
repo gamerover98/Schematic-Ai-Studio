@@ -10,6 +10,7 @@ import type { SchematicFormat } from "./schematic.js";
 import type { GpuPreference, Hotbar } from "./settings.js";
 import type { CameraPlacement, Vec3 } from "./camera_aim.js";
 import type { DyeName } from "./banner_patterns.js";
+import type { ShapeMode, ShapeSpec } from "./shapes.js";
 import { DEFAULT_DISTRIBUTION, type Distribution } from "./block_mix.js";
 import { SCHEMATIC_FORMAT_LABEL, SCHEMATIC_FORMATS } from "./schematic.js";
 import type {
@@ -1434,7 +1435,20 @@ export type EditRequest =
    * matched one -- a bare name is the block in any state -- and a cell is
    * replaced if it matches any of them.
    */
-  | { kind: "replace"; regions: RegionSpec[]; from: BlockSpec[]; to: MixSpec };
+  | { kind: "replace"; regions: RegionSpec[]; from: BlockSpec[]; to: MixSpec }
+  /**
+   * Write a mix into the cells of a shape: a sphere, a cylinder, a pyramid, a
+   * box or its walls (`shared/shapes.ts`).
+   *
+   * Grows the document like a fill, unless `mode` is `filled`: that writes
+   * only over blocks already there, and there are none outside the box --
+   * `replace`'s reason for never growing.
+   *
+   * `stroke` names the brush stroke this is a touch of. Touches with the same
+   * stroke are one undo step (`TransactionOptions.mergeKey`), so a stroke is
+   * taken back by one Ctrl+Z however many touches it took.
+   */
+  | { kind: "shape"; shape: ShapeSpec; mix: MixSpec; mode?: ShapeMode; stroke?: string };
 
 /**
  * Several blocks with weights, and the rule for which cell gets which.

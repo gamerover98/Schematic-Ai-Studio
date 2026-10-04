@@ -19,6 +19,7 @@
 
 import { cellValues, quotas, type Distribution } from "../../shared/block_mix.js";
 import { forEachUnionCell, unionVolume, type Box } from "../../shared/regions.js";
+import { forEachShapeCell, type ShapeCells } from "../../shared/shapes.js";
 import type { BannerLayer } from "../pipeline/banner_nbt.js";
 import { matchesBlockPattern, type PaletteEntry } from "../pipeline/types.js";
 import { stampBanner } from "./banner_place.js";
@@ -113,11 +114,44 @@ export function assignByQuota(values: Float32Array | Float64Array, shares: reado
 }
 
 /**
- * Writes a mix into the union of `regions`, or into the cells of it that hold
- * one of `from`.
+ * A set of cells walked in a fixed order: the union of a selection's boxes,
+ * or the cells of a shape (`shared/shapes.ts`).
+ *
+ * The order is the contract `writeMix` leans on -- it walks the set three
+ * times and indexes each walk's answers by position in the next -- so a set
+ * must visit the same cells in the same order every time it is asked.
+ */
+export interface CellSet {
+  readonly count: number;
+  forEach(visit: (x: number, y: number, z: number) => void): void;
+}
+
+/** The union of `regions`, overlaps once. */
+export function regionCellSet(regions: readonly Box[]): CellSet {
+  return { count: unionVolume(regions), forEach: (visit) => forEachUnionCell(regions, visit) };
+}
+
+/** The cells of a shape. */
+export function shapeCellSet(cells: ShapeCells): CellSet {
+  return { count: cells.count, forEach: (visit) => forEachShapeCell(cells, visit) };
+}
+
+/**
+ * Which of the cells an edit may write, decided by what is in them.
+ *
+ * A list is `replace`'s `from`: patterns, a bare name the block in any state.
+ * A function is anything else -- a shape drawn only into empty space, or only
+ * over what is already there -- and is asked once per palette entry, like the
+ * list.
+ */
+export type CellFilter = readonly PaletteEntry[] | ((entry: PaletteEntry) => boolean);
+
+/**
+ * Writes a mix into a set of cells -- the union of `regions`, or a shape --
+ * or into the ones of them that `filter` takes.
  *
  * Three walks over the same cells in the same order, which is
- * `forEachUnionCell`'s contract: the first decides which cells are candidates
+ * `CellSet`'s contract: the first decides which cells are candidates
  * and gives each a value, `assignByQuota` shares them out exactly, and the
  * last writes. The candidates are decided **before** anything is written,
  * because afterwards a replaced cell is indistinguishable from one that
@@ -131,31 +165,36 @@ export function assignByQuota(values: Float32Array | Float64Array, shares: reado
 export function writeMix(
   doc: SchematicDocument,
   tx: TransactionScope,
-  regions: readonly Box[],
+  where: readonly Box[] | CellSet,
   distribution: Distribution,
   shares: readonly number[],
   written: readonly PaletteEntry[],
   layers: readonly (readonly BannerLayer[] | null)[],
-  from: readonly PaletteEntry[] | null,
+  filter: CellFilter | null,
 ): number {
+  const cells = isCellSet(where) ? where : regionCellSet(where);
+  const forEachCell = (visit: (x: number, y: number, z: number) => void): void => cells.forEach(visit);
   /*
    * Decided once over the palette, read per cell -- `replaceAny`'s trade. A
    * miss interns nothing, so asking to replace a block the schematic does not
    * hold leaves no palette entry behind.
    */
-  const wanted =
-    from === null
+  const takes =
+    filter === null
       ? null
-      : Uint8Array.from(doc.palette, (entry) => (from.some((pattern) => matchesBlockPattern(entry, pattern)) ? 1 : 0));
+      : typeof filter === "function"
+        ? filter
+        : (entry: PaletteEntry): boolean => filter.some((pattern) => matchesBlockPattern(entry, pattern));
+  const wanted = takes === null ? null : Uint8Array.from(doc.palette, (entry) => (takes(entry) ? 1 : 0));
   if (wanted !== null && !wanted.includes(1)) return 0;
 
-  const total = unionVolume(regions);
+  const total = cells.count;
   const candidate = wanted === null ? null : new Uint8Array(total);
   let candidates = total;
   if (wanted !== null && candidate !== null) {
     candidates = 0;
     let at = 0;
-    forEachUnionCell(regions, (x, y, z) => {
+    forEachCell((x, y, z) => {
       if (wanted[doc.voxels[voxelIndex(doc, x, y, z)]] === 1) {
         candidate[at] = 1;
         candidates += 1;
@@ -173,7 +212,7 @@ export function writeMix(
     const values = new Float32Array(candidates);
     let at = 0;
     let k = 0;
-    forEachUnionCell(regions, (x, y, z) => {
+    forEachCell((x, y, z) => {
       if (candidate === null || candidate[at] === 1) {
         values[k] = valueAt(x, y, z);
         k += 1;
@@ -187,7 +226,7 @@ export function writeMix(
   let changed = 0;
   let at = 0;
   let k = 0;
-  forEachUnionCell(regions, (x, y, z) => {
+  forEachCell((x, y, z) => {
     if (candidate === null || candidate[at] === 1) {
       const entry = choice[k];
       if (tx.setBlock(x, y, z, written[entry])) changed += 1;
@@ -201,4 +240,8 @@ export function writeMix(
     if (cells !== null && own !== null) stampBanner(doc, tx, cells, written[index], own);
   });
   return changed;
+}
+
+function isCellSet(where: readonly Box[] | CellSet): where is CellSet {
+  return !Array.isArray(where);
 }

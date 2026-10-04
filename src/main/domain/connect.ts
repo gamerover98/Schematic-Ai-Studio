@@ -246,6 +246,15 @@ export function resolveEmptySpaceWith(
   emptySpaceFor = resolver;
 }
 
+/**
+ * The block empty space is made of in `doc` besides air, or `null` for air
+ * alone. The same answer this pass reads, for a caller that has a document
+ * and not the session -- an agent tool drawing only into empty space.
+ */
+export function emptySpaceOf(doc: SchematicDocument): PaletteEntry | null {
+  return emptySpaceFor(doc);
+}
+
 function paletteFacts(doc: SchematicDocument, empty: PaletteEntry | null): PaletteFacts {
   const blocks: Array<NeighbourBlock | null> = new Array(doc.palette.length);
   const dependent = new Uint8Array(doc.palette.length);

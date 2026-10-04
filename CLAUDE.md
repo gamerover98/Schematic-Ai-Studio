@@ -142,10 +142,13 @@ all until that check existed.
 
 **It is derived from the transaction rather than returned by five functions.**
 `tx.resize` is the one place that knows and every growing path goes through
-it, so `contentShiftSince(history, id)` sums the resizes pushed since an id
-captured before the call. The id is what makes an edit that changed nothing
-report nothing rather than inherit the previous edit's answer —
-`runTransaction` pushes no transaction for a recorder with no commands.
+it, so `contentShiftSince(history, mark)` sums the resizes recorded since a
+`historyMark` taken before the call. The mark is what makes an edit that
+changed nothing report nothing rather than inherit the previous edit's answer —
+`runTransaction` pushes no transaction for a recorder with no commands. It is
+a mark rather than an id because a brush touch pushes nothing either: it
+appends to the stroke's transaction (below), so the mark carries how long the
+top was, and a touch reports its own growth and not the stroke's.
 
 In the renderer `runDocument` carries the live selection, its anchor and the
 pivot, because it is the one place every edit passes through. The four commits
@@ -558,6 +561,53 @@ name several boxes, which are one set of cells: `shared/regions.ts` walks their
 union once, so an overlap is written and counted once, and the gap between two
 boxes is never touched. No bitmap over the bounding box, because two small
 areas far apart have a bounding box of hundreds of millions of cells.
+
+**A shape is a fill over other cells.** `EditRequest.shape` writes a mix the
+way `fill` does -- `writeMix`, shares met exactly, the document growing to hold
+it, one transaction -- and only *which* cells differ. `writeMix` takes a
+`CellSet` beside regions for it, and a `CellFilter` that is either `replace`'s
+patterns or a predicate. `shared/shapes.ts` is the geometry, in `shared/`
+because the creative tools will draw the same cells as a ghost.
+
+- **WorldEdit's shapes, inscribed in a box.** A sphere keeps the cells whose
+  centre is inside the ellipsoid touching the box's faces, measured in half
+  sizes, which on a box `2r + 1` across is `makeSphere`'s `x / (r + 0.5)`
+  exactly. A cylinder is that over two axes, a pyramid steps in one block a
+  side per layer up (a long footprint is a hipped roof), walls are a box's four
+  sides. `tests/session.ts` carries a literal port of `EditSession` and
+  requires every shape cell for cell, with counts written out beside it so the
+  port cannot confirm itself. `.claude/skills/mc-building-tools` has the
+  sources and the tables.
+- **Hollow is each command's own answer.** A cell is in the shell when the
+  cell `thickness` steps away along a *hollow axis* is outside; every shape is
+  convex, so that one look is enough. A sphere and a box are closed
+  (`//hsphere`, `//faces`), a cylinder is an open tube (`//hcyl`), a pyramid
+  has no floor (`//hpyramid`), walls neither floor nor ceiling (`//walls`).
+  Closing the tube's caps "for consistency" fails the port comparison.
+- **The mask covers a window, and a look past it asks the rule.** The window is
+  the box cut to the document, so the memory is a byte per cell of what can
+  change; a shape past the edge is that shape cut, not a smaller one, and the
+  shell at the cut is the shell the whole shape has there.
+- **`mode: "filled"` does not grow**, for `replace`'s reason: it writes only
+  over blocks already there. `empty` and `filled` ask `emptiness`, so the void
+  block is empty here too.
+
+`draw_shape` is in `TOOL_SPECS`, so the chat and MCP share it. It inscribes in
+the region it was *given*, not the trimmed one, and does not grow, like every
+agent tool; it says when part of the shape fell outside. Its description names
+the WorldEdit equivalents, which is prose no test reads.
+
+**A brush stroke is one undo step, and keeps its id.**
+`TransactionOptions.mergeKey` (`EditRequest.shape.stroke` on the wire): a
+touch with the key of the transaction on top joins it rather than pushing its
+own, through `commit` in `history.ts`. Keeping the **id** is the half that
+matters outside main: `undoTransactionId` does not move, so the renderer's
+selection timeline sees one edit. A new id per touch would also have made a
+save in mid-stroke silent, since joining does not move the depth `isDirty`
+reads. `history.open` holds the stroke, and anything but its next touch closes
+it: an edit without the key, an undo, a redo and **a save**
+(`markHistorySaved`). A touch that changes nothing pushes nothing and keeps it
+open. `tests/history.ts` fails if the save stops closing it.
 
 **A selection may be several areas, and the gap between them is nobody's.**
 Shift+Alt+drag adds an area and Alt+click removes one. Shift+Alt+click inside

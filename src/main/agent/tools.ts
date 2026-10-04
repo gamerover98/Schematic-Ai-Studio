@@ -111,10 +111,22 @@ import {
   singleBlockMix,
   type BlockMix,
 } from "../../shared/block_mix.js";
-import { writeMix } from "../domain/mix.js";
+import { shapeCellSet, writeMix } from "../domain/mix.js";
 import { MAX_DOCUMENT_VOLUME, MAX_EDIT_VOLUME } from "../services/session.js";
 import { orderRegion } from "../domain/grow.js";
-import { intersectBox, unionVolume } from "../../shared/regions.js";
+import { boxContains, intersectBox, unionVolume } from "../../shared/regions.js";
+import {
+  forEachShapeCell,
+  normalizeShape,
+  SHAPE_AXES,
+  SHAPE_KINDS,
+  SHAPE_MODES,
+  shapeCells,
+  type ShapeAxis,
+  type ShapeKind,
+  type ShapeMode,
+} from "../../shared/shapes.js";
+import { emptySpaceOf } from "../domain/connect.js";
 import {
   defaultStateFor,
   isKnownBlock,
@@ -601,6 +613,12 @@ function readMix(text: string): BlockMix {
 
 function describeRegion(region: Region): string {
   return `(${region.minX},${region.minY},${region.minZ})-(${region.maxX},${region.maxY},${region.maxZ})`;
+}
+
+function sameBox(a: Region, b: Region): boolean {
+  return (
+    a.minX === b.minX && a.minY === b.minY && a.minZ === b.minZ && a.maxX === b.maxX && a.maxY === b.maxY && a.maxZ === b.maxZ
+  );
 }
 
 /**
@@ -1414,6 +1432,131 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
               `what the schematic actually contains.`
             : undefined,
       };
+    },
+  },
+
+  {
+    /**
+     * WorldEdit's shapes, one tool. A model asked for a dome or a tower wrote
+     * a build script for it, which is fine for anything clever and a lot of
+     * arithmetic to get wrong for a sphere -- and `fill_region` answers "a
+     * round tower" with a square one.
+     *
+     * The shape is inscribed in the region, and the region is not trimmed
+     * first: a sphere half outside the schematic is half a sphere, not a
+     * smaller sphere. Like every tool here it does not grow the document;
+     * `resize_document` is the one way to make room, for the reason written
+     * on it.
+     */
+    name: "draw_shape",
+    description:
+      "Draw a shape with one block or a mix, inscribed in a region. Defaults to the user's selection. " +
+      "shape: sphere (an ellipsoid when the region is not a cube), cylinder (along axis, y by default), " +
+      "pyramid (steps in one block per layer going up from the region's floor, so a long footprint gives " +
+      "a hipped roof), box, walls (the four sides, no floor or ceiling). These are WorldEdit's: a sphere " +
+      "of radius r centred on (x,y,z) is the region x-r..x+r, y-r..y+r, z-r..z+r, and //pyramid s is " +
+      "2s-1 wide and s tall. hollow keeps a shell thickness blocks thick (default 1): a hollow sphere " +
+      "and box are closed, a hollow cylinder is an open tube, a hollow pyramid has no floor; walls are " +
+      "always hollow. mode: all (default), empty (only where nothing is, so it fills round a build), " +
+      "filled (only over blocks already there, to recolour them). Cells outside the schematic are not " +
+      "drawn; use resize_document first if you need the room. " +
+      MIX_SPELLING,
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        shape: { type: "string", enum: [...SHAPE_KINDS] },
+        block: { type: "string" },
+        axis: { type: "string", enum: [...SHAPE_AXES] },
+        hollow: { type: "boolean" },
+        thickness: { type: "integer", minimum: 1 },
+        mode: { type: "string", enum: [...SHAPE_MODES] },
+      },
+      required: ["shape", "block"],
+      additionalProperties: false,
+    },
+    async run(
+      context,
+      args: Partial<RegionArgs> & {
+        shape: ShapeKind;
+        block: string;
+        axis?: ShapeAxis;
+        hollow?: boolean;
+        thickness?: number;
+        mode?: ShapeMode;
+      },
+      id,
+    ) {
+      const { doc, selection } = context;
+      const given = args ?? ({} as typeof args);
+      const explicit = (["minX", "minY", "minZ", "maxX", "maxY", "maxZ"] as const).every(
+        (key) => typeof given[key] === "number",
+      );
+      const whole = { minX: 0, minY: 0, minZ: 0, maxX: doc.width - 1, maxY: doc.height - 1, maxZ: doc.length - 1 };
+      const box = explicit ? orderRegion(given as RegionArgs) : normalizeRegion(doc, selection ?? whole);
+      const shape = normalizeShape({
+        kind: given.shape,
+        box,
+        axis: given.axis,
+        hollow: given.hollow,
+        thickness: given.thickness,
+      });
+      const mode = given.mode ?? "all";
+      if (!(SHAPE_MODES as readonly string[]).includes(mode)) {
+        throw new Error(`mode must be one of ${SHAPE_MODES.join(", ")}, not "${String(mode)}".`);
+      }
+      const cells = shapeCells(shape, whole);
+      if (cells.count > MAX_EDIT_VOLUME) {
+        throw new Error(`That shape covers ${cells.count} blocks, more than one edit may touch.`);
+      }
+      const mix = readMix(given.block);
+      const placements = await placeMix(context, mix);
+
+      const voidEntry = emptySpaceOf(doc);
+      const isEmpty = (entry: PaletteEntry): boolean =>
+        entry.namespacedName === "minecraft:air" || (voidEntry !== null && matchesBlockPattern(entry, voidEntry));
+      const filter = mode === "empty" ? isEmpty : mode === "filled" ? (entry: PaletteEntry) => !isEmpty(entry) : null;
+
+      step(
+        context,
+        "draw_shape",
+        `drawing a ${shape.hollow && shape.kind !== "walls" ? "hollow " : ""}${shape.kind} in ${describeRegion(shape.box)} with ${describeMix(mix)}`,
+        id,
+      );
+      const changed =
+        cells.count === 0
+          ? 0
+          : writeMix(
+              doc,
+              context.tx,
+              shapeCellSet(cells),
+              mix.distribution,
+              effectiveShares(mix.entries),
+              placements.map((placement) => placement.entry),
+              placements.map((placement) => placement.layers),
+              filter,
+            );
+
+      const notes: { clamped?: string; outsideSelection?: string } = {};
+      if (cells.window === null || !sameBox(cells.window, shape.box)) {
+        notes.clamped =
+          `Part of the shape lies outside the schematic, which is ${doc.width}x${doc.height}x${doc.length} ` +
+          `(x 0-${doc.width - 1}, y 0-${doc.height - 1}, z 0-${doc.length - 1}), and was not drawn. ` +
+          `Use resize_document first if you need the room.`;
+      }
+      if (selection) {
+        const areas = [selection, ...(context.otherAreas ?? [])].map((area) => normalizeRegion(doc, area));
+        let outside = 0;
+        forEachShapeCell(cells, (x, y, z) => {
+          if (!areas.some((area) => boxContains(area, x, y, z))) outside += 1;
+        });
+        if (outside > 0) {
+          notes.outsideSelection =
+            `${outside.toLocaleString()} of the ${cells.count.toLocaleString()} cells of this shape are ` +
+            `outside the user's selection. Say so in your answer, or narrow the region.`;
+        }
+      }
+      return { changed, cells: cells.count, box: shape.box, ...notes };
     },
   },
 

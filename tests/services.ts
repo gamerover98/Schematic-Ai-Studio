@@ -2936,11 +2936,13 @@ console.log("\n--- recovering is opening ---");
       /shift: contentShiftSince\(session\.history, before\)/.test(body),
       `${channel} can grow below the origin and does not say so`,
     );
-    // Read against an id captured *before* the call, or an edit that changed
-    // nothing would report whatever the previous one did.
+    // Read against a mark taken *before* the call, or an edit that changed
+    // nothing would report whatever the previous one did -- and a mark rather
+    // than an id, or a brush touch that joined the stroke on top would report
+    // nothing at all.
     check(
-      `...against an id taken before the edit`,
-      /const before = session\.history\.nextId;/.test(body),
+      `...against a mark taken before the edit`,
+      /const before = historyMark\(session\.history\);/.test(body),
     );
   }
 }

@@ -573,6 +573,42 @@ try {
     closeDocument();
   }
 
+  /*
+   * WorldEdit's shapes from one tool, in the chat and over MCP alike. The
+   * geometry is `tests/session.ts`'s; this is the wire: the region it is
+   * inscribed in, the modes, and what it says when the shape leaves the
+   * schematic.
+   */
+  console.log("\n--- draw_shape ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const ball = await attempt("draw_shape", { shape: "sphere", block: "stone", minX: 0, minY: 0, minZ: 0, maxX: 6, maxY: 6, maxZ: 6 }, options(sink));
+    equal("draw_shape draws //sphere 3 in the box centre ± 3", [ball.changed, ball.cells], [179, 179]);
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...and the window is told the schematic moved", sink.changed > 0);
+
+    const walls = await attempt(
+      "draw_shape",
+      { shape: "walls", block: "oak_planks", mode: "empty", minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 3, maxZ: 7 },
+      options(sink),
+    );
+    equal("walls are the four sides of the region", walls.cells, 28 * 4);
+    check(
+      "...and drawn into empty space only, they leave the stone where it was",
+      (walls.changed as number) < 28 * 4 && getBlock(session.doc, 3, 3, 0)?.namespacedName === "minecraft:stone",
+    );
+
+    const spilled = await attempt("draw_shape", { shape: "sphere", block: "oak_planks", hollow: true, minX: -3, minY: 0, minZ: 0, maxX: 3, maxY: 6, maxZ: 6 }, options(sink));
+    check("a shape past the edge says so", typeof spilled.clamped === "string" && String(spilled.clamped).includes("resize_document"));
+    equal("...and does not grow the schematic", session.doc.width, 8);
+    check("...but draws the half that is inside", (spilled.cells as number) > 0);
+
+    const refused = await attempt("draw_shape", { shape: "cone", block: "stone" }, options(sink));
+    check("a shape that does not exist is refused by name", String(refused.refused ?? "").includes("not a shape"));
+    closeDocument();
+  }
+
   console.log("\n--- a tool places a block in the state the game would give it ---");
   {
     const session = open();

@@ -85,7 +85,7 @@ import {
   type StartupProgressEvent,
   type TransformRequest,
 } from "../../shared/ipc.js";
-import { contentShiftSince } from "../domain/history.js";
+import { contentShiftSince, historyMark } from "../domain/history.js";
 import { createReplyTable, RendererTimeoutError } from "../services/renderer_request.js";
 import { BannerPatternError } from "../pipeline/banner_nbt.js";
 import type { CameraPlacement } from "../../shared/camera_aim.js";
@@ -1409,13 +1409,13 @@ ${report.stack}`),
     try {
       const session = requireSession();
       /*
-       * The id before the edit, so the shift can be read back off what the
-       * transaction recorded. Growing below the origin moves every block that
+       * Where the stack stood before the edit, so the shift can be read back
+       * off what the transaction recorded. Growing below the origin moves every block that
        * was already there, and until now nothing outside main was told --
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
+      const before = historyMark(session.history);
       const changed = applyEdit(session, request, await editOptionsFor(session));
       return {
         ok: true,
@@ -1645,7 +1645,7 @@ ${report.stack}`),
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
+      const before = historyMark(session.history);
       const result = scaleRegion(session, request.regions, request.spec, {
         ...options,
         to: request.to ?? null,
@@ -1684,7 +1684,7 @@ ${report.stack}`),
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
+      const before = historyMark(session.history);
       const changed = moveRegion(session, request.regions, request.to, options);
       return {
         ok: true,
@@ -1785,7 +1785,7 @@ ${report.stack}`),
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
+      const before = historyMark(session.history);
       const changed = transformRegion(session, request.regions, request.transform, {
         ...options,
         to: request.to ?? null,
@@ -1838,7 +1838,7 @@ ${report.stack}`),
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
+      const before = historyMark(session.history);
       const changed = pasteSelection(session, request, {
         ...(await editOptionsFor(session)),
         includeAir: request.includeAir,

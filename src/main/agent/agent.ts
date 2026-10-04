@@ -199,10 +199,15 @@ const SYSTEM_PROMPT = [
   // replace_blocks it concludes the rule does not apply to it. A sloping roof
   // is not hundreds of set_blocks, it is a shape, and shapes are what the
   // script is for.
-  "- A shape is a build script. Anything whose blocks depend on where they are — a roof, an arch,",
-  "  a spiral, anything sloping or tapering — is run_build_script, because it is the only tool that",
-  "  can vary a block by coordinate. fill_region and replace_blocks cannot make a shape: they apply",
-  "  one block to a box, so reaching for them here gives a solid box of that block instead.",
+  // draw_shape takes the shapes WorldEdit has a command for, which are the
+  // ones a model most often got wrong by hand: a sphere is a lot of arithmetic
+  // for a script, and fill_region answers "a round tower" with a square one.
+  "- A sphere, a dome (a hollow sphere cut by the region), a cylinder or tube, a pyramid or hipped",
+  "  roof, a box's shell and four walls are draw_shape. Any other shape is a build script. Anything",
+  "  whose blocks depend on where they are — an arch, a spiral, a gable, anything else sloping or",
+  "  tapering — is run_build_script, because it is the only tool that can vary a block by coordinate.",
+  "  fill_region and replace_blocks cannot make a shape: they apply one block to a box, so reaching",
+  "  for them here gives a solid box of that block instead.",
   "- Coordinates start at 0 and y is up. Everything is inclusive of both ends.",
   // The clamp used to be silent, so a fill above the ceiling landed *at* the
   // ceiling and reported a healthy count. It says so now, and this is the way

@@ -116,9 +116,16 @@ import {
   takeCheckpoint,
   useCheckpointDirectory,
 } from "../src/main/services/checkpoints.js";
-import { contentShiftSince, isDirty, undo } from "../src/main/domain/history.js";
+import { contentShiftSince, historyMark, isDirty, undo } from "../src/main/domain/history.js";
 import { anchorOf, countBlocks, createDocument, documentFromLoaded } from "../src/main/domain/document.js";
 import { findBlocks } from "../src/main/domain/find_blocks.js";
+import {
+  forEachShapeCell,
+  normalizeShape,
+  shapeCells,
+  ShapeError,
+  type ShapeSpec,
+} from "../src/shared/shapes.js";
 import { UnrepresentableBlocksError } from "../src/main/services/writers.js";
 import { SpongeSchematicWriter } from "../src/main/services/schematic.js";
 import { dataVersionFor } from "../src/main/services/versions.js";
@@ -2390,7 +2397,7 @@ console.log("\n--- a growth that moves the build says so ---");
 
   {
     const session = marked();
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: -4, y: 0, z: 0 });
     const shift = contentShiftSince(session.history, before);
 
@@ -2420,7 +2427,7 @@ console.log("\n--- a growth that moves the build says so ---");
    */
   {
     const session = marked();
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: 20, y: 0, z: 0 });
     equal("a move past the far face moves nothing", contentShiftSince(session.history, before), [
       0, 0, 0,
@@ -2433,7 +2440,7 @@ console.log("\n--- a growth that moves the build says so ---");
   {
     const session = marked();
     copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 });
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     pasteSelection(session, { x: 0, y: -2, z: 0 });
     equal("a paste below the origin says how far it moved", contentShiftSince(session.history, before), [
       0, 2, 0,
@@ -2441,7 +2448,7 @@ console.log("\n--- a growth that moves the build says so ---");
   }
   {
     const session = marked();
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     transformRegion(
       session,
       { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
@@ -2454,7 +2461,7 @@ console.log("\n--- a growth that moves the build says so ---");
   }
   {
     const session = marked();
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     scaleRegion(
       session,
       { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 },
@@ -2472,7 +2479,7 @@ console.log("\n--- a growth that moves the build says so ---");
   {
     const session = marked();
     moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: -4, y: 0, z: 0 });
-    const after = session.history.nextId;
+    const after = historyMark(session.history);
     equal("a later edit does not inherit an earlier shift", contentShiftSince(session.history, after), [
       0, 0, 0,
     ]);
@@ -6210,6 +6217,275 @@ console.log("\n--- where a block is, as the shell the glow is drawn from ---");
   equal("a growth below the origin leaves the shell where it was", faces(after), before);
   equal("...and says where the content now stands", after.frame, [2, 0, 0]);
   closeDocument();
+}
+
+// --- shapes ------------------------------------------------------------------
+//
+// WorldEdit's shapes, inscribed in a box. The reference is a literal port of
+// `EditSession.makeSphere`, `makeCylinder` and `makePyramid` (see the
+// `mc-building-tools` skill): the same loops, the same early exits, the same
+// `radius + 0.5`. Compared cell for cell, and beside it a handful of counts
+// written out by hand, so a mistake in the port cannot confirm itself.
+console.log("\n--- shapes ---");
+{
+  const lengthSq = (...v: number[]): number => v.reduce((sum, x) => sum + x * x, 0);
+  const weSphere = (rx: number, ry: number, rz: number, filled: boolean): Set<string> => {
+    const cells = new Set<string>();
+    rx += 0.5;
+    ry += 0.5;
+    rz += 0.5;
+    const cx = Math.ceil(rx);
+    const cy = Math.ceil(ry);
+    const cz = Math.ceil(rz);
+    let nextXn = 0;
+    forX: for (let x = 0; x <= cx; ++x) {
+      const xn = nextXn;
+      nextXn = (x + 1) / rx;
+      let nextYn = 0;
+      forY: for (let y = 0; y <= cy; ++y) {
+        const yn = nextYn;
+        nextYn = (y + 1) / ry;
+        let nextZn = 0;
+        for (let z = 0; z <= cz; ++z) {
+          const zn = nextZn;
+          nextZn = (z + 1) / rz;
+          if (lengthSq(xn, yn, zn) > 1) {
+            if (z === 0) {
+              if (y === 0) break forX;
+              break forY;
+            }
+            break;
+          }
+          if (!filled && lengthSq(nextXn, yn, zn) <= 1 && lengthSq(xn, nextYn, zn) <= 1 && lengthSq(xn, yn, nextZn) <= 1) {
+            continue;
+          }
+          for (const [a, b, c] of [[x, y, z], [-x, y, z], [x, -y, z], [x, y, -z], [-x, -y, z], [x, -y, -z], [-x, y, -z], [-x, -y, -z]]) {
+            cells.add(`${a},${b},${c}`);
+          }
+        }
+      }
+    }
+    return cells;
+  };
+  const weCylinder = (rx: number, rz: number, height: number, filled: boolean): Set<string> => {
+    const cells = new Set<string>();
+    rx += 0.5;
+    rz += 0.5;
+    const cx = Math.ceil(rx);
+    const cz = Math.ceil(rz);
+    let nextXn = 0;
+    forX: for (let x = 0; x <= cx; ++x) {
+      const xn = nextXn;
+      nextXn = (x + 1) / rx;
+      let nextZn = 0;
+      for (let z = 0; z <= cz; ++z) {
+        const zn = nextZn;
+        nextZn = (z + 1) / rz;
+        if (lengthSq(xn, zn) > 1) {
+          if (z === 0) break forX;
+          break;
+        }
+        if (!filled && lengthSq(nextXn, zn) <= 1 && lengthSq(xn, nextZn) <= 1) continue;
+        for (let y = 0; y < height; ++y) {
+          for (const [a, c] of [[x, z], [-x, z], [x, -z], [-x, -z]]) cells.add(`${a},${y},${c}`);
+        }
+      }
+    }
+    return cells;
+  };
+  const wePyramid = (size: number, filled: boolean): Set<string> => {
+    const cells = new Set<string>();
+    const height = size;
+    for (let y = 0; y <= height; ++y) {
+      size--;
+      for (let x = 0; x <= size; ++x) {
+        for (let z = 0; z <= size; ++z) {
+          if ((filled && z <= size && x <= size) || z === size || x === size) {
+            for (const [a, c] of [[x, z], [-x, z], [x, -z], [-x, -z]]) cells.add(`${a},${y},${c}`);
+          }
+        }
+      }
+    }
+    return cells;
+  };
+
+  const cellsOf = (spec: ShapeSpec, window: Parameters<typeof shapeCells>[1] = null): Set<string> => {
+    const out = new Set<string>();
+    forEachShapeCell(shapeCells(spec, window), (x, y, z) => out.add(`${x},${y},${z}`));
+    return out;
+  };
+  const sameCells = (a: Set<string>, b: Set<string>): boolean => a.size === b.size && [...a].every((key) => b.has(key));
+  const around = (rx: number, ry: number, rz: number) => ({ minX: -rx, minY: -ry, minZ: -rz, maxX: rx, maxY: ry, maxZ: rz });
+
+  const misses: string[] = [];
+  for (let r = 0; r <= 8; r += 1) {
+    for (const hollow of [false, true]) {
+      if (!sameCells(cellsOf({ kind: "sphere", box: around(r, r, r), hollow }), weSphere(r, r, r, !hollow))) {
+        misses.push(`sphere ${r}${hollow ? " hollow" : ""}`);
+      }
+      const tube = { minX: -r, minY: 0, minZ: -r, maxX: r, maxY: 2, maxZ: r };
+      if (!sameCells(cellsOf({ kind: "cylinder", box: tube, hollow }), weCylinder(r, r, 3, !hollow))) {
+        misses.push(`cylinder ${r}${hollow ? " hollow" : ""}`);
+      }
+    }
+  }
+  for (const [a, b, c] of [[3, 1, 2], [5, 2, 7], [1, 4, 0]]) {
+    for (const hollow of [false, true]) {
+      if (!sameCells(cellsOf({ kind: "sphere", box: around(a, b, c), hollow }), weSphere(a, b, c, !hollow))) {
+        misses.push(`ellipsoid ${a},${b},${c}${hollow ? " hollow" : ""}`);
+      }
+    }
+  }
+  for (let s = 1; s <= 8; s += 1) {
+    for (const hollow of [false, true]) {
+      const box = { minX: -(s - 1), minY: 0, minZ: -(s - 1), maxX: s - 1, maxY: s - 1, maxZ: s - 1 };
+      if (!sameCells(cellsOf({ kind: "pyramid", box, hollow }), wePyramid(s, !hollow))) {
+        misses.push(`pyramid ${s}${hollow ? " hollow" : ""}`);
+      }
+    }
+  }
+  equal("every sphere, ellipsoid, cylinder and pyramid is WorldEdit's, cell for cell", misses, []);
+
+  const count = (spec: ShapeSpec): number => shapeCells(spec).count;
+  equal(
+    "...and the counts, written out: //sphere 1, 3; //hsphere 3; //cyl 2 1; //pyramid 3; //hpyramid 3",
+    [
+      count({ kind: "sphere", box: around(1, 1, 1) }),
+      count({ kind: "sphere", box: around(3, 3, 3) }),
+      count({ kind: "sphere", box: around(3, 3, 3), hollow: true }),
+      count({ kind: "cylinder", box: { minX: -2, minY: 0, minZ: -2, maxX: 2, maxY: 0, maxZ: 2 } }),
+      count({ kind: "pyramid", box: { minX: -2, minY: 0, minZ: -2, maxX: 2, maxY: 2, maxZ: 2 } }),
+      count({ kind: "pyramid", box: { minX: -2, minY: 0, minZ: -2, maxX: 2, maxY: 2, maxZ: 2 }, hollow: true }),
+    ],
+    [19, 179, 98, 21, 35, 25],
+  );
+
+  // A cylinder along x is the one along y turned over.
+  equal(
+    "a cylinder lying along x is the standing one turned",
+    count({ kind: "cylinder", axis: "x", box: { minX: 0, minY: -3, minZ: -3, maxX: 4, maxY: 3, maxZ: 3 } }),
+    count({ kind: "cylinder", axis: "y", box: { minX: -3, minY: 0, minZ: -3, maxX: 3, maxY: 4, maxZ: 3 } }),
+  );
+
+  // Which faces a shell has is each command's own answer.
+  const layer = (spec: ShapeSpec, y: number): number => [...cellsOf(spec)].filter((key) => key.split(",")[1] === String(y)).length;
+  const tube = { kind: "cylinder", box: { minX: -3, minY: 0, minZ: -3, maxX: 3, maxY: 4, maxZ: 3 }, hollow: true } as const;
+  equal("a hollow cylinder is an open tube: its top is a ring like its middle", layer(tube, 4), layer(tube, 2));
+  const roof = { kind: "pyramid", box: { minX: -2, minY: 0, minZ: -2, maxX: 2, maxY: 2, maxZ: 2 }, hollow: true } as const;
+  equal("a hollow pyramid has no floor: its bottom layer is a ring of 16", layer(roof, 0), 16);
+  equal("a hollow box is closed on all six sides", count({ kind: "box", box: around(2, 2, 2), hollow: true }), 125 - 27);
+  const walls = { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 3, maxZ: 9 };
+  equal("walls are the four sides, no floor or ceiling", count({ kind: "walls", box: walls }), 36 * 4);
+  equal("...two blocks thick", count({ kind: "walls", box: walls, thickness: 2 }), (100 - 36) * 4);
+  equal("...and the same whichever two corners name the box", count({ kind: "walls", box: { minX: 9, minY: 3, minZ: 0, maxX: 0, maxY: 0, maxZ: 9 } }), 144);
+  const thick = cellsOf({ kind: "sphere", box: around(6, 6, 6), hollow: true, thickness: 2 });
+  const thin = cellsOf({ kind: "sphere", box: around(6, 6, 6), hollow: true });
+  check(
+    "a thicker shell holds the thinner one and more",
+    [...thin].every((key) => thick.has(key)) && thick.size > thin.size,
+  );
+  equal("a box is every cell", count({ kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 1, maxZ: 2 } }), 24);
+  equal("an even box has an even sphere: 2x2x2 is all eight", count({ kind: "sphere", box: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 } }), 8);
+
+  /*
+   * A shape cut by a window is that shape, cut: the part inside the window,
+   * shell and all, and no new face where the cut falls.
+   */
+  const cutAt = { minX: 0, minY: -10, minZ: -10, maxX: 10, maxY: 10, maxZ: 10 };
+  for (const hollow of [false, true]) {
+    const whole = cellsOf({ kind: "sphere", box: around(4, 4, 4), hollow });
+    const half = cellsOf({ kind: "sphere", box: around(4, 4, 4), hollow }, cutAt);
+    equal(
+      `a ${hollow ? "hollow " : ""}sphere cut by the edge is the half of the sphere, not a smaller sphere`,
+      [...half].sort(),
+      [...whole].filter((key) => Number(key.split(",")[0]) >= 0).sort(),
+    );
+  }
+  equal("a window that misses the shape holds nothing", shapeCells({ kind: "box", box: around(1, 1, 1) }, { minX: 5, minY: 5, minZ: 5, maxX: 6, maxY: 6, maxZ: 6 }).count, 0);
+
+  const refused = (spec: ShapeSpec, words: string): boolean => {
+    try {
+      normalizeShape(spec);
+      return false;
+    } catch (err) {
+      return err instanceof ShapeError && err.message.includes(words);
+    }
+  };
+  check("a shape that does not exist is refused by name", refused({ kind: "cone" as never, box: around(1, 1, 1) }, "cone"));
+  check("...an axis that does not exist too", refused({ kind: "cylinder", axis: "w" as never, box: around(1, 1, 1) }, "axis"));
+  check("...and a shell no blocks thick", refused({ kind: "sphere", hollow: true, thickness: 0, box: around(1, 1, 1) }, "thick"));
+
+  // --- drawn into a document ---------------------------------------------------
+  const stone = { namespacedName: "minecraft:stone" };
+  const glass = { namespacedName: "minecraft:glass" };
+  const draw = (session: ReturnType<typeof newDocument>, request: Partial<Extract<Parameters<typeof applyEdit>[1], { kind: "shape" }>> & { shape: ShapeSpec }, options = {}) =>
+    applyEdit(session, { kind: "shape", mix: singleMix(stone), ...request }, options);
+
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 3, 3, 3, { namespacedName: "minecraft:dirt", properties: {} });
+    const ball = { kind: "sphere", box: { minX: 0, minY: 0, minZ: 0, maxX: 6, maxY: 6, maxZ: 6 } } as const;
+    const wrote = draw(session, { shape: ball, mix: singleMix(glass), mode: "empty" });
+    equal("drawn only into empty space, it fills round what is there", wrote, 178);
+    equal("...and leaves it", getBlock(session.doc, 3, 3, 3).namespacedName, "minecraft:dirt");
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...labelled with the shape", (session.history.undoStack[0]?.label ?? "").includes("sphere"));
+    const over = draw(session, { shape: { kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 } }, mode: "filled" });
+    equal("drawn only over what is there, it recolours it", over, 179);
+    equal("...the dirt included", getBlock(session.doc, 3, 3, 3).namespacedName, "minecraft:stone");
+    equal("...and nothing round it", getBlock(session.doc, 7, 7, 7).namespacedName, "minecraft:air");
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    const wrote = draw(session, { shape: { kind: "box", box: { minX: -3, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 } }, mix: singleMix(glass), mode: "filled" });
+    equal("over what is there, a shape past the edge does not grow the document", [session.doc.width, wrote], [4, 1]);
+    const mark = historyMark(session.history);
+    draw(session, { shape: { kind: "sphere", box: { minX: -2, minY: 0, minZ: 0, maxX: 0, maxY: 2, maxZ: 2 } } });
+    equal("anywhere else it grows, below the origin too", session.doc.width, 6);
+    equal("...and says how far the content moved", contentShiftSince(session.history, mark), [2, 0, 0]);
+    let refusedOutside = false;
+    try {
+      draw(session, { shape: { kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 0 } } }, { autoGrow: false });
+    } catch (err) {
+      refusedOutside = err instanceof OutsideDocumentError;
+    }
+    check("with resizing off, a shape outside the box is refused by name", refusedOutside);
+    closeDocument();
+  }
+  {
+    // A box drawn is a fill of the same region, voxel for voxel, mix and all.
+    const mix = parseMix("#perlin{seed=3,frequency=0.2}60%stone,40%andesite");
+    const spec: MixSpec = {
+      entries: mix.entries.map((entry) => ({ block: { namespacedName: entry.block }, weight: entry.weight })),
+      distribution: mix.distribution,
+    };
+    const region = { minX: 1, minY: 0, minZ: 1, maxX: 6, maxY: 3, maxZ: 5 };
+    const a = newDocument({ width: 8, height: 4, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(a, { kind: "fill", regions: [region], mix: spec });
+    const filled = Array.from(a.doc.voxels, (index) => a.doc.palette[index].namespacedName).join();
+    const b = newDocument({ width: 8, height: 4, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(b, { kind: "shape", shape: { kind: "box", box: region }, mix: spec });
+    const drawn = Array.from(b.doc.voxels, (index) => b.doc.palette[index].namespacedName).join();
+    equal("a box drawn is the fill of its region, mix and all", drawn, filled);
+    closeDocument();
+  }
+  {
+    // A brush stroke: touches with one stroke are one Ctrl+Z.
+    const session = newDocument({ width: 8, height: 4, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    for (let x = 0; x < 6; x += 2) {
+      draw(session, { shape: { kind: "sphere", box: { minX: x, minY: 0, minZ: 0, maxX: x + 1, maxY: 1, maxZ: 1 } }, stroke: "stroke-1" });
+    }
+    equal("touches of one stroke are one step", session.history.undoStack.length, 1);
+    undoEdit(session);
+    equal("...taken back by one undo", documentState(session).blockCount, 0);
+    draw(session, { shape: { kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 } }, stroke: "stroke-2" });
+    draw(session, { shape: { kind: "box", box: { minX: 1, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 } } });
+    draw(session, { shape: { kind: "box", box: { minX: 2, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 } }, stroke: "stroke-2" });
+    equal("a shape with no stroke between two touches closes the stroke", session.history.undoStack.length, 3);
+    closeDocument();
+  }
 }
 
 console.log("\n--- a mix shared out by a pattern ---");
