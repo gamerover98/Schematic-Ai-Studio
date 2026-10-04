@@ -2609,16 +2609,30 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   }
 
   /**
+   * One layout write at a time, each over the answer to the one before.
+   *
+   * Each write sends the whole `ui` block, spread from `settings` -- which is
+   * only replaced when main answers. Two in the same instant therefore both
+   * spread the same old block and the second undid the first: a panel moved
+   * while the creative settings were being written came back with the old
+   * radius. Queued, each spreads what the last one left.
+   */
+  let uiWrites: Promise<void> = Promise.resolve();
+
+  /**
    * Layout gestures must not depend on the settings write succeeding: the
    * panel has already moved on screen by the time this runs, and a failed
    * persist is worth a banner, not a stuck sidebar.
    */
-  async function patchUi(patch: Partial<Settings["ui"]>): Promise<void> {
-    try {
-      await patchSettings({ ui: { ...settings.ui, ...patch } });
-    } catch (err) {
-      failed(err, t("task.savingLayout"));
-    }
+  function patchUi(patch: Partial<Settings["ui"]>): Promise<void> {
+    uiWrites = uiWrites.then(async () => {
+      try {
+        await patchSettings({ ui: { ...settings.ui, ...patch } });
+      } catch (err) {
+        failed(err, t("task.savingLayout"));
+      }
+    });
+    return uiWrites;
   }
 
   /** Persist on every change; the Python UI persisted nothing at all. */
