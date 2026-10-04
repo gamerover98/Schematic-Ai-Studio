@@ -29,7 +29,7 @@ import {
   resolveBlockInput,
   type LegacyIndex,
 } from "../../../shared/legacy_ids.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
 
   interface Props {
     id?: string;
@@ -271,7 +271,7 @@ const ROW_LIMIT = 120;
         {#if shown.length < matches.length}
           {t("blocks.capped", { shown: shown.length, count: matches.length })}
         {:else if matches.length === offered.length}
-          {t("blocks.all", { count: offered.length })}
+          {tn("blocks.all", offered.length)}
         {:else}
           {t("blocks.matches", { count: matches.length, total: offered.length })}
         {/if}

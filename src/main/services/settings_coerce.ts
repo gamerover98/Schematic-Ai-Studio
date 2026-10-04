@@ -63,6 +63,7 @@ import {
   type Theme,
   type UiSettings,
   type UpdateSettings,
+  OPTIONS_PANEL_MIN_WIDTH,
   PANEL_SIZE,
   bindAddressRefusal,
   isMaterialsSort,
@@ -128,7 +129,7 @@ export function coerceUi(raw: unknown): UiSettings {
     creativeWindowW: extent(
       source.creativeWindowW,
       DEFAULT_UI_SETTINGS.creativeWindowW,
-      PANEL_SIZE.minWidth,
+      OPTIONS_PANEL_MIN_WIDTH,
     ),
     creativeWindowH: extent(
       source.creativeWindowH,

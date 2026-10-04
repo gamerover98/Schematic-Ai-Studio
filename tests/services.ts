@@ -2054,6 +2054,14 @@ console.log("\n--- settings coercion ---");
   } satisfies UiSettings;
 
   equal("every ui field survives a round-trip", coerceUi(ui), ui);
+  // The creative options are label-and-field rows with a noise picker in them,
+  // and at the old 248 the picker read "Perlin nois": a width saved before the
+  // minimum existed comes back at it.
+  equal(
+    "a creative options window narrower than its minimum is widened to it",
+    coerceUi({ ...ui, creativeWindowW: 248 }).creativeWindowW,
+    300,
+  );
   equal(
     "an order the materials list does not have falls back to most first",
     coerceUi({ ...ui, materialsSort: "sideways" }).materialsSort,

@@ -33,6 +33,8 @@
      */
     width: number;
     height: number;
+    /** The narrowest it may be dragged; `PANEL_SIZE.minWidth` unless said. */
+    minWidth?: number;
     /** Fired continuously while dragging — cheap, renderer-local. */
     onmove: (x: number, y: number) => void;
     /** Fired once when the gesture ends; this is what gets persisted. */
@@ -51,6 +53,7 @@
     y,
     width,
     height,
+    minWidth = PANEL_SIZE.minWidth,
     onmove,
     oncommit,
     onresize,
@@ -168,7 +171,7 @@
     const pane = parent
       ? { width: parent.clientWidth, height: parent.clientHeight }
       : { width: Number.MAX_SAFE_INTEGER, height: Number.MAX_SAFE_INTEGER };
-    return clampPanelSize({ width: nextW, height: nextH }, pane);
+    return clampPanelSize({ width: nextW, height: nextH }, pane, minWidth);
   }
 
   function onResizeMove(event: PointerEvent): void {
@@ -295,7 +298,7 @@
     tabindex="0"
     aria-label={t("toolwindow.resize")}
     aria-valuenow={Math.round(width)}
-    aria-valuemin={PANEL_SIZE.minWidth}
+    aria-valuemin={minWidth}
     onpointerdown={onResizeDown}
     onpointermove={onResizeMove}
     onpointerup={endResize}

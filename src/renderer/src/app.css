@@ -50,6 +50,10 @@
   /* What a click on a material lights up, through walls. Warm, so it is never
      read as the selection, which is the cool colour beside it. */
   --glow: #ffd84a;
+  /* The inside of an inventory slot, dark in every theme. The count on it is
+     the game's white with a hard shadow, and on the light theme's white slot
+     that came out at 1:1 -- the main number of the materials list, gone. */
+  --slot: #0e141c;
 
   /* The compass gizmo. X red, Y green, Z blue is the convention every CAD
      and 3D package shares, so it is read without being told; the *labels*
@@ -108,6 +112,7 @@
   --grid-minor: #c4cedc;
   --selection: #1f5fd0;
   --glow: #d97700;
+  --slot: #3a414c;
 
   --axis-x: #c23b3b;
   --axis-y: #2f8f3f;
@@ -140,7 +145,8 @@
     --grid-major: #97a5ba;
     --grid-minor: #c4cedc;
     --selection: #1f5fd0;
-  --glow: #d97700;
+    --glow: #d97700;
+    --slot: #3a414c;
 
     --axis-x: #c23b3b;
     --axis-y: #2f8f3f;
@@ -222,6 +228,26 @@ code,
  */
 img {
   -webkit-user-drag: none;
+}
+
+/*
+ * The keyboard's focus is the app's, in the accent, and only from the keyboard.
+ *
+ * Without this rule Tab showed Chromium's own orange ring, which is 2.4:1 on
+ * the light theme's white -- under the 3:1 a focus indicator needs -- and
+ * belongs to no palette here. One rule, so every control gets it, including
+ * the ones written next. A component that draws its own focus (a slot, a
+ * field's border) wins by specificity, as it should.
+ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline-offset: 0;
 }
 
 button {

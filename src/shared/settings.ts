@@ -681,6 +681,15 @@ export const SIDEBAR_WIDTH = { min: 320, max: 720, minViewport: 360 } as const;
  */
 export const PANEL_SIZE = { minWidth: 232, minHeight: 160 } as const;
 
+/**
+ * The narrowest the creative tool's options may be.
+ *
+ * Wider than `PANEL_SIZE.minWidth` because those options are label-and-field
+ * rows with a noise picker and a map in them: at 248 the picker read "Perlin
+ * nois" and the heightmap was cut off.
+ */
+export const OPTIONS_PANEL_MIN_WIDTH = 300;
+
 export const DEFAULT_UI_SETTINGS: UiSettings = {
   sidebarWidth: 420,
   sidebarCollapsed: false,
@@ -708,7 +717,7 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   // inside the pane, so a panel pushed past it hangs over the sidebar.
   creativeWindowX: 264,
   creativeWindowY: 64,
-  creativeWindowW: 248,
+  creativeWindowW: 300,
   creativeWindowH: 340,
 };
 

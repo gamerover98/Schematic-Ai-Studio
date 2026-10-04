@@ -18,7 +18,7 @@
    */
   import type { DocumentVersion } from "../../../shared/ipc.js";
   import { ageLabel } from "./age_label.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
 
   interface Props {
@@ -69,7 +69,7 @@
               <span class="facts">
                 {t(`versions.source.${version.source}`)}
                 · {version.size.join("×")}
-                · {t("bar.blocks", { count: version.blockCount.toLocaleString() })}
+                · {tn("count.blocks", version.blockCount)}
               </span>
               {#if confirming === version.id}
                 <span class="confirm">

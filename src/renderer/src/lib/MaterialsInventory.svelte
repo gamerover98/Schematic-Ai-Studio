@@ -356,7 +356,7 @@
     padding: 0;
     border: none;
     border-radius: 0;
-    background: var(--bg-input);
+    background: var(--slot);
     box-shadow:
       inset 2px 2px 0 rgba(0, 0, 0, 0.35),
       inset -2px -2px 0 rgba(255, 255, 255, 0.1);
@@ -411,7 +411,8 @@
     inset: 0;
     display: grid;
     place-items: center;
-    color: var(--text-dim);
+    /* On the slot, which is dark in every theme, so not the panel's dim. */
+    color: rgb(255 255 255 / 70%);
   }
 
   .pending {

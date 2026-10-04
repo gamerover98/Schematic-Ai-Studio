@@ -29,7 +29,7 @@
   import { canonicalBlock, withBlockAdded, withBlocksAdded } from "./block_spelling.js";
   import type { MaterialAction } from "./materials.js";
   import type { DraggedBlock } from "./block_drag.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
 
   interface Props {
     /** The active area: the one the readout below describes. */
@@ -303,15 +303,14 @@
         maxX: selection.maxX,
         maxY: selection.maxY,
         maxZ: selection.maxZ,
-        volume: volume.toLocaleString(),
-      })}
+      })} · {tn("count.blocks", volume)}
     </p>
     {#if areas.length > 1}
       <!--
         The areas, in a fixed order: activating one leaves it where it is in
         the list, so the numbers mean the same boxes from one click to the next.
       -->
-      <p class="coords">{t("selection.areas", { count: areas.length, cells: cells.toLocaleString() })}</p>
+      <p class="coords">{t("selection.areas", { count: areas.length })} · {tn("selection.inAll", cells)}</p>
       <ul class="areas">
         {#each areas as area, index (index)}
           <li class:active={index === activeArea}>

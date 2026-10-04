@@ -7647,6 +7647,28 @@ slider offers. It also greps `Viewer.svelte` for a `position.y` assignment near
 zero, because the epsilons are easy to reintroduce, they look like care, and
 nothing else in the app would notice.
 
+**And the floor fades into the horizon before the far plane cuts it.** It is
+twenty thousand blocks across and the far plane a few hundred, so it always
+ended in a straight edge with the dome showing below the horizon behind it: at
+eight in the morning a pale band under a night-coloured floor, reported in the
+UX audit as a banner or a drawing fault. `fadeIntoHorizon` mixes the floor
+towards `skyHorizon` -- the uniform the dome draws with -- from 30% of the far
+plane to 95% of it, so where it is cut there is nothing left to see. Two
+details are the whole of it:
+
+- **it is mixed after `dithering_fragment`, the last thing the shader does.**
+  The dome is a raw `ShaderMaterial` with neither tone mapping nor a
+  colour-space conversion, so it writes `uHorizon` as it is, into the canvas
+  and into the multisampled target alike; mixed any earlier, the two agree in
+  one of those paths and not the other;
+- **the distance is measured per fragment**, from an interpolated world
+  position. The floor is one quad, and a distance interpolated from its four
+  corners is ten thousand blocks everywhere: the first version faded the whole
+  floor into the sky.
+
+Under the sky only. Without it the background is the theme's flat colour, which
+the floor already sits a shade off.
+
 **The sky is the viewer's alone, and `sky.ts` is the part that is testable.**
 The dome, the two squares and the stars are geometry with no relationship to the
 schematic; what needed writing down is the set of curves through a

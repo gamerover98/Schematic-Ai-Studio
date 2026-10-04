@@ -346,7 +346,7 @@
             {/if}
           {:else if entry.changed !== undefined && entry.changed > 0}
             <span class="hint">
-              {t("chat.blocksChanged", { count: entry.changed.toLocaleString() })}
+              {tn("chat.blocksChanged", entry.changed)}
             </span>
           {/if}
         </div>

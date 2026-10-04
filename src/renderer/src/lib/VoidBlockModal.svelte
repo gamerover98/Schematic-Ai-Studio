@@ -30,6 +30,7 @@
   import BlockPicker from "./BlockPicker.svelte";
   import { t } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
+  import { blockLabel } from "./inventory.js";
 
   interface Props {
     open: boolean;
@@ -134,9 +135,12 @@
     ),
   );
 
-  /** A block id as a person reads it; `""` is air, which has no id to show. */
-  const readable = (id: string): string =>
-    id === "" ? t("void.air") : id.replace("minecraft:", "");
+  /**
+   * A block as a person reads it -- `Structure void`, not `structure_void` --
+   * beside `Air`, which used to be the only one of the five with a name.
+   * `""` is air, which has no id to show.
+   */
+  const readable = (id: string): string => (id === "" ? t("void.air") : blockLabel(id));
 
   /*
    * What a press converts *from*, from the same function main converts with.
@@ -196,9 +200,10 @@
           <button
             class:active={block === candidate}
             disabled={busy}
+            title={candidate === "" ? "minecraft:air" : candidate}
             onclick={() => onblock(candidate)}
           >
-            {candidate === "" ? t("void.air") : candidate.replace("minecraft:", "")}
+            {readable(candidate)}
           </button>
         {/each}
       </div>
@@ -255,8 +260,15 @@
           {t("void.replaceApply")}
         </button>
       </div>
+      <!--
+        With air chosen over air there is no source at all: air is what every
+        schematic starts with and the target is never its own source. Joining
+        an empty list put "holds ." on screen, so that case has its own words.
+      -->
       <p class="note">
-        {nothingToDo
+        {sources.length === 0
+          ? t("void.replaceAir")
+          : nothingToDo
           ? t("void.replaceNone", { from: sources.map(readable).join(", ") })
           : t("void.replaceWhat", {
               from: sources.map(readable).join(", "),
@@ -281,7 +293,7 @@
   .scrim {
     position: fixed;
     inset: 0;
-    z-index: 60;
+    z-index: 100;
     display: flex;
     align-items: center;
     justify-content: center;

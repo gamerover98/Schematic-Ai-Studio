@@ -237,7 +237,8 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    max-width: 220px;
+    min-width: 0;
+    max-width: min(220px, 100%);
     padding: 3px 8px;
     border: none;
     background: none;

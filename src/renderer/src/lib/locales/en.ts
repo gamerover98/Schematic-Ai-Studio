@@ -222,7 +222,9 @@ export const en = {
   "convert.nothing": "Nothing chosen",
   "convert.apply": "Convert",
   "convert.wrote":
-    "Wrote {count} file(s), starting with {name} \u2014 {size}, {blocks} blocks.",
+    "Wrote {files}, starting with {name} \u2014 {size}, {blocks}.",
+  "convert.files.one": "1 file",
+  "convert.files.other": "{count} files",
   "convert.backedUp": "{count} existing file(s) moved aside with a timestamp.",
   "dimensions.open": "Dimensions",
   "void.open": "Empty space",
@@ -239,6 +241,8 @@ export const en = {
     "Every cell holding {from} becomes {to} \u2014 one step, so Ctrl+Z takes it all back. Choosing a block changes what is drawn and what a break writes; this changes the schematic itself.",
   "void.replaceNone":
     "Nothing to convert: no cell in this schematic holds {from}. Choose a different block, or place some first.",
+  "void.replaceAir":
+    "Empty space is air, which is what every schematic starts with, so there is nothing to convert. Choose another block to turn the empty cells into it.",
   "void.pickNote":
     "Clicks pass through this block wherever it appears, including where you placed it by hand. That is what lets you reach the build inside it.",
   "dimensions.openHint": "How big the schematic is, and whether editing may change it",
@@ -274,7 +278,7 @@ export const en = {
   "viewport.fpsIdle": "idle · nothing changed",
   "viewport.lodCounts": "full {full} · shapes {shapes} · coarse {lod2} + {lod3} · fading {fading}",
   "viewport.noAtlas": "The mesh arrived without a texture atlas and none is held.",
-  "viewport.bounds": "Preview bounds center: ({center}) · size: ({size})",
+  "viewport.bounds": "centre {center} · size {size}",
   "viewport.dropTitle": "Drop to open",
   "viewport.dropTypes": ".schem or .schematic",
 
@@ -299,7 +303,8 @@ export const en = {
   "doc.openedMinutes": "{count}m ago",
   "doc.openedHours": "{count}h ago",
   "doc.openedDays": "{count}d ago",
-  "bar.blocks": "{count} blocks",
+  "count.blocks.one": "1 block",
+  "count.blocks.other": "{count} blocks",
   "bar.editing": "Editing",
   "doc.untitled": "Untitled",
   "doc.notSaved": "Not saved yet",
@@ -313,7 +318,6 @@ export const en = {
   "doc.width": "Width (x)",
   "doc.height": "Height (y)",
   "doc.length": "Length (z)",
-  "doc.volume": "{count} blocks",
   "doc.savingSize": "Saving {size} as it stands. Empty space around the build is trimmed on the way out.",
   "mcversion.open": "Version",
   "mcversion.openHint": "Change which Minecraft this schematic is for",
@@ -346,7 +350,6 @@ export const en = {
   "inventory.for.fill": "Add to With",
   "inventory.for.replace": "Add to Replace",
   "inventory.search": "Search blocks",
-  "inventory.count": "{count} blocks",
 
   // A patterned banner is not a block in the list: it is a banner plus a
   // design, and the design is edited in the inspector, on a banner already
@@ -522,8 +525,10 @@ export const en = {
   "selection.hint":
     "Click a block in the viewport to select it, Shift-click another to extend the box.",
   "selection.range":
-    "({minX}, {minY}, {minZ}) → ({maxX}, {maxY}, {maxZ}) · {volume} blocks",
-  "selection.areas": "{count} areas · {cells} blocks in all",
+    "({minX}, {minY}, {minZ}) → ({maxX}, {maxY}, {maxZ})",
+  "selection.areas": "{count} areas",
+  "selection.inAll.one": "1 block in all",
+  "selection.inAll.other": "{count} blocks in all",
   "selection.area": "Area {n}",
   "selection.areaActivate": "Make this the active area: the one with face handles",
   "selection.areaRemove": "Remove this area from the selection (Alt+click it in the viewport)",
@@ -621,7 +626,7 @@ export const en = {
   "mix.map.share": "{here}% here · {asked}% asked",
   "mix.map.distinct": "Distinct colours",
   "mix.map.distinctHint": "Paint each block in a colour of its own rather than its own colour, to tell similar blocks apart.",
-  "mix.seed": "seed",
+  "mix.seed": "Seed",
   "mix.reroll": "New seed: the same blocks in a different arrangement",
 
   "blockInfo.since": "In Minecraft since {version}",
@@ -630,9 +635,8 @@ export const en = {
   "blockInfo.until": "In Minecraft until {to}",
   "blockInfo.legacyId": "Stored as {id}",
   "blockInfo.legacyApprox": "Stored as {id}: this exact state has no ID:DATA of its own",
-  "blockInfo.count": "{count} blocks",
-  "blockInfo.countShare": "{count} blocks · {share} of the selection",
-  "blockInfo.countShareDocument": "{count} blocks · {share} of the schematic",
+  "blockInfo.share": "{share} of the selection",
+  "blockInfo.shareDocument": "{share} of the schematic",
   "materials.ofSelection": "Materials in the selection",
   "materials.ofDocument": "Materials in the schematic",
   "materials.slot": "{block}: {count}",
@@ -763,7 +767,8 @@ export const en = {
   "chat.newChat": "New chat",
   "chat.newChatHint": "Forget what has been said so far and start over",
   "chat.undoThis": "Undo this",
-  "chat.blocksChanged": "{count} blocks changed",
+  "chat.blocksChanged.one": "1 block changed",
+  "chat.blocksChanged.other": "{count} blocks changed",
   "chat.andMore": "and {count} more",
   "chat.emptyTitle": "Ask for a change to the schematic you have open.",
   "chat.emptyBuildTitle": "Describe something to build, and it will be generated and opened.",
@@ -990,7 +995,8 @@ export const en = {
   "palette.placeholder": "Type a command…",
   "palette.noMatch": "Nothing matches “{query}”.",
 
-  "blocks.all": "all {count} blocks",
+  "blocks.all.one": "the only block",
+  "blocks.all.other": "all {count} blocks",
   "blocks.matches": "{count} of {total}",
   "blocks.capped":
     "First {shown} of {count} matches — type another letter to narrow it.",
@@ -998,7 +1004,7 @@ export const en = {
   "recovery.title": "Unsaved work was found",
   "recovery.unnamed": "An unsaved schematic",
   "recovery.body":
-    "{name} — {blocks} blocks, from {when}. The last session ended before it was saved.",
+    "{name} — {blocks}, from {when}. The last session ended before it was saved.",
   "recovery.notOnDisk": "It has not been written to disk yet — save when you are happy with it.",
   "recovery.restore": "Restore it",
   "recovery.discard": "Discard",
@@ -1112,8 +1118,10 @@ export const en = {
   "status.notASchematic": "{name} is not a schematic — open a .schem or .schematic.",
   "status.recovered": "Recovered your unsaved work.",
   "status.recoveredNamed": "Recovered your unsaved work on {name}.",
-  "status.copied": "Copied {count} blocks. Move the selection, Ctrl+V to paste, Esc to stop.",
-  "status.cut": "Cut {count} blocks. Move the selection, Ctrl+V to paste, Esc to stop.",
+  "status.copied.one": "Copied 1 block. Move the selection, Ctrl+V to paste, Esc to stop.",
+  "status.copied.other": "Copied {count} blocks. Move the selection, Ctrl+V to paste, Esc to stop.",
+  "status.cut.one": "Cut 1 block. Move the selection, Ctrl+V to paste, Esc to stop.",
+  "status.cut.other": "Cut {count} blocks. Move the selection, Ctrl+V to paste, Esc to stop.",
   "status.nothingMatched": "No blocks matched, so nothing changed.",
   "status.replaced.one": "Replaced 1 block.",
   "status.replaced.other": "Replaced {count} blocks.",

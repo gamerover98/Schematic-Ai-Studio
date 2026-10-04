@@ -163,6 +163,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   DEFAULT_HOTBAR,
   DEFAULT_UI_SETTINGS,
     lodSettings,
+    OPTIONS_PANEL_MIN_WIDTH,
     providerRequiresApiKey,
     type ExportType,
     type KeyStorageStatus,
@@ -4261,9 +4262,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       if (cut) await refreshDocument();
       status = {
         tone: "ok",
-        text: t(cut ? "status.cut" : "status.copied", {
-          count: response.clipboard.blocks.toLocaleString(),
-        }),
+        text: tn(cut ? "status.cut" : "status.copied", response.clipboard.blocks),
       };
       // Not awaited: the copy is done, and the picture is only a picture.
       void armStamp();
@@ -4972,10 +4971,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        */
       convertReport = [
         t("convert.wrote", {
-          count: response.files.length,
+          files: tn("convert.files", response.files.length),
           name: response.files[0]?.split(/[\\/]/).pop() ?? "",
           size: response.size.join(String.fromCharCode(215)),
-          blocks: response.blocks.toLocaleString(),
+          blocks: tn("count.blocks", response.blocks),
         }),
         response.backedUp.length > 0
           ? t("convert.backedUp", { count: response.backedUp.length })
@@ -5693,7 +5692,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         <p>
           {t("recovery.body", {
             name: recovery.fileName ?? t("recovery.unnamed"),
-            blocks: recovery.blockCount.toLocaleString(),
+            blocks: tn("count.blocks", recovery.blockCount),
             when: new Date(recovery.savedAt).toLocaleString(),
           })}
         </p>
@@ -5767,6 +5766,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         y={creativeWindowY}
         width={creativeWindowW}
         height={creativeWindowH}
+        minWidth={OPTIONS_PANEL_MIN_WIDTH}
         closeLabel={t("common.close")}
         onmove={(x, y) => {
           creativeWindowX = x;
@@ -5994,6 +5994,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       gpuPreference={settings.preview.gpuPreference}
       globalIllumination={settings.preview.globalIllumination}
       showFps={settings.preview.showFps}
+      meshBounds={bounds}
       frameDiagnostics={settings.preview.frameDiagnostics}
       alwaysDraw={settings.preview.alwaysDraw}
       lodMode={lod.mode}
@@ -6050,15 +6051,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       }}
       raised={inventoryOpen}
     />
-    {#if bounds}
-      <!-- component.py:465-469's caption, same two-decimal formatting. -->
-      <footer>
-        {t("viewport.bounds", {
-          center: bounds.center.map((n) => n.toFixed(2)).join(", "),
-          size: bounds.size.map((n) => n.toFixed(2)).join(", "),
-        })}
-      </footer>
-    {/if}
   </section>
 </main>
 
@@ -6302,13 +6294,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   .preview :global(.viewer) {
     flex: 1;
-  }
-
-  footer {
-    padding: 8px 16px;
-    border-top: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--text-dim);
   }
 
   .status {

@@ -310,6 +310,13 @@ import { isTyping } from "./typing.js";
     globalIllumination?: boolean;
     /** Frames per second, frame time, triangles and draw calls, in a corner. */
     showFps?: boolean;
+    /**
+     * The drawn geometry's centre and size, as main measured it. A diagnostic,
+     * so it is a line of the counter in the corner rather than a caption of
+     * its own: as a strip under the canvas it sat beneath the hotbar, half
+     * covered, on every screen.
+     */
+    meshBounds?: { center: number[]; size: number[] } | null;
     /** Record where each frame's time goes; see `frame_profiler.ts`. */
     frameDiagnostics?: boolean;
     /** Draw on every refresh rather than on demand; see `render_demand.ts`. */
@@ -599,6 +606,7 @@ import { isTyping } from "./typing.js";
     gpuPreference: gpuPref = "auto",
     globalIllumination = false,
     showFps = false,
+    meshBounds = null,
     frameDiagnostics = false,
     alwaysDraw = false,
     lodMode = "off",
@@ -1103,6 +1111,21 @@ import { isTyping } from "./typing.js";
    * and sky light separately and this decides how much of the second counts.
    */
   const daylight = { value: 1 };
+  /**
+   * The sky's colour at the horizon, and how far away the floor gives way to
+   * it -- the far plane, or 0 for not at all.
+   *
+   * The floor is twenty thousand blocks across and the far plane is a few
+   * hundred, so the floor always ended in a straight edge with sky below the
+   * horizon behind it: at eight in the morning a band of pale blue under a
+   * night-coloured floor, which read as a banner or a drawing fault. The floor
+   * now fades into exactly the colour the dome draws below the horizon by the
+   * time it reaches the far plane, so where it is cut off nothing changes.
+   * Shared uniforms, `daylight`'s arrangement: the dome writes the colour, the
+   * floor reads it.
+   */
+  const skyHorizon = { value: new THREE.Color(0x78a7ff) };
+  const groundFade = { value: 0 };
   let loaded: THREE.Object3D | null = null;
   /**
    * The void layer, beside `loaded` and never inside it.
@@ -2801,7 +2824,7 @@ import { isTyping } from "./typing.js";
       depthWrite: false,
       depthTest: false,
       uniforms: {
-        uHorizon: { value: new THREE.Color(0x78a7ff) },
+        uHorizon: skyHorizon,
         uZenith: { value: new THREE.Color(0x3c6bdc) },
       },
       vertexShader: `
@@ -3004,13 +3027,10 @@ import { isTyping } from "./typing.js";
       ambient.groundColor.setRGB(0.1, 0.11, 0.14);
     }
 
+    // Outside the dome's guard: the floor reads it too, sky drawn yet or not.
+    skyHorizon.value.setRGB(state.horizon[0], state.horizon[1], state.horizon[2]);
     if (skyDome) {
       const uniforms = (skyDome.material as THREE.ShaderMaterial).uniforms;
-      (uniforms.uHorizon.value as THREE.Color).setRGB(
-        state.horizon[0],
-        state.horizon[1],
-        state.horizon[2],
-      );
       (uniforms.uZenith.value as THREE.Color).setRGB(
         state.zenith[0],
         state.zenith[1],
@@ -3118,6 +3138,7 @@ import { isTyping } from "./typing.js";
           polygonOffsetUnits: COPLANAR_OFFSET.units,
         }),
       );
+      fadeIntoHorizon(groundPlane.material as THREE.MeshLambertMaterial);
       groundPlane.receiveShadow = true;
       groundPlane.castShadow = false;
       // Nothing raycasts it -- picking asks the loaded model and the build grid
@@ -3136,11 +3157,65 @@ import { isTyping } from "./typing.js";
     }
   }
 
+  /**
+   * Fades the floor into the horizon's colour on its way to the far plane.
+   *
+   * Mixed in **last**, after tone mapping and the colour-space conversion,
+   * because that is where the dome's own colour lands: the dome is a raw
+   * `ShaderMaterial` that includes neither, so it writes `uHorizon` as it
+   * is, into the canvas or into the multisampled target alike. Mixed any
+   * earlier, the two would agree in one of those paths and not the other.
+   * The distance is the full one to the camera, which is never less than the
+   * depth the far plane clips at, so every visible scrap of floor at the cut
+   * has already faded. It is measured per fragment from an interpolated
+   * position: the floor is one quad, and a distance interpolated from its four
+   * corners is ten thousand blocks wherever you look.
+   */
+  function fadeIntoHorizon(material: THREE.MeshLambertMaterial): void {
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uHorizon = skyHorizon;
+      shader.uniforms.uFadeFar = groundFade;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+          varying vec3 vGroundPosition;`,
+        )
+        .replace(
+          "#include <project_vertex>",
+          `#include <project_vertex>
+          vGroundPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+          uniform vec3 uHorizon;
+          uniform float uFadeFar;
+          varying vec3 vGroundPosition;`,
+        )
+        .replace(
+          "#include <dithering_fragment>",
+          `#include <dithering_fragment>
+          if (uFadeFar > 0.0) {
+            float fade = smoothstep(uFadeFar * 0.3, uFadeFar * 0.95, distance(vGroundPosition, cameraPosition));
+            gl_FragColor.rgb = mix(gl_FragColor.rgb, uHorizon, fade);
+          }`,
+        );
+    };
+  }
+
   $effect(() => {
     void ground;
     void groundColor;
     void theme;
     applyGround();
+  });
+
+  // Only under the sky: without it the background is the theme's flat colour,
+  // which the floor already sits a shade off.
+  $effect(() => {
+    groundFade.value = sky ? maxDrawDistance || 2048 : 0;
   });
 
   function setSunFromAngles(az: number, el: number): void {
@@ -4967,6 +5042,7 @@ import { isTyping } from "./typing.js";
       gpuPref,
       globalIllumination,
       showFps,
+      meshBounds,
       frameDiagnostics,
       alwaysDraw,
       lodMode,
@@ -6859,6 +6935,13 @@ import { isTyping } from "./typing.js";
       {/if}
       {#if fps.worst}
         <br />{t("viewport.worstFrame", { ms: fps.worst.ms, culprit: fps.worst.culprit })}
+      {/if}
+      {#if meshBounds}
+        <!-- component.py:465-469's caption, same two-decimal formatting. -->
+        <br />{t("viewport.bounds", {
+          center: meshBounds.center.map((n) => n.toFixed(2)).join(", "),
+          size: meshBounds.size.map((n) => n.toFixed(2)).join(", "),
+        })}
       {/if}
     </div>
   {/if}

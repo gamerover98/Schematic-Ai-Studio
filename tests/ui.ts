@@ -28,6 +28,7 @@ import {
 import {
   AA_LEVELS,
   blocksInDocument,
+  OPTIONS_PANEL_MIN_WIDTH,
   PANEL_SIZE,
   SHADER_MODES,
   FPS_CAPS,
@@ -346,6 +347,13 @@ console.log("--- i18n lookup ---");
   equal("one selects the singular", translatePlural(catalog, "thing", 1), "1 thing");
   equal("two selects the plural", translatePlural(catalog, "thing", 2), "2 things");
   equal("zero selects the plural", translatePlural(catalog, "thing", 0), "0 things");
+  // Formatted as every other count in the window, so a call site never has to
+  // pick between the right form and the thousands separator.
+  equal(
+    "...and the count comes out formatted",
+    translatePlural(catalog, "thing", 12345),
+    `${(12345).toLocaleString()} things`,
+  );
 
   equal("missingKeys finds the gaps", missingKeys(catalog, ["plain", "nope", "gone"]), [
     "nope",
@@ -616,6 +624,14 @@ console.log("\n--- floating panel size ---");
     width: 400,
     height: 301,
   });
+
+  // A window with a minimum of its own keeps it while being dragged, not only
+  // when its size is read back from disk.
+  equal(
+    "a panel with a minimum of its own stops at that one",
+    clampPanelSize({ width: 248, height: 300 }, pane, OPTIONS_PANEL_MIN_WIDTH).width,
+    OPTIONS_PANEL_MIN_WIDTH,
+  );
 }
 
 // --- the chat's markdown, and what it must not let through -----------------
@@ -3508,8 +3524,8 @@ console.log("\n--- creative inventory ---");
   }
 
 
-  equal("a label loses its namespace and its underscores", blockLabel("minecraft:oak_planks"), "oak planks");
-  equal("...and its block states", blockLabel("minecraft:oak_stairs[facing=north]"), "oak stairs");
+  equal("a label loses its namespace and its underscores", blockLabel("minecraft:oak_planks"), "Oak planks");
+  equal("...and its block states", blockLabel("minecraft:oak_stairs[facing=north]"), "Oak stairs");
 }
 
 // --- the anchor modal does not fight the fields ------------------------------
@@ -6480,6 +6496,49 @@ console.log("\n--- the creative tools ---");
   );
   const escapeCorner = app.indexOf('event.key === "Escape" && cornerAt !== null');
   check("...and Escape does too, before the glow and the selection", escapeCorner >= 0 && escapeCorner < app.indexOf('event.key === "Escape" && glow !== null'));
+}
+
+// --- what the UX audit found, each pinned where a tidy-up would undo it -----
+console.log("\n--- audit fixes ---");
+{
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8");
+  const lib = (name: string): string => readFileSync(path.join(RENDERER, "lib", name), "utf8");
+  check(
+    "the keyboard's focus ring is the app's, in the accent, for every control",
+    /^:focus-visible \{\s*outline: 2px solid var\(--accent\);/m.test(css),
+  );
+  check(
+    "a slot is dark in all three palettes, so the white count reads on it",
+    (css.match(/--slot: #/g) ?? []).length === 3 && /background: var\(--slot\);/.test(lib("MaterialsInventory.svelte")),
+  );
+  check(
+    "empty space as air over air has words of its own, not \"holds .\"",
+    /sources\.length === 0\s*\?\s*t\("void\.replaceAir"\)/.test(lib("VoidBlockModal.svelte")),
+  );
+  const scrims = ["ConvertModal", "DimensionsModal", "VoidBlockModal", "VersionsModal", "NbtModal", "AnchorModal"].filter(
+    (name) => !/\.scrim \{[^}]*z-index: 100;/.test(lib(`${name}.svelte`)),
+  );
+  equal("every modal's scrim is on the modal tier, over the bar and the chat", scrims, []);
+  check(
+    "the format select is as wide as its words, not as the row",
+    /\.format \{[^}]*width: auto;/.test(lib("ChatComposer.svelte")),
+  );
+  const viewer = lib("Viewer.svelte");
+  check(
+    "the floor fades into the horizon last, where the dome's colour lands",
+    /#include <dithering_fragment>[\s\S]{0,200}mix\(gl_FragColor\.rgb, uHorizon, fade\)/.test(viewer),
+  );
+  // Interpolated across one quad twenty thousand blocks wide, a distance is
+  // the same ten thousand everywhere, and the whole floor came out as sky.
+  check(
+    "...measuring the distance per fragment, not interpolating it",
+    viewer.includes("distance(vGroundPosition, cameraPosition)") && !/varying float vGround/.test(viewer),
+  );
+  check(
+    "the bounds caption is a line of the diagnostics, not a strip under the hotbar",
+    !readFileSync(path.join(RENDERER, "App.svelte"), "utf8").includes("viewport.bounds") &&
+      /\{#if meshBounds\}[\s\S]{0,200}viewport\.bounds/.test(viewer),
+  );
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

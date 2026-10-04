@@ -20,7 +20,7 @@
   import { mcVersion } from "../../../shared/mc_versions.js";
   import { blockLabel, gridWindow, inventoryBlocks } from "./inventory.js";
 import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
   import BannerPatternHint from "./BannerPatternHint.svelte";
 
@@ -141,7 +141,7 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
           aria-label={t("inventory.search")}
         />
         <span class="hint">
-          {t("inventory.count", { count: filtered.length.toLocaleString() })}
+          {tn("count.blocks", filtered.length)}
           · {mcVersion(version)?.label ?? version}
         </span>
         <button class="icon" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
@@ -327,11 +327,17 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
     opacity: 0.7;
   }
 
+  /* Two lines, which the tile has room for: on one, every long name came out
+     as the same few letters -- "Acacia hangin…" is four different blocks. */
   .name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     max-width: 100%;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    text-align: center;
     font-size: 9px;
     line-height: 1.1;
   }

@@ -28,12 +28,13 @@ export interface Bounds {
 export function clampPanelSize(
   size: { width: number; height: number },
   pane: { width: number; height: number },
+  minWidth: number = PANEL_SIZE.minWidth,
 ): { width: number; height: number } {
   // `Math.max` against the minimum last, so a pane smaller than the minimum
   // gives a panel that overflows rather than one that has collapsed: an
   // unusable window you can see beats a usable one you cannot.
   return {
-    width: Math.round(Math.max(PANEL_SIZE.minWidth, Math.min(size.width, pane.width))),
+    width: Math.round(Math.max(minWidth, Math.min(size.width, pane.width))),
     height: Math.round(Math.max(PANEL_SIZE.minHeight, Math.min(size.height, pane.height))),
   };
 }

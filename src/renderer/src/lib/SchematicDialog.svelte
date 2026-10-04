@@ -26,7 +26,7 @@
     mcVersion,
     refusalFor,
   } from "../../../shared/mc_versions.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
 
   interface Props {
     open: boolean;
@@ -169,7 +169,7 @@
               <input type="number" min="1" max="2048" bind:value={length} />
             </label>
           </div>
-          <p class="hint">{t("doc.volume", { count: volume.toLocaleString() })}</p>
+          <p class="hint">{tn("count.blocks", volume)}</p>
         </fieldset>
       {:else}
         <p class="hint fact">

@@ -1304,6 +1304,7 @@ import {
               <div class="pick-row">
                 <input
                   id="mcp-token"
+                  class="mono"
                   readonly
                   value={revealed ? (mcpStatus.token ?? "") : maskToken(mcpStatus.token)}
                 />
@@ -1345,7 +1346,7 @@ import {
             <div class="field">
               <label for="mcp-command">{t("mcp.command")}</label>
               <div class="pick-row">
-                <input id="mcp-command" readonly value={command} title={command} />
+                <input id="mcp-command" class="mono" readonly value={command} title={command} />
                 <button onclick={() => copy("command", command)}>
                   {copied === "command" ? t("mcp.copied") : t("mcp.copy")}
                 </button>
@@ -1357,7 +1358,7 @@ import {
               <div class="field">
                 <label for="mcp-bridge">{t("mcp.bridge")}</label>
                 <div class="pick-row">
-                  <input id="mcp-bridge" readonly value={bridge} title={bridge} />
+                  <input id="mcp-bridge" class="mono" readonly value={bridge} title={bridge} />
                   <button onclick={() => copy("bridge", bridge)}>
                     {copied === "bridge" ? t("mcp.copied") : t("mcp.copy")}
                   </button>
@@ -1701,6 +1702,13 @@ import {
   .activity .tool {
     flex: none;
     font-family: var(--mono, monospace);
+  }
+
+  /* Text to paste into a terminal, set the way a terminal will show it: in a
+     proportional face a token's 0 and O, and l and 1, are one guess apart. */
+  input.mono {
+    font-family: var(--mono, monospace);
+    font-size: 12px;
   }
 
   /* The summary is the long one, so it is the one that gives way. */

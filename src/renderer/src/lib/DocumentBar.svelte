@@ -18,7 +18,7 @@
   import type { DocumentState } from "../../../shared/ipc.js";
   import { SCHEMATIC_FORMAT_LABEL } from "../../../shared/schematic.js";
   import { mcVersion, versionNameOf } from "../../../shared/mc_versions.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
 
   interface Props {
     /** `doc`, not `state`: a prop of that name breaks every rune in the file. */
@@ -83,7 +83,7 @@
       ? ""
       : [
           `${doc.size[0]}×${doc.size[1]}×${doc.size[2]}`,
-          t("bar.blocks", { count: doc.blockCount.toLocaleString() }),
+          tn("count.blocks", doc.blockCount),
           SCHEMATIC_FORMAT_LABEL[doc.format],
           versionLabel,
         ]

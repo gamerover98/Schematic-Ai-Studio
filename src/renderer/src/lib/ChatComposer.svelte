@@ -239,9 +239,16 @@
 </div>
 
 <style>
+  /*
+   * Both columns may shrink, and the context wraps. With nothing open the
+   * context row holds three things -- the chip, the image and the format --
+   * and in a narrow sidebar the format select used to run on under the model
+   * name, its arrow covering half of it. Wrapping keeps every control whole;
+   * the model name gives way with an ellipsis rather than being covered.
+   */
   .composer {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
     grid-template-areas:
       "text text"
       "context actions";
@@ -275,6 +282,7 @@
   .context {
     grid-area: context;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 4px;
     min-width: 0;
@@ -321,8 +329,11 @@
     color: var(--text-dim);
   }
 
+  /* `width: auto` undoes app.css's `width: 100%` for every select, which is
+     what made this one as wide as the whole row and push under the model. */
   .format {
     flex: none;
+    width: auto;
     padding: 1px 4px;
     border-radius: 999px;
     font-size: 11px;
@@ -340,6 +351,8 @@
     align-items: center;
     gap: 4px;
     justify-content: flex-end;
+    align-self: end;
+    min-width: 0;
   }
 
   .send {

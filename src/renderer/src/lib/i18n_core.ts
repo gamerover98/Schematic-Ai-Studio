@@ -54,6 +54,10 @@ export function translate(catalog: Catalog, key: string, params?: MessageParams)
  * choice *here* rather than as a ternary at each call site means a language
  * with three forms is a change to this function and its catalogue, not to
  * forty components.
+ *
+ * The count goes in formatted, `toLocaleString()` as every other count in the
+ * window is, so a call site never has to choose between the right form and the
+ * thousands separator.
  */
 export function translatePlural(
   catalog: Catalog,
@@ -61,7 +65,10 @@ export function translatePlural(
   count: number,
   params?: MessageParams,
 ): string {
-  return translate(catalog, `${key}.${count === 1 ? "one" : "other"}`, { ...params, count });
+  return translate(catalog, `${key}.${count === 1 ? "one" : "other"}`, {
+    ...params,
+    count: count.toLocaleString(),
+  });
 }
 
 /**

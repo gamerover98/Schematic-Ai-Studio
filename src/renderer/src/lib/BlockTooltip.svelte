@@ -27,7 +27,7 @@
   import { readSpelling, shortName } from "./block_spelling.js";
   import { placePopover, type AnchorRect } from "./floating.js";
   import { propertyRows } from "./inspector_rows.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
 
   interface Props {
     /** The spelling to describe, or `null` for nothing to show. */
@@ -212,12 +212,10 @@
     {/if}
     {#if count !== null}
       <p class="line strong">
-        {share === null
-          ? t("blockInfo.count", { count: count.toLocaleString() })
-          : t(shareOf === "document" ? "blockInfo.countShareDocument" : "blockInfo.countShare", {
-              count: count.toLocaleString(),
-              share: percent(share),
-            })}
+        {tn("count.blocks", count)}{#if share !== null}
+          · {t(shareOf === "document" ? "blockInfo.shareDocument" : "blockInfo.share", {
+            share: percent(share),
+          })}{/if}
       </p>
     {:else if weight !== null && share !== null}
       <p class="line strong">{t("blockInfo.weight", { weight: String(weight), share: percent(share) })}</p>
