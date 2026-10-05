@@ -857,7 +857,17 @@ import { isTyping } from "./typing.js";
     scene.add(group);
   }
 
-  /** How big the gizmo is, and how far it sits from the corner, in CSS px. */
+  /**
+   * How big the gizmo is, and how far it sits from the top-right corner, in
+   * CSS px.
+   *
+   * Top-right, where a 3D editor keeps its navigation gizmo. It was
+   * bottom-left until the tools docked to the window's left edge: the
+   * viewport lost a panel's width, the hotbar is centred in what is left, and
+   * at an ordinary window size the two met -- the hotbar drawn over the
+   * handles. The corner is measured from the canvas's own size every frame,
+   * so it follows the splitters.
+   */
   const COMPASS_PX = 104;
   const COMPASS_MARGIN = 16;
 
@@ -3439,11 +3449,15 @@ import { isTyping } from "./typing.js";
     renderer.autoClear = false;
     renderer.clearDepth();
     renderer.setScissorTest(true);
-    renderer.setViewport(COMPASS_MARGIN, COMPASS_MARGIN, COMPASS_PX, COMPASS_PX);
-    renderer.setScissor(COMPASS_MARGIN, COMPASS_MARGIN, COMPASS_PX, COMPASS_PX);
+    // WebGL counts from the bottom-left, so the top-right square starts a
+    // margin and a square short of both far edges.
+    renderer.getSize(viewSize);
+    const left = viewSize.x - COMPASS_MARGIN - COMPASS_PX;
+    const bottom = viewSize.y - COMPASS_MARGIN - COMPASS_PX;
+    renderer.setViewport(left, bottom, COMPASS_PX, COMPASS_PX);
+    renderer.setScissor(left, bottom, COMPASS_PX, COMPASS_PX);
     renderer.render(compassScene, compassCamera);
     renderer.setScissorTest(false);
-    renderer.getSize(viewSize);
     renderer.setViewport(0, 0, viewSize.x, viewSize.y);
     renderer.autoClear = wasAutoClear;
   }
@@ -3451,9 +3465,14 @@ import { isTyping } from "./typing.js";
   /** Lays the compass's own target onto its square of the canvas. */
   function compositeCompass(): void {
     if (!renderer || compassTarget === null || !compassCopy || !aaCamera) return;
-    renderer.setViewport(COMPASS_MARGIN, COMPASS_MARGIN, COMPASS_PX, COMPASS_PX);
-    renderer.render(compassCopy, aaCamera);
     renderer.getSize(viewSize);
+    renderer.setViewport(
+      viewSize.x - COMPASS_MARGIN - COMPASS_PX,
+      viewSize.y - COMPASS_MARGIN - COMPASS_PX,
+      COMPASS_PX,
+      COMPASS_PX,
+    );
+    renderer.render(compassCopy, aaCamera);
     renderer.setViewport(0, 0, viewSize.x, viewSize.y);
   }
 
@@ -6990,7 +7009,7 @@ import { isTyping } from "./typing.js";
     <button
       class="compass"
       class:locked={flying}
-      style={`width:${COMPASS_PX}px;height:${COMPASS_PX}px;left:${COMPASS_MARGIN}px;bottom:${COMPASS_MARGIN}px`}
+      style={`width:${COMPASS_PX}px;height:${COMPASS_PX}px;right:${COMPASS_MARGIN}px;top:${COMPASS_MARGIN}px`}
       onclick={onCompassClick}
       title={t("viewport.compassHint")}
       aria-label={t("viewport.compass")}
@@ -7018,9 +7037,10 @@ import { isTyping } from "./typing.js";
    * Top right, where the overlay is not: the two would otherwise sit on each
    * other, which is the fault the gizmo bar had against the notifications.
    */
+  /* Under the compass, which has the corner: its margin, its square and a gap. */
   .fps {
     position: absolute;
-    top: 16px;
+    top: 128px;
     right: 16px;
     padding: 6px 10px;
     background: var(--overlay-bg);

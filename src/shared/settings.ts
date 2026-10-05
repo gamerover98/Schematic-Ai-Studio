@@ -537,32 +537,16 @@ export interface UiSettings {
   /** UI language. The renderer's strings only; main's errors are not translated. */
   language: Language;
   /**
-   * Where the floating tool window sits, in pixels from the viewport's
-   * top-left corner.
+   * The docked panel on the left -- the selection's tools, the inspector and
+   * the terrain as tabs -- in CSS pixels, clamped to `DOCK_WIDTH`.
    *
-   * Clamped on read the way the sidebar width is, and again against the live
-   * window at drag time: a position saved on a second monitor is otherwise a
-   * panel nobody can reach.
+   * It replaced two floating windows, each with four numbers here (where it
+   * sat and how big it was). Those are gone rather than kept unread: a stored
+   * file that still carries them loses them on the next write, which is what
+   * `coerceUi` naming every field is for.
    */
-  toolWindowX: number;
-  toolWindowY: number;
-  /**
-   * And how big it is. The panel was a hard-coded 232px, which is what sent
-   * the version history off to a modal and what left the inspector showing
-   * `Items[0].tag.display.Name` three characters at a time.
-   */
-  toolWindowW: number;
-  toolWindowH: number;
-  /**
-   * The inspector's own floating window.
-   *
-   * A separate pair rather than one shared position, because both windows can
-   * be open at once and a single stored position would stack them.
-   */
-  inspectorWindowX: number;
-  inspectorWindowY: number;
-  inspectorWindowW: number;
-  inspectorWindowH: number;
+  dockWidth: number;
+  dockCollapsed: boolean;
   /**
    * The materials list with every state of a block merged into one slot:
    * vines on four walls are one slot of vines rather than four.
@@ -576,8 +560,9 @@ export interface UiSettings {
    */
   creative: CreativeSettings;
   /**
-   * The creative tool's options window, the third floating panel. Its own
-   * place for the inspector's reason: all three can be open at once.
+   * The creative tool's options window: the one tool window that still
+   * floats, because it is settings for what the right button does in flight
+   * and the user asked for those to float.
    */
   creativeWindowX: number;
   creativeWindowY: number;
@@ -668,6 +653,14 @@ export const DEFAULT_HOTBAR: readonly string[] = [
 export const SIDEBAR_WIDTH = { min: 320, max: 720, minViewport: 360 } as const;
 
 /**
+ * The docked tools' panel. Narrower than the chat at both ends: its rows are
+ * label-and-field pairs and a slot grid, which read at 260 and gain nothing
+ * past 560 but a wider gap between the label and the field. The live window is
+ * the second clamp, with the chat's width reserved, as for the chat.
+ */
+export const DOCK_WIDTH = { min: 260, max: 560 } as const;
+
+/**
  * What a resizable floating panel may become, in CSS pixels.
  *
  * A minimum because a panel dragged to nothing cannot be dragged back -- the
@@ -695,27 +688,16 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   sidebarCollapsed: false,
   theme: "system",
   language: "en",
-  // Below the viewport's HUD line rather than on top of it: both were at 16,
-  // in the same containing block, so the panel opened over the text telling
-  // you how to fly.
-  toolWindowX: 16,
-  toolWindowY: 64,
-  toolWindowW: 232,
-  toolWindowH: 420,
-  // Below the tool window rather than beside it: the viewport is wider than it
-  // is tall, and two panels down the same edge leave the middle clear.
-  inspectorWindowX: 16,
-  inspectorWindowY: 500,
-  inspectorWindowW: 300,
-  inspectorWindowH: 320,
+  dockWidth: 300,
+  dockCollapsed: false,
   materialsUnify: false,
   materialsSort: "countDesc",
   creative: DEFAULT_CREATIVE_SETTINGS,
-  // Beside the tool window rather than under it: the inspector is under it,
-  // and in flight the middle of the view is where the crosshair is. Not
-  // against the right edge -- `ToolWindow` keeps only a margin of a panel
-  // inside the pane, so a panel pushed past it hangs over the sidebar.
-  creativeWindowX: 264,
+  // Below the viewport's HUD line rather than on top of it, against the
+  // docked panel: in flight the middle of the view is where the crosshair is.
+  // Not against the right edge -- `ToolWindow` keeps only a margin of a panel
+  // inside the pane, so a panel pushed past it hangs over the chat.
+  creativeWindowX: 16,
   creativeWindowY: 64,
   creativeWindowW: 300,
   creativeWindowH: 340,

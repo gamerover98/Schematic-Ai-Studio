@@ -29,6 +29,7 @@ export type MenuCommand =
   | "save"
   | "saveAs"
   | "close"
+  | "convert"
   | "undo"
   | "redo"
   | "about"
@@ -193,6 +194,14 @@ export function menuModel(state: MenuState): MenuItemModel[] {
           accelerator: "CmdOrCtrl+Shift+S",
           enabled: state.hasDocument,
         },
+        { separator: true },
+        /*
+         * A verb about files, not about the open document -- it reads one
+         * file and writes another without opening either -- so it belongs
+         * here rather than in the bar beside the document's own settings,
+         * where it sat for a long time. Never disabled, for the same reason.
+         */
+        { command: "convert", label: "Convert…", enabled: true },
         { separator: true },
         {
           command: "close",

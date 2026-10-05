@@ -46,6 +46,11 @@
     busy: boolean;
     onnew: () => void;
     onopen: () => void;
+    /**
+     * Converting a file someone sent you is a thing to do before there is
+     * anything open at all, and this is what the window shows then.
+     */
+    onconvert: () => void;
     onopenrecent: (filePath: string) => void;
     onopenartifact: (artifact: Artifact) => void;
     onrevealartifact: (artifact: Artifact) => void;
@@ -70,6 +75,7 @@
     busy,
     onnew,
     onopen,
+    onconvert,
     onopenrecent,
     onopenartifact,
     onrevealartifact,
@@ -156,6 +162,7 @@
     <div class="actions">
       <button class="primary" onclick={onnew} disabled={busy}>{t("doc.new")}</button>
       <button onclick={onopen} disabled={busy}>{t("doc.open")}</button>
+      <button onclick={onconvert} title={t("convert.openHint")}>{t("start.convert")}</button>
     </div>
 
     {#if shown.length > 0}

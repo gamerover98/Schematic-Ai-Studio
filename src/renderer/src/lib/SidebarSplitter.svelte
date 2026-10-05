@@ -19,9 +19,30 @@
     onresize: (width: number) => void;
     /** Fired once when the gesture ends; this is what gets persisted. */
     oncommit: (width: number) => void;
+    /**
+     * Which edge the panel is docked to. The chat is on the right and the
+     * tools' panel on the left, and the arithmetic is each other's mirror.
+     */
+    side?: "left" | "right";
+    /** The panel's own bounds: `SIDEBAR_WIDTH` for the chat, `DOCK_WIDTH` for the tools. */
+    limits?: { readonly min: number; readonly max: number };
+    /**
+     * What the panel on the other side is taking, so the two together never
+     * leave the viewport narrower than `SIDEBAR_WIDTH.minViewport`.
+     */
+    reserve?: number;
+    label?: string;
   }
 
-  const { width, onresize, oncommit }: Props = $props();
+  const {
+    width,
+    onresize,
+    oncommit,
+    side = "right",
+    limits = SIDEBAR_WIDTH,
+    reserve = 0,
+    label,
+  }: Props = $props();
 
   let dragging = $state(false);
 
@@ -31,8 +52,8 @@
    * window width is the second clamp, applied on every move.
    */
   function clamp(value: number): number {
-    const max = Math.min(SIDEBAR_WIDTH.max, window.innerWidth - SIDEBAR_WIDTH.minViewport);
-    return Math.round(Math.min(Math.max(value, SIDEBAR_WIDTH.min), Math.max(max, SIDEBAR_WIDTH.min)));
+    const max = Math.min(limits.max, window.innerWidth - reserve - SIDEBAR_WIDTH.minViewport);
+    return Math.round(Math.min(Math.max(value, limits.min), Math.max(max, limits.min)));
   }
 
   /**
@@ -59,14 +80,15 @@
   }
 
   /**
-   * The panel is on the *right*, so its width is the distance from the pointer
-   * to the right-hand edge of the window -- not `clientX`, which is how wide
-   * the viewport is. Getting this backwards does not fail loudly: the splitter
-   * still drags, it just grows the panel when you pull it narrower.
+   * A panel on the *right* is as wide as the distance from the pointer to the
+   * right-hand edge of the window -- not `clientX`, which is how wide the
+   * viewport is. Getting this backwards does not fail loudly: the splitter
+   * still drags, it just grows the panel when you pull it narrower. A panel on
+   * the left starts at the window's edge, so there it *is* `clientX`.
    */
   function onPointerMove(event: PointerEvent): void {
     if (!dragging) return;
-    onresize(clamp(window.innerWidth - event.clientX));
+    onresize(clamp(side === "left" ? event.clientX : window.innerWidth - event.clientX));
   }
 
   function endDrag(event: PointerEvent): void {
@@ -81,14 +103,17 @@
   /**
    * Arrow keys move the *splitter*, not the number. With the panel on the
    * right, dragging the divider left makes the panel wider -- so ArrowLeft has
-   * to grow it, or the keyboard would disagree with the mouse.
+   * to grow it, or the keyboard would disagree with the mouse. On the left it
+   * is ArrowRight.
    */
   function onKeyDown(event: KeyboardEvent): void {
+    const grow = side === "left" ? "ArrowRight" : "ArrowLeft";
+    const shrink = side === "left" ? "ArrowLeft" : "ArrowRight";
     let next: number | null = null;
-    if (event.key === "ArrowLeft") next = width + STEP;
-    else if (event.key === "ArrowRight") next = width - STEP;
-    else if (event.key === "Home") next = SIDEBAR_WIDTH.min;
-    else if (event.key === "End") next = SIDEBAR_WIDTH.max;
+    if (event.key === grow) next = width + STEP;
+    else if (event.key === shrink) next = width - STEP;
+    else if (event.key === "Home") next = limits.min;
+    else if (event.key === "End") next = limits.max;
     if (next === null) return;
     event.preventDefault();
     const clamped = clamp(next);
@@ -112,10 +137,10 @@
   role="separator"
   tabindex="0"
   aria-orientation="vertical"
-  aria-label={t("sidebar.resize")}
+  aria-label={label ?? t("sidebar.resize")}
   aria-valuenow={Math.round(width)}
-  aria-valuemin={SIDEBAR_WIDTH.min}
-  aria-valuemax={SIDEBAR_WIDTH.max}
+  aria-valuemin={limits.min}
+  aria-valuemax={limits.max}
   onpointerdown={onPointerDown}
   onpointermove={onPointerMove}
   onpointerup={endDrag}
@@ -128,10 +153,9 @@
 <style>
   .splitter {
     position: relative;
-    width: 7px;
+    width: 6px;
     cursor: col-resize;
     background: var(--bg);
-    border-left: 1px solid var(--border);
     display: flex;
     align-items: center;
     justify-content: center;

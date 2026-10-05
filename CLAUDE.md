@@ -645,9 +645,11 @@ viewer draws is `shapeCells`' cells and cannot disagree with the edit.
 
 `patchUi` is queued, and the tools are why: each write spreads `settings.ui`,
 which only moves when main answers, so two in one instant both spread the old
-block and the second undid the first. The options window opens beside the tool
-window, not against the right edge: `ToolWindow` keeps only a margin of a panel
-inside the pane, so one pushed past it hangs over the sidebar.
+block and the second undid the first. The options window opens against the
+docked panel, not against the right edge: `ToolWindow` keeps only a margin of a
+panel inside the pane, so one pushed past it hangs over the chat. It is the one
+tool window that still floats, because it is settings for what the right button
+does in flight, and the user asked for those to float.
 
 **Terrain is a surface from a noise, and it is the same surface everywhere.**
 `shared/terrain.ts` gives every column the height of its top block,
@@ -2062,8 +2064,8 @@ Where the three went, and why each destination is the honest one:
   `ToolWindow` was a fixed 232px and a row here reads `manual · 64×32×64 ·
   12,048 blocks` with a Restore beside it, so every row ellipsised. It differs
   from the tools and the inspector in the way that decides its default: nothing
-  *summons* it — a selection brings the tools back and a click brings the
-  inspector back — so it starts closed and has a button in the document bar. A
+  *summons* it — a selection brings up the tools' tab and a click the
+  inspector's — so it starts closed and has a button in the bar, History. A
   panel with no way back is a feature you delete by accident.
 - the **generated files** to the start screen beside the recents. Their only two
   verbs are "open this" and "show me where it is", which are that screen's whole
@@ -2141,6 +2143,41 @@ was unsaved work, but only while you were looking away from what you were
 building. The title is main's (`windowTitle` in `menu_model.ts`), with the dirty
 marker leading, because a taskbar button truncates from the right.
 
+**The shell is docked: a bar in three thirds, a panel either side, a status
+bar.** The user's choice from the UX audit's three directions -- the
+workbench's structure in the inventory's material. Tool windows dock to the
+edges; the windows that are settings (the creative options, every modal)
+float.
+
+- **The bar** is a grid of `1fr auto 1fr`, so the camera switch stays in the
+  middle of the window whatever the sides hold: the document on the left (its
+  name and a **Document** menu holding its version, dimensions, empty space,
+  anchor and NBT, which were six buttons along the bar), how you look at it in
+  the middle, Undo, Redo, History, the gear and the two panel toggles on the
+  right. **Convert** is about files rather than the open document, so it moved
+  to File (`menuConvert`) and the start screen.
+- **The left panel** (`DockPanel`) is the selection's tools, the inspector and
+  the terrain as tabs, where two floating windows used to open over the build,
+  over each other and over the HUD. The gesture picks the tab, as it used to
+  bring a window back: a click asks for the inspector, and selecting a region
+  brings up the tools -- **only on the way into a region**, or dragging a face
+  would pull the panel off the Terrain tab every frame. The tabs are snippets
+  named `selectionTab`, `inspectorTab`, `terrainTab`: a snippet binds its name
+  in `App.svelte`'s markup, and one called `selection` shadows the selection
+  every prop inside it is passed. Its width and whether it is put away are
+  `UiSettings.dockWidth`/`dockCollapsed`, clamped to `DOCK_WIDTH`; the two
+  splitters each reserve the other panel's width.
+- **The status bar** is the grid's third row, never an overlay: the selection
+  (a block in two areas counted once), the schematic's size and blocks, its
+  container and version, and the MCP state, which is the one thing in it you
+  can press.
+- **The start screen steps aside for the dialogs it opens.** Every scrim is on
+  the modal tier and it comes later in the document, so it painted over New's
+  dialog and Convert's.
+- **The compass moved to the top-right corner**, where a 3D editor keeps its
+  navigation gizmo: with a panel's width gone from the viewport, the centred
+  hotbar met it in the bottom-left. The frame counter sits under it.
+
 **A floating panel is resizable, and its size is two settings per window.**
 `ToolWindow` was `width: 232px` in CSS with no size props at all — the number
 that sent the version history off to a modal, and that leaves the inspector
@@ -2176,8 +2213,8 @@ the areas, overlaps once, through `forEachUnionCell`, the walk the fill takes.
 It is **asked for, not pushed**: the selection is the renderer's, so
 `App.svelte` asks once the selection has held still for 120 ms, one request in
 flight through `coalesce`. A 256x64x256 selection is about 35 ms in main.
-Only while the list is on screen, which is the tool window, which is only
-there with a selection: it used to be read off `DocumentState.palette` with
+Only while the list is on screen, which is the Selection tab of the docked
+panel, with a selection: it used to be read off `DocumentState.palette` with
 nothing selected, for a window that could not show it. Main counts the whole
 schematic for `regions: null`, which nothing in the window asks yet.
 

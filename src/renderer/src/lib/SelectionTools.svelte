@@ -20,9 +20,7 @@
   import BannerPatternHint from "./BannerPatternHint.svelte";
   import Icon from "./Icon.svelte";
   import MaterialsInventory from "./MaterialsInventory.svelte";
-  import TerrainOptions from "./TerrainOptions.svelte";
-  import type { ErodeToolSettings, SmoothToolSettings, TerrainToolSettings } from "../../../shared/creative.js";
-  import { EROSION_PRESET_NAMES, SMOOTH_ITERATIONS, type ErosionPreset } from "../../../shared/terrain.js";
+  import { mapFrameOf } from "./map_frame.js";
   import { isBannerBlock } from "../../../shared/banner_patterns.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
   import { tryParseMix } from "../../../shared/block_mix.js";
@@ -128,23 +126,6 @@
     ondelete: () => void;
     onclearselection: () => void;
     onselectall: () => void;
-    /**
-     * The terrain, shared with the creative brush (`CreativeSettings.terrain`):
-     * one landscape, painted in or laid over a box.
-     */
-    terrain?: TerrainToolSettings | null;
-    onterrainchange?: (next: TerrainToolSettings) => void;
-    onlayterrain?: () => void;
-    onfitterrain?: () => void;
-    /** `DocumentState.frame`, where the terrain's noise is read. */
-    origin?: readonly [number, number, number];
-    /** The smooth and erode brushes' settings, which the selection's buttons use too. */
-    smooth?: SmoothToolSettings | null;
-    onsmoothchange?: (next: SmoothToolSettings) => void;
-    onsmooth?: () => void;
-    erode?: ErodeToolSettings | null;
-    onerodechange?: (next: ErodeToolSettings) => void;
-    onerode?: () => void;
   }
 
   const {
@@ -181,21 +162,7 @@
     ondelete,
     onclearselection,
     onselectall,
-    terrain = null,
-    onterrainchange = () => {},
-    onlayterrain = () => {},
-    onfitterrain = () => {},
-    origin = [0, 0, 0],
-    smooth = null,
-    onsmoothchange = () => {},
-    onsmooth = () => {},
-    erode = null,
-    onerodechange = () => {},
-    onerode = () => {},
   }: Props = $props();
-
-  /** Whether the terrain section is open. Closed by default: most selections are not hills. */
-  let terrainOpen = $state(false);
 
   /**
    * A slot of the inventory, clicked: `materialAction` decides what the click
@@ -248,27 +215,8 @@
 
   const none = $derived(selection === null);
 
-  /**
-   * What the map of a mix is drawn over: the box round every selected area,
-   * which is what a fill covers, or the schematic with nothing selected, which
-   * is what the hand takes its shares over.
-   */
-  const mapFrame = $derived.by((): Box | null => {
-    const boxes = selection === null ? areas : [selection, ...areas];
-    if (boxes.length > 0) {
-      return {
-        minX: Math.min(...boxes.map((box) => box.minX)),
-        minY: Math.min(...boxes.map((box) => box.minY)),
-        minZ: Math.min(...boxes.map((box) => box.minZ)),
-        maxX: Math.max(...boxes.map((box) => box.maxX)),
-        maxY: Math.max(...boxes.map((box) => box.maxY)),
-        maxZ: Math.max(...boxes.map((box) => box.maxZ)),
-      };
-    }
-    if (documentSize === null) return null;
-    const [width, height, length] = documentSize;
-    return { minX: 0, minY: 0, minZ: 0, maxX: width - 1, maxY: height - 1, maxZ: length - 1 };
-  });
+  /** What the map of a mix is drawn over: see `mapFrameOf`. */
+  const mapFrame = $derived(mapFrameOf(selection, areas, documentSize));
 
   /*
    * Whether any block in With is a banner, however it was spelled: a bare id,
@@ -345,217 +293,145 @@
     {/if}
     <p class="hint">{t("selection.areasHint")}</p>
   {:else}
+    <!--
+      Nothing to act on. The panel is docked and stays, so it says how to make
+      a selection and offers the one way that needs no gesture, rather than a
+      column of greyed buttons explaining themselves one tooltip at a time.
+    -->
     <p class="hint">{t("selection.hint")}</p>
+    <div class="row">
+      <button onclick={onselectall} disabled={busy}>{t("selection.all")}</button>
+    </div>
   {/if}
 
-  {#if materials !== null && (materials.palette.length > 0 || materials.air > 0 || materials.outside > 0)}
+  {#if !none}
+    {#if materials !== null && (materials.palette.length > 0 || materials.air > 0 || materials.outside > 0)}
+      <div class="group">
+        <MaterialsInventory
+          title={selection ? t("materials.ofSelection") : t("materials.ofDocument")}
+          palette={materials.palette}
+          air={materials.air}
+          outside={materials.outside}
+          cells={materials.cells}
+          scope={selection ? "selection" : "document"}
+          {legacy}
+          unify={materialsUnify}
+          onunifychange={onmaterialsunifychange}
+          sort={materialsSort}
+          onsortchange={onmaterialssortchange}
+          onaction={onMaterial}
+          {glowing}
+          {glowTotal}
+          {glowCapped}
+          {glowCoarse}
+          {onglowclear}
+        />
+      </div>
+    {/if}
+
+    <!--
+      Replace first, then With, so the panel reads top to bottom the way the
+      sentence does: replace these with those. It used to read the other way --
+      "Block", then "Replace" with a button saying "Replace with the block
+      above" -- which made the field nearest the button the one it did *not*
+      write.
+
+      With is also what Fill writes and what the hand places, because it is the
+      active hotbar slot: one answer to "what am I holding".
+    -->
     <div class="group">
-      <MaterialsInventory
-        title={selection ? t("materials.ofSelection") : t("materials.ofDocument")}
-        palette={materials.palette}
-        air={materials.air}
-        outside={materials.outside}
-        cells={materials.cells}
-        scope={selection ? "selection" : "document"}
+      <label for="tool-from-block">{t("selection.replace")}</label>
+      <BlockMixField
+        id="tool-from-block"
+        value={replaceFrom}
+        weights={false}
+        placeholder="minecraft:cobblestone"
+        {blocks}
+        {placeable}
         {legacy}
-        unify={materialsUnify}
-        onunifychange={onmaterialsunifychange}
-        sort={materialsSort}
-        onsortchange={onmaterialssortchange}
-        onaction={onMaterial}
-        {glowing}
-        {glowTotal}
-        {glowCapped}
-        {glowCoarse}
-        {onglowclear}
+        onchange={onreplacefromchange}
+        onbrowse={() => onbrowse("replace")}
+        ondropblock={(dragged) => onMaterial(dragged, "addReplace")}
       />
     </div>
-  {/if}
 
-  <!--
-    Replace first, then With, so the panel reads top to bottom the way the
-    sentence does: replace these with those. It used to read the other way --
-    "Block", then "Replace" with a button saying "Replace with the block
-    above" -- which made the field nearest the button the one it did *not*
-    write.
-
-    With is also what Fill writes and what the hand places, because it is the
-    active hotbar slot: one answer to "what am I holding".
-  -->
-  <div class="group">
-    <label for="tool-from-block">{t("selection.replace")}</label>
-    <BlockMixField
-      id="tool-from-block"
-      value={replaceFrom}
-      weights={false}
-      placeholder="minecraft:cobblestone"
-      {blocks}
-      {placeable}
-      {legacy}
-      onchange={onreplacefromchange}
-      onbrowse={() => onbrowse("replace")}
-      ondropblock={(dragged) => onMaterial(dragged, "addReplace")}
-    />
-  </div>
-
-  <div class="swap-row">
-    <button
-      class="swap"
-      type="button"
-      onclick={onswap}
-      disabled={replaceFrom.trim() === "" && block.trim() === ""}
-      title={t("selection.swap")}
-      aria-label={t("selection.swap")}
-    >
-      <Icon name="swapVertical" size={14} weight={1.8} />
-    </button>
-  </div>
-
-  <div class="group">
-    <label for="tool-to-block">{t("selection.with")}</label>
-    <BlockMixField
-      id="tool-to-block"
-      value={block}
-      placeholder="minecraft:stone"
-      {blocks}
-      {placeable}
-      {legacy}
-      frame={mapFrame}
-      onchange={onblockchange}
-      onbrowse={() => onbrowse("fill")}
-      ondropblock={(dragged) => onMaterial(dragged, "addWith")}
-    />
-    {#if holdsBanner}
-      <BannerPatternHint where="place" />
-    {/if}
-  </div>
-
-  <div class="row">
-    <button
-      class="primary"
-      onclick={() => onfill(block)}
-      disabled={busy || none || block.trim() === ""}
-      title={none ? t("selection.selectFirst") : t("selection.fillHint")}
-    >
-      {t("selection.fill")}
-    </button>
-    <button
-      onclick={() => onreplace(replaceFrom, block)}
-      disabled={busy || none || replaceFrom.trim() === "" || block.trim() === ""}
-      title={none ? t("selection.selectFirst") : t("selection.replaceHint")}
-    >
-      {t("selection.replaceButton")}
-    </button>
-  </div>
-
-  <!--
-    Cut, copy, paste, move, turn and mirror used to be nine buttons here.
-
-    They are handles on the gizmo in the viewport now, which is where the
-    thing they act on actually is -- a button that turns a region you are
-    looking at somewhere else is a worse version of grabbing it. What stays
-    is what has no handle to hang on: the block operations, and the three
-    that are about the selection rather than about its contents.
-
-    The keyboard kept all of them: Ctrl+C, Ctrl+X, Ctrl+V and Delete are in
-    `App.svelte`, and the command palette lists the rest.
-  -->
-  <div class="row">
-    <button onclick={onselectall} disabled={busy}>{t("selection.all")}</button>
-    <button onclick={onclearselection} disabled={busy || none} title={t("selection.clearHint")}>
-      {t("selection.clear")}
-    </button>
-    <button
-      class="danger"
-      onclick={ondelete}
-      disabled={busy || none}
-      title={t("selection.deleteHint")}
-    >
-      {t("selection.delete")}
-    </button>
-  </div>
-
-  {#if terrain !== null}
-    <div class="group terrain">
+    <div class="swap-row">
       <button
+        class="swap"
         type="button"
-        class="disclosure"
-        aria-expanded={terrainOpen}
-        title={t("selection.terrainHint")}
-        onclick={() => (terrainOpen = !terrainOpen)}
+        onclick={onswap}
+        disabled={replaceFrom.trim() === "" && block.trim() === ""}
+        title={t("selection.swap")}
+        aria-label={t("selection.swap")}
       >
-        <Icon name={terrainOpen ? "chevronDown" : "chevronRight"} size={12} weight={2} />
-        <Icon name="terrain" size={14} weight={1.8} />
-        <span>{t("selection.terrain")}</span>
+        <Icon name="swapVertical" size={14} weight={1.8} />
       </button>
-      {#if terrainOpen}
-        <TerrainOptions
-          settings={terrain}
-          onchange={onterrainchange}
-          {blocks}
-          {placeable}
-          {legacy}
-          frame={mapFrame ?? { minX: 0, minY: 0, minZ: 0, maxX: 63, maxY: 63, maxZ: 63 }}
-          {origin}
-          idPrefix="selection-terrain"
-        />
-        <div class="row">
-          <button onclick={onfitterrain} disabled={busy || none} title={t("selection.fitTerrainHint")}>
-            {t("selection.fitTerrain")}
-          </button>
-          <button
-            class="primary"
-            onclick={onlayterrain}
-            disabled={busy || none}
-            title={none ? t("selection.selectFirst") : t("selection.layTerrainHint")}
-          >
-            {t("selection.layTerrain")}
-          </button>
-        </div>
-        {#if smooth !== null}
-          <div class="subtool">
-            <label for="selection-smooth-passes">{t("selection.smoothPasses")}</label>
-            <input
-              id="selection-smooth-passes"
-              type="number"
-              min={SMOOTH_ITERATIONS.min}
-              max={SMOOTH_ITERATIONS.max}
-              value={smooth.iterations}
-              onchange={(event) => {
-                const value = Math.round(Number(event.currentTarget.value));
-                if (Number.isFinite(value)) {
-                  onsmoothchange({
-                    ...smooth,
-                    iterations: Math.min(SMOOTH_ITERATIONS.max, Math.max(SMOOTH_ITERATIONS.min, value)),
-                  });
-                }
-              }}
-            />
-            <button onclick={onsmooth} disabled={busy || none} title={t("selection.smoothHint")}>
-              {t("selection.smooth")}
-            </button>
-          </div>
-        {/if}
-        {#if erode !== null}
-          <div class="subtool">
-            <label for="selection-erode-preset">{t("selection.erodePreset")}</label>
-            <select
-              id="selection-erode-preset"
-              value={erode.preset}
-              onchange={(event) => onerodechange({ ...erode, preset: event.currentTarget.value as ErosionPreset })}
-            >
-              {#each EROSION_PRESET_NAMES as preset (preset)}
-                <option value={preset}>{t(`erode.preset.${preset}`)}</option>
-              {/each}
-            </select>
-            <button onclick={onerode} disabled={busy || none} title={t("selection.erodeHint")}>
-              {t("selection.erode")}
-            </button>
-          </div>
-          <p class="hint">{t(`erode.presetHint.${erode.preset}`)}</p>
-        {/if}
+    </div>
+
+    <div class="group">
+      <label for="tool-to-block">{t("selection.with")}</label>
+      <BlockMixField
+        id="tool-to-block"
+        value={block}
+        placeholder="minecraft:stone"
+        {blocks}
+        {placeable}
+        {legacy}
+        frame={mapFrame}
+        onchange={onblockchange}
+        onbrowse={() => onbrowse("fill")}
+        ondropblock={(dragged) => onMaterial(dragged, "addWith")}
+      />
+      {#if holdsBanner}
+        <BannerPatternHint where="place" />
       {/if}
     </div>
+
+    <div class="row">
+      <button
+        class="primary"
+        onclick={() => onfill(block)}
+        disabled={busy || none || block.trim() === ""}
+        title={none ? t("selection.selectFirst") : t("selection.fillHint")}
+      >
+        {t("selection.fill")}
+      </button>
+      <button
+        onclick={() => onreplace(replaceFrom, block)}
+        disabled={busy || none || replaceFrom.trim() === "" || block.trim() === ""}
+        title={none ? t("selection.selectFirst") : t("selection.replaceHint")}
+      >
+        {t("selection.replaceButton")}
+      </button>
+    </div>
+
+    <!--
+      Cut, copy, paste, move, turn and mirror used to be nine buttons here.
+
+      They are handles on the gizmo in the viewport now, which is where the
+      thing they act on actually is -- a button that turns a region you are
+      looking at somewhere else is a worse version of grabbing it. What stays
+      is what has no handle to hang on: the block operations, and the three
+      that are about the selection rather than about its contents.
+
+      The keyboard kept all of them: Ctrl+C, Ctrl+X, Ctrl+V and Delete are in
+      `App.svelte`, and the command palette lists the rest.
+    -->
+    <div class="row">
+      <button onclick={onselectall} disabled={busy}>{t("selection.all")}</button>
+      <button onclick={onclearselection} disabled={busy || none} title={t("selection.clearHint")}>
+        {t("selection.clear")}
+      </button>
+      <button
+        class="danger"
+        onclick={ondelete}
+        disabled={busy || none}
+        title={t("selection.deleteHint")}
+      >
+        {t("selection.delete")}
+      </button>
+    </div>
+
   {/if}
 </div>
 
@@ -671,48 +547,5 @@
 
   .tools :global(.hint) {
     margin: 0;
-  }
-
-  .terrain {
-    padding-top: 6px;
-    border-top: 1px solid var(--border);
-  }
-
-  .subtool {
-    display: flex;
-    gap: 5px;
-    align-items: center;
-  }
-
-  .subtool label {
-    flex: 0 0 64px;
-    margin: 0;
-    color: var(--text-dim);
-  }
-
-  .subtool input,
-  .subtool select {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .subtool button {
-    flex: 0 0 auto;
-    padding: 5px 8px;
-    font-size: 12px;
-  }
-
-  .disclosure {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    padding: 3px 4px;
-    border: 0;
-    background: none;
-    color: var(--text);
-    font: inherit;
-    font-weight: 600;
-    text-align: left;
-    cursor: pointer;
   }
 </style>

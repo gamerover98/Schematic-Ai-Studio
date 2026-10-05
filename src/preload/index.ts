@@ -289,6 +289,7 @@ const api: BgptApi = {
   onMenuSave: (listener) => subscribe(IPC.menuSave, listener),
   onMenuSaveAs: (listener) => subscribe(IPC.menuSaveAs, listener),
   onMenuClose: (listener) => subscribe(IPC.menuClose, listener),
+  onMenuConvert: (listener) => subscribe(IPC.menuConvert, listener),
   onMenuUndo: (listener) => subscribe(IPC.menuUndo, listener),
   onMenuRedo: (listener) => subscribe(IPC.menuRedo, listener),
   onMenuAbout: (listener) => subscribe(IPC.menuAbout, listener),

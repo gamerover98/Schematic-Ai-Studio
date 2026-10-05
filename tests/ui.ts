@@ -25,6 +25,7 @@ import {
   isWithinBounds,
   placePopover,
 } from "../src/renderer/src/lib/floating.js";
+import { mapFrameOf } from "../src/renderer/src/lib/map_frame.js";
 import {
   AA_LEVELS,
   blocksInDocument,
@@ -5412,15 +5413,18 @@ console.log("\n--- the materials, as an inventory ---");
     /setTimeout\(\(\) => \{[\s\S]{0,300}refreshMaterials\(\)/.test(app),
   );
   /*
-   * The list is drawn in the tool window, which is only there with a
+   * The list is drawn in the Selection tab of the docked panel, with a
    * selection. It used to be read off `DocumentState.palette` with nothing
    * selected, which counts the states the file holds -- a bed was two beds --
    * for a window that could not show it; asking main for the whole schematic
-   * on every edit instead would be the same answer to nobody, paid for.
+   * on every edit instead would be the same answer to nobody, paid for. With
+   * the panel put away or another tab up, the list is not on screen either.
    */
   check(
     "nothing is counted while the list is not on screen",
-    app.includes("if (!toolsOpen || selection === null || docState === null) {"),
+    app.includes(
+      'if (dockCollapsed || dockTab !== "selection" || selection === null || docState === null) {',
+    ),
   );
   check("...and nothing is read off the document's state", !app.includes("documentMaterials("));
   const replaceArm = tools.slice(tools.indexOf('case "replace":'), tools.indexOf('case "state":'));
@@ -6656,6 +6660,123 @@ console.log("\n--- audit fixes ---");
     !readFileSync(path.join(RENDERER, "App.svelte"), "utf8").includes("viewport.bounds") &&
       /\{#if meshBounds\}[\s\S]{0,200}viewport\.bounds/.test(viewer),
   );
+}
+
+// --- the shell: docked panels, a bar in three thirds, a status bar ----------
+console.log("\n--- shell ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+
+  // The tools dock to the edges; the settings-like windows float. The user's
+  // choice in the UX audit, and the one floating tool window left is settings.
+  equal("one floating tool window is left", (app.match(/<ToolWindow\n/g) ?? []).length, 1);
+  check("...and it is the creative tool's options", /<ToolWindow\n\s*title=\{t\("creative\.optionsTitle"/.test(app));
+  check(
+    "the selection, the inspector and the terrain are tabs of the docked panel",
+    /<DockPanel[\s\S]*\{#snippet selectionTab\(\)\}[\s\S]*<SelectionTools[\s\S]*\{#snippet inspectorTab\(\)\}[\s\S]*<InspectorPanel[\s\S]*\{#snippet terrainTab\(\)\}[\s\S]*<TerrainPanel/.test(
+      app,
+    ),
+  );
+  // A snippet binds its name in the parent's markup, so one called
+  // `selection` would shadow the selection every prop inside it is passed.
+  check("no tab's snippet is named after something the app holds", !/\{#snippet (selection|inspector|terrain)\(\)/.test(app));
+  check(
+    "the terrain is a tab of its own, not a section at the foot of the selection's tools",
+    !lib("SelectionTools.svelte").includes("TerrainOptions") && lib("TerrainPanel.svelte").includes("<TerrainOptions"),
+  );
+
+  // The gesture brings the tab up, as it used to bring the windows back.
+  check("a click asks for the inspector's tab", app.includes('if (inspection !== null) dockTab = "inspector";'));
+  check(
+    "a region brings up the tools' tab, only on the way into one",
+    /if \(region && !hadRegion\) dockTab = "selection";\s*hadRegion = region;/.test(app),
+  );
+
+  // The bar: the document, how you look at it, what you can do about it.
+  check(
+    "the bar is three thirds, the middle one in the middle of the window",
+    /\.navbar \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto minmax\(0, 1fr\);/.test(app),
+  );
+  check(
+    "the document's own settings are one menu beside its name, not five buttons",
+    !app.includes('class="nbt-open"') && lib("DocumentBar.svelte").includes("<DocumentMenu"),
+  );
+  const opens: [string, RegExp][] = [
+    ["version", /case "version":\s*mcVersionOpen = true;/],
+    ["dimensions", /case "dimensions":\s*dimensionsOpen = true;/],
+    ["void", /case "void":[\s\S]{0,200}voidOpen = true;/],
+    ["anchor", /case "anchor":\s*anchorOpen = true;/],
+    ["nbt", /case "nbt":\s*void openNbtPanel\(\);/],
+  ];
+  equal(
+    "...and each of its items opens its own dialog",
+    opens.filter(([, pattern]) => !pattern.test(app)).map(([item]) => item),
+    [],
+  );
+  const menu = lib("DocumentMenu.svelte");
+  check(
+    "the menu is a menu to a screen reader, and Escape stays its own",
+    menu.includes('aria-haspopup="menu"') &&
+      menu.includes('role="menuitem"') &&
+      /event\.key === "Escape"[\s\S]{0,200}event\.stopPropagation\(\)/.test(menu),
+  );
+  check(
+    "Convert is reached from File and from the start screen",
+    app.includes("api().onMenuConvert(() => (convertOpen = true))") &&
+      app.includes("onconvert={() => (convertOpen = true)}") &&
+      /<button onclick=\{onconvert\}/.test(lib("StartScreen.svelte")),
+  );
+  // Every scrim is on the modal tier and the start screen comes later in the
+  // document, so it painted over the dialogs it had just opened.
+  check(
+    "the start screen steps aside for the dialogs it opens",
+    /const startVisible = \$derived\(\s*docState === null && recovery === null && !startDismissed && schematicDialog === null && !convertOpen,/.test(
+      app,
+    ),
+  );
+
+  // The status bar is a row of the window, not an overlay of the viewport.
+  check(
+    "the status bar is the grid's third row",
+    /main :global\(\.status-bar\) \{\s*grid-column: 1 \/ -1;\s*grid-row: 3;/.test(app) &&
+      !/position: (absolute|fixed)/.test(lib("StatusBar.svelte")),
+  );
+
+  // Two docked panels, two splitters, each the other's mirror.
+  check(
+    "a panel on the left is as wide as the pointer is far from the left edge",
+    lib("SidebarSplitter.svelte").includes('side === "left" ? event.clientX : window.innerWidth - event.clientX'),
+  );
+  check(
+    "...and each splitter leaves room for the other panel",
+    app.includes("reserve={sidebarCollapsed ? 0 : sidebarWidth}") && app.includes("reserve={docked ? dockWidth : 0}"),
+  );
+
+  // A menu at the leading end of a bar lines up with its button.
+  const window1440 = { viewportWidth: 1440, viewportHeight: 900, popoverWidth: 300, popoverHeight: 200, margin: 8, gap: 4 };
+  equal(
+    "a popover aligned to the start hangs from the control's left edge",
+    placePopover({ left: 60, top: 8, width: 90, height: 28 }, window1440, "below", "start"),
+    { x: 60, y: 40 },
+  );
+  equal(
+    "...where hanging leftwards would only have pinned it to the margin",
+    placePopover({ left: 60, top: 8, width: 90, height: 28 }, window1440, "below").x,
+    8,
+  );
+
+  // One frame for the With field's map and the Terrain tab's picture.
+  const box = (minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number) =>
+    ({ minX, minY, minZ, maxX, maxY, maxZ });
+  equal("with nothing selected, the frame is the schematic", mapFrameOf(null, [], [10, 4, 6]), box(0, 0, 0, 9, 3, 5));
+  equal(
+    "...and with areas selected, the box round all of them",
+    mapFrameOf(box(2, 0, 2, 4, 1, 4), [box(2, 0, 2, 4, 1, 4), box(8, 3, 0, 9, 5, 1)], [10, 6, 6]),
+    box(2, 0, 0, 9, 5, 4),
+  );
+  equal("...and nothing at all without a schematic", mapFrameOf(null, [], null), null);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

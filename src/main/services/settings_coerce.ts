@@ -51,6 +51,7 @@ import {
   MCP_PORT,
   PROVIDERS,
   SIDEBAR_WIDTH,
+  DOCK_WIDTH,
   THEMES,
   DEFAULT_EDITING_SETTINGS,
   VOID_OPACITY,
@@ -98,32 +99,19 @@ export function coerceUi(raw: unknown): UiSettings {
     sidebarCollapsed: source.sidebarCollapsed === true,
     theme: isTheme(source.theme) ? source.theme : DEFAULT_UI_SETTINGS.theme,
     language: isLanguage(source.language) ? source.language : DEFAULT_UI_SETTINGS.language,
-    // Only non-negative here. The real clamp is the live window, which this
-    // process cannot see, so the renderer applies it again on every drag and on
-    // resize -- the same two-stage arrangement `sidebarWidth` uses.
-    toolWindowX: coordinate(source.toolWindowX, DEFAULT_UI_SETTINGS.toolWindowX),
-    toolWindowY: coordinate(source.toolWindowY, DEFAULT_UI_SETTINGS.toolWindowY),
-    // Sizes get the floor, not the ceiling: the pane a panel has to fit in is
-    // the renderer's to measure, and it clamps again on every drag.
-    toolWindowW: extent(source.toolWindowW, DEFAULT_UI_SETTINGS.toolWindowW, PANEL_SIZE.minWidth),
-    toolWindowH: extent(source.toolWindowH, DEFAULT_UI_SETTINGS.toolWindowH, PANEL_SIZE.minHeight),
-    inspectorWindowX: coordinate(source.inspectorWindowX, DEFAULT_UI_SETTINGS.inspectorWindowX),
-    inspectorWindowY: coordinate(source.inspectorWindowY, DEFAULT_UI_SETTINGS.inspectorWindowY),
-    inspectorWindowW: extent(
-      source.inspectorWindowW,
-      DEFAULT_UI_SETTINGS.inspectorWindowW,
-      PANEL_SIZE.minWidth,
-    ),
-    inspectorWindowH: extent(
-      source.inspectorWindowH,
-      DEFAULT_UI_SETTINGS.inspectorWindowH,
-      PANEL_SIZE.minHeight,
-    ),
+    // Clamped on read like the chat's width; the renderer clamps again
+    // against the live window, with the chat's width reserved.
+    dockWidth: clampWidth(source.dockWidth, DOCK_WIDTH, DEFAULT_UI_SETTINGS.dockWidth),
+    dockCollapsed: source.dockCollapsed === true,
     materialsUnify: source.materialsUnify === true,
     materialsSort: isMaterialsSort(source.materialsSort)
       ? source.materialsSort
       : DEFAULT_UI_SETTINGS.materialsSort,
     creative: coerceCreative(source.creative),
+    // Only non-negative here. The real clamp is the live window, which this
+    // process cannot see, so the renderer applies it again on every drag and on
+    // resize -- the same two-stage arrangement `sidebarWidth` uses. Sizes get
+    // the floor, not the ceiling, for the same reason.
     creativeWindowX: coordinate(source.creativeWindowX, DEFAULT_UI_SETTINGS.creativeWindowX),
     creativeWindowY: coordinate(source.creativeWindowY, DEFAULT_UI_SETTINGS.creativeWindowY),
     creativeWindowW: extent(
@@ -288,6 +276,11 @@ function onlyAir(slot: string): boolean {
 function extent(raw: unknown, fallback: number, minimum: number): number {
   const value = Number(raw);
   return Number.isFinite(value) ? Math.max(minimum, Math.round(value)) : fallback;
+}
+
+function clampWidth(raw: unknown, limits: { min: number; max: number }, fallback: number): number {
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.min(limits.max, Math.max(limits.min, Math.round(value))) : fallback;
 }
 
 function coordinate(raw: unknown, fallback: number): number {

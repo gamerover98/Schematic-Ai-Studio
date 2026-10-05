@@ -160,6 +160,7 @@ import {
   isLoopbackAddress,
   DEFAULT_SETTINGS,
   DEFAULT_UI_SETTINGS,
+  DOCK_WIDTH,
   SIDEBAR_WIDTH,
   VOID_OPACITY,
   type EditingSettings,
@@ -1238,6 +1239,15 @@ console.log("\n--- application menu ---");
   equal("New works with nothing open", at(fileMenu(empty), "New…")?.enabled, true);
   equal("Open works with nothing open", at(fileMenu(empty), "Open…")?.enabled, true);
 
+  /*
+   * Convert is about files, not the open document: it reads one and writes
+   * another without opening either, so it is in File beside Open, and never
+   * dark. It sat in the application bar for a long time, beside the
+   * document's own settings, which is the one place it did not belong.
+   */
+  equal("Convert works with nothing open", at(fileMenu(empty), "Convert…")?.enabled, true);
+  equal("...and asks the window for the converter", at(fileMenu(open), "Convert…")?.command, "convert");
+
   for (const label of ["Save", "Save As…", "Close Schematic"]) {
     equal(`${label} is off with nothing open`, at(fileMenu(empty), label)?.enabled, false);
     equal(`${label} is on with a document`, at(fileMenu(open), label)?.enabled, true);
@@ -2009,16 +2019,10 @@ console.log("\n--- settings coercion ---");
     sidebarCollapsed: true,
     theme: "light",
     language: "en",
-    toolWindowX: 240,
-    toolWindowY: 96,
-    // Both above the minimum and neither the default, so a `coerceUi` that
+    // Inside `DOCK_WIDTH` and not the default, so a `coerceUi` that
     // substituted either would not survive the comparison.
-    toolWindowW: 340,
-    toolWindowH: 520,
-    inspectorWindowX: 300,
-    inspectorWindowY: 480,
-    inspectorWindowW: 380,
-    inspectorWindowH: 400,
+    dockWidth: 410,
+    dockCollapsed: true,
     // Neither the default, for the same reason.
     materialsUnify: true,
     materialsSort: "nameDesc",
@@ -2498,6 +2502,15 @@ console.log("\n--- settings coercion ---");
     "...and a hairline one clamped up",
     coerceUi({ sidebarWidth: 10 }).sidebarWidth,
     SIDEBAR_WIDTH.min,
+  );
+  // The docked tools' panel has bounds of its own, and the same two clamps.
+  equal("an over-wide tools panel is clamped down", coerceUi({ dockWidth: 9999 }).dockWidth, DOCK_WIDTH.max);
+  equal("...a hairline one clamped up", coerceUi({ dockWidth: 10 }).dockWidth, DOCK_WIDTH.min);
+  equal("...and nonsense is the default", coerceUi({ dockWidth: "wide" }).dockWidth, DEFAULT_UI_SETTINGS.dockWidth);
+  // The two floating windows it replaced leave nothing behind on the next write.
+  check(
+    "the tool windows' old places are not kept",
+    !("toolWindowX" in coerceUi({ toolWindowX: 40 })) && !("inspectorWindowW" in coerceUi({ inspectorWindowW: 300 })),
   );
 
   equal("an empty file is the defaults", coerceSettings({}), DEFAULT_SETTINGS);

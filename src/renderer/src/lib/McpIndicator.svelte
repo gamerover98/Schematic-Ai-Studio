@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * "MCP ●" in the application bar.
+   * "● MCP · listening" in the status bar.
    *
    * It exists because letting somebody else's model edit your build is only
    * reasonable if you can see that it can. The dot answers one question — can
@@ -28,6 +28,12 @@
 
   const { status, onopen }: Props = $props();
 
+  /*
+   * In the status bar since the shell was docked: it reports a state of the
+   * window rather than offering a verb, which is what that bar is for, and
+   * there is room there for the state in words beside the dot.
+   */
+
   const dot = $derived(dotFor(status));
 
   const label = $derived.by(() => {
@@ -36,6 +42,10 @@
         return tn("mcp.clients", status?.clients ?? 0);
       case "listening":
         return t("mcp.stateListening");
+      // It fell through to "starting", which is the one thing it is not: the
+      // server is up and taking anybody.
+      case "unauthenticated":
+        return t("mcp.stateUnauthenticated");
       case "error":
         return status?.message ?? t("mcp.stateError");
       default:
@@ -79,15 +89,34 @@
 >
   <span class="dot" style={`background: var(${dotColor(dot)})`}></span>
   <span class="name">{t("mcp.short")}</span>
+  <span class="state">{label}</span>
 </button>
 
 <style>
+  /* Flat, the height of the bar: a reading you can click, not a slab. */
   .mcp {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    font-size: 12px;
+    gap: var(--space-2);
+    min-height: 0;
+    height: 100%;
+    padding: 0 var(--space-2);
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+  }
+
+  .mcp:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  .state {
+    max-width: 22ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .dot {

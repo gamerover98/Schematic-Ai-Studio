@@ -137,12 +137,25 @@ export interface PopoverBounds {
  */
 export type PopoverSide = "above" | "below";
 
+/**
+ * Which edge of the control the popover lines up with.
+ *
+ * `"end"` is the default and hangs it leftwards from the control's right
+ * edge, which is right for a control in a trailing rail. `"start"` lines up
+ * the left edges, which is what a menu at the *leading* end of a bar wants:
+ * hung leftwards from there it would only ever be clamped against the margin,
+ * a few pixels away from the button that opened it.
+ */
+export type PopoverAlign = "start" | "end";
+
 export function placePopover(
   anchor: AnchorRect,
   bounds: PopoverBounds,
   prefer: PopoverSide = "above",
+  align: PopoverAlign = "end",
 ): Point {
-  const preferredLeft = anchor.left + anchor.width - bounds.popoverWidth;
+  const preferredLeft =
+    align === "start" ? anchor.left : anchor.left + anchor.width - bounds.popoverWidth;
   const above = anchor.top - bounds.gap - bounds.popoverHeight;
   const below = anchor.top + anchor.height + bounds.gap;
   const preferredTop =

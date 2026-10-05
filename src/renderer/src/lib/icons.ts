@@ -174,6 +174,16 @@ export const ICONS = {
   terrain: {
     paths: ["M2.5 19 H21.5", "M2.5 19 L8.5 9 L12.5 15 L15.5 11 L21.5 19"],
   },
+  /** Undo: an arrow turning back on itself; redo is its mirror. */
+  undo: { paths: ["M9 13.5 L4.5 9 L9 4.5", "M4.5 9 H14 A5.5 5.5 0 0 1 14 20 H8"] },
+  redo: { paths: ["M15 13.5 L19.5 9 L15 4.5", "M19.5 9 H10 A5.5 5.5 0 0 0 10 20 H16"] },
+  /** The version history: a clock wound backwards. */
+  history: {
+    paths: ["M4.2 13 A8 8 0 1 0 6.4 6.3", "M3.5 3.5 V8 H8", "M12 7.5 V12 L15 14"],
+  },
+  /** The docked panels, on the side each one is on. */
+  panelLeft: { rects: [{ x: 3.5, y: 4.5, w: 17, h: 15, rx: 1 }], paths: ["M9.5 4.5 V19.5"] },
+  panelRight: { rects: [{ x: 3.5, y: 4.5, w: 17, h: 15, rx: 1 }], paths: ["M14.5 4.5 V19.5"] },
 } satisfies Record<string, IconShape>;
 
 export type IconName = keyof typeof ICONS;

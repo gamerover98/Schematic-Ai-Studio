@@ -346,6 +346,8 @@ export const IPC = {
   menuSave: "bgpt:menu:save",
   menuSaveAs: "bgpt:menu:saveAs",
   menuClose: "bgpt:menu:close",
+  /** File → Convert…: one schematic file into another, without opening it. */
+  menuConvert: "bgpt:menu:convert",
   menuUndo: "bgpt:menu:undo",
   menuRedo: "bgpt:menu:redo",
   /**
@@ -2604,6 +2606,7 @@ export interface BgptApi {
   onMenuSave(listener: () => void): () => void;
   onMenuSaveAs(listener: () => void): () => void;
   onMenuClose(listener: () => void): () => void;
+  onMenuConvert(listener: () => void): () => void;
   onMenuUndo(listener: () => void): () => void;
   onMenuRedo(listener: () => void): () => void;
   onMenuAbout(listener: () => void): () => void;
