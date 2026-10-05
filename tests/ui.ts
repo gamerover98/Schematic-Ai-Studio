@@ -5385,8 +5385,8 @@ console.log("\n--- the materials, as an inventory ---");
   );
   check(
     "...and rises over the creative inventory to be dropped on",
-    /\.hotbar\.raised \{\s*z-index: 101;/.test(hotbar) &&
-      /\.scrim \{[^}]*z-index: 100;/.test(readFileSync(path.join(RENDERER, "lib", "CreativeInventory.svelte"), "utf8")),
+    /\.hotbar\.raised \{\s*z-index: var\(--z-beside-modal\);/.test(hotbar) &&
+      readFileSync(path.join(RENDERER, "lib", "CreativeInventory.svelte"), "utf8").includes("<Modal {open}"),
   );
   const appSource = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
   check("...while it is open", appSource.includes("raised={inventoryOpen}"));
@@ -6525,9 +6525,11 @@ console.log("\n--- design system ---");
     "--radius",
     "--control-h",
     "--bevel",
+    "--z-overlay",
     "--z-window",
     "--z-popover",
     "--z-modal",
+    "--z-beside-modal",
     "--z-toast",
     "--z-top",
     "--shadow-raised",
@@ -7150,6 +7152,7 @@ console.log("\n--- dialogs and settings ---");
     "VersionModal",
     "VersionsModal",
     "VoidBlockModal",
+    "CreativeInventory",
   ];
   const ownSkeleton = dialogs.filter((name) => {
     const source = lib(name + ".svelte");
@@ -7336,8 +7339,10 @@ console.log("\n--- the start screen ---");
   // learned to open four formats.
   const opened = [...(/const SCHEMATIC_EXTENSIONS = \[([^\]]*)\]/.exec(app)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
   equal(
-    "the start screen and the drop overlay name every format a drop opens",
-    opened.filter((extension) => !en["start.openHint"].includes(extension) || !en["viewport.dropTypes"].includes(extension)),
+    "the start screen, the drop overlay and the refusal name every format a drop opens",
+    opened.filter((extension) =>
+      (["start.openHint", "viewport.dropTypes", "status.notASchematic"] as const).some((key) => !en[key].includes(extension)),
+    ),
     [],
   );
   check("...and there are four of them to name", opened.length === 4);
@@ -7371,6 +7376,162 @@ console.log("\n--- the start screen ---");
     return faults;
   });
   equal("the launch screens draw with the design system's scales and nothing else", offScale, []);
+}
+
+// --- the viewport's overlays -------------------------------------------------
+console.log("\n--- the viewport's overlays ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+  const token = (name: string): number => parseFloat(new RegExp(`\\n  ${name}: ([\\d.]+)(px)?;`).exec(css)?.[1] ?? "NaN");
+  const hotbar = lib("Hotbar.svelte");
+  const gizmo = lib("GizmoBar.svelte");
+  const creative = lib("CreativeToolBar.svelte");
+  const viewer = lib("Viewer.svelte");
+  const statusBar = lib("StatusBar.svelte");
+
+  // They were 4, 5, 100 and 101, written in each file; the toast's 4 put it
+  // under the start screen and every dialog.
+  const order = ["--z-overlay", "--z-window", "--z-popover", "--z-screen", "--z-modal", "--z-beside-modal", "--z-toast", "--z-top"];
+  const levels = order.map(token);
+  check(
+    "the tiers stack in their stated order, the viewport's overlays at the bottom",
+    levels.every((level, at) => Number.isFinite(level) && (at === 0 || level > levels[at - 1])),
+    order.map((name, at) => `${name}=${levels[at]}`).join(" "),
+  );
+  for (const [name, source, selector] of [
+    ["the hotbar", hotbar, "hotbar"],
+    ["the gizmo's bar", gizmo, "gizmo-bar"],
+    ["the creative tools' bar", creative, "creative-bar"],
+  ] as const) {
+    check(`${name} is on the overlay tier`, new RegExp(`\\.${selector} \\{[^}]*z-index: var\\(--z-overlay\\);`).test(styleOf(source)));
+  }
+  check(
+    "the hotbar rises beside the creative inventory, over its scrim",
+    /\.hotbar\.raised \{\s*z-index: var\(--z-beside-modal\);/.test(styleOf(hotbar)),
+  );
+  check(
+    "a notification is on the toast tier, over a dialog and over the start screen",
+    /\.status \{[^}]*z-index: var\(--z-toast\);/.test(styleOf(app)),
+  );
+
+  // The bars above the hotbar clear it from the pair of tokens, and the pair
+  // is what the hotbar's own rules add up to: change the slot and this says so.
+  for (const [name, source] of [["the gizmo's bar", gizmo], ["the creative tools' bar", creative]] as const) {
+    check(
+      `${name} stands clear of the hotbar`,
+      /bottom: calc\(var\(--hotbar-inset\) \+ var\(--hotbar-height\) \+ var\(--space-3\)\);/.test(styleOf(source)),
+    );
+  }
+  const hotbarStyle = styleOf(hotbar);
+  const slotSide = Number(/\.slot,[\s\S]*?\{[^}]*height: (\d+)px;/.exec(hotbarStyle)?.[1] ?? NaN);
+  check(
+    "...measured off the hotbar's own rules",
+    /\.hotbar \{[^}]*gap: var\(--space-2\);/.test(hotbarStyle) &&
+      /\.held \{[^}]*padding: var\(--space-2\) var\(--space-3\);[^}]*font-size: var\(--text-sm\);[^}]*line-height: 1;/.test(hotbarStyle) &&
+      /\.slots \{[^}]*padding: var\(--space-1\);/.test(hotbarStyle) &&
+      hotbar.includes('<div class="slots slab">'),
+  );
+  const held = token("--text-sm") + 2 * token("--space-2");
+  equal(
+    "...which come to the height the token claims",
+    token("--hotbar-height"),
+    held + token("--space-2") + slotSide + 2 * token("--space-1") + 2 * token("--bevel"),
+  );
+
+  // The game's hotbar: slots in a slab, the one in hand framed, the name of
+  // what is held over it -- and every slot still named to a screen reader.
+  check(
+    "the name of what is held is over the slots, and each slot says its own",
+    hotbar.includes('<p class="held pixel" aria-hidden="true">{label(slots[active] ?? "")}</p>') &&
+      hotbar.includes("aria-label={label(id)}"),
+  );
+  check(
+    "...the slot in hand framed with a shadow, so the focus ring stays the keyboard's",
+    /\.slot\.active \{\s*box-shadow: 0 0 0 var\(--bevel\) var\(--accent\);/.test(hotbarStyle) &&
+      !/\.slot\.active \{[^}]*outline/.test(hotbarStyle),
+  );
+  check(
+    "...and the name is written slot-dark, so it reads over any sky in either theme",
+    /\.held \{[^}]*background: var\(--slot\);[^}]*color: var\(--slot-text\);/.test(hotbarStyle),
+  );
+
+  // A choice of one is the design system's segmented control, in both bars.
+  check(
+    "the gizmo's modes and the creative tools are segmented controls",
+    gizmo.includes('<div class="segmented modes">') && creative.includes('<div class="segmented">'),
+  );
+  check(
+    "...and the gizmo's other buttons are the icon buttons every toolbar has",
+    !/\n  button \{/.test(styleOf(gizmo)) && !/\n  button \{/.test(styleOf(creative)),
+  );
+
+  // What the buttons do went to the status bar: in the viewport's corner it
+  // sat under every notification the app raised.
+  check(
+    "what the buttons do is said in the status bar, not over the scene",
+    !viewer.includes("viewport.hud") &&
+      app.includes("hint={viewportHint}") &&
+      statusBar.includes('{#if hint !== null}') &&
+      ["hudOrbit", "hudClickToFly", "hudFlyingTool", "hudFlying"].every((key) =>
+        app.slice(app.indexOf("const viewportHint"), app.indexOf("const viewportHint") + 700).includes(`"viewport.${key}"`),
+      ),
+  );
+
+  // The compass has the corner. The frame counter stands under it and the
+  // toast clear of it, both from the two numbers the gizmo is drawn with.
+  const compassSize = Number(/const COMPASS_PX = (\d+);/.exec(viewer)?.[1] ?? NaN);
+  const compassMargin = Number(/const COMPASS_MARGIN = (\d+);/.exec(viewer)?.[1] ?? NaN);
+  check(
+    "the frame counter stands under the compass, from the compass's own numbers",
+    viewer.includes("style:--compass-size={`${COMPASS_PX}px`}") &&
+      viewer.includes("style:--compass-margin={`${COMPASS_MARGIN}px`}") &&
+      /\.fps \{[^}]*top: calc\(var\(--compass-margin\) \+ var\(--compass-size\) \+ var\(--space-3\)\);/.test(styleOf(viewer)),
+  );
+  const toastClearance = Number(/max-width: min\(680px, max\(240px, calc\(100% - 2 \* (\d+)px\)\)\);/.exec(styleOf(app))?.[1] ?? NaN);
+  equal("...and a notification clears it on both sides", toastClearance, compassMargin + compassSize + token("--space-3"));
+
+  // The drop target is one element, on the start screen's tier and after it,
+  // because that screen says to drop a file anywhere on it.
+  check(
+    "the drop target is one element, drawn over the start screen that asks for it",
+    /\.drop \{[^}]*z-index: var\(--z-screen\);/.test(styleOf(app)) &&
+      app.indexOf('<div class="drop" aria-hidden="true">') > app.indexOf("<StartScreen") &&
+      !app.includes("drop-active"),
+  );
+
+  // Every overlay picks from the scales. Viewer's style is only overlays;
+  // App's is checked for the overlay rules alone.
+  const overlayRules = (source: string, names: string[]): string =>
+    names
+      .map((name) => new RegExp(`\\n  \\.${name}(\\s|[.:,])[^{]*\\{[^}]*\\}`, "g"))
+      .flatMap((pattern) => [...styleOf(source).matchAll(pattern)].map((match) => match[0]))
+      .join("\n");
+  const surfaces: [string, string][] = [
+    ["Hotbar", styleOf(hotbar)],
+    ["GizmoBar", styleOf(gizmo)],
+    ["CreativeToolBar", styleOf(creative)],
+    ["CreativeInventory", styleOf(lib("CreativeInventory.svelte"))],
+    ["Viewer", styleOf(viewer)],
+    ["StatusBar", styleOf(statusBar)],
+    ["App's overlays", overlayRules(app, ["status", "drop", "drop-hint"])],
+  ];
+  check("...the App overlay rules were found to check", surfaces[surfaces.length - 1][1].length > 400);
+  const offScale = surfaces.flatMap(([name, style]) => {
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(name + ": a radius");
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(name + ": a colour");
+    if (/font-size:\s*\d/.test(style)) faults.push(name + ": a font size");
+    if (/z-index:\s*\d/.test(style)) faults.push(name + ": a stacking level");
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(name + ": the accent as text");
+    if (/backdrop-filter/.test(style)) faults.push(name + ": a blur");
+    return faults;
+  });
+  equal("the viewport's overlays draw with the design system's scales and nothing else", offScale, []);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

@@ -115,21 +115,24 @@
   });
 </script>
 
-<div class="creative-bar" class:locked={flying} role="toolbar" aria-label={t("creative.legend")}>
+<div class="creative-bar slab" class:locked={flying} role="toolbar" aria-label={t("creative.legend")}>
   <div class="tools">
-    {#each CREATIVE_TOOLS as tool (tool)}
-      <button
-        class:active={settings.tool === tool}
-        onclick={() => ontool(tool)}
-        aria-pressed={settings.tool === tool}
-        title={`${t(`creative.tool.${tool}`)} — ${t(`creative.toolHint.${tool}`)}`}
-      >
-        <Icon name={ICONS[tool]} />
-        <span>{t(`creative.tool.${tool}`)}</span>
-      </button>
-    {/each}
+    <!-- One tool in hand, so `.segmented`: the gizmo bar's modes, in flight. -->
+    <div class="segmented">
+      {#each CREATIVE_TOOLS as tool (tool)}
+        <button
+          class:active={settings.tool === tool}
+          onclick={() => ontool(tool)}
+          aria-pressed={settings.tool === tool}
+          title={`${t(`creative.tool.${tool}`)} — ${t(`creative.toolHint.${tool}`)}`}
+        >
+          <Icon name={ICONS[tool]} />
+          <span>{t(`creative.tool.${tool}`)}</span>
+        </button>
+      {/each}
+    </div>
     <button
-      class="options"
+      class="icon options"
       class:active={optionsOpen}
       onclick={onoptions}
       disabled={settings.tool === "place"}
@@ -147,24 +150,22 @@
 </div>
 
 <style>
+  /* A slab over the scene, clear of the hotbar from the tokens that describe
+     it -- the gizmo bar's place, which it never shares: that one is orbit's
+     and this is flight's. */
   .creative-bar {
     position: absolute;
-    /* Clear of the hotbar, from the tokens that describe it -- the gizmo bar's
-       place, which it never shares: that one is orbit's and this is flight's. */
-    bottom: calc(var(--hotbar-inset) + var(--hotbar-height) + 8px);
+    bottom: calc(var(--hotbar-inset) + var(--hotbar-height) + var(--space-3));
     left: 50%;
     transform: translateX(-50%);
-    z-index: 5;
+    z-index: var(--z-overlay);
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 3px;
-    max-width: calc(100% - 32px);
-    padding: 4px 6px 5px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg-panel);
-    box-shadow: 0 6px 20px var(--shadow);
+    gap: var(--space-2);
+    max-width: calc(100% - 2 * var(--space-5));
+    padding: var(--space-1) var(--space-2) var(--space-2);
+    box-shadow: var(--shadow-float);
   }
 
   /* Nothing can be pressed while the pointer is locked; saying so is the honest look. */
@@ -174,55 +175,42 @@
 
   .tools {
     display: flex;
-    gap: 2px;
+    gap: var(--space-2);
     align-items: center;
+    max-width: 100%;
   }
 
-  button {
-    display: flex;
+  .segmented {
+    min-width: 0;
+  }
+
+  .segmented > button {
+    display: inline-flex;
     align-items: center;
-    gap: 5px;
-    height: 26px;
-    min-height: 0;
-    padding: 0 8px;
-    border: 1px solid transparent;
-    border-radius: 5px;
-    background: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: 12px;
-    line-height: 1;
-    cursor: pointer;
+    gap: var(--space-2);
   }
 
-  button:hover:not(:disabled) {
-    background: var(--bg-input);
-    color: var(--text);
+  /* A flex item cuts its own text: the ellipsis on the button reaches no further. */
+  .segmented > button > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  button:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-
-  button.active {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .options {
-    width: 28px;
-    padding: 0;
-    justify-content: center;
-    margin-left: 4px;
+  /* Pressed and lit while its window is out, as a toggle should say. */
+  .options.active,
+  .options.active:hover:not(:disabled) {
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--accent);
+    color: var(--accent-contrast);
   }
 
   .line {
     display: flex;
-    gap: 8px;
+    gap: var(--space-3);
     align-items: baseline;
     max-width: 100%;
-    font-size: 11px;
+    font-size: var(--text-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -231,7 +219,7 @@
 
   .line strong {
     color: var(--text);
-    font-weight: 600;
+    font-weight: 700;
   }
 
   .hint {
@@ -239,8 +227,9 @@
     text-overflow: ellipsis;
   }
 
-  /* A first corner is waiting: the one line that asks for something. */
+  /* A first corner is waiting: the one line that asks for something, in the
+     gold of what glows. */
   .hint.pending {
-    color: var(--selection);
+    color: var(--warn);
   }
 </style>

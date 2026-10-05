@@ -13,6 +13,11 @@
    * Readings, not controls. The one thing in it you can press is the MCP
    * state, because a status light with no way to act on what it reports is a
    * half-feature (see `McpIndicator`).
+   *
+   * And on the right, what the buttons do in the camera you are in, as a 3D
+   * editor's status bar says it. It was a plate in the viewport's corner, and
+   * every notification the app raised landed on top of it. It is the reading
+   * that gives way first when the window runs out of room.
    */
   import type { DocumentState, McpStatus } from "../../../shared/ipc.js";
   import type { Box } from "../../../shared/regions.js";
@@ -34,9 +39,11 @@
     mcp: boolean;
     mcpStatus: McpStatus | null;
     onmcp: () => void;
+    /** What the mouse and the keys do in the viewport now, or nothing. */
+    hint?: string | null;
   }
 
-  const { doc, selection, areas, cells, mcp, mcpStatus, onmcp }: Props = $props();
+  const { doc, selection, areas, cells, mcp, mcpStatus, onmcp, hint = null }: Props = $props();
 
   const size = (box: Box): string =>
     `${box.maxX - box.minX + 1}×${box.maxY - box.minY + 1}×${box.maxZ - box.minZ + 1}`;
@@ -68,6 +75,9 @@
     <span class="item">{t("doc.nothingOpen")}</span>
   {/if}
   <span class="push"></span>
+  {#if hint !== null}
+    <span class="item keys" title={hint}>{hint}</span>
+  {/if}
   {#if mcp}
     <McpIndicator status={mcpStatus} onopen={onmcp} />
   {/if}
@@ -109,5 +119,10 @@
 
   .push {
     flex: 1;
+  }
+
+  /* Long, and the least of the readings: it shrinks before the others do. */
+  .keys {
+    flex: 0 1000 auto;
   }
 </style>

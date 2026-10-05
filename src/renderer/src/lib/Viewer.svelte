@@ -6916,7 +6916,12 @@ import { isTyping } from "./typing.js";
 
 </script>
 
-<div class="viewer" bind:this={container}>
+<div
+  class="viewer"
+  bind:this={container}
+  style:--compass-size={`${COMPASS_PX}px`}
+  style:--compass-margin={`${COMPASS_MARGIN}px`}
+>
   <canvas bind:this={canvas}></canvas>
   <!--
     Not only frames per second: the triangle count is what makes this a
@@ -6953,7 +6958,7 @@ import { isTyping } from "./typing.js";
     </div>
   {/if}
   {#if error}
-    <div class="error">
+    <div class="error slab">
       {t("viewport.unavailable")}<br />
       <small>{error}</small>
     </div>
@@ -6961,18 +6966,9 @@ import { isTyping } from "./typing.js";
     <!--
       No placeholder for the empty state: an empty viewport is self-evidently
       empty, and a card in the middle of it was noise rather than information.
+      What the buttons do is said in the status bar, as a 3D editor says it:
+      up here, in the corner, it sat under every notification.
     -->
-    <div class="overlay">
-      {#if cameraMode === "fly"}
-        {flying
-          ? creative !== null && creative.settings.tool !== "place"
-            ? t("viewport.hudFlyingTool")
-            : t("viewport.hudFlying")
-          : t("viewport.hudClickToFly")}
-      {:else}
-        {t("viewport.hudOrbit")}
-      {/if}
-    </div>
     {#if cameraMode === "fly" && flying}
       <!-- A crosshair, because in flight there is no cursor to aim with. -->
       <div class="crosshair" aria-hidden="true"></div>
@@ -6997,7 +6993,6 @@ import { isTyping } from "./typing.js";
     <button
       class="compass"
       class:locked={flying}
-      style={`width:${COMPASS_PX}px;height:${COMPASS_PX}px;right:${COMPASS_MARGIN}px;top:${COMPASS_MARGIN}px`}
       onclick={onCompassClick}
       title={t("viewport.compassHint")}
       aria-label={t("viewport.compass")}
@@ -7022,35 +7017,21 @@ import { isTyping } from "./typing.js";
   }
 
   /*
-   * Top right, where the overlay is not: the two would otherwise sit on each
-   * other, which is the fault the gizmo bar had against the notifications.
+   * Under the compass, which has the corner: its margin, its square and a gap,
+   * from the two numbers the gizmo is drawn with. A translucent plate with
+   * hard corners and nothing behind it blurred, as the game's own debug
+   * screen is: a blur here was a second pass over the scene for a caption.
    */
-  /* Under the compass, which has the corner: its margin, its square and a gap. */
   .fps {
     position: absolute;
-    top: 128px;
-    right: 16px;
-    padding: 6px 10px;
+    top: calc(var(--compass-margin) + var(--compass-size) + var(--space-3));
+    right: var(--compass-margin);
+    padding: var(--space-2) var(--space-3);
     background: var(--overlay-bg);
-    border-radius: 6px;
-    backdrop-filter: blur(6px);
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: var(--text-xs);
     line-height: 1.5;
     text-align: right;
-    pointer-events: none;
-  }
-
-  .overlay {
-    position: absolute;
-    top: 16px;
-    left: 16px;
-    padding: 8px 12px;
-    background: var(--overlay-bg);
-    border-radius: 6px;
-    backdrop-filter: blur(6px);
-    font-size: 13px;
-    line-height: 1.4;
     pointer-events: none;
   }
 
@@ -7067,9 +7048,14 @@ import { isTyping } from "./typing.js";
   .compass,
   .compass:hover {
     position: absolute;
+    top: var(--compass-margin);
+    right: var(--compass-margin);
+    width: var(--compass-size);
+    height: var(--compass-size);
+    min-height: 0;
     padding: 0;
     border: none;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: transparent;
     cursor: pointer;
   }
@@ -7097,17 +7083,16 @@ import { isTyping } from "./typing.js";
     mix-blend-mode: difference;
   }
 
+  /* A slab in the middle of the empty canvas: the one thing on it to read. */
   .error {
     position: absolute;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    padding: 12px 16px;
-    max-width: 720px;
+    padding: var(--space-4) var(--space-5);
+    max-width: min(720px, calc(100% - 2 * var(--space-5)));
     text-align: center;
-    background: var(--overlay-bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    box-shadow: var(--shadow-float);
     pointer-events: none;
   }
 </style>

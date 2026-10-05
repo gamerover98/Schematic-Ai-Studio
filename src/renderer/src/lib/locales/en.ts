@@ -390,7 +390,6 @@ export const en = {
 
   // The creative hotbar. Right-click a slot to put the picker's current
   // block in it, which is why the hint names both gestures.
-  "inventory.title": "Blocks",
   "inventory.for.hand": "Hold",
   "inventory.for.fill": "Add to With",
   "inventory.for.replace": "Add to Replace",
@@ -425,7 +424,6 @@ export const en = {
 
   "hotbar.label": "Hotbar",
   "hotbar.browse": "All blocks (E)",
-  "hotbar.browseShort": "more",
   "hotbar.slotHint": "Press {key} to hold this, right-click to replace it",
   "hotbar.mix": "{first} +{more}",
   "hotbar.mixBadge": "mix",
@@ -1156,7 +1154,7 @@ export const en = {
 
   "status.failed": "{doing}: {message}",
   "status.notOnDisk": "{name} does not come from a file on disk.",
-  "status.notASchematic": "{name} is not a schematic — open a .schem or .schematic.",
+  "status.notASchematic": "{name} is not a schematic. A drop opens .schem, .schematic, .litematic or .mcfunction.",
   "status.recovered": "Recovered your unsaved work.",
   "status.recoveredNamed": "Recovered your unsaved work on {name}.",
   "status.copied.one": "Copied 1 block. Move the selection, Ctrl+V to paste, Esc to stop.",

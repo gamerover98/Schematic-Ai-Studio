@@ -144,12 +144,22 @@
   --bevel: 2px;
   /* The stacking tiers, by name. A number between them is a new tier and
      should be added here with its reason. */
+  /* What the viewport draws over the scene: the hotbar, the gizmo's and the
+     creative tools' bars. Under every window, so the creative options float
+     over the bar whose tool they set. */
+  --z-overlay: 10;
   --z-window: 20;
   --z-popover: 40;
   /* The start screen: over the whole shell, under every dialog -- it opens
      several of them, and a dialog it opened must not land behind it. */
   --z-screen: 90;
   --z-modal: 100;
+  /* The hotbar while the creative inventory is open: the game draws it inside
+     its inventory, and a tile is dragged down onto a slot. Over the dialog's
+     scrim, under a toast. */
+  --z-beside-modal: 110;
+  /* A notification: over a dialog and over the start screen, which is where
+     the action that raised it -- an open that failed -- was pressed. */
   --z-toast: 150;
   --z-top: 200;
   --shadow-raised: 0 2px 0 rgb(0 0 0 / 30%);
@@ -166,13 +176,14 @@
 
      Not colours, so they are defined once here and never redefined per theme,
      for `--mono`'s reason. They are a *pair*: the hotbar reads the first, and
-     anything stacking above it -- today the gizmo's toolbar -- clears both.
-     The height is measured off `Hotbar.svelte`'s own rules (icon 26 + name 10
-     + gap 2 + slot padding 7 + slot borders 4 + bar padding 8 + bar borders 2
-     = 59), so changing the slot moves it. That is a failure you can see -- two
-     bars overlapping -- rather than a silent one. */
+     anything stacking above it -- the gizmo's bar, the creative tools' bar --
+     clears both. The height is measured off `Hotbar.svelte`'s own rules: the
+     name of what is held (a 12px line and 4px of padding each way, 20) and
+     the gap under it (4), over the slab of slots (slot 40, slab padding 2 and
+     bevel 2 each side, 48) = 72. Changing the slot moves it, which is a
+     failure you can see -- two bars overlapping -- rather than a silent one. */
   --hotbar-inset: 16px;
-  --hotbar-height: 60px;
+  --hotbar-height: 72px;
 }
 
 :root[data-theme="light"] {

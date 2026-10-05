@@ -1090,6 +1090,24 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   let pointerLocked = $state(false);
 
   /**
+   * What the buttons do, in the camera you are in, said in the status bar as
+   * a 3D editor says it. It was a plate in the viewport's top-left corner,
+   * under every notification the app raised. With a creative tool in hand
+   * the buttons are the tool's, and the bar over the hotbar says what they do.
+   */
+  const viewportHint = $derived(
+    docState === null
+      ? null
+      : cameraMode === "orbit"
+        ? t("viewport.hudOrbit")
+        : !pointerLocked
+          ? t("viewport.hudClickToFly")
+          : creative.tool !== "place"
+            ? t("viewport.hudFlyingTool")
+            : t("viewport.hudFlying"),
+  );
+
+  /**
    * The first corner of a shape or a wall, waiting for the second.
    *
    * The app's rather than the viewer's, because what forgets it is heard here:
@@ -5823,7 +5841,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   -->
   <section
     class="preview"
-    class:drop-active={dropActive}
     aria-label={t("viewport.label")}
     ondragenter={onDragEnter}
     ondragover={onDragOver}
@@ -5861,9 +5878,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     {/if}
 
     {#if dropActive}
-      <div class="drop-hint" aria-hidden="true">
-        <strong>{t("viewport.dropTitle")}</strong>
-        <span>{t("viewport.dropTypes")}</span>
+      <!--
+        The whole viewport is the target, so the whole viewport says so: an
+        edge and a tint, and in the middle what a drop does. On the start
+        screen's tier and after it in the document, because that screen tells
+        you to drop a file anywhere on it and would otherwise cover the answer.
+      -->
+      <div class="drop" aria-hidden="true">
+        <div class="drop-hint slab">
+          <strong class="pixel">{t("viewport.dropTitle")}</strong>
+          <span>{t("viewport.dropTypes")}</span>
+        </div>
       </div>
     {/if}
 
@@ -5899,11 +5924,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     {/if}
 
     {#if status}
-      <div class={`status ${status.tone}`} role="status">
-        <div>
+      <div class={`status slab ${status.tone}`} role="status">
+        <p>
           {status.text}
           {#if status.detail}<br /><small>{status.detail}</small>{/if}
-        </div>
+        </p>
         <button class="icon" onclick={() => (status = null)} aria-label={t("common.dismiss")}>
           <Icon name="close" size={14} />
         </button>
@@ -6099,6 +6124,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     mcp={showsIndicator(settings.mcp.enabled, mcpStatus)}
     {mcpStatus}
     onmcp={openMcpSettings}
+    hint={viewportHint}
   />
 </main>
 
@@ -6258,37 +6284,33 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     min-height: 0;
   }
 
-  .preview.drop-active::after {
-    content: "";
+  /* The overlay must not eat the drop event it is drawn for. */
+  .drop {
     position: absolute;
-    inset: 8px;
-    z-index: 4;
-    border: 2px dashed var(--accent);
-    border-radius: 10px;
+    inset: var(--space-3);
+    z-index: var(--z-screen);
+    display: grid;
+    place-items: center;
+    border: var(--bevel) dashed var(--accent);
     background: var(--accent-tint);
-    /* The overlay must not eat the drop event it is drawn for. */
     pointer-events: none;
   }
 
   .drop-hint {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 5;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 4px;
-    padding: 14px 22px;
-    border-radius: 10px;
-    background: var(--bg-panel);
-    box-shadow: 0 8px 28px var(--shadow);
-    pointer-events: none;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-6);
+    box-shadow: var(--shadow-float);
+  }
+
+  .drop-hint strong {
+    font-size: var(--text-lg);
   }
 
   .drop-hint span {
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
@@ -6316,36 +6338,52 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     flex: 1;
   }
 
+  /*
+   * A notification is a slab with an edge in the colour of what it says, as a
+   * `.callout` is: emerald for done, gold to warn, redstone for a failure. On
+   * the toast tier, over a dialog and over the start screen: an open that
+   * failed was pressed on the start screen, and its answer used to land
+   * behind it.
+   *
+   * Clear of the compass in the corner, each side: its margin, its square
+   * and a gap -- 16 + 104 + 8, `COMPASS_MARGIN` and `COMPASS_PX` in the viewer.
+   */
   .status {
     position: absolute;
-    top: 12px;
+    top: var(--space-4);
     left: 50%;
     transform: translateX(-50%);
-    z-index: 4;
+    z-index: var(--z-toast);
     display: flex;
     align-items: flex-start;
-    gap: 10px;
-    max-width: min(680px, calc(100% - 96px));
-    padding: 10px 10px 10px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--bg-panel);
-    box-shadow: 0 6px 20px var(--shadow);
-    font-size: 13px;
+    gap: var(--space-3);
+    width: max-content;
+    max-width: min(680px, max(240px, calc(100% - 2 * 128px)));
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+    border-left: var(--space-2) solid var(--text-dim);
+    box-shadow: var(--shadow-float);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+  }
+
+  .status p {
+    align-self: center;
+    margin: 0;
+  }
+
+  .status small {
+    color: var(--text-dim);
   }
 
   .status.ok {
-    color: var(--ok);
-    border-color: var(--ok);
+    border-left-color: var(--ok);
   }
 
   .status.warn {
-    color: var(--warn);
-    border-color: var(--warn);
+    border-left-color: var(--warn);
   }
 
   .status.error {
-    color: var(--danger);
-    border-color: var(--danger);
+    border-left-color: var(--danger);
   }
 </style>

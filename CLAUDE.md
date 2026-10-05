@@ -2258,7 +2258,7 @@ their own, and for the accent written as text.
   -- so a scoped `.chips:has(:focus-visible)` asks for a focused element of
   `BlockMixField` and never finds one. It compiles, and draws nothing.
 - **The floating options window is on `--z-window`**, over the hotbar and the
-  viewport's bars, which share a level of 5 until the overlays get theirs.
+  viewport's bars, which are `--z-overlay`, the tier under it.
 
 **Every dialog is `Modal.svelte`.** There were ten copies of the skeleton and
 they had drifted: three ways of handling Escape, the pointer-lock release in
@@ -2288,7 +2288,9 @@ release of its own, and any component with a local `.primary`, which painted
 the accent flat over `app.css`'s bevelled one in five dialogs. The block-state
 editor is not a dialog: it is anchored to a chip, on `--z-popover`. The
 command palette keeps its own frame -- a search at the top, no title -- and
-wears `.modal`.
+wears `.modal`. The creative inventory is a `Modal` too, with its search
+in the header (`head`) and focused after a `tick`, because the dialog puts
+the focus on itself in the same flush.
 
 `.callout` in `app.css` is what a dialog says before an act: a field-coloured
 well with an emerald edge to explain, gold to warn (`.warn`), redstone to
@@ -2327,6 +2329,50 @@ focus back on the way out, because what opened it was the launch.
 - **The command palette gives the focus back** to what had it, unless something
   has taken it since: Ctrl+K and Escape over the start screen left it on the
   page, and the screen's keys with it.
+
+**What the viewport draws over the scene is the inventory's material too.**
+The overlays were the last surfaces deciding their own corners, colours and
+stacking levels -- 4, 5, 100 and 101, written in four files, with blurred
+translucent plates and a toast that sat under the start screen and every
+dialog.
+
+- **Three tiers of their own, by name.** `--z-overlay` (10) is the hotbar and
+  the two bars over it, under every window. `--z-beside-modal` (110) is the
+  hotbar while the creative inventory is open, over the dialog's scrim -- the
+  game draws its hotbar inside its inventory, and a tile is dragged down onto
+  a slot. A notification is `--z-toast`: an open that failed was pressed on
+  the start screen, and its answer used to land behind it.
+- **The hotbar is the game's**: nine slots sunk into a slab, the one in hand
+  framed with a `box-shadow` (the outline is the keyboard's focus ring), and
+  over it the name of what is held, slot-dark with the game's white words so
+  it reads over any sky in either theme. The names used to sit under every
+  slot at nine pixels; each slot still says its own in `aria-label` and its
+  hover. `--hotbar-height` is what its rules add up to, and `tests/ui.ts`
+  does the sum: a slot made bigger with the token left alone fails by name.
+  Only the slab takes the pointer, so a click beside the name is a click on
+  the build.
+- **The bars are slabs, and a choice of one is `.segmented`**: the gizmo's
+  four modes and the creative tools. Copy, paste and the rest are
+  `button.icon`; a toggle that is on is pressed in and lit, as a segmented
+  control's chosen one is. The axis letters are in the body face, bold: in the
+  pixel face a Z reads as a 2.
+- **What the buttons do is said in the status bar** (`viewportHint` in
+  `App.svelte`, `hint` on `StatusBar`), as a 3D editor's status bar says
+  it. It was a plate in the viewport's top-left corner, under every
+  notification; it is the reading that gives way first when the window is
+  narrow.
+- **A notification is a slab with an edge in its tone**, `.callout`'s rule,
+  centred at the top and clear of the compass on both sides -- `2 * 128px`,
+  which is `COMPASS_MARGIN` + `COMPASS_PX` + a gap, and `tests/ui.ts`
+  holds the two to each other. The frame counter stands under the compass
+  from the same two numbers, which the viewer hands to CSS as
+  `--compass-margin` and `--compass-size`.
+- **The drop target is one element**, an edge and a tint with what a drop
+  does in the middle, on `--z-screen` and after the start screen in the
+  document: that screen says to drop a file anywhere on it, and covered the
+  answer.
+- **Nothing over the scene is blurred.** A blur was a second pass over the
+  scene for a caption.
 
 **The settings are ten panes in four groups**, each pane in sections: App
 (General, Updates), Viewport (Scene, Lighting, Textures & colours), Performance
@@ -2490,8 +2536,8 @@ a time; a block already there is not added twice.
 A field takes the drop only with `ondropblock`, and stops it there, or the
 text box under the pointer would type what it was handed. Air is not
 dragged. The creative inventory's tiles drag too, and the hotbar rises over
-its scrim while it is open (`raised`, `z-index: 101` against 100): the game
-draws the hotbar inside its inventory for the same reason.
+its scrim while it is open (`raised`, `--z-beside-modal` over `--z-modal`):
+the game draws the hotbar inside its inventory for the same reason.
 
 **A bar over the slots searches, orders and merges states**, and the rules
 are `materialRows` in the same module. Merged, a block is one slot under its
@@ -3580,7 +3626,8 @@ for what destroys.
   size pressed and unpressed. `--bevel-hi`/`--bevel-lo` swap on `:active`.
 - **The scales are tokens**: `--space-1..8`, `--text-xs..2xl`, `--radius` (0:
   stone has corners), `--control-h` (28px, over WCAG 2.2's 24px), the stacking
-  tiers `--z-window`/`--z-popover`/`--z-modal`/`--z-toast`/`--z-top`, three
+  tiers `--z-overlay`/`--z-window`/`--z-popover`/`--z-screen`/`--z-modal`/
+  `--z-beside-modal`/`--z-toast`/`--z-top`, three
   shadows and the motion. The audit counted 24 spacings, 16 radii and 11
   z-indexes decided again per file; a value outside the scales should come
   with its reason.
@@ -3718,7 +3765,8 @@ notifications.** `.status` and the bar had byte-identical positioning —
 the controls somebody was reaching for. It clears the hotbar now, from
 `--hotbar-inset` and `--hotbar-height` in `app.css`: a pair, because the second
 is measured off `Hotbar.svelte`'s own rules and changing the slot moves it.
-That failure is two bars overlapping, which is visible, rather than silent.
+That failure is two bars overlapping, which is visible, rather than silent --
+and `tests/ui.ts` adds the rules up, so it is a failing check as well.
 
 Glyphs rather than words, with the name, the sentence and the key on `title`
 and the name on `aria-label` — not optional for a button with no text in it.
