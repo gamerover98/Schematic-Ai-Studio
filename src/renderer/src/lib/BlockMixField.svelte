@@ -505,12 +505,17 @@
     place-items: center;
     width: 14px;
     height: 14px;
+    min-height: 0;
     padding: 0;
     border: none;
     border-radius: 50%;
     background: var(--danger);
     color: var(--bg-panel);
     cursor: pointer;
+  }
+
+  .remove:hover {
+    background: var(--danger);
   }
 
   .chip:hover .remove,
@@ -599,6 +604,7 @@
     place-items: center;
     width: 22px;
     height: 20px;
+    min-height: 0;
     padding: 0;
   }
 
@@ -646,6 +652,7 @@
     place-items: center;
     width: 22px;
     height: 20px;
+    min-height: 0;
     padding: 0;
     border: none;
     background: none;
@@ -655,5 +662,6 @@
 
   .dice:hover {
     color: var(--text);
+    background: none;
   }
 </style>

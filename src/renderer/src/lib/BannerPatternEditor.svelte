@@ -378,6 +378,7 @@
   .swatch {
     width: 18px;
     height: 18px;
+    min-height: 0;
     padding: 0;
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -431,6 +432,7 @@
   .dye {
     width: 22px;
     height: 22px;
+    min-height: 0;
     padding: 0;
     border: 1px solid var(--border);
     border-radius: 4px;

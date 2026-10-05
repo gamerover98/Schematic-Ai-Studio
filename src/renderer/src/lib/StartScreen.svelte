@@ -391,6 +391,7 @@
   .reveal:hover {
     border-color: var(--border);
     color: var(--text);
+    background: none;
   }
 
   .aside {

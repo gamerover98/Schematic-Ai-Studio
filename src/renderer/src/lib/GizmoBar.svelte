@@ -228,6 +228,7 @@
     justify-content: center;
     width: 28px;
     height: 26px;
+    min-height: 0;
     border: 1px solid transparent;
     border-radius: 5px;
     background: none;

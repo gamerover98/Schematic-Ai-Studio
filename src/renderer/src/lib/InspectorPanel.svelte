@@ -354,12 +354,14 @@
     padding: 0;
     width: 18px;
     height: 18px;
+    min-height: 0;
     color: var(--text-dim);
     cursor: pointer;
   }
 
   .props li button.remove:hover:not(:disabled) {
     color: var(--text);
+    background: none;
   }
 
   .props li button.remove:disabled {
@@ -391,20 +393,6 @@
     opacity: 0.65;
     margin-left: 4px;
     font-size: 10px;
-  }
-
-  button.link {
-    background: none;
-    border: none;
-    padding: 4px 0 0;
-    color: var(--accent);
-    cursor: pointer;
-    font: inherit;
-    font-size: 12px;
-  }
-
-  button.link:hover {
-    text-decoration: underline;
   }
 
   pre {

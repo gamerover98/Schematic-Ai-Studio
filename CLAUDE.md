@@ -3459,6 +3459,14 @@ for what destroys.
   `assetsInlineLimit` in `electron.vite.config.ts` says no for font files.
 - **One focus ring**: `:focus-visible`, 2px of `--accent`. Chromium's own was
   orange and 2.4:1 on the old light theme.
+- **A button that draws itself has to say so twice.** app.css's
+  `button:hover:not(:disabled)` is (0,2,1) and a single class, once Svelte has
+  scoped it, is (0,2,0): a transparent hit area, a red dot or a slot was
+  painted `--bg-hover` under the pointer -- a grey disc over the compass -- and
+  a `height` under the control height was overruled by the global
+  `min-height`. Such a rule restates its background on `:hover` and sets
+  `min-height`; `tests/ui.ts` walks every component for both. `button.icon` is
+  exempt, because its global rules own both.
 
 **The left mouse button pans, so anything else that drags must take it.** The
 viewer maps `LEFT` to `THREE.MOUSE.PAN`. A selection-face drag therefore sets

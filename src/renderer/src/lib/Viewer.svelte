@@ -7070,8 +7070,14 @@ import { isTyping } from "./typing.js";
    * Transparent: what is inside it is drawn by WebGL, in the same pixels.
    * This element exists to be clicked and to carry the tooltip, and giving
    * it any background of its own would put that background over the gizmo.
+   *
+   * Under the pointer too, which is the half that has to be said: app.css
+   * paints every hovered button `--bg-hover` at a specificity one element
+   * above this class, and with the radius here that was a grey disc over
+   * the compass the moment the pointer reached it.
    */
-  .compass {
+  .compass,
+  .compass:hover {
     position: absolute;
     padding: 0;
     border: none;

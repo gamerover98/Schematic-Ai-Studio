@@ -289,6 +289,12 @@
     cursor: pointer;
   }
 
+  /* The well it sits in, with the edge it had before a hover meant a fill. */
+  .slot:hover {
+    background: var(--bg-input);
+    border-color: var(--accent-dim);
+  }
+
   /* Over the creative inventory's scrim, which is `z-index: 100`. */
   .hotbar.raised {
     z-index: 101;

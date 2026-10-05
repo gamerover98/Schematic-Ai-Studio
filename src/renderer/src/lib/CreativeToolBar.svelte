@@ -183,6 +183,7 @@
     align-items: center;
     gap: 5px;
     height: 26px;
+    min-height: 0;
     padding: 0 8px;
     border: 1px solid transparent;
     border-radius: 5px;

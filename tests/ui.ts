@@ -6613,6 +6613,78 @@ console.log("\n--- design system ---");
     });
   equal("...and no component draws its own", drawnLocally, []);
 
+  // app.css's `button` rules are one element above a component's single
+  // class: `button:hover:not(:disabled)` is (0,2,1) and `.compass`, once
+  // Svelte has scoped it, is (0,2,0). So a button that draws itself -- a
+  // transparent hit area, a red dot, a slot -- is painted `--bg-hover` under
+  // the pointer unless it says otherwise, and a `height` below the control
+  // height is overruled by the `min-height` beside it. Both arrived with the
+  // design system and were reported as a grey disc over the compass.
+  const scopedSpecificity = (selector: string): [number, number, number] => {
+    const score: [number, number, number] = [0, 0, 0];
+    for (const part of selector.split(/\s*[\s>+~]\s*/).filter(Boolean)) {
+      if (part.startsWith(":global")) continue;
+      const flat = part.replace(/:not\(([^)]*)\)/g, " $1");
+      score[0] += (flat.match(/#[\w-]+/g) ?? []).length;
+      score[1] += (flat.match(/\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+/g) ?? []).length + 1;
+      score[2] += (flat.match(/(^|[\s(])[a-z][\w-]*/g) ?? []).length;
+    }
+    return score;
+  };
+  const beatsHover = ([a, b, c]: [number, number, number]): boolean => a > 0 || b > 2 || (b === 2 && c > 1);
+  const repaintedOnHover: string[] = [];
+  const stretchedToControl: string[] = [];
+  const svelteFiles = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const full = path.join(dir, name);
+      return statSync(full).isDirectory() ? svelteFiles(full) : name.endsWith(".svelte") ? [full] : [];
+    });
+  for (const file of svelteFiles(RENDERER)) {
+    const source = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+    const at = source.indexOf("<style>");
+    if (at < 0) continue;
+    const name = path.basename(file, ".svelte");
+    // What each button in the markup is called, and whether it is also an
+    // `icon`, whose global rules already own its hover and its height.
+    const buttons = [...source.slice(0, at).matchAll(/<button\b[\s\S]*?>/g)].map((tag) => {
+      const names = new Set<string>();
+      for (const flag of tag[0].matchAll(/class:([\w-]+)/g)) names.add(flag[1]);
+      const list = tag[0].match(/class=["{`]([^"}`]*)/)?.[1] ?? "";
+      for (const word of list.split(/\s+/)) if (/^[\w-]+$/.test(word)) names.add(word);
+      return names;
+    });
+    const wearing = (classes: string[]): Set<string>[] =>
+      buttons.filter((names) => classes.length > 0 && classes.every((c) => names.has(c)));
+    const rules = [...source.slice(at).replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^}]*)\}/g)].map(
+      (match) => ({ selector: match[1].trim(), body: match[2] }),
+    );
+    const elsewhere = (classes: string[], test: (selector: string, body: string) => boolean): boolean =>
+      rules.some((other) =>
+        other.selector.split(",").some((one) => classes.every((c) => one.includes(`.${c}`)) && test(one, other.body)),
+      );
+    for (const { selector, body } of rules) {
+      if (/:hover|:active|:disabled/.test(selector)) continue;
+      for (const one of selector.split(",").map((s) => s.trim())) {
+        const last = one.split(/\s+|>/).pop() ?? "";
+        const classes = [...last.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+        const worn = wearing(classes);
+        if (worn.length === 0 || beatsHover(scopedSpecificity(one))) continue;
+        if (worn.every((names) => names.has("icon"))) continue;
+        if (/(^|[;\s])background(-color)?:/.test(body) && !worn.every((names) => names.has("primary"))) {
+          if (!elsewhere(classes, (s, b) => s.includes(":hover") && /background/.test(b))) {
+            repaintedOnHover.push(`${name} ${one}`);
+          }
+        }
+        const height = body.match(/(?:^|[;\s])height:\s*([\d.]+)px/);
+        if (height && Number(height[1]) < 28 && !elsewhere(classes, (_s, b) => /min-height/.test(b))) {
+          stretchedToControl.push(`${name} ${one}`);
+        }
+      }
+    }
+  }
+  equal("a button that draws its own background keeps it under the pointer", repaintedOnHover, []);
+  equal("...and one drawn smaller than a control is not stretched back to it", stretchedToControl, []);
+
   const main = readFileSync(path.join(RENDERER, "main.ts"), "utf8");
   check(
     "both faces ship with the app, imported before the sheet that names them",

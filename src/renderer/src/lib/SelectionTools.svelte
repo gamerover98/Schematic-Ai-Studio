@@ -542,6 +542,7 @@
     place-items: center;
     width: 32px;
     height: 22px;
+    min-height: 0;
     padding: 0;
   }
 

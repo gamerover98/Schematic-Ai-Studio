@@ -291,6 +291,7 @@
     place-items: center;
     width: 24px;
     height: 24px;
+    min-height: 0;
     padding: 0;
     border: none;
     background: none;
@@ -300,6 +301,7 @@
 
   .close:hover {
     color: var(--text);
+    background: none;
   }
 
   .rows {
@@ -362,6 +364,7 @@
     place-items: center;
     width: 18px;
     height: 18px;
+    min-height: 0;
     padding: 0;
     border: none;
     background: none;
@@ -371,6 +374,7 @@
 
   .bool .reset:hover {
     color: var(--text);
+    background: none;
   }
 
   .foot {
@@ -407,6 +411,12 @@
     border-radius: 4px;
     background: var(--bg-input);
     cursor: pointer;
+  }
+
+  /* The well it sits in, with the edge it had before a hover meant a fill. */
+  .variant:hover {
+    background: var(--bg-input);
+    border-color: var(--accent-dim);
   }
 
   .variant img {

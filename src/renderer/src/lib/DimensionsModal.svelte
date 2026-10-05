@@ -322,10 +322,4 @@
     color: var(--accent-contrast);
     border-color: var(--accent);
   }
-
-  .danger {
-    background: var(--danger);
-    color: var(--accent-contrast);
-    border-color: var(--danger);
-  }
 </style>
