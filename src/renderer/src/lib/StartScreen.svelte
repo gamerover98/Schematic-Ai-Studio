@@ -253,12 +253,14 @@
    * against leaves precisely because children fire them, so one more child
    * changes nothing.
    *
-   * `z-index: 100` is the modal tier, shared with every other scrim.
+   * `--z-screen` is a tier of its own, just under the dialogs: it covers the
+   * whole shell, and a dialog opened from it -- or from the menu while it is
+   * up, as Ctrl+, opens Settings -- lands on top rather than behind it.
    */
   .start {
     position: fixed;
     inset: 0;
-    z-index: 100;
+    z-index: var(--z-screen);
     display: flex;
     align-items: center;
     justify-content: center;

@@ -224,7 +224,9 @@ const ROW_LIMIT = 120;
         event.preventDefault();
         choose(shown[highlighted]);
       }
-    } else if (event.key === "Escape") {
+    } else if (event.key === "Escape" && open) {
+      // Taken, so a dialog around the field closes the list and not itself.
+      event.preventDefault();
       open = false;
     }
   }

@@ -6714,7 +6714,7 @@ console.log("\n--- audit fixes ---");
     /sources\.length === 0\s*\?\s*t\("void\.replaceAir"\)/.test(lib("VoidBlockModal.svelte")),
   );
   const scrims = ["ConvertModal", "DimensionsModal", "VoidBlockModal", "VersionsModal", "NbtModal", "AnchorModal"].filter(
-    (name) => !/\.scrim \{[^}]*z-index: 100;/.test(lib(`${name}.svelte`)),
+    (name) => !lib(`${name}.svelte`).includes("<Modal"),
   );
   equal("every modal's scrim is on the modal tier, over the bar and the chat", scrims, []);
   check(
@@ -7091,6 +7091,160 @@ console.log("\n--- tool panels ---");
   check(
     "the floating options window is on the window tier, over the hotbar and the bars",
     /\.tool-window \{[^}]*z-index: var\(--z-window\);/.test(lib("ToolWindow.svelte")),
+  );
+}
+
+// --- dialogs and settings ----------------------------------------------------
+console.log("\n--- dialogs and settings ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+  const scriptOf = (source: string): string => source.slice(0, source.indexOf("</script>"));
+
+  // One component does what a dialog does. Ten skeletons had drifted: three
+  // ways of handling Escape, the pointer-lock release in six of them, a
+  // backdrop that closed on any click in some.
+  const modal = lib("Modal.svelte");
+  check("the dialog's scrim is the modal tier", /\.scrim \{[^}]*z-index: var\(--z-modal\);/.test(modal));
+  check("...it lets go of the pointer lock on the way in", modal.includes("document.exitPointerLock()"));
+  check(
+    "...takes the keyboard, so the window's shortcuts never fire from inside it",
+    /function onKey\(event: KeyboardEvent\): void \{\s*\/\/[^\n]*\n\s*event\.stopPropagation\(\);/.test(modal),
+  );
+  check(
+    "...leaves an Escape something inside already took",
+    /if \(event\.key === "Escape"\) \{\s*if \(event\.defaultPrevented\) return;/.test(modal),
+  );
+  check("...keeps Tab inside itself", /else if \(event\.key === "Tab"\) \{\s*keepFocusInside\(event\);/.test(modal));
+  check("...gives the focus back to what opened it", /opener\.focus\(\{ preventScroll: true \}\)/.test(modal));
+  check(
+    "...and closes from the backdrop only for a press that began there",
+    modal.includes("pressedOnScrim = event.target === event.currentTarget") &&
+      modal.includes("if (pressedOnScrim && event.target === event.currentTarget) onclose();"),
+  );
+
+  const dialogs = [
+    "AboutModal",
+    "AnchorModal",
+    "ConvertModal",
+    "DimensionsModal",
+    "NbtModal",
+    "SchematicDialog",
+    "SettingsModal",
+    "VersionModal",
+    "VersionsModal",
+    "VoidBlockModal",
+  ];
+  const ownSkeleton = dialogs.filter((name) => {
+    const source = lib(name + ".svelte");
+    return (
+      !source.includes('import Modal from "./Modal.svelte";') ||
+      !source.includes("<Modal") ||
+      source.includes('class="scrim"') ||
+      source.includes("exitPointerLock") ||
+      /event\.key === "Escape"/.test(scriptOf(source))
+    );
+  });
+  equal("every dialog is a Modal, with no scrim, Escape or pointer lock of its own", ownSkeleton, []);
+
+  // A local ".primary" painted the accent flat over app.css's bevelled one.
+  const libDir = path.join(RENDERER, "lib");
+  const flatPrimary = readdirSync(libDir)
+    .filter((name) => name.endsWith(".svelte"))
+    .filter((name) => /\n\s*(button)?\.primary\s*\{/.test(styleOf(lib(name))));
+  equal("no component paints its own confirming button", flatPrimary, []);
+
+  // The dialogs pick from the scales, as the tool panels do.
+  const surfaces = [...dialogs, "Modal", "BlockStateModal", "CommandPalette", "VersionList", "ApiKeysSection"];
+  const offScale = surfaces.flatMap((name) => {
+    const style = styleOf(lib(name + ".svelte"));
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(name + ": a radius");
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(name + ": a colour");
+    if (/font-size:\s*\d/.test(style)) faults.push(name + ": a font size");
+    if (/z-index:\s*\d/.test(style)) faults.push(name + ": a stacking level");
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(name + ": the accent as text");
+    return faults;
+  });
+  equal("the dialogs draw with the design system's scales and nothing else", offScale, []);
+  check(
+    "the block-state editor is a popover, on the popover tier",
+    /\.modal \{[^}]*z-index: var\(--z-popover\);/.test(lib("BlockStateModal.svelte")),
+  );
+  check(
+    "the command palette wears the dialogs' slab",
+    /class="palette modal"/.test(lib("CommandPalette.svelte")),
+  );
+
+  // The start screen opens dialogs, and Ctrl+, opens Settings over it: both
+  // have to land on top of it.
+  const tier = (name: string): number => Number(new RegExp(name + ": (\\d+);").exec(css)?.[1] ?? NaN);
+  check("the start screen is a tier of its own, under every dialog", tier("--z-screen") < tier("--z-modal"));
+  check("...and wears it", /\.start \{[^}]*z-index: var\(--z-screen\);/.test(lib("StartScreen.svelte")));
+  check(
+    "the empty space field chooses a block when one is picked, not on every keystroke",
+    lib("VoidBlockModal.svelte").includes("onchange={(next) => (typed = next)}") &&
+      /onpick=\{\(next\) => \{\s*typed = null;\s*onblock\(next\);/.test(lib("VoidBlockModal.svelte")),
+  );
+  check(
+    "an Escape that closes a block list stays with the list, not the dialog around it",
+    /event\.key === "Escape" && open\) \{\s*\/\/[^\n]*\n\s*event\.preventDefault\(\);\s*open = false;/.test(
+      lib("BlockPicker.svelte"),
+    ),
+  );
+
+  // Settings: ten panes in four groups, each control in one of them.
+  const settings = lib("SettingsModal.svelte");
+  const panes = [...settings.matchAll(/\{ id: "(\w+)", key: "settings\.\w+" \}/g)].map((match) => match[1]);
+  equal(
+    "the settings are ten panes in a fixed order",
+    panes,
+    ["general", "updates", "scene", "lighting", "textures", "performance", "lod", "diagnostics", "providers", "mcp"],
+  );
+  equal(
+    "...in four groups",
+    [...settings.matchAll(/key: "(settings\.group\.\w+)"/g)].map((match) => match[1]),
+    ["settings.group.app", "settings.group.viewport", "settings.group.performance", "settings.group.connections"],
+  );
+  const drawn = panes.filter((id) => id !== "providers" && !settings.includes('category === "' + id + '"'));
+  equal("...and every pane has something in it", drawn, []);
+  for (const key of ["preview.ambientOcclusion", "preview.showGrid", "preview.wireframe", "preview.showFps"]) {
+    equal("..." + key + " is in exactly one place", settings.split('t("' + key + '")').length - 1, 1);
+  }
+  check(
+    "the frame counter and the stutter report are diagnostics, not graphics",
+    settings.indexOf('t("preview.showFps")') > settings.indexOf('category === "diagnostics"') &&
+      settings.indexOf('t("preview.copyStutterReport")') > settings.indexOf('category === "diagnostics"'),
+  );
+
+  // What rebuilds says so beside its name -- and the list is App's, so a
+  // setting that starts rebuilding there and is not badged here fails.
+  const from = app.indexOf("const rebuilds =");
+  const rebuilding = [...app.slice(from, app.indexOf(";", from)).matchAll(/patch\.(\w+) !== undefined/g)]
+    .map((match) => match[1])
+    .filter((field) => !field.startsWith("lod"));
+  check("App's rebuild list was found", rebuilding.length >= 6, rebuilding.join(", "));
+  const badged = (field: string): boolean =>
+    field === "biomeColor" || field === "waterColor"
+      ? settings.includes('t("preview.biomeColors")} {@render mesh()}')
+      : new RegExp("\\(" + field + "\\) => onpreviewchange\\(\\{ " + field + " \\}\\),[\\s\\S]{0,160}?false,\\s*true,\\s*\\)\\}").test(
+          settings,
+        );
+  equal("every setting that rebuilds the preview carries the badge", rebuilding.filter((field) => !badged(field)), []);
+  check("...and so does the resource pack", settings.includes('t("preview.resourcePack")} {@render mesh()}'));
+  check(
+    "the level-of-detail legend is painted from the viewport's own table",
+    settings.includes('style:background={tintColour("lod1")}') &&
+      lib("Viewer.svelte").includes("LOD_TINT_AMOUNT,") &&
+      !/const LOD_TINT\b/.test(lib("Viewer.svelte")),
+  );
+  check(
+    "the open schematic's level-of-detail state comes first, not under six controls",
+    settings.indexOf("lodStatusLine}") < settings.indexOf('id="lod-mode"'),
   );
 }
 

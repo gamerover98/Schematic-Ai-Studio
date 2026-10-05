@@ -147,7 +147,7 @@
       if (event.target === event.currentTarget) onclose();
     }}
   >
-    <div class="palette" role="dialog" aria-label={t("palette.label")}>
+    <div class="palette modal" role="dialog" aria-modal="true" aria-label={t("palette.label")}>
       <input
         bind:this={input}
         bind:value={query}
@@ -187,7 +187,7 @@
   .scrim {
     position: fixed;
     inset: 0;
-    z-index: 100;
+    z-index: var(--z-modal);
     background: var(--scrim);
     display: flex;
     justify-content: center;
@@ -197,29 +197,31 @@
     padding-top: 12vh;
   }
 
+  /* `.modal` in app.css is the look: a slab over the scrim, like every dialog. */
   .palette {
     width: min(560px, 90vw);
-    background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: 0 12px 40px var(--shadow);
     overflow: hidden;
   }
 
+  /* The search is the game's text box, the full width of the slab. */
   .palette input {
     width: 100%;
-    box-sizing: border-box;
+    min-height: 0;
     border: none;
-    border-bottom: 1px solid var(--border);
-    border-radius: 0;
-    padding: 12px 14px;
-    font-size: 15px;
+    border-bottom: var(--bevel) solid var(--bevel-lo);
+    padding: var(--space-4) var(--space-5);
+    font-size: var(--text-lg);
+  }
+
+  /* The ring inside the slab's edge, where it cannot be clipped. */
+  .palette input:focus-visible {
+    outline-offset: -2px;
   }
 
   .palette ul {
     list-style: none;
     margin: 0;
-    padding: 4px;
+    padding: var(--space-2);
     max-height: 46vh;
     overflow-y: auto;
   }
@@ -227,22 +229,27 @@
   .palette button {
     display: flex;
     align-items: baseline;
-    gap: 10px;
+    gap: var(--space-4);
     width: 100%;
-    box-sizing: border-box;
+    min-height: var(--control-h);
     text-align: left;
-    padding: 7px 10px;
+    padding: var(--space-2) var(--space-4);
     background: none;
-    border: none;
-    border-radius: 4px;
+    border-color: transparent;
     color: inherit;
-    font: inherit;
-    font-size: 13px;
-    cursor: pointer;
+    font-size: var(--text-md);
   }
 
+  /* The highlighted row is the one Enter takes: pressed into the slab and lit. */
+  .palette button:hover:not(:disabled),
   .palette button.highlighted:not(:disabled) {
-    background: var(--accent-dim);
+    background: none;
+  }
+
+  .palette button.highlighted:not(:disabled),
+  .palette button.highlighted:hover:not(:disabled) {
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--accent-tint);
   }
 
   .palette button:disabled {
@@ -258,23 +265,24 @@
   }
 
   .group {
-    font-size: 11px;
+    font-size: var(--text-xs);
     color: var(--text-dim);
   }
 
   kbd {
-    font: inherit;
-    font-size: 11px;
-    color: var(--text-dim);
+    padding: 0 var(--space-2);
     border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 1px 5px;
+    background: var(--bg-input);
+    color: var(--text-dim);
+    font: inherit;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
   }
 
   .empty {
     margin: 0;
-    padding: 14px;
-    font-size: 13px;
+    padding: var(--space-5);
+    font-size: var(--text-md);
     color: var(--text-dim);
   }
 </style>

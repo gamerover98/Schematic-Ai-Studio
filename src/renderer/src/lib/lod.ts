@@ -155,6 +155,30 @@ export const HYSTERESIS = 0.1;
 export const FADE_MS = 250;
 
 /**
+ * The diagnostic tint of each level, mixed halfway into the albedo.
+ *
+ * Mixed rather than multiplied: green times copper is olive, which on a
+ * field of copper statues is the colour of copper. Halfway towards a strong
+ * colour reads on any texture, and keeps enough of it to see what is there.
+ *
+ * Here rather than in the viewer so the settings pane's legend is painted
+ * from the same three numbers: a legend kept beside it as CSS would be a
+ * second copy of them.
+ */
+export const LOD_TINT: Readonly<Record<string, readonly [number, number, number]>> = {
+  lod1: [0.15, 1, 0.2],
+  lod2: [1, 0.9, 0.1],
+  lod3: [1, 0.12, 0.08],
+};
+export const LOD_TINT_AMOUNT = 0.5;
+
+/** A level's tint as a CSS colour, for the legend. */
+export function tintColour(layer: string): string {
+  const [r, g, b] = LOD_TINT[layer] ?? [1, 1, 1];
+  return `rgb(${Math.round(r * 255)} ${Math.round(g * 255)} ${Math.round(b * 255)})`;
+}
+
+/**
  * Whether a level that errs by `errorPx` may be shown: a level already shown
  * is kept up to a tenth past the threshold, and one that is not is taken only
  * a tenth before it.

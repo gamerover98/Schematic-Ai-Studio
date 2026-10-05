@@ -18,7 +18,7 @@
    */
   import { DOCUMENT_SIZE } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
-  import Icon from "./Icon.svelte";
+  import Modal from "./Modal.svelte";
 
   interface Props {
     open: boolean;
@@ -58,7 +58,6 @@
     onclose,
   }: Props = $props();
 
-  let dialog = $state<HTMLDivElement | null>(null);
   let draft = $state<[string, string, string]>(["", "", ""]);
 
   /**
@@ -98,228 +97,120 @@
     onresize([parsed[0], parsed[1], parsed[2]], confirmLoss);
   }
 
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      onclose();
-    }
-  }
-
-  $effect(() => {
-    if (open) dialog?.focus();
-  });
 </script>
 
-{#if open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="scrim" onclick={onclose} onkeydown={onKeydown}>
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      bind:this={dialog}
-      class="modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("dimensions.title")}
-      tabindex="-1"
-      onclick={(event) => event.stopPropagation()}
-      onkeydown={onKeydown}
-    >
-      <header>
-        <h2>{t("dimensions.title")}</h2>
-        <button class="icon" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
-      </header>
+<Modal {open} title={t("dimensions.title")} {onclose} width={460}>
+  <label class="check">
+    <input type="checkbox" checked={showBounds} onchange={(event) => onbounds(event.currentTarget.checked)} />
+    <span>
+      {t("dimensions.showBounds")}
+      <small>{t("dimensions.showBoundsHint")}</small>
+    </span>
+  </label>
 
-      <label class="row">
-        <input
-          type="checkbox"
-          checked={showBounds}
-          onchange={(event) => onbounds(event.currentTarget.checked)}
-        />
-        <span>
-          {t("dimensions.showBounds")}
-          <small>{t("dimensions.showBoundsHint")}</small>
-        </span>
-      </label>
+  <label class="check">
+    <input type="checkbox" checked={autoGrow} onchange={(event) => onautogrow(event.currentTarget.checked)} />
+    <span>
+      {t("dimensions.autoGrow")}
+      <small>{t("dimensions.autoGrowHint")}</small>
+    </span>
+  </label>
 
-      <label class="row">
-        <input
-          type="checkbox"
-          checked={autoGrow}
-          onchange={(event) => onautogrow(event.currentTarget.checked)}
-        />
-        <span>
-          {t("dimensions.autoGrow")}
-          <small>{t("dimensions.autoGrowHint")}</small>
-        </span>
-      </label>
-
-      <!--
-        Always editable, not only with automatic resizing off. The two are not
-        opposites: someone who builds freely still wants to say "make it 64
-        wide" once, and hiding the fields behind a checkbox would make that
-        look like it needed the checkbox.
-      -->
-      <fieldset>
-        <legend>{t("dimensions.size")}</legend>
-        <div class="axes">
-          {#each AXES as axis, index (axis)}
-            <label>
-              <span>{t(axis)}</span>
-              <input
-                type="number"
-                min={DOCUMENT_SIZE.min}
-                max={DOCUMENT_SIZE.max}
-                step="1"
-                value={draft[index]}
-                disabled={busy}
-                oninput={(event) => (draft[index] = event.currentTarget.value)}
-              />
-            </label>
-          {/each}
-        </div>
-
-        <!--
-          Said before the button is pressed, because it is knowable here: any
-          axis getting smaller *may* cost blocks. How many is main's to count,
-          and arrives only if it refuses.
-        -->
-        {#if shrinking}
-          <p class="warn">{t("dimensions.shrinking")}</p>
-        {/if}
-      </fieldset>
-
-      {#if error !== ""}
-        <p class="error">{error}</p>
-      {/if}
-
-      <footer>
-        <button onclick={onclose}>{t("common.close")}</button>
-        {#if confirmable}
-          <!--
-            Only after main has refused once, and it says what it is agreeing
-            to. A permanent "and delete whatever falls outside" checkbox would
-            be armed on every ordinary resize, which is the state this refusal
-            exists to avoid.
-          -->
-          <button class="danger" disabled={!changed || busy} onclick={() => apply(true)}>
-            {t("dimensions.applyAnyway")}
-          </button>
-        {:else}
-          <button class="primary" disabled={!changed || busy} onclick={() => apply(false)}>
-            {t("dimensions.apply")}
-          </button>
-        {/if}
-      </footer>
+  <!--
+    Always editable, not only with automatic resizing off. The two are not
+    opposites: someone who builds freely still wants to say "make it 64
+    wide" once, and hiding the fields behind a checkbox would make that
+    look like it needed the checkbox.
+  -->
+  <fieldset>
+    <legend>{t("dimensions.size")}</legend>
+    <div class="axes">
+      {#each AXES as axis, index (axis)}
+        <label>
+          <span>{t(axis)}</span>
+          <input
+            type="number"
+            min={DOCUMENT_SIZE.min}
+            max={DOCUMENT_SIZE.max}
+            step="1"
+            value={draft[index]}
+            disabled={busy}
+            oninput={(event) => (draft[index] = event.currentTarget.value)}
+          />
+        </label>
+      {/each}
     </div>
-  </div>
-{/if}
+
+    <!--
+      Said before the button is pressed, because it is knowable here: any
+      axis getting smaller *may* cost blocks. How many is main's to count,
+      and arrives only if it refuses.
+    -->
+    {#if shrinking}
+      <p class="callout warn shrinking">{t("dimensions.shrinking")}</p>
+    {/if}
+  </fieldset>
+
+  {#if error !== ""}
+    <p class="callout bad" role="alert">{error}</p>
+  {/if}
+
+  {#snippet footer()}
+    <button onclick={onclose}>{t("common.close")}</button>
+    {#if confirmable}
+      <!--
+        Only after main has refused once, and it says what it is agreeing
+        to. A permanent "and delete whatever falls outside" checkbox would
+        be armed on every ordinary resize, which is the state this refusal
+        exists to avoid.
+      -->
+      <button class="danger" disabled={!changed || busy} onclick={() => apply(true)}>
+        {t("dimensions.applyAnyway")}
+      </button>
+    {:else}
+      <button class="primary" disabled={!changed || busy} onclick={() => apply(false)}>
+        {t("dimensions.apply")}
+      </button>
+    {/if}
+  {/snippet}
+</Modal>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--scrim);
-  }
-
-  .modal {
-    width: min(460px, calc(100vw - 32px));
-    max-height: calc(100vh - 64px);
-    overflow: auto;
-    padding: 16px;
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  h2 {
-    flex: 1 1 auto;
-    margin: 0;
-    font-size: 15px;
-  }
-
-  .icon {
-    border: none;
-    background: transparent;
-  }
-
-  .row {
+  .check {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
-    margin-bottom: 12px;
-    font-size: 13px;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+    color: var(--text);
+    font-size: var(--text-md);
   }
 
-  .row small {
+  .check small {
     display: block;
-    margin-top: 2px;
+    margin-top: var(--space-1);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--text-sm);
     line-height: 1.4;
   }
 
   fieldset {
-    margin: 0 0 12px;
-    padding: 10px 12px 12px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-  }
-
-  legend {
-    padding: 0 4px;
-    font-size: 12px;
-    color: var(--text-dim);
+    margin-bottom: var(--space-4);
   }
 
   .axes {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
+    gap: var(--space-3);
   }
 
   .axes label {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    font-size: 12px;
+    gap: var(--space-1);
+    margin: 0;
   }
 
-  .axes input {
-    width: 100%;
-    padding: 4px 6px;
-  }
-
-  .warn {
-    margin: 10px 0 0;
-    font-size: 12px;
-    color: var(--warn);
-  }
-
-  .error {
-    margin: 0 0 12px;
-    font-size: 12px;
-    color: var(--danger);
-  }
-
-  footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-
-  .primary {
-    background: var(--accent);
-    color: var(--accent-contrast);
-    border-color: var(--accent);
+  .shrinking {
+    margin-top: var(--space-4);
   }
 </style>

@@ -55,15 +55,42 @@ export const en = {
   "settings.title": "Settings",
   "settings.openShortcut": "Settings (Ctrl+,)",
   "settings.keywords": "preferences options theme language api key",
-  "settings.appearance": "Appearance",
-  "settings.sky": "Sky & light",
-  "settings.viewport": "Viewport",
-  "settings.quality": "Quality",
-  "settings.lod": "Level of detail",
-  "settings.textures": "Textures & colours",
-  "settings.providers": "Providers",
-  "settings.mcp": "MCP server",
+  // The rail: four groups of panes, and the sections inside the panes.
+  "settings.group.app": "App",
+  "settings.group.viewport": "Viewport",
+  "settings.group.performance": "Performance",
+  "settings.group.connections": "Connections",
+  "settings.general": "General",
   "settings.updates": "Updates",
+  "settings.scene": "Scene",
+  "settings.lighting": "Lighting",
+  "settings.textures": "Textures & colours",
+  "settings.performance": "Graphics",
+  "settings.lod": "Level of detail",
+  "settings.diagnostics": "Diagnostics",
+  "settings.providers": "AI providers",
+  "settings.mcp": "MCP server",
+  "settings.appearance": "Appearance",
+  "settings.section.sky": "Sky",
+  "settings.section.floor": "Floor and grid",
+  "settings.section.camera": "Camera",
+  "settings.section.sun": "Sun and sky light",
+  "settings.section.blocks": "Light from blocks",
+  "settings.section.card": "Hardware",
+  "settings.section.resolution": "Resolution",
+  "settings.section.frames": "Frames and distance",
+  "settings.section.server": "Server",
+  "settings.section.connect": "Connecting a client",
+  "settings.section.access": "Access",
+  "settings.section.thisCopy": "This copy",
+  "settings.section.checking": "Checking",
+  "settings.rebuilds": "Rebuilds",
+  "settings.rebuildsTitle":
+    "Baked into the textures or the mesh, so changing it rebuilds the preview. Everything without this tag applies on the next frame.",
+  "settings.diagnosticsHint":
+    "For finding out why the viewport is slow, or draws something wrong. None of these change the schematic.",
+  "settings.providersHint":
+    "The keys for the models the chat builds and edits with. Which model is used is chosen at the foot of the chat.",
 
   // The MCP server. Main's own failure wording is not translated — it arrives
   // already phrased, like every other `Failure.message` — so there is no key
@@ -114,7 +141,7 @@ export const en = {
   "mcp.clients.other": "{count} clients connected",
   "mcp.requireAuth": "Require a token",
   "mcp.requireAuthHint":
-    "On, a client has to send the token above. Off, anything that can reach the address below can read, write and save your schematics — and delete them if that is allowed too. Only offered while the server is bound to this machine.",
+    "On, a client has to send the token. Off, anything that can reach the address it listens on can read, write and save your schematics — and delete them if that is allowed too. Only offered while it listens on this machine alone.",
   "mcp.bindAddress": "Listen on",
   "mcp.bindAddressHint":
     "127.0.0.1 is this machine only. 0.0.0.0 is every network interface, which puts the editor on your network — the token is what stands between it and anyone who can route to you, so it cannot be turned off there. This is an address, not a range.",
@@ -179,10 +206,10 @@ export const en = {
     "Applies to this window straight away. Messages from the schematic reader and writers are " +
     "not translated.",
   "settings.schematic": "Schematics",
-  "settings.version": "Game version",
+  "settings.version": "Game version for new schematics",
   "settings.versionHint":
-    "Stamped on what you save, and what a build is written for. Anything up to 1.12.2 is " +
-    "MCEdit only.",
+    "What New starts on and what a build from the chat is made for. Anything up to 1.12.2 is " +
+    "MCEdit only. The open schematic's own version is in the Document menu.",
   "settings.outputDir": "Where builds are written",
   "settings.outputDefault": "Default",
   "settings.outputHint":
@@ -191,9 +218,6 @@ export const en = {
   "settings.qualityHint":
     "These cost frame time, not accuracy — lower them if the viewport feels heavy on a large " +
     "schematic.",
-  "settings.rebuildsHint":
-    "These are baked into the texture atlas, so changing one rebuilds the preview. Everything " +
-    "under Viewport and Quality applies to the next frame instead.",
 
   "sidebar.hide": "Hide the chat",
   "sidebar.show": "Show the chat",
@@ -252,6 +276,7 @@ export const en = {
   "void.air": "Air",
   "void.block": "Block",
   "void.opacity": "Opacity \u2014 {percent}%",
+  "void.convertLegend": "Empty cells already in the schematic",
   "void.replaceApply": "Replace what is already there",
   "void.replaceWhat":
     "Every cell holding {from} becomes {to} \u2014 one step, so Ctrl+Z takes it all back. Choosing a block changes what is drawn and what a break writes; this changes the schematic itself.",
@@ -867,8 +892,7 @@ export const en = {
   "preview.plains": "Plains",
   "preview.biomeHint":
     "Foliage (left) and water (right) ship greyscale and are tinted per biome — they are " +
-    "separate colours in Minecraft, so they are separate here. Changing either rebuilds the " +
-    "preview.",
+    "separate colours in Minecraft, so they are separate here.",
   "preview.sunAzimuth": "Sun azimuth — {value}°",
   "preview.sunElevation": "Sun elevation — {value}°",
   "preview.antialias": "Anti-aliasing",
@@ -946,9 +970,9 @@ export const en = {
   "preview.flySpeed": "Flight speed — {value} blocks/s",
   "preview.showGrid": "Show grid",
   "preview.wireframe": "Wireframe",
+  "preview.wireframeHint": "Draws the edges of every triangle, to see what the mesher made.",
   "preview.ambientOcclusion": "Ambient occlusion",
-  "preview.ambientOcclusionHint":
-    "Darkens the corners a block is buried in. Baked into the mesh, so changing it rebuilds.",
+  "preview.ambientOcclusionHint": "Darkens the corners a block is buried in.",
   "preview.sky": "Draw the sky",
   "preview.skyHint":
     "A gradient that follows the hour, a square sun and moon, and stars. Off leaves the flat background.",
@@ -980,11 +1004,9 @@ export const en = {
   "preview.groundColor": "Floor colour",
   "preview.groundFollowTheme": "Follow theme",
   "preview.smoothLighting": "Smooth lighting",
-  "preview.smoothLightingHint":
-    "Blends the light across each face instead of lighting it flat. Baked into the mesh, so changing it rebuilds.",
+  "preview.smoothLightingHint": "Blends the light across each face instead of lighting it flat.",
   "preview.blockLight": "Light from blocks",
-  "preview.blockLightHint":
-    "Torches, lanterns and lava light what is around them. Baked into the mesh, so changing it rebuilds.",
+  "preview.blockLightHint": "Torches, lanterns and lava light what is around them.",
 
   "chat.needsKey": "Add an API key for {provider} in Settings before sending",
   "chat.attachImage": "Reference image",

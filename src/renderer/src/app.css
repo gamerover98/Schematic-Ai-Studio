@@ -146,6 +146,9 @@
      should be added here with its reason. */
   --z-window: 20;
   --z-popover: 40;
+  /* The start screen: over the whole shell, under every dialog -- it opens
+     several of them, and a dialog it opened must not land behind it. */
+  --z-screen: 90;
   --z-modal: 100;
   --z-toast: 150;
   --z-top: 200;
@@ -753,6 +756,39 @@ button.link:hover:not(:disabled) {
   font-family: var(--font-pixel);
   font-weight: 500;
   letter-spacing: 0.02em;
+}
+
+/* A heading inside a dialog: the legend's pixel face, quieter than the title. */
+.modal h3 {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+/*
+ * Something to read before acting -- what a tag is for, why an edit was
+ * refused, what a setting will cost: a field-coloured well with an edge in the
+ * colour of what it says. Emerald explains, gold warns, redstone refuses.
+ */
+.callout {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-left: var(--space-2) solid var(--accent);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.callout.warn {
+  border-left-color: var(--warn);
+}
+
+.callout.bad {
+  border-left-color: var(--danger);
 }
 
 .row {

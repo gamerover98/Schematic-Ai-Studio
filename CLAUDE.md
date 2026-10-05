@@ -2171,9 +2171,11 @@ float.
   (a block in two areas counted once), the schematic's size and blocks, its
   container and version, and the MCP state, which is the one thing in it you
   can press.
-- **The start screen steps aside for the dialogs it opens.** Every scrim is on
-  the modal tier and it comes later in the document, so it painted over New's
-  dialog and Convert's.
+- **The start screen steps aside for the dialogs it opens**, and since the
+  dialogs became one component it is a tier of its own as well, `--z-screen`,
+  just under `--z-modal`. It comes later in the document than every dialog, so
+  on the same tier it painted over New's and Convert's -- and over Settings
+  opened with Ctrl+, while it was up, which the step-aside list did not name.
 - **The compass moved to the top-right corner**, where a 3D editor keeps its
   navigation gizmo: with a panel's width gone from the viewport, the centred
   hotbar met it in the bottom-left. The frame counter sits under it.
@@ -2238,6 +2240,68 @@ their own, and for the accent written as text.
   `BlockMixField` and never finds one. It compiles, and draws nothing.
 - **The floating options window is on `--z-window`**, over the hotbar and the
   viewport's bars, which share a level of 5 until the overlays get theirs.
+
+**Every dialog is `Modal.svelte`.** There were ten copies of the skeleton and
+they had drifted: three ways of handling Escape, the pointer-lock release in
+six of the ten, a close button in the header's flow in some and pinned to a
+corner in others, two with no close button at all, and a backdrop that closed
+on any click in some. What a dialog looks like was already `.modal` in
+`app.css`; what it does is this component, once:
+
+- **the scrim is `--z-modal`**, and the pointer lock goes on open;
+- **the keyboard is the dialog's.** Every keydown stops at the scrim, so the
+  window's single-key shortcuts -- Delete empties the selection, E opens the
+  inventory, Escape drops the selection -- never fire from inside a dialog.
+  Escape closes it **unless something inside already took it**
+  (`defaultPrevented`): a block list open in a field closes first, which is why
+  `BlockPicker` now `preventDefault`s the Escape it uses. Tab goes round
+  inside, and the control that opened the dialog gets the focus back;
+- **the backdrop closes it only for a press that began there.** A drag that
+  starts on a slider and is let go past the edge ends in a click on the scrim;
+- `width`, `height` and `flush` (no padding, no scroll: the dialog lays out
+  its own regions, as NBT and Settings do). The actions are a `footer`
+  snippet, declared inside `<Modal>` -- a snippet that is a direct child of a
+  component is passed to it as a prop, so the rows Settings renders are
+  declared *outside* it for the same reason.
+
+`tests/ui.ts` refuses a dialog with a scrim, an Escape or a pointer-lock
+release of its own, and any component with a local `.primary`, which painted
+the accent flat over `app.css`'s bevelled one in five dialogs. The block-state
+editor is not a dialog: it is anchored to a chip, on `--z-popover`. The
+command palette keeps its own frame -- a search at the top, no title -- and
+wears `.modal`.
+
+`.callout` in `app.css` is what a dialog says before an act: a field-coloured
+well with an emerald edge to explain, gold to warn (`.warn`), redstone to
+refuse (`.bad`). It replaced five local spellings of the same box.
+
+**A block field in a dialog chooses on a pick, never on a keystroke.**
+`BlockPicker` calls `onchange` for every character typed and `onpick` for a
+row chosen or Enter, and the Empty space dialog wired its choice to the first:
+typing "stone" made the empty space `s`, then `st`, then `sto` -- three
+requests to main, each a block that does not exist, and the last one stayed.
+It keeps what is typed as a draft now and chooses on `onpick`.
+
+**The settings are ten panes in four groups**, each pane in sections: App
+(General, Updates), Viewport (Scene, Lighting, Textures & colours), Performance
+(Graphics, Level of detail, Diagnostics), Connections (AI providers, MCP
+server). They were ten panes in a flat list, in the order they were written,
+with ambient occlusion in two of them, the floor under "Sky & light", the frame
+counter among the GPU costs, and a hint pointing at panes called Viewport and
+Quality that no longer held what it said.
+
+- **What rebuilds the preview says so beside its name**, with a gold badge, and
+  the list is `App.svelte`'s: `tests/ui.ts` reads `patchPreview`'s `rebuilds`
+  and requires a badge on every field in it but the levels of detail, which
+  build beside the mesh and re-mesh nothing.
+- **The level-of-detail legend is painted from `LOD_TINT` in `lod.ts`**, which
+  the viewer reads too. It was three `rgb()` literals beside a comment saying
+  they had to match the viewer.
+- **"Game version" is the version for new schematics** -- what New starts on and
+  what a build from the chat is made for -- and is shown by its label, 26.2, not
+  the table's key. The open schematic's own version is the Document menu's.
+- `startOn` names a pane by id; the MCP indicator and the update indicator open
+  `mcp` and `updates`.
 
 **A floating panel is resizable, and its size is two settings per window.**
 `ToolWindow` was `width: 232px` in CSS with no size props at all — the number
@@ -3477,7 +3541,7 @@ for what destroys.
 - **Every dialog's look is `.modal` in `app.css`**: the components keep their
   sizes and layouts and draw no border, radius, background or shadow of their
   own. `tests/ui.ts` walks `lib/` and refuses one that does -- it found
-  `BlockStateModal` on its first run.
+  `BlockStateModal` on its first run. What a dialog *does* is `Modal.svelte`.
 - **Contrast is computed, not claimed.** `tests/ui.ts` parses both palettes and
   holds text pairs to 4.5:1 and field edges and the focus ring to 3:1 (WCAG
   1.4.3, 1.4.11), and requires the system light block to equal the explicit

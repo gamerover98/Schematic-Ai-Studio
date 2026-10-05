@@ -57,7 +57,7 @@
 </script>
 
 {#if keyStatus && !keyStatus.encryptionAvailable}
-  <p class="hint warn">{t("provider.noEncryption")}</p>
+  <p class="callout warn">{t("provider.noEncryption")}</p>
 {/if}
 
 <!--
@@ -71,13 +71,13 @@
   one click away.
 -->
 {#if keyStatus?.legacyProfile}
-  <p class="hint warn">
+  <p class="callout warn">
     {t("provider.legacyProfile", {
       providers: keyStatus.legacyProfile.providers.join(", "),
       path: keyStatus.legacyProfile.path,
     })}
   </p>
-  <button onclick={() => onrevealpath(keyStatus?.legacyProfile?.path ?? "")}>
+  <button class="reveal" onclick={() => onrevealpath(keyStatus?.legacyProfile?.path ?? "")}>
     {t("provider.legacyProfileReveal")}
   </button>
 {/if}
@@ -135,13 +135,30 @@
 </div>
 
 <style>
+  /* A row of the settings pane it sits in: the label above, in the pane's
+     voice rather than a panel's small one. */
+  .field > label {
+    color: var(--text);
+    font-size: var(--text-md);
+  }
+
   .key-row {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    gap: var(--space-3);
   }
 
   .key-row input {
     flex: 1;
+    min-width: 0;
+  }
+
+  .callout {
+    margin-bottom: var(--space-4);
+  }
+
+  .reveal {
+    margin: calc(-1 * var(--space-2)) 0 var(--space-5);
   }
 
   .ok {

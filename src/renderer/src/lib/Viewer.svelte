@@ -42,6 +42,8 @@
   import { counterIdle, shouldDraw, ViewWatch } from "./render_demand.js";
   import {
     BAYER_4X4,
+    LOD_TINT,
+    LOD_TINT_AMOUNT,
     LodSelector,
     meshKey,
     regionOfChunk,
@@ -6161,20 +6163,6 @@ import { isTyping } from "./typing.js";
     }
     return sharedPair;
   }
-
-  /**
-   * The diagnostic tint of each level, mixed halfway into the albedo.
-   *
-   * Mixed rather than multiplied: green times copper is olive, which on a
-   * field of copper statues is the colour of copper. Halfway towards a strong
-   * colour reads on any texture, and keeps enough of it to see what is there.
-   */
-  const LOD_TINT: Readonly<Record<string, readonly [number, number, number]>> = {
-    lod1: [0.15, 1, 0.2],
-    lod2: [1, 0.9, 0.1],
-    lod3: [1, 0.12, 0.08],
-  };
-  const LOD_TINT_AMOUNT = 0.5;
 
   /**
    * The copies of the block materials the levels of detail are drawn with.

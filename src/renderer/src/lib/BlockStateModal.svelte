@@ -127,13 +127,13 @@
   style={placement === null ? "visibility: hidden" : `left: ${placement.x}px; top: ${placement.y}px`}
 >
   <div class="head">
-    {#if icons.get(block)}
-      <img src={icons.get(block)} alt="" width="32" height="32" />
-    {:else}
-      <span class="pending" aria-hidden="true"></span>
-    {/if}
+    <span class="slot">
+      {#if icons.get(block)}
+        <img src={icons.get(block)} alt="" width="32" height="32" />
+      {/if}
+    </span>
     <code class="id">{block}</code>
-    <button class="close" onclick={onclose} title={t("common.close")} aria-label={t("common.close")}>
+    <button class="icon" onclick={onclose} title={t("common.close")} aria-label={t("common.close")}>
       <Icon name="close" size={14} weight={2.2} />
     </button>
   </div>
@@ -154,7 +154,7 @@
             {#if icons.get(variant.modern)}
               <img src={icons.get(variant.modern)} alt="" width="28" height="28" />
             {:else}
-              <span class="pending small" aria-hidden="true"></span>
+              <span class="pending" aria-hidden="true"></span>
             {/if}
             <span class="data">{variant.label}</span>
           </button>
@@ -242,72 +242,55 @@
 </div>
 
 <style>
+  /* A slab on the popover tier, anchored to the chip it edits: the block
+     list's arrangement, not a dialog's. */
   .modal {
     position: fixed;
-    z-index: 30;
-    width: min(270px, calc(100vw - 16px));
-    max-height: min(420px, calc(100vh - 16px));
+    z-index: var(--z-popover);
+    width: min(280px, calc(100vw - 16px));
+    max-height: min(440px, calc(100vh - 16px));
     overflow-y: auto;
-    box-sizing: border-box;
-    padding: 8px 10px 10px;
-    font-size: 12px;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+    font-size: var(--text-sm);
   }
 
   .head {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
   }
 
-  .head img,
-  .pending {
+  /* The block in a slot, as the field it came from holds it. */
+  .slot {
     flex: none;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
+  }
+
+  .slot img {
     width: 32px;
     height: 32px;
     image-rendering: pixelated;
   }
 
-  .pending {
-    border-radius: 4px;
-    background: var(--bg-input);
-  }
-
-  .pending.small {
-    width: 28px;
-    height: 28px;
-  }
-
   .id {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
     overflow-wrap: anywhere;
-  }
-
-  .close {
-    flex: none;
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    min-height: 0;
-    padding: 0;
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-
-  .close:hover {
-    color: var(--text);
-    background: none;
   }
 
   .rows {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-2);
     margin: 0;
     padding: 0;
     list-style: none;
@@ -317,11 +300,12 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
     align-items: center;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
   .rows label {
     margin: 0;
+    color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -335,13 +319,13 @@
   .rows input:not([type="checkbox"]) {
     width: 100%;
     min-width: 0;
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
 
   .bool {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-2);
   }
 
   .bool input {
@@ -355,7 +339,7 @@
   }
 
   .bool .note {
-    font-size: 11px;
+    font-size: var(--text-xs);
     color: var(--text-dim);
   }
 
@@ -380,43 +364,47 @@
   .foot {
     display: flex;
     align-items: flex-end;
-    gap: 8px;
-    margin-top: 8px;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
   }
 
   .foot .hint {
     flex: 1;
   }
 
+  .foot button {
+    font-size: var(--text-sm);
+  }
+
   .hint,
   .label {
-    margin: 4px 0;
-    font-size: 11px;
+    margin: var(--space-2) 0;
+    font-size: var(--text-xs);
     color: var(--text-dim);
   }
 
   .variants {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
-    gap: 4px;
+    grid-template-columns: repeat(auto-fill, minmax(46px, 1fr));
+    gap: var(--space-2);
   }
 
+  /* Each variant a slot, the chosen one lit: the inventory's grid. */
   .variant {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 1px;
-    padding: 3px 2px;
-    border: 2px solid transparent;
-    border-radius: 4px;
-    background: var(--bg-input);
+    gap: var(--space-1);
+    min-height: 0;
+    padding: var(--space-1) var(--space-1) var(--space-2);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
     cursor: pointer;
   }
 
-  /* The well it sits in, with the edge it had before a hover meant a fill. */
   .variant:hover {
-    background: var(--bg-input);
-    border-color: var(--accent-dim);
+    background: color-mix(in srgb, var(--slot-text) 12%, var(--slot));
   }
 
   .variant img {
@@ -425,22 +413,30 @@
     image-rendering: pixelated;
   }
 
-  .variant.chosen {
-    border-color: var(--accent);
+  .pending {
+    display: block;
+    width: 28px;
+    height: 28px;
   }
 
+  .variant.chosen {
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+
+  /* A slot's number, the game's: white with a hard shadow, on slot-dark. */
   .data {
-    font-size: 10px;
+    color: var(--slot-text);
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
-    color: var(--text-dim);
+    text-shadow: 1px 1px 0 var(--slot-text-shadow);
   }
 
   .readonly {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 1px 10px;
-    margin: 8px 0 0;
-    font-size: 11px;
+    gap: var(--space-1) var(--space-4);
+    margin: var(--space-3) 0 0;
+    font-size: var(--text-xs);
   }
 
   .readonly dt,

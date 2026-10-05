@@ -29,7 +29,7 @@
   import { VOID_OPACITY, voidSources } from "../../../shared/settings.js";
   import BlockPicker from "./BlockPicker.svelte";
   import { t } from "./i18n.svelte.js";
-  import Icon from "./Icon.svelte";
+  import Modal from "./Modal.svelte";
   import { blockLabel } from "./inventory.js";
 
   interface Props {
@@ -103,8 +103,6 @@
     onclose,
   }: Props = $props();
 
-  let dialog = $state<HTMLDivElement | null>(null);
-
   /**
    * The blocks worth offering, and why they are a list rather than the whole
    * inventory.
@@ -156,253 +154,156 @@
    */
   const nothingToDo = $derived(!sources.some((id) => present.has(id)));
 
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      onclose();
-    }
-  }
-
+  /*
+   * What is typed in the field, until a block is picked from the list or
+   * Enter takes it. The field used to choose on every keystroke, so typing
+   * "stone" made the empty space `s`, then `st`, then `sto` -- each a request
+   * to main, and each a block that does not exist.
+   */
+  let typed = $state<string | null>(null);
   $effect(() => {
-    if (!open) return;
-    // Over the viewport, where the canvas may hold the pointer: a panel on
-    // top of a camera still turning underneath is the documented failure.
-    document.exitPointerLock();
-    dialog?.focus();
+    void block;
+    if (!open) typed = null;
   });
 </script>
 
-{#if open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="scrim" onclick={onclose} onkeydown={onKeydown}>
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      bind:this={dialog}
-      class="modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("void.title")}
-      tabindex="-1"
-      onclick={(event) => event.stopPropagation()}
-      onkeydown={onKeydown}
-    >
-      <header>
-        <h2>{t("void.title")}</h2>
-        <button class="icon" onclick={onclose} aria-label={t("common.close")}><Icon name="close" /></button>
-      </header>
+<Modal {open} title={t("void.title")} {onclose} width={460}>
+  <p class="hint lead">{t("void.hint")}</p>
 
-      <p class="hint">{t("void.hint")}</p>
-
-      <div class="presets" role="group" aria-label={t("void.presets")}>
-        {#each offered as candidate (candidate)}
-          <button
-            class:active={block === candidate}
-            disabled={busy}
-            title={candidate === "" ? "minecraft:air" : candidate}
-            onclick={() => onblock(candidate)}
-          >
-            {readable(candidate)}
-          </button>
-        {/each}
-      </div>
-
-      <label class="field">
-        <span>{t("void.block")}</span>
-        <BlockPicker
-          value={block}
-          placeholder="minecraft:air"
-          {blocks}
-          {placeable}
-          {legacy}
-          onchange={(next) => onblock(next)}
-        />
-      </label>
-
-      <!--
-        Disabled with air chosen rather than hidden: it is the same control
-        either way, and a slider that comes and goes reads as a bug in the
-        panel. There is simply nothing for it to make see-through.
-      -->
-      <label class="field slider" class:inert={block === ""}>
-        <span>{t("void.opacity", { percent: Math.round(opacity * 100) })}</span>
-        <input
-          type="range"
-          min={VOID_OPACITY.min}
-          max={VOID_OPACITY.max}
-          step="0.05"
-          value={opacity}
-          disabled={busy || block === ""}
-          oninput={(event) => onopacity(Number(event.currentTarget.value))}
-        />
-      </label>
-
-      <!--
-        The rewrite, on a press of its own.
-
-        It converts the cells that hold the *previous* answer -- the air a
-        schematic has always been full of, or whatever was chosen before. One
-        transaction, so it is one Ctrl+Z.
-
-        It was a checkbox carried along with the choice, and that could not
-        work: it was read at the moment the block changed, so ticking it after
-        picking water did nothing, and re-picking water to make it fire was
-        refused as choosing what was already chosen. Two acts that happen at
-        different moments need two controls.
-      -->
-      <div class="field rewrite">
-        <button
-          class="primary"
-          disabled={busy || nothingToDo}
-          onclick={() => onreplace(converted, block)}
-        >
-          {t("void.replaceApply")}
-        </button>
-      </div>
-      <!--
-        With air chosen over air there is no source at all: air is what every
-        schematic starts with and the target is never its own source. Joining
-        an empty list put "holds ." on screen, so that case has its own words.
-      -->
-      <p class="note">
-        {sources.length === 0
-          ? t("void.replaceAir")
-          : nothingToDo
-          ? t("void.replaceNone", { from: sources.map(readable).join(", ") })
-          : t("void.replaceWhat", {
-              from: sources.map(readable).join(", "),
-              to: readable(block),
-            })}
-      </p>
-
-      {#if error}
-        <p class="error">{error}</p>
-      {/if}
-
-      <p class="note">{t("void.pickNote")}</p>
-
-      <footer>
-        <button onclick={onclose}>{t("common.close")}</button>
-      </footer>
-    </div>
+  <div class="presets segmented" role="group" aria-label={t("void.presets")}>
+    {#each offered as candidate (candidate)}
+      <button
+        aria-pressed={block === candidate}
+        disabled={busy}
+        title={candidate === "" ? "minecraft:air" : candidate}
+        onclick={() => onblock(candidate)}
+      >
+        {readable(candidate)}
+      </button>
+    {/each}
   </div>
-{/if}
+
+  <label class="field">
+    <span>{t("void.block")}</span>
+    <BlockPicker
+      value={typed ?? block}
+      placeholder="minecraft:air"
+      {blocks}
+      {placeable}
+      {legacy}
+      onchange={(next) => (typed = next)}
+      onpick={(next) => {
+        typed = null;
+        onblock(next);
+      }}
+    />
+  </label>
+
+  <!--
+    Disabled with air chosen rather than hidden: it is the same control
+    either way, and a slider that comes and goes reads as a bug in the
+    panel. There is simply nothing for it to make see-through.
+  -->
+  <label class="field" class:inert={block === ""}>
+    <span>{t("void.opacity", { percent: Math.round(opacity * 100) })}</span>
+    <input
+      type="range"
+      min={VOID_OPACITY.min}
+      max={VOID_OPACITY.max}
+      step="0.05"
+      value={opacity}
+      disabled={busy || block === ""}
+      oninput={(event) => onopacity(Number(event.currentTarget.value))}
+    />
+  </label>
+
+  <!--
+    The rewrite, on a press of its own.
+
+    It converts the cells that hold the *previous* answer -- the air a
+    schematic has always been full of, or whatever was chosen before. One
+    transaction, so it is one Ctrl+Z.
+
+    It was a checkbox carried along with the choice, and that could not
+    work: it was read at the moment the block changed, so ticking it after
+    picking water did nothing, and re-picking water to make it fire was
+    refused as choosing what was already chosen. Two acts that happen at
+    different moments need two controls.
+  -->
+  <fieldset class="rewrite">
+    <legend>{t("void.convertLegend")}</legend>
+    <!--
+      With air chosen over air there is no source at all: air is what every
+      schematic starts with and the target is never its own source. Joining
+      an empty list put "holds ." on screen, so that case has its own words.
+    -->
+    <p class="hint what">
+      {sources.length === 0
+        ? t("void.replaceAir")
+        : nothingToDo
+        ? t("void.replaceNone", { from: sources.map(readable).join(", ") })
+        : t("void.replaceWhat", {
+            from: sources.map(readable).join(", "),
+            to: readable(block),
+          })}
+    </p>
+    <!-- The one control here that changes the document, so it is the one that looks like it. -->
+    <button class="primary" disabled={busy || nothingToDo} onclick={() => onreplace(converted, block)}>
+      {t("void.replaceApply")}
+    </button>
+  </fieldset>
+
+  {#if error}
+    <p class="callout bad" role="alert">{error}</p>
+  {/if}
+
+  <p class="hint">{t("void.pickNote")}</p>
+
+  {#snippet footer()}
+    <button onclick={onclose}>{t("common.close")}</button>
+  {/snippet}
+</Modal>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--scrim);
-  }
-
-  .modal {
-    width: min(440px, calc(100vw - 32px));
-    max-height: calc(100vh - 64px);
-    overflow: auto;
-    padding: 16px;
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  h2 {
-    flex: 1 1 auto;
-    margin: 0;
-    font-size: 15px;
-  }
-
-  .icon {
-    border: none;
-    background: transparent;
-  }
-
-  .hint {
-    margin: 0 0 12px;
-    font-size: 12px;
+  .lead {
+    margin: 0 0 var(--space-4);
     line-height: 1.5;
-    color: var(--text-dim);
   }
 
+  /* Five words in a 460px dialog: the row wraps rather than cutting
+     "Structure void" short. */
   .presets {
-    display: flex;
     flex-wrap: wrap;
-    gap: 4px;
-    margin-bottom: 12px;
-  }
-
-  .presets button {
-    padding: 4px 9px;
-    font-size: 12px;
-  }
-
-  .presets button.active {
-    background: var(--accent);
-    color: var(--accent-contrast);
-    border-color: var(--accent);
+    margin-bottom: var(--space-4);
   }
 
   .field {
-    display: block;
-    margin-bottom: 12px;
-    font-size: 12px;
+    margin-bottom: var(--space-4);
   }
 
   .field > span {
     display: block;
-    margin-bottom: 4px;
-    color: var(--text-dim);
-  }
-
-  .slider input {
-    width: 100%;
+    margin-bottom: var(--space-2);
   }
 
   .inert {
     opacity: 0.5;
   }
 
-  /* The one control here that changes the document, so it is the one that
-     looks like it. `button.primary` is the app's own accent -- stated in
-     `app.css` and shared with every other modal's confirming button -- so
-     only the width is this panel's business. */
-  .field.rewrite {
-    margin-bottom: 6px;
+  .rewrite {
+    margin-bottom: var(--space-4);
   }
 
-  .field.rewrite button {
-    width: 100%;
-    padding: 6px 10px;
-    font-size: 12px;
-  }
-
-  .error {
-    margin: 0;
-    padding: 6px 8px;
-    border-radius: 6px;
-    background: var(--bg-input);
-    color: var(--text);
-    font-size: 11px;
-  }
-
-  .note {
-    margin: 0 0 12px;
-    font-size: 11px;
+  .what {
+    margin: 0 0 var(--space-3);
     line-height: 1.5;
-    color: var(--text-dim);
   }
 
-  footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
+  .rewrite button {
+    width: 100%;
+  }
+
+  .callout {
+    margin-bottom: var(--space-4);
   }
 </style>

@@ -58,7 +58,7 @@
     {#if versions.length === 0}
       <p class="hint">{t("versions.empty")}</p>
     {:else}
-      <ul>
+      <ul class="sunken">
         {#each versions as version (version.id)}
           <li>
             <div class="row">
@@ -109,41 +109,46 @@
   {/if}
 
 <style>
+  /* The versions in a well, one row each, newest first. */
   ul {
     list-style: none;
     margin: 0;
-    padding: 0;
+    padding: 0 var(--space-4);
   }
 
   li {
-    padding: 6px 0;
-    border-top: 1px solid var(--border);
+    padding: var(--space-3) 0;
   }
 
-  li:first-child {
-    border-top: none;
+  li + li {
+    border-top: 1px solid var(--border);
   }
 
   .row {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: var(--space-3);
     min-width: 0;
+  }
+
+  .row + .row {
+    margin-top: var(--space-1);
   }
 
   .label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 12px;
+    font-size: var(--text-md);
+    font-weight: 700;
   }
 
   .when,
   .facts {
     flex: none;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--text-sm);
     font-variant-numeric: tabular-nums;
   }
 
@@ -160,24 +165,21 @@
     display: flex;
     flex: none;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-2);
   }
 
-  .actions button,
+  .actions button:not(.icon),
   .confirm button {
-    padding: 2px 7px;
-    font-size: 11px;
-  }
-
-  /* The one destructive control here, coloured like the risk it carries. */
-  .danger {
-    border-color: var(--danger);
-    color: var(--danger);
+    font-size: var(--text-sm);
   }
 
   .buttons {
     display: flex;
-    gap: 8px;
-    margin-bottom: 8px;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+
+  .hint {
+    margin: var(--space-3) 0 0;
   }
 </style>
