@@ -5715,7 +5715,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       message rather than a panel.
 
       Its show and hide is the panel button at the trailing end of the bar,
-      the mirror of the tools' at the leading end, and Ctrl+B.
+      the mirror of the tools' at the leading end, Ctrl+B, and the chevron in
+      its own strip, as the tools' panel has one in its.
     -->
     <div class="tab-body">
       <ChatPanel
@@ -5756,6 +5757,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         onundo={() => runDocument(t("task.undoing"), () => api().undo())}
         onsettingschange={patchSettings}
         onopensettings={() => (settingsOpen = true)}
+        oncollapse={toggleSidebar}
       />
     </div>
   </section>
@@ -6176,7 +6178,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     overflow: hidden;
     min-width: 0;
     min-height: 0;
-    padding: var(--space-3) var(--space-5) var(--space-4);
+    /* Edge to edge: the chat draws its own strip, log and footer, as the
+       tools' panel does. */
+    background: var(--bg-panel);
     border-left: var(--bevel) solid var(--bevel-hi);
   }
 

@@ -2177,6 +2177,42 @@ float.
 - **The compass moved to the top-right corner**, where a 3D editor keeps its
   navigation gizmo: with a panel's width gone from the viewport, the centred
   hotbar met it in the bottom-left. The frame counter sits under it.
+- **The tools' panel is never narrower than its three tabs.** `DOCK_WIDTH.min`
+  is 280: at 260 "Selection", "Inspector" and "Terrain" did not fit on the
+  strip in the pixel face, and the collapse chevron fell off its end.
+
+**The chat is the right-hand docked panel, and it wears the left one's
+strip.** `.panel-head` and `.panel-tab` in `app.css` are both panels' header
+and tabs; the conversation picker's button is the chat's one tab, so the name
+of the conversation is the name of the panel. It is a tab to look at and a
+button to a screen reader, because what it opens is a list.
+
+- **A turn is a name in the pixel face behind a square of its colour**, as the
+  game prints a player in chat: gold you, emerald the model, redstone a
+  failure, the quiet colour a stopped run. The square of a turn still being
+  written blinks. Going back to a checkpoint is an icon on the name's line,
+  shown on hover: hidden in a row of its own, it left a blank line under every
+  message that had one.
+- **Emerald as text is `--accent-text`, not `--accent`.** The accent is
+  4.3:1 on the light theme's stone, under the 4.5 a line of text needs, so
+  words take a deeper green there and fills keep the bright one. `tests/ui.ts`
+  holds it to 4.5 on the slab and in a field. Older components still write
+  `--accent` as text and move over as their sub-phase comes.
+- **What the model did is a well, `.sunken`**: field-coloured, with the inset
+  bevel. `.inset` is slot-dark in every theme, which is right under an icon and
+  wrong under a paragraph on the light theme. The trace, the composer and a
+  code block are wells.
+- **What changed is the blocks, in slots**: the receipt asks
+  `requestBlockIcons` for each tally shown and draws the count beside the
+  slot in the pixel face, with the id in the hover. Air has no picture and is
+  never asked for; its slot stays empty.
+- **The two popovers keep their Escape.** The window's own drops the
+  selection, so the conversation list and the model picker stop it, from the
+  button as well as from inside, because a click leaves the focus on the
+  button. The list takes the focus after a `tick`: the effect that focused it
+  woke on the same `placement` the popover's `style` is written from and ran
+  first, so the focus landed on a popover still `visibility: hidden`, which the
+  browser refuses without a word.
 
 **A floating panel is resizable, and its size is two settings per window.**
 `ToolWindow` was `width: 232px` in CSS with no size props at all — the number

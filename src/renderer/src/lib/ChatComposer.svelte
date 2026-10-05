@@ -12,6 +12,11 @@
    * unless you say otherwise". Same fact, but as a chip it reads as part of the
    * request being composed rather than as instructions about it, and it can
    * carry the actual size.
+   *
+   * The box is the game's text field: a well sunk into the slab, with the
+   * focus ring on the box rather than on the bare textarea inside it, because
+   * the box is what you are typing into. Send is the emerald slab, Stop the
+   * redstone one.
    */
   import type { RegionSpec } from "../../../shared/ipc.js";
   import type { ExportType, KeyStorageStatus, Settings } from "../../../shared/settings.js";
@@ -221,8 +226,8 @@
         Never disabled. A Stop that is greyed out while the thing it stops is
         running is the one state this button must not have.
       -->
-      <button class="send stop" onclick={onstop} title={t("chat.stopHint")}>
-        {t("chat.stop")}
+      <button class="send danger" onclick={onstop} title={t("chat.stopHint")}>
+        <Icon name="stop" size={14} />{t("chat.stop")}
       </button>
     {:else}
       <button
@@ -252,30 +257,33 @@
     grid-template-areas:
       "text text"
       "context actions";
-    gap: 6px;
-    padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    gap: var(--space-2);
+    padding: var(--space-3);
     background: var(--bg-input);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
   }
 
-  .composer:focus-within {
-    border-color: var(--accent);
+  /* The ring of the field you are typing in, drawn round the whole box. */
+  .composer:has(textarea:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 0;
   }
 
   textarea {
     grid-area: text;
     width: 100%;
-    min-height: 22px;
+    min-height: 24px;
     max-height: 180px;
-    padding: 2px 4px;
+    padding: var(--space-1) var(--space-2);
     border: none;
     background: none;
     resize: none;
     overflow-y: auto;
   }
 
-  textarea:focus {
+  textarea:focus,
+  textarea:focus-visible {
     outline: none;
   }
 
@@ -284,21 +292,23 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-2);
     min-width: 0;
   }
 
+  /* A label stamped on the request: square, a step up out of the well. */
   .chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: var(--space-2);
     max-width: 100%;
-    padding: 2px 8px;
+    min-height: 24px;
+    padding: 0 var(--space-3);
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius);
     background: var(--bg-panel);
-    font-size: 11px;
-    color: var(--accent);
+    font-size: var(--text-xs);
+    color: var(--accent-text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -317,16 +327,23 @@
 
   .chip.attach:hover:not(:disabled) {
     color: var(--text);
-    border-color: var(--accent);
+    background: var(--bg-hover);
+    border-color: var(--field-edge);
   }
 
   .chip .clear {
     display: grid;
     place-items: center;
-    padding: 0 2px;
+    min-height: 0;
+    padding: 0 var(--space-1);
     border: none;
     background: none;
     color: var(--text-dim);
+  }
+
+  .chip .clear:hover:not(:disabled) {
+    background: none;
+    color: var(--text);
   }
 
   /* `width: auto` undoes app.css's `width: 100%` for every select, which is
@@ -334,9 +351,9 @@
   .format {
     flex: none;
     width: auto;
-    padding: 1px 4px;
-    border-radius: 999px;
-    font-size: 11px;
+    min-height: 24px;
+    padding: 0 var(--space-2);
+    font-size: var(--text-xs);
   }
 
   .chip em {
@@ -349,7 +366,7 @@
     grid-area: actions;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-2);
     justify-content: flex-end;
     align-self: end;
     min-width: 0;
@@ -357,11 +374,11 @@
 
   .send {
     flex: none;
-    display: inline-grid;
-    place-items: center;
-    min-height: 26px;
-    padding: 4px 12px;
-    font-size: 13px;
-    line-height: 1.2;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    min-width: 40px;
+    padding: 0 var(--space-3);
   }
 </style>

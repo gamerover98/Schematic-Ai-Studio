@@ -84,6 +84,20 @@
   }
 
   /*
+   * Escape puts it away and gives the focus back to the button, and goes no
+   * further: the window's own Escape drops the selection, which is not what
+   * somebody closing a popover meant. From the button as well as from inside,
+   * because a click leaves the focus on the button.
+   */
+  function onPanelKey(event: KeyboardEvent): void {
+    if (event.key !== "Escape" || !open) return;
+    event.preventDefault();
+    event.stopPropagation();
+    open = false;
+    trigger?.focus();
+  }
+
+  /*
    * Measure, then place. The popover has to be in the DOM to know how tall it
    * is, so it renders hidden for one flush and `placement` reveals it -- an
    * `$effect` runs after the DOM is updated and before paint, so there is
@@ -123,6 +137,9 @@
     class:warn={needsKey}
     bind:this={trigger}
     onclick={() => (open = !open)}
+    onkeydown={onPanelKey}
+    aria-haspopup="dialog"
+    aria-expanded={open}
     title={t("chat.modelPickerHint")}
   >
     <span class="label">{selected?.name ?? (settings.model || settings.provider)}</span>
@@ -131,9 +148,11 @@
 
   {#if open}
     <div
-      class="popover"
+      class="popover slab"
       role="dialog"
       aria-label={t("chat.modelPickerHint")}
+      tabindex="-1"
+      onkeydown={onPanelKey}
       bind:this={panel}
       style={placement === null
         ? "visibility: hidden"
@@ -233,23 +252,26 @@
     min-width: 0;
   }
 
+  /* Flat until the pointer is on it, as an icon button is: it shares the
+     composer's footer with the context chips and should not outshout Send. */
   .trigger {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-2);
     min-width: 0;
     max-width: min(220px, 100%);
-    padding: 3px 8px;
-    border: none;
+    min-height: 24px;
+    padding: 0 var(--space-2);
+    border-color: transparent;
     background: none;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
 
   .trigger:hover:not(:disabled) {
     color: var(--text);
-    background: var(--bg-panel);
-    border-radius: 6px;
+    background: var(--bg-hover);
+    border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
   }
 
   .trigger.warn {
@@ -279,13 +301,14 @@
    */
   .popover {
     position: fixed;
-    z-index: 20;
+    z-index: var(--z-popover);
     width: min(340px, calc(100vw - 16px));
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--bg-panel);
-    box-shadow: 0 8px 28px var(--shadow);
+    padding: var(--space-4);
+    box-shadow: var(--shadow-float);
+  }
+
+  .popover:focus {
+    outline: none;
   }
 
   .popover .field:last-of-type {
@@ -294,15 +317,5 @@
 
   .warn {
     color: var(--warn);
-  }
-
-  button.link {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--accent);
-    cursor: pointer;
-    font: inherit;
-    text-decoration: underline;
   }
 </style>

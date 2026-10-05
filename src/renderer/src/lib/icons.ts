@@ -129,6 +129,8 @@ export const ICONS = {
   /** The selection's anchor: a ring with its centre marked. */
   anchor: { circles: [{ cx: 12, cy: 12, r: 8 }, dot(12, 12, 2.5)] },
   send: { paths: ["M4 12 H19", "M13 6 L19 12 L13 18"] },
+  /** Stop a run: the square every player has pressed on a media control. */
+  stop: { filled: ["M7 7 H17 V17 H7 Z"] },
   attach: {
     paths: ["M17 8.5 L9.5 16 A2.2 2.2 0 0 1 6.4 12.9 L14 5.3 A3.6 3.6 0 0 1 19.1 10.4 L11.3 18.2 A5.2 5.2 0 0 1 3.9 10.8 L10 4.7"],
   },

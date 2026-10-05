@@ -65,6 +65,11 @@
   --accent-dim: #1f5c38;
   --accent-contrast: #0b1a10;
   --accent-tint: rgb(76 199 121 / 12%);
+  /* Emerald as words: a name, a link, an action written as text. On deepslate
+     the accent itself reads; on the light theme's stone it is 4.3:1, under
+     the 4.5 a line of text needs, so words take a deeper green there and
+     fills keep the brighter one. */
+  --accent-text: #4cc779;
   /* Redstone, gold, emerald. */
   --danger: #ff6f61;
   --warn: #f5c542;
@@ -181,6 +186,7 @@
   --accent-dim: #b5dcc2;
   --accent-contrast: #ffffff;
   --accent-tint: rgb(23 113 58 / 12%);
+  --accent-text: #12602f;
   --danger: #b3261e;
   --warn: #7a5200;
   --ok: #136133;
@@ -221,6 +227,7 @@
     --accent-dim: #b5dcc2;
     --accent-contrast: #ffffff;
     --accent-tint: rgb(23 113 58 / 12%);
+    --accent-text: #12602f;
     --danger: #b3261e;
     --warn: #7a5200;
     --ok: #136133;
@@ -598,6 +605,85 @@ legend {
   background: var(--slot);
   border: var(--bevel) solid;
   border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+}
+
+/*
+ * A field-coloured well, for what is read rather than held: a trace, a code
+ * block, the composer. `.inset` is slot-dark in every theme, which is right
+ * under an icon and wrong under a paragraph on the light theme.
+ */
+.sunken {
+  background: var(--bg-input);
+  border: var(--bevel) solid;
+  border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+}
+
+/*
+ * The strip along the top of a docked panel, and its tabs: the creative
+ * inventory's, slabs standing on the strip, the chosen one the colour of the
+ * panel and joined to it by drawing over the strip's edge. Both docked panels
+ * wear it -- the tools' three tabs on the left, the conversation on the right
+ * -- so the two edges of the window are one piece of furniture.
+ */
+.panel-head {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-2) 0;
+  background: var(--bg);
+  border-bottom: var(--bevel) solid var(--bevel-lo);
+}
+
+.panel-head > button.icon {
+  margin-bottom: var(--space-1);
+}
+
+.panel-tab {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-bottom: calc(-1 * var(--bevel));
+  padding: 0 var(--space-2);
+  border-bottom: 0;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-family: var(--font-pixel);
+  font-size: var(--text-md);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Joined to the panel, under the pointer too: a hover colour on the chosen
+   tab would cut it off from the slab it belongs to. */
+.panel-tab:is([aria-selected="true"], .current),
+.panel-tab:is([aria-selected="true"], .current):hover:not(:disabled) {
+  padding-bottom: var(--bevel);
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
+/*
+ * A button that reads as words: an action inside an answer -- "Undo this" --
+ * where a slab would outshout the text it belongs to. Still 24px tall, the
+ * target size a pointer needs.
+ */
+button.link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+button.link:hover:not(:disabled) {
+  background: none;
+  text-decoration: underline;
 }
 
 /* The pixel face: titles of panels and numbers on slots. */

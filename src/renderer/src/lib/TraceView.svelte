@@ -22,6 +22,12 @@
    * `open` is keyed by item id and nothing writes it but the toggles. An
    * earlier arrangement re-derived it from `running`, which snapped rows shut
    * the instant they finished — under the reader's cursor, mid-sentence.
+   *
+   * ## A well in the slab
+   *
+   * What the model did is sunk into the panel (`.sunken`), the way a slot is:
+   * it is the machinery under the answer, and the answer stands on the slab
+   * above it. While the turn is still going the well has an emerald edge.
    */
   import type { TraceItem } from "../../../shared/ipc.js";
   import { t, tn } from "./i18n.svelte.js";
@@ -81,7 +87,7 @@
 </script>
 
 {#if items.length > 0}
-  <div class="trace" class:live>
+  <div class="trace sunken" class:live>
     {#each items as item (item.id)}
       <div class="row" class:running={item.running}>
         {#if hasBody(item)}
@@ -148,27 +154,30 @@
   .trace {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    margin: 6px 0;
-    padding: 4px 0;
-    border-left: 2px solid var(--border);
-    padding-left: 8px;
+    padding: var(--space-1) var(--space-3);
+    min-width: 0;
   }
 
   .trace.live {
-    border-left-color: var(--accent);
+    box-shadow: inset 2px 0 0 var(--accent);
   }
 
+  /*
+   * A row is a line of text that opens, not a slab: the global button's bevel
+   * and padding are taken off. 24px tall, the smallest target a pointer is
+   * owed.
+   */
   .head {
     display: flex;
-    align-items: baseline;
-    gap: 6px;
+    align-items: center;
+    gap: var(--space-2);
     width: 100%;
-    padding: 2px 0;
-    border: none;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
     background: none;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--text-sm);
     text-align: left;
     cursor: pointer;
   }
@@ -177,7 +186,8 @@
     cursor: default;
   }
 
-  .head:hover:not(.static) {
+  .head:hover:not(.static):not(:disabled) {
+    background: none;
     color: var(--text);
   }
 
@@ -190,12 +200,12 @@
 
   .kind {
     flex: none;
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     color: var(--text);
   }
 
   .kind.reasoning {
-    color: var(--accent);
+    color: var(--accent-text);
     font-style: italic;
   }
 
@@ -219,7 +229,6 @@
   .ms {
     flex: none;
     font-variant-numeric: tabular-nums;
-    opacity: 0.7;
   }
 
   .spinner {
@@ -249,13 +258,14 @@
   }
 
   .body {
-    padding: 2px 0 6px 15px;
+    padding: var(--space-1) 0 var(--space-3) var(--space-5);
   }
 
   .caption {
-    margin: 4px 0 2px;
-    font-size: 10px;
-    text-transform: uppercase;
+    margin: var(--space-2) 0 var(--space-1);
+    font-family: var(--font-pixel);
+    font-size: var(--text-xs);
+    font-weight: 500;
     letter-spacing: 0.04em;
     color: var(--text-dim);
   }
@@ -263,46 +273,47 @@
   /*
    * Scrolls inside itself, both ways. A build script is long and a block-id
    * list is 933 lines; without the cap one trace row would own the panel.
+   * The slab's colour, a step up out of the well it sits in.
    */
   pre {
     max-height: 240px;
     margin: 0;
-    padding: 6px 8px;
+    padding: var(--space-2) var(--space-3);
     overflow: auto;
-    border-radius: 6px;
-    background: var(--bg-input);
-    font-size: 11px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    font-size: var(--text-xs);
     line-height: 1.45;
   }
 
   code {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     white-space: pre;
   }
 
   .thinking {
     max-height: 240px;
     margin: 0;
-    padding: 6px 8px;
+    padding: var(--space-2) var(--space-3);
     overflow-y: auto;
-    border-radius: 6px;
-    background: var(--bg-input);
-    font-size: 11px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    font-size: var(--text-sm);
     line-height: 1.5;
     white-space: pre-wrap;
     color: var(--text-dim);
   }
 
   .failed {
-    margin: 2px 0;
-    font-size: 11px;
-    color: var(--danger, #e06c75);
+    margin: var(--space-1) 0;
+    font-size: var(--text-sm);
+    color: var(--danger);
   }
 
   .elided,
   .hint {
-    margin: 4px 0 0;
-    font-size: 10px;
+    margin: var(--space-2) 0 var(--space-1);
+    font-size: var(--text-xs);
     color: var(--text-dim);
     font-style: italic;
   }

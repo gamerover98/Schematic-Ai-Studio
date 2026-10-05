@@ -6572,6 +6572,14 @@ console.log("\n--- design system ---");
     ["--danger", "--bg-panel", 4.5],
     ["--warn", "--bg-panel", 4.5],
     ["--ok", "--bg-panel", 4.5],
+    // Emerald as words: a name in the chat, a link, the selection chip. The
+    // accent itself is 4.3:1 on the light theme's stone, which is why this
+    // token exists.
+    ["--accent-text", "--bg-panel", 4.5],
+    ["--accent-text", "--bg-input", 4.5],
+    // A trace's failure and a receipt's counts sit in a well, not on the slab.
+    ["--danger", "--bg-input", 4.5],
+    ["--ok", "--bg-input", 4.5],
     ["--field-edge", "--bg-panel", 3],
     ["--accent", "--bg-panel", 3],
     ["--accent", "--bg", 3],
@@ -6777,6 +6785,112 @@ console.log("\n--- shell ---");
     box(2, 0, 0, 9, 5, 4),
   );
   equal("...and nothing at all without a schematic", mapFrameOf(null, [], null), null);
+}
+
+// --- the chat: the right-hand docked panel, in the inventory's material -----
+console.log("\n--- chat ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string => source.slice(source.indexOf("<style>"));
+  const chat = lib("ChatPanel.svelte");
+  const composer = lib("ChatComposer.svelte");
+  const conversations = lib("ConversationPicker.svelte");
+  const models = lib("ModelPicker.svelte");
+
+  // The two edges of the window are one piece of furniture.
+  check(
+    "both docked panels stand on app.css's strip",
+    css.includes("\n.panel-head {") &&
+      chat.includes('<header class="panel-head">') &&
+      lib("DockPanel.svelte").includes('<div class="panel-head">'),
+  );
+  check(
+    "...the tools' three tabs and the conversation are one kind of tab",
+    css.includes("\n.panel-tab {") &&
+      lib("DockPanel.svelte").includes('class="panel-tab"') &&
+      conversations.includes('class="panel-tab current trigger"'),
+  );
+  check(
+    "the chat is put away from its own strip, as the tools' panel is",
+    chat.includes("onclick={oncollapse}") && app.includes("oncollapse={toggleSidebar}"),
+  );
+
+  // Every surface of the chat picks from the scales: no rounded corner, no
+  // colour of its own, no font size outside the type scale.
+  const files = ["ChatPanel", "ChatComposer", "ConversationPicker", "TraceView", "ModelPicker", "Markdown"];
+  const offScale = files.flatMap((name) => {
+    const style = styleOf(lib(`${name}.svelte`));
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius\))/.test(style)) faults.push(`${name}: a radius`);
+    if (/#[0-9a-fA-F]{3,8}\b/.test(style)) faults.push(`${name}: a colour`);
+    if (/font-size:\s*\d/.test(style)) faults.push(`${name}: a font size`);
+    return faults;
+  });
+  equal("the chat draws with the design system's scales and nothing else", offScale, []);
+  check(
+    "emerald words take the text green, which reads on the light stone",
+    (css.match(/--accent-text: #/g) ?? []).length === 3 &&
+      /\.chip \{[^}]*color: var\(--accent-text\);/.test(composer) &&
+      /\.markdown :global\(a\) \{\s*color: var\(--accent-text\);/.test(lib("Markdown.svelte")),
+  );
+
+  // The box is what you type into, so the ring goes round the box.
+  check(
+    "the composer's focus ring is drawn round the whole field",
+    /\.composer:has\(textarea:focus-visible\) \{\s*outline: 2px solid var\(--accent\);/.test(composer),
+  );
+  const stop = composer.match(/<button class="send danger"[^>]*>/)?.[0] ?? "";
+  check("Stop is the redstone slab, and never disabled", stop.includes("onclick={onstop}") && !stop.includes("disabled"));
+
+  // A turn: the name, the machinery under it, what changed.
+  check(
+    "going back sits on the name's line and takes no room of its own",
+    /<div class="who">[\s\S]*?class="icon restore"[\s\S]*?<\/div>/.test(chat),
+  );
+  check(
+    "a receipt shows the blocks in slots, asking for their pictures",
+    chat.includes('<span class="slot">') &&
+      chat.includes("requestBlockIcons(receiptBlocks)") &&
+      chat.includes(".filter((block) => !isAir(block))"),
+  );
+  check("the trace is a well in the slab", lib("TraceView.svelte").includes('<div class="trace sunken" class:live>'));
+
+  // The two popovers: on their tier, said to a screen reader, and Escape
+  // stays theirs -- the window's own drops the selection.
+  for (const [name, source] of [
+    ["the conversation list", conversations],
+    ["the model picker", models],
+  ] as const) {
+    check(
+      `${name} is on the popover tier`,
+      /\.popover \{[^}]*z-index: var\(--z-popover\);/.test(source),
+    );
+    check(
+      `...says it opens and whether it is open`,
+      source.includes('aria-haspopup="dialog"') && source.includes("aria-expanded={open}"),
+    );
+    check(
+      `...and keeps its Escape from the window`,
+      /event\.key === "Escape"[\s\S]{0,160}event\.stopPropagation\(\)/.test(source) ||
+        /event\.key !== "Escape"[\s\S]{0,160}event\.stopPropagation\(\)/.test(source),
+    );
+  }
+  check(
+    "...from the button as well, where a click leaves the focus",
+    /event\.key === "Escape" && open/.test(conversations) &&
+      models
+        .slice(models.indexOf('class="trigger"'), models.indexOf("</button>", models.indexOf('class="trigger"')))
+        .includes("onkeydown={onPanelKey}"),
+  );
+  // Measured: the effect that focuses the list ran before the popover's
+  // `visibility: hidden` came off, and the browser refused it in silence.
+  check(
+    "the list takes the focus only once it is visible",
+    /focused = true;[\s\S]{0,80}void tick\(\)\.then\(/.test(conversations),
+  );
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

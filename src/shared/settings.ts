@@ -654,11 +654,14 @@ export const SIDEBAR_WIDTH = { min: 320, max: 720, minViewport: 360 } as const;
 
 /**
  * The docked tools' panel. Narrower than the chat at both ends: its rows are
- * label-and-field pairs and a slot grid, which read at 260 and gain nothing
- * past 560 but a wider gap between the label and the field. The live window is
- * the second clamp, with the chat's width reserved, as for the chat.
+ * label-and-field pairs and a slot grid, which gain nothing past 560 but a
+ * wider gap between the label and the field. The floor is the three tabs: at
+ * 260 "Selection", "Inspector" and "Terrain" no longer fitted on the strip in
+ * the pixel face, and either the collapse chevron fell off its end or every
+ * name ended in an ellipsis. The live window is the second clamp, with the
+ * chat's width reserved, as for the chat.
  */
-export const DOCK_WIDTH = { min: 260, max: 560 } as const;
+export const DOCK_WIDTH = { min: 280, max: 560 } as const;
 
 /**
  * What a resizable floating panel may become, in CSS pixels.

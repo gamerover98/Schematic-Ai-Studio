@@ -65,10 +65,11 @@
 </script>
 
 <aside class="dock" aria-label={t("dock.label")}>
-  <div class="head">
+  <div class="panel-head">
     <div class="tabs" role="tablist" aria-label={t("dock.label")} bind:this={strip}>
       {#each TABS as id (id)}
         <button
+          class="panel-tab"
           role="tab"
           id={`dock-tab-${id}`}
           aria-selected={tab === id}
@@ -82,7 +83,7 @@
       {/each}
     </div>
     <button
-      class="icon collapse"
+      class="icon"
       onclick={oncollapse}
       title={t("dock.hide")}
       aria-label={t("dock.hide")}><Icon name="chevronLeft" /></button
@@ -110,51 +111,13 @@
     border-right: var(--bevel) solid var(--bevel-lo);
   }
 
-  /*
-   * The creative inventory's tabs: slabs along the top edge, the chosen one
-   * the colour of the panel and joined to it, the others a step back.
-   */
-  .head {
-    display: flex;
-    align-items: flex-end;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-2) 0;
-    background: var(--bg);
-    border-bottom: var(--bevel) solid var(--bevel-lo);
-  }
-
+  /* The strip and its tabs are app.css's `.panel-head` and `.panel-tab`, which
+     the chat wears too. */
   .tabs {
     display: flex;
     flex: 1;
     min-width: 0;
     gap: var(--space-1);
-  }
-
-  [role="tab"] {
-    flex: 0 1 auto;
-    min-width: 0;
-    margin-bottom: calc(-1 * var(--bevel));
-    padding: 0 var(--space-3);
-    border-bottom: 0;
-    background: var(--bg-raised);
-    color: var(--text-dim);
-    font-family: var(--font-pixel);
-    font-size: var(--text-md);
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  [role="tab"][aria-selected="true"] {
-    padding-bottom: var(--bevel);
-    background: var(--bg-panel);
-    color: var(--text);
-  }
-
-  .collapse {
-    flex: none;
-    margin-bottom: var(--space-1);
   }
 
   .body {

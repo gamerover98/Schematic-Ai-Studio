@@ -759,6 +759,7 @@ export const en = {
   "nbt.apply": "Apply",
   "nbt.revert": "Revert",
 
+  "chat.label": "Chat",
   "chat.legend": "Ask the AI",
   "chat.you": "You",
   "chat.ai": "AI",
