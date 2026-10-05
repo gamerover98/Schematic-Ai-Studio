@@ -573,14 +573,28 @@
 {#snippet slider(
   id: string,
   label: string,
+  shown: string,
   range: { min: number; max: number; step: number },
   value: number,
   set: (value: number) => void,
   hint: string | null = null,
 )}
+  <!-- The name and the value apart: `.slider-head` in app.css says why. -->
   <div class="field">
-    <label for={id}>{label}</label>
-    <input {id} type="range" min={range.min} max={range.max} step={range.step} {value} oninput={(event) => set(num(event))} />
+    <div class="slider-head">
+      <label for={id}>{label}</label>
+      <output for={id}>{shown}</output>
+    </div>
+    <input
+      {id}
+      type="range"
+      min={range.min}
+      max={range.max}
+      step={range.step}
+      {value}
+      aria-valuetext={shown}
+      oninput={(event) => set(num(event))}
+    />
     {#if hint !== null}<p class="hint">{hint}</p>{/if}
   </div>
 {/snippet}
@@ -684,7 +698,8 @@
           {#if preview.sky}
             {@render slider(
               "time-of-day",
-              t("preview.timeOfDay", { time: clockLabel(preview.timeOfDay) }),
+              t("preview.timeOfDay"),
+              clockLabel(preview.timeOfDay),
               PREVIEW_SETTING_RANGES.timeOfDay,
               preview.timeOfDay,
               (timeOfDay) => onpreviewchange({ timeOfDay }),
@@ -696,7 +711,8 @@
             {#if preview.daylightCycle}
               {@render slider(
                 "daylight-speed",
-                t("preview.daylightSpeed", { value: preview.daylightSpeed.toFixed(0) }),
+                t("preview.daylightSpeed"),
+                t("unit.gameMinutesPerSecond", { value: preview.daylightSpeed.toFixed(0) }),
                 PREVIEW_SETTING_RANGES.daylightSpeed,
                 preview.daylightSpeed,
                 (daylightSpeed) => onpreviewchange({ daylightSpeed }),
@@ -711,14 +727,16 @@
             -->
             {@render slider(
               "sun-az",
-              t("preview.sunAzimuth", { value: preview.sunAzimuthDeg.toFixed(0) }),
+              t("preview.sunAzimuth"),
+              t("unit.degrees", { value: preview.sunAzimuthDeg.toFixed(0) }),
               PREVIEW_SETTING_RANGES.sunAzimuthDeg,
               preview.sunAzimuthDeg,
               (sunAzimuthDeg) => onpreviewchange({ sunAzimuthDeg }),
             )}
             {@render slider(
               "sun-el",
-              t("preview.sunElevation", { value: preview.sunElevationDeg.toFixed(0) }),
+              t("preview.sunElevation"),
+              t("unit.degrees", { value: preview.sunElevationDeg.toFixed(0) }),
               PREVIEW_SETTING_RANGES.sunElevationDeg,
               preview.sunElevationDeg,
               (sunElevationDeg) => onpreviewchange({ sunElevationDeg }),
@@ -764,7 +782,8 @@
           <h4>{t("settings.section.camera")}</h4>
           {@render slider(
             "fly-speed",
-            t("preview.flySpeed", { value: preview.flySpeed.toFixed(0) }),
+            t("preview.flySpeed"),
+            t("unit.blocksPerSecond", { value: preview.flySpeed.toFixed(0) }),
             PREVIEW_SETTING_RANGES.flySpeed,
             preview.flySpeed,
             (flySpeed) => onpreviewchange({ flySpeed }),
@@ -992,14 +1011,16 @@
           </div>
           {@render slider(
             "render-scale",
-            t("preview.renderScale", { value: preview.renderScale.toFixed(1) }),
+            t("preview.renderScale"),
+            t("unit.times", { value: preview.renderScale.toFixed(1) }),
             PREVIEW_SETTING_RANGES.renderScale,
             preview.renderScale,
             (renderScale) => onpreviewchange({ renderScale }),
           )}
           {@render slider(
             "max-dpr",
-            t("preview.maxDpr", { value: preview.maxDpr.toFixed(1) }),
+            t("preview.maxDpr"),
+            preview.maxDpr.toFixed(1),
             PREVIEW_SETTING_RANGES.maxDpr,
             preview.maxDpr,
             (maxDpr) => onpreviewchange({ maxDpr }),
@@ -1029,7 +1050,8 @@
           </div>
           {@render slider(
             "max-distance",
-            t("preview.maxDrawDistance", { value: preview.maxDrawDistance.toFixed(0) }),
+            t("preview.maxDrawDistance"),
+            t("unit.blocks", { value: preview.maxDrawDistance.toFixed(0) }),
             PREVIEW_SETTING_RANGES.maxDrawDistance,
             preview.maxDrawDistance,
             (maxDrawDistance) => onpreviewchange({ maxDrawDistance }),
@@ -1075,12 +1097,14 @@
           versions' rule: a control that vanishes is one nobody learns exists.
         -->
         <div class="field">
-          <label for="lod-auto">
-            {t("preview.lodAutoTriangles", { value: triangleCount(lod.autoTriangles) })}
-          </label>
+          <div class="slider-head">
+            <label for="lod-auto">{t("preview.lodAutoTriangles")}</label>
+            <output for="lod-auto">{t("unit.triangles", { value: triangleCount(lod.autoTriangles) })}</output>
+          </div>
           <input
             id="lod-auto"
             type="range"
+            aria-valuetext={t("unit.triangles", { value: triangleCount(lod.autoTriangles) })}
             min={LOD_AUTO_TRIANGLES.min}
             max={LOD_AUTO_TRIANGLES.max}
             step={LOD_AUTO_TRIANGLES.step}
@@ -1591,6 +1615,16 @@
 
   .field.nested {
     margin-left: 30px;
+  }
+
+  /* As wide as the slider under it, so the value sits over its end. */
+  .slider-head {
+    max-width: 420px;
+  }
+
+  .slider-head > label {
+    color: var(--text);
+    font-size: var(--text-md);
   }
 
   /* A choice or a slider is as wide as it needs to be read, not as the pane:

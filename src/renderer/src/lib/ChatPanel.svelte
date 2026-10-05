@@ -698,11 +698,12 @@
     height: 20px;
   }
 
+  /* A count is figures, not pixels: `.figures` in app.css says why. */
   .count {
     flex: none;
     min-width: 5ch;
-    font-family: var(--font-pixel);
-    font-weight: 500;
+    font-family: var(--font-body);
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
 

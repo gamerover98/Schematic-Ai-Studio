@@ -156,11 +156,12 @@ import {
   import {
     axisAt,
     COMPASS_AXES,
-    FLIGHT_MS,
     flightAt,
+    flightDuration,
     HANDLE_RADIUS,
     HANDLE_REACH,
     orbitFor,
+    prefersReducedMotion,
     type CameraFlight,
   } from "./compass.js";
 import { isTyping } from "./typing.js";
@@ -4137,7 +4138,8 @@ import { isTyping } from "./typing.js";
          * ends.
          */
         if (flight !== null && camera && controls) {
-          const at = flightAt(flight, performance.now(), FLIGHT_MS);
+          // Cut rather than flown for somebody who asked for less motion.
+          const at = flightAt(flight, performance.now(), flightDuration(prefersReducedMotion()));
           camera.position.set(at.position.x, at.position.y, at.position.z);
           camera.lookAt(controls.target);
           controls.update();

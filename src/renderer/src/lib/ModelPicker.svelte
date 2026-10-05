@@ -23,6 +23,7 @@
   } from "../../../shared/settings.js";
   import { placePopover } from "./floating.js";
   import { t } from "./i18n.svelte.js";
+  import { providerLabel } from "./provider_label.js";
   import Icon from "./Icon.svelte";
   import { findOpenCodeModel, openCodeCatalogue, openCodeFetchFailed } from "./models.svelte.js";
 
@@ -166,7 +167,7 @@
           onchange={(event) => selectProvider(event.currentTarget.value as Provider)}
         >
           {#each PROVIDERS as provider (provider)}
-            <option value={provider}>{provider}</option>
+            <option value={provider}>{providerLabel(provider)}</option>
           {/each}
         </select>
       </div>

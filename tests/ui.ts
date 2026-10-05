@@ -171,7 +171,7 @@ import { isSafeHref } from "../src/renderer/src/lib/markdown_policy.js";
 import { HOSTILE_CASES } from "./markdown_cases.js";
 import { missingKeys, translate, translatePlural } from "../src/renderer/src/lib/i18n_core.js";
 import { openedAge } from "../src/renderer/src/lib/recent_age.js";
-import { DEFAULT_PREVIEW_SETTINGS, PREVIEW_SETTING_RANGES } from "../src/shared/settings.js";
+import { DEFAULT_PREVIEW_SETTINGS, PREVIEW_SETTING_RANGES, PROVIDERS } from "../src/shared/settings.js";
 import {
   COPLANAR_OFFSET,
   depthEpsilon,
@@ -264,6 +264,8 @@ import {
   COMPASS_AXES,
   easeInOutCubic,
   flightAt,
+  flightDuration,
+  FLIGHT_MS,
   HANDLE_REACH,
   orbitFor,
   projectAxis,
@@ -7057,8 +7059,8 @@ console.log("\n--- tool panels ---");
   // The count on a slot, as the game prints a stack.
   const inventory = lib("MaterialsInventory.svelte");
   check(
-    "a slot's count is in the pixel face, in the slot's own white with its hard shadow",
-    inventory.includes('<span class="count pixel"') &&
+    "a slot's count is in figures, in the slot's own white with its hard shadow",
+    inventory.includes('<span class="count figures"') &&
       /\.count \{[^}]*color: var\(--slot-text\);[^}]*text-shadow: [^;]*var\(--slot-text-shadow\);/.test(inventory),
   );
   check(
@@ -7573,5 +7575,163 @@ console.log("\n--- the viewport's overlays ---");
   equal("the viewport's overlays draw with the design system's scales and nothing else", offScale, []);
 }
 
+// --- accessibility and copy: the last pass of the redesign ------------------
+console.log("\n--- accessibility and copy ---");
+{
+  const read = (relative: string): string =>
+    readFileSync(path.join(RENDERER, relative), "utf8").replace(/\r\n/g, "\n");
+  const app = read("App.svelte");
+  const css = read("app.css");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+
+  /*
+   * A number on a slot is figures, not pixels. In the pixel face at a slot's
+   * size a 5 is an S and a 2 is a Z -- measured in the app, on the hotbar's
+   * fifth slot -- and a count is the one thing that must not be misread.
+   */
+  check(
+    "a number on a slot is bold in the body face, every digit one width",
+    /\.figures \{[^}]*font-family: var\(--font-body\);[^}]*font-weight: 700;[^}]*font-variant-numeric: tabular-nums;/.test(css),
+  );
+  const figures: [string, string][] = [
+    ["lib/Hotbar.svelte", '<span class="key figures"'],
+    ["lib/MaterialsInventory.svelte", '<span class="count figures"'],
+    ["lib/CreativeInventory.svelte", '<span class="legacy figures"'],
+  ];
+  for (const [file, markup] of figures) check(`...${file}'s numbers are figures`, read(file).includes(markup));
+  check(
+    "...and a chat receipt's counts too",
+    /\.count \{[^}]*font-family: var\(--font-body\);/.test(styleOf(read("lib/ChatPanel.svelte"))),
+  );
+
+  /*
+   * A slider says its value beside its name, never inside it. "Render scale —
+   * 1.0" was one label that changed under the pointer, read as one sentence.
+   */
+  const labelsWithValues = Object.entries(en).filter(([, value]) => /^[^{}]+ — \{\w+\}[^ ]*( [^ ]+)?$/.test(value));
+  equal(
+    "no message is a name with its value written into it",
+    labelsWithValues.map(([key]) => key),
+    [],
+  );
+  const settingsModal = read("lib/SettingsModal.svelte");
+  const slider = settingsModal.slice(settingsModal.indexOf("{#snippet slider("), settingsModal.indexOf("{/snippet}", settingsModal.indexOf("{#snippet slider(")));
+  check(
+    "the settings' slider shows its value in an output for the control",
+    slider.includes("<output for={id}>{shown}</output>") && slider.includes("aria-valuetext={shown}"),
+  );
+  // Markup only: a stylesheet saying `input[type="range"]` is not a slider.
+  const markup = (source: string): string => source.split("<style>")[0];
+  const ranges = (source: string): number => (markup(source).match(/type="range"/g) ?? []).length;
+  const outputs = (source: string): number => (markup(source).match(/<output\b/g) ?? []).length;
+  const lib = readdirSync(path.join(RENDERER, "lib")).filter((name) => name.endsWith(".svelte"));
+  equal(
+    "...and every slider in the window has its value beside it",
+    lib.filter((name) => ranges(read(`lib/${name}`)) > outputs(read(`lib/${name}`))),
+    [],
+  );
+
+  /*
+   * Less motion. The compass cuts to the view rather than swinging round the
+   * build, and an infinite animation runs once: shortened alone, it flickers
+   * at the display's rate instead of stopping.
+   */
+  check("a flight for somebody who asked for less motion is an arrival", flightDuration(true) === 0);
+  check("...and anybody else's is the flight it always was", flightDuration(false) === FLIGHT_MS);
+  check(
+    "...and the viewer asks the system every flight",
+    read("lib/Viewer.svelte").includes("flightAt(flight, performance.now(), flightDuration(prefersReducedMotion()))"),
+  );
+  check(
+    "an animation runs once under reduced motion, rather than flickering",
+    /@media \(prefers-reduced-motion: reduce\) \{[^}]*animation-iteration-count: 1 !important;/.test(css),
+  );
+
+  /*
+   * A notification is announced. The toast is created holding its sentence,
+   * and a live region born full is one most screen readers never read; the
+   * regions are always in the document and their words change.
+   */
+  const toastAt = app.indexOf("{#if status}");
+  const politeAt = app.indexOf('<div class="sr-only" role="status" aria-live="polite" aria-atomic="true">');
+  const alertAt = app.indexOf('<div class="sr-only" role="alert" aria-atomic="true">');
+  check("notifications are spoken from a region that is always there", politeAt > 0 && politeAt < toastAt);
+  check("...a failure from one that interrupts", alertAt > 0 && alertAt < toastAt);
+  check("...and the toast itself is no second region", !/class=\{`status slab \$\{status\.tone\}`\} role=/.test(app));
+  check("...drawn nowhere", /\.sr-only \{[^}]*clip-path: inset\(50%\);/.test(css));
+
+  /*
+   * Every component picks from the scales, not only the surfaces each
+   * sub-phase walked: no corner, colour, size or stacking level of its own,
+   * and emerald as words is the text green. This is the walk that found the
+   * dirty marker, the panel toggles and the update button.
+   */
+  const offScale = ["App.svelte", ...lib.map((name) => `lib/${name}`)].flatMap((file) => {
+    const style = styleOf(read(file));
+    if (!read(file).includes("<style>")) return [];
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(`${file}: a radius`);
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(`${file}: a colour`);
+    if (/font-size:\s*\d/.test(style)) faults.push(`${file}: a font size`);
+    if (/z-index:\s*\d/.test(style)) faults.push(`${file}: a stacking level`);
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(`${file}: the accent as text`);
+    return faults;
+  });
+  equal("every component draws with the design system's scales", offScale, []);
+
+  /*
+   * One line of help per control. Nineteen messages ran past 200 characters
+   * and the settings explained the renderer to the person using it; what is
+   * worth more than a line sits behind a «More».
+   */
+  const messages = Object.entries(en);
+  equal(
+    "no message runs past 200 characters",
+    messages.filter(([, value]) => value.length > 200).map(([key, value]) => `${key} (${value.length})`),
+    [],
+  );
+  equal(
+    "...and no hint past 170",
+    messages
+      .filter(([key, value]) => /hint$/i.test(key) && value.length > 170)
+      .map(([key, value]) => `${key} (${value.length})`),
+    [],
+  );
+  equal(
+    "the engine's words stay out of the help",
+    messages.filter(([, value]) => /\b(mesh|atlas|multisampl\w*)\b/i.test(value)).map(([key]) => key),
+    [],
+  );
+  const materials = read("lib/MaterialsInventory.svelte");
+  check(
+    "the materials list says one line, and its shortcuts are a press away",
+    /<details class="more">\s*<summary>\{t\("materials\.shortcuts"\)\}<\/summary>\s*<dl class="keys">/.test(materials),
+  );
+  // Dropping onto a field always adds since it stopped needing Ctrl, and the
+  // hint went on saying it did.
+  check("...and no longer says Ctrl adds", !Object.values(en).some((value) => value.includes("(Ctrl adds)")));
+  check(
+    "the anchor's dialog opens with one paragraph, not four",
+    /<p>\{t\("anchor\.infoWhat"\)\}<\/p>\s*(<!--[\s\S]*?-->\s*)?<details class="more">/.test(read("lib/AnchorModal.svelte")),
+  );
+
+  /*
+   * A provider is shown by its name, not by the value \`settings.json\` keeps:
+   * "OpenCode Zen", not "OpenCode"; "OpenAI-compatible", with its hyphen.
+   */
+  const providers = read("lib/provider_label.ts");
+  check(
+    "every provider has a name in the catalogue",
+    PROVIDERS.every((provider) =>
+      [`${JSON.stringify(provider)}: "provider.name.`, `${provider}: "provider.name.`].some((row) => providers.includes(row)),
+    ),
+  );
+  check("...and the picker shows the name", read("lib/ModelPicker.svelte").includes("<option value={provider}>{providerLabel(provider)}</option>"));
+
+  // The creative inventory says what it is for: "Hold" was a verb with no
+  // object, in the title bar of the biggest dialog in the app.
+  check("the inventory's title says what choosing does", (en["inventory.for.hand"] as string) !== "Hold");
+}
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

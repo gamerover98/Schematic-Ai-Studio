@@ -33,6 +33,7 @@
   import logo from "../assets/logo.png";
   import { ageLabel } from "./age_label.js";
   import { t } from "./i18n.svelte.js";
+  import { providerLabel } from "./provider_label.js";
   import Icon from "./Icon.svelte";
   import Screen from "./Screen.svelte";
 
@@ -128,7 +129,7 @@
   {#if legacyProfile}
     <!-- A warning that is still prose: the button in it is the one useful verb. -->
     <p class="callout warn legacy">
-      {t("start.legacyProfile", { providers: legacyProfile.providers.join(", ") })}
+      {t("start.legacyProfile", { providers: legacyProfile.providers.map(providerLabel).join(", ") })}
       <button class="link" onclick={() => onrevealpath(legacyProfile?.path ?? "")}>
         {t("provider.legacyProfileReveal")}
       </button>

@@ -2225,7 +2225,7 @@ button to a screen reader, because what it opens is a list.
   `app.css` is a layout imposed on every component that happens to say it.
 - **What changed is the blocks, in slots**: the receipt asks
   `requestBlockIcons` for each tally shown and draws the count beside the
-  slot in the pixel face, with the id in the hover. Air has no picture and is
+  slot in figures, with the id in the hover. Air has no picture and is
   never asked for; its slot stays empty.
 - **The two popovers keep their Escape.** The window's own drops the
   selection, so the conversation list and the model picker stop it, from the
@@ -2244,7 +2244,7 @@ their own, and for the accent written as text.
   slot-dark in every theme with `.inset`'s bevel -- the materials, a field's
   chips, the inspector's heading, a block's hover. The inspector and the hover
   put the readable name (`blockLabel`) over the id in the mono face.
-- **A slot's count is the game's**: the pixel face, `--slot-text` with
+- **A slot's count is the game's**: `.figures` (below), `--slot-text` with
   `--slot-text-shadow`. They are tokens restated in all three palettes with
   the same values, because the slot under them is dark in every theme, and
   the contrast check holds the pair to 4.5:1 there.
@@ -2373,6 +2373,36 @@ dialog.
   answer.
 - **Nothing over the scene is blurred.** A blur was a second pass over the
   scene for a caption.
+
+**The last pass was accessibility and copy, and each rule in it is checked
+in `tests/ui.ts` ("accessibility and copy").**
+
+- **A number on a slot is figures, not pixels.** `.figures` in `app.css`:
+  the body face in bold, tabular. In Pixelify Sans at 11 and 12px a 5 is an
+  S and a 2 a Z, measured on the hotbar's fifth slot; the hotbar's keys, the
+  materials' counts, the inventory's `ID:DATA` and a receipt's counts are
+  figures. Words on a slot (the held name, `mix`) stay in the pixel face.
+- **A slider's value is beside its name, never inside it.** `.slider-head`:
+  the label, then an `<output for>` at the trailing edge, and the input
+  carries `aria-valuetext`. "Render scale — 1.0" was one label that changed
+  under the pointer and was read as one sentence. The units are `unit.*`.
+- **Less motion means less motion.** The global rule runs every animation
+  once (shortened alone, an infinite one flickers at the display's rate), and
+  a compass flight is an arrival (`flightDuration`, asked per flight).
+- **A notification is spoken from a region that is always there.** Two
+  `.sr-only` regions in `App.svelte`, polite and `role="alert"` for a
+  failure, whose words change; the toast is created already full, and a live
+  region born full is one most readers never announce.
+- **Every component picks from the scales**, not only the surfaces each
+  sub-phase walked. That walk found the dirty marker, the panel toggles and
+  the update button writing `--accent` as text, a 12px font and two radii.
+- **One line of help per control.** No message past 200 characters, no hint
+  past 170, and none of the renderer's words (mesh, atlas, multisampled) in
+  them. What is worth more than a line is behind a `details.more`: the
+  materials' shortcuts (a `dl.keys`), the anchor's three paragraphs.
+- **A provider is shown by its name** (`providerLabel`): the stored values
+  are what `settings.json` holds and cannot be reworded, so "OpenCode"
+  is shown as OpenCode Zen through the catalogue.
 
 **The settings are ten panes in four groups**, each pane in sections: App
 (General, Updates), Viewport (Scene, Lighting, Textures & colours), Performance
@@ -3626,7 +3656,7 @@ theme's `--bg` and has to be moved with it.
 Chosen by the user from three directions in the UX audit: the workbench's
 structure (panels docked to the edges, the settings-like windows floating) in
 the inventory's material -- slabs raised with a light edge up and to the left,
-slots and fields sunk into them, titles and slot numbers in a pixel face.
+slots and fields sunk into them, titles in a pixel face.
 Deepslate and polished stone, an emerald accent, gold for what glows, redstone
 for what destroys.
 
@@ -3650,7 +3680,7 @@ for what destroys.
   which is dark in every theme for exactly that reason.
 - **Two faces ship with the app**, OFL, from `@fontsource` (devDependencies,
   bundled by vite like `marked`): Atkinson Hyperlegible for everything read,
-  Pixelify Sans for panel titles and slot numbers only. **A font is never
+  Pixelify Sans for panel titles and the words on slots only. **A font is never
   inlined**: vite turns assets under 4 kB into `data:` URLs, the CSP has no
   `font-src`, and `default-src 'self'` refuses them in silence --
   `assetsInlineLimit` in `electron.vite.config.ts` says no for font files.

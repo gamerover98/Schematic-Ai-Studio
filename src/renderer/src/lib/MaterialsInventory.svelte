@@ -238,7 +238,7 @@
         {:else}
           <span class="pending" aria-hidden="true">{shortName(slot.block).slice(0, 2)}</span>
         {/if}
-        <span class="count pixel" aria-hidden="true">{formatCount(slot.count)}</span>
+        <span class="count figures" aria-hidden="true">{formatCount(slot.count)}</span>
       </button>
     {/each}
   </div>
@@ -265,6 +265,28 @@
   <p class="note">{t("materials.outside", { count: formatNumber(outside) })}</p>
 {/if}
 <p class="note">{fields ? t("materials.hint") : t("materials.hintDocument")}</p>
+<!--
+  What every click does, a press away. It was one run-on line of six
+  gestures at the foot of the list, three lines tall at the panel's width.
+  Shift does nothing without the fields, so it is not offered then.
+-->
+<details class="more">
+  <summary>{t("materials.shortcuts")}</summary>
+  <dl class="keys">
+    <dt>{t("gesture.click")}</dt>
+    <dd>{t("materials.key.click")}</dd>
+    <dt>{t("gesture.ctrlClick")}</dt>
+    <dd>{t("materials.key.ctrl")}</dd>
+    {#if fields}
+      <dt>{t("gesture.shiftClick")}</dt>
+      <dd>{t("materials.key.shift")}</dd>
+      <dt>{t("gesture.ctrlShiftClick")}</dt>
+      <dd>{t("materials.key.ctrlShift")}</dd>
+    {/if}
+    <dt>{t("gesture.rightClick")}</dt>
+    <dd>{t("materials.key.right")}</dd>
+  </dl>
+</details>
 
 <BlockTooltip
   block={hoveredSlot?.block ?? null}

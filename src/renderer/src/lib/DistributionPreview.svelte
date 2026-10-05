@@ -123,7 +123,7 @@
       </div>
       {#if range.max > range.min}
         <label class="level" title={t("mix.map.level", { axis: range.axis })}>
-          <span class="axis">{range.axis} = {level}</span>
+          <output class="axis">{range.axis} = {level}</output>
           <input
             type="range"
             min={range.min}
@@ -131,6 +131,7 @@
             step="1"
             value={level}
             aria-label={t("mix.map.level", { axis: range.axis })}
+            aria-valuetext={`${range.axis} = ${level}`}
             oninput={(event) => (chosen = Number(event.currentTarget.value))}
           />
         </label>

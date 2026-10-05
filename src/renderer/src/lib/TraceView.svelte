@@ -250,7 +250,7 @@
     flex: none;
     display: grid;
     place-items: center;
-    color: var(--accent);
+    color: var(--accent-text);
     animation: pulse 1.1s ease-in-out infinite;
   }
 

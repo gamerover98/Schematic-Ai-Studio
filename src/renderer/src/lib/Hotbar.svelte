@@ -241,7 +241,7 @@
           {:else}
             <span class="pending" aria-hidden="true"></span>
           {/if}
-          <span class="key pixel" aria-hidden="true">{index + 1}</span>
+          <span class="key figures" aria-hidden="true">{index + 1}</span>
           {#if isMix(id)}
             <span class="mix pixel" aria-hidden="true">{t("hotbar.mixBadge")}</span>
           {/if}

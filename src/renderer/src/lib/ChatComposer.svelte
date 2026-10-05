@@ -21,6 +21,7 @@
   import type { RegionSpec } from "../../../shared/ipc.js";
   import type { ExportType, KeyStorageStatus, Settings } from "../../../shared/settings.js";
   import { formatNumber, t } from "./i18n.svelte.js";
+  import { providerLabel } from "./provider_label.js";
   import Icon from "./Icon.svelte";
   import ModelPicker from "./ModelPicker.svelte";
 
@@ -245,7 +246,7 @@
         onclick={submit}
         disabled={busy || blockedOnKey || draft.trim() === ""}
         aria-label={t("chat.send")}
-        title={blockedOnKey ? t("chat.needsKey", { provider: settings.provider }) : t("chat.send")}
+        title={blockedOnKey ? t("chat.needsKey", { provider: providerLabel(settings.provider) }) : t("chat.send")}
       >
         <Icon name="send" size={15} />
       </button>

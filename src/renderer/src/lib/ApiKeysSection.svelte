@@ -21,6 +21,7 @@
     type Settings,
   } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
+  import { providerLabel } from "./provider_label.js";
 
   interface Props {
     settings: Settings;
@@ -73,7 +74,7 @@
 {#if keyStatus?.legacyProfile}
   <p class="callout warn">
     {t("provider.legacyProfile", {
-      providers: keyStatus.legacyProfile.providers.join(", "),
+      providers: keyStatus.legacyProfile.providers.map(providerLabel).join(", "),
       path: keyStatus.legacyProfile.path,
     })}
   </p>
@@ -85,7 +86,7 @@
 {#each PROVIDERS as provider (provider)}
   <div class="field">
     <label for={`key-${provider}`}>
-      {provider}{providerRequiresApiKey(provider) ? "" : ` — ${t("provider.apiKeyOptional")}`}
+      {providerLabel(provider)}{providerRequiresApiKey(provider) ? "" : ` — ${t("provider.apiKeyOptional")}`}
     </label>
     <div class="key-row">
       <input
@@ -109,7 +110,7 @@
       </button>
     </div>
     {#if hasKey(provider)}
-      <p class="hint ok">{t("provider.keyStored", { provider })}</p>
+      <p class="hint ok">{t("provider.keyStored", { provider: providerLabel(provider) })}</p>
     <!--
       A key is on disk and this machine cannot read it back -- a keyring that
       changed, or a profile copied to another machine. Said out loud, because
@@ -118,7 +119,7 @@
       `Invalid API key.` with nothing pointing here.
     -->
     {:else if keyStatus?.keys.find((entry) => entry.provider === provider)?.unreadable}
-      <p class="hint warn">{t("provider.keyUnreadable", { provider })}</p>
+      <p class="hint warn">{t("provider.keyUnreadable", { provider: providerLabel(provider) })}</p>
     {/if}
   </div>
 {/each}

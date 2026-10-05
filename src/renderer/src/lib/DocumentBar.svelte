@@ -97,6 +97,6 @@
   /* The marker is a colour as well as a bullet: a lone `•` beside a file name
      reads as punctuation until you already know what it means. */
   strong.dirty {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 </style>

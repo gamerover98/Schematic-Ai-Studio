@@ -21,13 +21,9 @@ export const en = {
   "about.title": "About",
   "about.version": "Version {version}",
   "about.tagline":
-    "An AI-assisted 3D editor for Minecraft schematics. Open a build, select part of it, and " +
-    "either edit it by hand or ask for the change in plain language — the AI works on the " +
-    "schematic itself, not on a description of it.",
+    "An AI-assisted 3D editor for Minecraft schematics. Select part of a build and change it by hand, or describe the change and the AI makes it on the schematic itself.",
   "about.free":
-    "Free software, and free of charge. No subscription, no credits, no paid tier and no " +
-    "feature held back — it is open source under the Apache 2.0 licence and it will stay " +
-    "that way.",
+    "Free software, and free of charge: no subscription, no credits, no paid tier. Open source under the Apache 2.0 licence, and it will stay that way.",
   "about.runtime": "Built on",
   "about.credits": "Credits",
   "about.credit.origin": "the original Python implementation this desktop version derives from",
@@ -39,9 +35,7 @@ export const en = {
   "about.license": "Licence",
 
   "bridge.missing":
-    "This page is not running inside the Schematic AI Studio desktop app, so the backend is " +
-    "unavailable. Start it with `npm run dev` (or the packaged app) rather than " +
-    "opening the dev-server URL in a browser.",
+    "This page is not running inside the desktop app, so there is no backend. Start it with `npm run dev` or the packaged app, not the dev-server URL in a browser.",
 
   "common.choose": "Choose…",
   "common.clear": "Clear",
@@ -86,7 +80,7 @@ export const en = {
   "settings.section.checking": "Checking",
   "settings.rebuilds": "Rebuilds",
   "settings.rebuildsTitle":
-    "Baked into the textures or the mesh, so changing it rebuilds the preview. Everything without this tag applies on the next frame.",
+    "Changing it redraws the whole schematic, which takes a moment on a large one. Everything without this tag applies at once.",
   "settings.diagnosticsHint":
     "For finding out why the viewport is slow, or draws something wrong. None of these change the schematic.",
   "settings.providersHint":
@@ -108,7 +102,7 @@ export const en = {
   "mcp.stateOff": "off",
   "mcp.enable": "Run the MCP server",
   "mcp.enableHint":
-    "Lets another program — Claude Code, Codex — edit the schematic you have open, through the same tools and the same undo stack. It listens on this computer only, and asks for a token.",
+    "Lets another program, such as Claude Code or Codex, edit the schematic you have open, with the same tools and the same undo. It listens on this computer only.",
   "mcp.port": "Port",
   "mcp.portHint": "0 asks the system for any free port, which is what a second copy of the app needs.",
   "mcp.root": "Folder it may touch",
@@ -129,10 +123,11 @@ export const en = {
   "mcp.copied": "Copied",
   "mcp.regenerate": "Regenerate",
   "mcp.command": "Command to connect",
-  "mcp.commandHint": "For a client that speaks MCP over HTTP. Anything that can send an Authorization header will do — the address and token above are all it needs.",
+  "mcp.commandHint":
+    "For a client that speaks MCP over HTTP. The address and the token above are all it needs.",
   "mcp.bridge": "…or over stdio",
   "mcp.bridgeHint":
-    "For a client that only speaks stdio. It forwards to this app, so the schematic you have open is the one it edits. Needs Node on the path.",
+    "For a client that can only start a command. It forwards to this app, so it edits the schematic you have open. Needs Node on the path.",
   "mcp.activity": "Recent calls",
   "mcp.activityEmpty": "Nothing yet.",
   "mcp.activityFailed": "failed",
@@ -141,10 +136,10 @@ export const en = {
   "mcp.clients.other": "{count} clients connected",
   "mcp.requireAuth": "Require a token",
   "mcp.requireAuthHint":
-    "On, a client has to send the token. Off, anything that can reach the address it listens on can read, write and save your schematics — and delete them if that is allowed too. Only offered while it listens on this machine alone.",
+    "On, a client must send the token. Off, any program that can reach the address can read, write and save your schematics. Only offered on this computer alone.",
   "mcp.bindAddress": "Listen on",
   "mcp.bindAddressHint":
-    "127.0.0.1 is this machine only. 0.0.0.0 is every network interface, which puts the editor on your network — the token is what stands between it and anyone who can route to you, so it cannot be turned off there. This is an address, not a range.",
+    "127.0.0.1 is this computer only. 0.0.0.0 puts the editor on your network, so the token is always required there. An address, not a range.",
 
   // Updates. Main's failure wording arrives already phrased, like the MCP
   // server's, so "GitHub is refusing anonymous requests…" has no key here.
@@ -161,10 +156,10 @@ export const en = {
   "updates.kind.other": "unpacked build",
   "updates.checkOnStartup": "Check for updates at startup",
   "updates.checkOnStartupHint":
-    "One request to api.github.com a few seconds after launch — GitHub sees your address and this version, nothing else. Nothing is downloaded until you ask.",
+    "One request to GitHub a few seconds after launch, which sees your address and this version. Nothing is downloaded until you ask.",
   "updates.includeDev": "Include development builds (-dev.N)",
   "updates.includeDevHint":
-    "Development builds are prereleases made from every change on the develop branch: newer, and less tested. Off, only stable releases are offered, and a development build waits for the stable release that follows it.",
+    "Development builds come from every change on the develop branch: newer, and less tested. Off, only stable releases are offered.",
   "updates.status": "Status",
   "updates.state.idle": "Not checked yet",
   "updates.state.checking": "Checking…",
@@ -253,7 +248,7 @@ export const en = {
   "viewport.compass": "Compass",
   "convert.title": "Convert a file",
   "convert.hint":
-    "Reads .schem, .schematic, .litematic and .mcfunction, and writes any of them. The schematic you have open is not touched, and an existing file at the destination is moved aside with a timestamp rather than overwritten.",
+    "Reads and writes .schem, .schematic, .litematic and .mcfunction. The open schematic is untouched, and a file already there is moved aside, never overwritten.",
   "convert.from": "File to convert",
   "convert.to": "Write it as",
   "convert.format": "Format",
@@ -270,11 +265,11 @@ export const en = {
   "void.openHint": "What fills the cells nothing has been built in",
   "void.title": "Empty space",
   "void.hint":
-    "By default a schematic is full of air. Choose something else and breaking a block leaves it behind \u2014 which is what an underwater build needs the file to say. It is drawn over every empty cell, and the pointer passes straight through it.",
+    "What empty cells are made of. Breaking a block leaves it behind, which an underwater build needs. It is drawn over empty space, and clicks pass through it.",
   "void.presets": "Common choices",
   "void.air": "Air",
   "void.block": "Block",
-  "void.opacity": "Opacity \u2014 {percent}%",
+  "void.opacity": "Opacity",
   "void.convertLegend": "Empty cells already in the schematic",
   "void.replaceApply": "Replace what is already there",
   "void.replaceWhat":
@@ -298,9 +293,9 @@ export const en = {
     "Draws the box as a transparent cage, so empty room inside the schematic is visible as room rather than as nothing.",
   "dimensions.autoGrow": "Resize automatically while editing",
   "dimensions.autoGrowHint":
-    "Filling or placing outside the schematic grows it to fit, and breaking the block an outer face is made of takes it back in \u2014 both in the same undo step as the edit. Turn this off to build to a fixed size; edits that reach outside are then refused rather than trimmed.",
+    "Building past the edge grows the schematic, and breaking its outermost blocks shrinks it back, in the same undo step. Off, edits past the edge are refused.",
   "dimensions.shrinking":
-    "This is smaller on at least one side. You are asked to confirm only if blocks would actually be lost \u2014 shrinking into empty space simply happens. Either way it is one undo step: Ctrl+Z brings the size and the blocks back together.",
+    "Smaller on at least one side. You are asked first only if blocks would be lost. Either way it is one undo step: Ctrl+Z brings back the size and the blocks.",
   "viewport.compassHint": "Which way you are looking. Click an axis to look from it.",
   "viewport.orthographicHint":
     "Draw without perspective, so parallel lines stay parallel and distance does not shrink a block. Orbit only \u2014 flying needs a point of view.",
@@ -317,7 +312,8 @@ export const en = {
   "viewport.worstFrame": "worst {ms} ms · {culprit}",
   "viewport.fpsIdle": "idle · nothing changed",
   "viewport.lodCounts": "full {full} · shapes {shapes} · coarse {lod2} + {lod3} · fading {fading}",
-  "viewport.noAtlas": "The mesh arrived without a texture atlas and none is held.",
+  "viewport.noAtlas":
+    "The blocks arrived without their textures. Reopen the schematic to try again.",
   "viewport.bounds": "centre {center} · size {size}",
   "viewport.dropTitle": "Drop to open",
   "viewport.dropTypes": ".schem, .schematic, .litematic or .mcfunction",
@@ -373,9 +369,9 @@ export const en = {
   "mcversion.useSaveAs":
     "Save As or Convert can write it in a container that fits, in one step.",
   "mcversion.toLegacy":
-    "Before 1.13 blocks were numeric ids, and the set is much smaller. Anything the older version never had is replaced with the empty space block \u2014 you will be told how much before it happens, and it can be undone.",
+    "Before 1.13 blocks were numeric ids, and there were fewer. Anything that version never had becomes the empty space block: you are told how many first, and it can be undone.",
   "mcversion.backport":
-    "Blocks the older version never had are replaced with the empty space block, and you will be told how many before it happens. Blocks that were only renamed are simply renamed \u2014 nothing is lost and nothing is asked.",
+    "Blocks the older version never had become the empty space block, and you are told how many first. Blocks that were only renamed are renamed, with nothing lost.",
   "mcversion.apply": "Change version",
   "mcversion.applyAnyway": "Change it and drop those blocks",
   "status.versionChanged": "Now a Minecraft {version} schematic. {notes}",
@@ -390,7 +386,7 @@ export const en = {
 
   // The creative hotbar. Right-click a slot to put the picker's current
   // block in it, which is why the hint names both gestures.
-  "inventory.for.hand": "Hold",
+  "inventory.for.hand": "Choose a block to hold",
   "inventory.for.fill": "Add to With",
   "inventory.for.replace": "Add to Replace",
   "inventory.search": "Search blocks",
@@ -494,12 +490,12 @@ export const en = {
     "Right-click one corner, then the opposite one. Corners on one level build this tall; a corner clicked higher up builds taller. Esc cancels.",
   "creative.blockHint": "Builds with the block in your hand, mixes included.",
   "creative.terrainHint":
-    "The landscape is the same wherever it is laid, so painting a place twice changes nothing and two strokes meet without a seam. The left button digs away whatever stands above the surface. One stroke is one undo.",
+    "The landscape is the same wherever it is laid, so strokes meet without a seam and painting twice changes nothing. The left button digs. One stroke is one undo.",
 
   "creative.passes": "Passes",
   "creative.preset": "Preset",
   "creative.smoothHint":
-    "WorldEdit's smooth brush: the heights round the crosshair blurred, each column stretched to its new height. Flowers, torches and fences are not ground. One stroke is one undo.",
+    "WorldEdit's smooth brush: the ground round the crosshair evened out. Flowers, torches and fences are not ground. One stroke is one undo.",
   "creative.erodeHint":
     "VoxelSniper's erode brush, in a sphere round the block aimed at. The left button runs the preset's inverse. One stroke is one undo.",
   "erode.preset.melt": "Melt",
@@ -636,7 +632,8 @@ export const en = {
   "mix.param.edge": "Edge",
   "mix.paramHint.frequency": "How fine the pattern is: patches come out about 1/frequency blocks across.",
   "mix.paramHint.octaves": "How many layers of finer detail are laid over the first.",
-  "mix.paramHint.persistence": "How much each finer layer counts against the one before (persistence). An overall amplitude would change nothing: the shares are exact, so only the order of the values matters.",
+  "mix.paramHint.persistence":
+    "How much each finer layer counts against the one before. There is no overall amplitude: the shares are exact, so only the order of the values matters.",
   "mix.paramHint.lacunarity": "How much finer each layer is than the one before.",
   "mix.paramHint.grain": "Random scatter mixed in, which roughens the edges between blocks.",
   "mix.paramHint.gain": "How strongly a ridge sharpens the detail along it.",
@@ -684,8 +681,19 @@ export const en = {
   "materials.ofDocument": "Materials in the schematic",
   "materials.slot": "{block}: {count}",
   "materials.outside": "{count} cells of the selection lie outside the schematic and hold nothing.",
-  "materials.hint": "Click: show where it is · Ctrl: show several · Shift: Replace · Ctrl+Shift: add to Replace · Right-click: details · Drag onto With, Replace or the hotbar (Ctrl adds)",
-  "materials.hintDocument": "Click: show where it is · Ctrl: show several · Right-click: details · Drag onto the hotbar",
+  "materials.hint": "Click a block to see where it is. Drag it onto a field or the hotbar.",
+  "materials.hintDocument": "Click a block to see where it is. Drag it onto the hotbar.",
+  "materials.shortcuts": "Shortcuts",
+  "gesture.click": "Click",
+  "gesture.ctrlClick": "Ctrl+click",
+  "gesture.shiftClick": "Shift+click",
+  "gesture.ctrlShiftClick": "Ctrl+Shift+click",
+  "gesture.rightClick": "Right-click",
+  "materials.key.click": "Show where it is",
+  "materials.key.ctrl": "Show several",
+  "materials.key.shift": "Use in Replace",
+  "materials.key.ctrlShift": "Add to Replace",
+  "materials.key.right": "Details",
   "materials.glowFinding": "Finding them…",
   "materials.glowLit.one": "1 block glows in the viewport.",
   "materials.glowLit.other": "{count} blocks glow in the viewport.",
@@ -725,7 +733,7 @@ export const en = {
   "inspector.at": "at ({x}, {y}, {z})",
   "inspector.blockStates": "Block states",
   "inspector.blockStatesHint":
-    "Changing one places the block again — undoable like any edit. Greyed rows are states this block can hold but does not; type a value, or tick the box, to add one.",
+    "Changing one places the block again, and can be undone. Greyed rows are states this block can hold but does not: type a value, or tick the box, to add one.",
   "inspector.noBlockStates": "This block has no block states.",
   "inspector.unset": "not set",
   "inspector.removeProperty": "Remove {name}",
@@ -740,14 +748,15 @@ export const en = {
   "anchor.openHint": "Create, move or remove WorldEdit's paste anchor",
   "anchor.title": "WorldEdit anchor",
   "anchor.infoTitle": "What this is for",
+  "anchor.more": "How it works",
   "anchor.infoWhat":
-    "WorldEdit and the tools built on it paste a schematic relative to a single cell: its anchor. It is stored in the file's NBT rather than as a block, it is optional, and a schematic without one pastes from its own corner.",
+    "WorldEdit pastes a schematic relative to one cell, its anchor. It is optional: without one, a schematic pastes from its own corner.",
   "anchor.infoExample":
-    "It is the position the player was standing in when the selection was copied. Copy a 7x4 area while standing in the middle of it and the anchor is that middle cell — paste it back and the build lands around you exactly as it did before.",
+    "It is where the player stood when the selection was copied. Copy an area standing in its middle, and pasting it back puts the build around you as it was.",
   "anchor.infoPivot":
-    "That makes it the pivot, not just a starting point: //rotate and //flip turn the selection about the anchor, and //paste puts the anchor under you. Move it and everything those commands do moves with it.",
+    "So it is also the pivot: //rotate and //flip turn about it, and //paste puts it under you. Move it and all three move with it.",
   "anchor.infoStorage":
-    "It costs no block and is never exported into the build — it lives in the schematic's NBT, and the marker in the viewport is a picture of it.",
+    "It is not a block and never part of the build: it lives in the file's NBT, and the marker in the viewport is a picture of it.",
   "anchor.positionTitle": "Position",
   "anchor.none": "This schematic has no anchor. Give it one, or leave it without.",
   "anchor.create": "Create",
@@ -760,7 +769,7 @@ export const en = {
   "anchor.stored":
     "In this file it is stored as {tag} = [{x}, {y}, {z}] — the anchor's position, negated.",
   "anchor.notStored":
-    "This container has nowhere to keep an anchor, so saving drops it. The marker stays in the viewport and the vector stays in the document \u2014 the file simply will not carry it.",
+    "This format has nowhere to keep an anchor, so saving drops it. The marker stays in the viewport and in the schematic, but the file will not carry it.",
   "anchor.viewTitle": "In the viewport",
   "anchor.showMarker": "Show the anchor marker",
   "anchor.markerHint":
@@ -770,14 +779,14 @@ export const en = {
   "nbt.title": "Schematic NBT",
   "nbt.originTitle": "WorldEdit origin",
   "nbt.originHint":
-    "Where this schematic's corner sat in the world, so WorldEdit and the tools that read it can paste it back exactly. Saving trims the schematic to its blocks, so an origin set against empty space moves with them.",
+    "Where this schematic's corner sat in the world, so WorldEdit can paste it back in place. Saving trims empty space, and an origin set against it moves with the blocks.",
   "nbt.originUnset": "not set",
   "nbt.originSet": "Set",
   "nbt.originClear": "Clear",
   "nbt.whereHint":
-    "In this container the paste anchor is {anchor} and the origin is {origin}. The two are different vectors and each format spells them differently, so the tag you want may not be the one you expect.",
+    "In this format the paste anchor is {anchor} and the origin is {origin}. They are two different vectors, and each format names them differently.",
   "nbt.whereNone":
-    "This container keeps neither a paste anchor nor a world origin, so neither appears below and saving drops both. Save it as Sponge if the file has to carry them.",
+    "This format keeps neither a paste anchor nor a world origin, so saving drops both. Save it as Sponge if the file has to carry them.",
   "nbt.omittedHint":
     "The palette and the block data are left out ({tags}): they are the schematic itself, and are rewritten from the grid every time it is saved.",
   "nbt.readOnly":
@@ -846,6 +855,10 @@ export const en = {
     "Follow-ups can refer back — the AI remembers the last {count} exchanges.",
 
   "provider.provider": "Provider",
+  "provider.name.openai": "OpenAI",
+  "provider.name.gemini": "Google Gemini",
+  "provider.name.opencode": "OpenCode Zen",
+  "provider.name.custom": "Custom (OpenAI-compatible)",
   "provider.model": "Model name",
   "provider.baseUrl": "Base URL",
   "provider.baseUrlHint":
@@ -864,9 +877,9 @@ export const en = {
     "{model} is billed per token, so it needs a key. The free models in the list above do not.",
   "provider.keyStored": "A key is stored for {provider}. It is never sent back to this window.",
   "start.legacyProfile":
-    "An earlier version of this app kept your {providers} API key in a different folder, and this one does not read it. Generation will not work until you paste it in again.",
+    "An earlier version of this app kept your {providers} API key in another folder, which this one does not read. Paste the key again to generate.",
   "provider.legacyProfile":
-    "An earlier version of this app stored keys for {providers} in {path}. This version reads a different folder and does not migrate them — paste the keys again below.",
+    "An earlier version of this app kept keys for {providers} in {path}. This version reads a different folder: paste the keys again below.",
   "provider.legacyProfileReveal": "Show me that folder",
   "provider.keyUnreadable":
     "A key for {provider} is stored but this machine can no longer decrypt it — paste it again.",
@@ -881,9 +894,7 @@ export const en = {
   "preview.resourcePack": "Resource pack (.zip)",
   "preview.resourcePackPlaceholder": "Faithful 64x (bundled)",
   "preview.resourcePackHint":
-    "A pack ships with the app and is used by default. Choosing your own takes priority, with " +
-    "the bundled one filling in any textures it does not provide. Affects the preview only, " +
-    "never the generated file.",
+    "A pack ships with the app. Your own takes priority, and the bundled one fills in any textures it lacks. Only the preview changes, never the saved file.",
   "preview.showMarkers": "Show barriers and structure voids",
   "preview.showMarkersHint": "They are invisible in game, and usually placed on purpose. Turn this off to see the build the way a player would.",
   "preview.biomeColors": "Biome colours",
@@ -893,16 +904,15 @@ export const en = {
   "preview.biomeHint":
     "Foliage (left) and water (right) ship greyscale and are tinted per biome — they are " +
     "separate colours in Minecraft, so they are separate here.",
-  "preview.sunAzimuth": "Sun azimuth — {value}°",
-  "preview.sunElevation": "Sun elevation — {value}°",
+  "preview.sunAzimuth": "Sun azimuth",
+  "preview.sunElevation": "Sun elevation",
   "preview.antialias": "Anti-aliasing",
   "preview.antialias.off": "Off",
-  "preview.antialiasHint":
-    "Smooths the edges of blocks. Applies straight away: the scene is drawn into a multisampled buffer rather than asking the browser for it, which cannot be changed once a window is open.",
+  "preview.antialiasHint": "Smooths the edges of blocks. Applies straight away.",
   "preview.maxFps": "Frame rate limit",
   "preview.maxFps.off": "Unlimited (display refresh)",
   "preview.maxFpsHint":
-    "Draws at most this many frames per second, to spend less GPU time. Unlimited draws once per refresh of the display. Camera movement keeps its speed either way.",
+    "Draws at most this many frames a second, to spare the graphics card. Unlimited draws once per refresh of the display. The camera keeps its speed either way.",
   "preview.showFps": "Show the frame counter",
   "preview.showFpsHint":
     "Frames per second and frame time, with the triangles and draw calls behind them.",
@@ -925,32 +935,32 @@ export const en = {
     "Each frame fills {pixels} million pixels × {samples} samples. On an integrated GPU, lower this or the anti-aliasing first.",
   "preview.frameDiagnostics": "Diagnose stutters",
   "preview.frameDiagnosticsHint":
-    "Records where each frame's time goes and keeps the slow ones. The frame counter then shows the worst frame of the last two seconds and what caused it, and every stutter is logged to the developer console (Help → Toggle Developer Tools).",
+    "Keeps the slow frames and what caused them. The frame counter shows the worst of the last two seconds, and each stutter goes to the developer console.",
   "preview.alwaysDraw": "Always draw",
   "preview.alwaysDrawHint":
-    "The viewport normally draws only when something changes, so a still scene leaves the GPU idle. This draws every frame instead, as it used to. Turn it on only to compare the two.",
+    "The viewport draws only when something changes, so a still scene leaves the graphics card idle. This draws every frame instead. Only for comparing the two.",
   "preview.lodMode": "Levels of detail",
   "preview.lodMode.off": "Off",
   "preview.lodMode.auto": "Automatic (large schematics only)",
   "preview.lodMode.always": "Always",
   "preview.lodModeHint":
-    "Far from the camera, simpler versions of the build stand in for the full one, so very large schematics draw faster. Up close nothing changes, and coming closer always brings the full detail back. Clicks and shadows always use the full build.",
+    "Far from the camera, simpler versions of the build stand in for it, so huge schematics draw faster. Up close, and for clicks and shadows, the full build is used.",
   "preview.lodPixels": "Quality",
   "preview.lodPixels.1": "Highest (1 pixel)",
   "preview.lodPixels.2": "High (2 pixels)",
   "preview.lodPixels.4": "Balanced (4 pixels)",
   "preview.lodPixels.8": "Performance (8 pixels)",
   "preview.lodPixelsHint":
-    "How much a simpler version may differ from the full build, measured on screen. Fewer pixels means it is used only further away; more pixels draws faster and the change may show.",
-  "preview.lodAutoTriangles": "Automatic from — {value} triangles",
+    "How far a simpler version may stray from the full build, on screen. Fewer pixels: used only further away. More: faster, and the change may show.",
+  "preview.lodAutoTriangles": "Automatic from",
   "preview.lodAutoTrianglesHint":
-    "In Automatic, only a schematic whose full mesh has at least this many triangles gets levels of detail. A smaller one is cheap to draw and is always shown exactly as it is.",
+    "In Automatic, only a schematic this heavy to draw gets levels of detail. A lighter one is always shown exactly as it is.",
   "preview.lodShapes": "Simplified shapes",
   "preview.lodShapesHint":
     "Blocks with very detailed models, such as copper golem statues, cauldrons and candles, are drawn with a few boxes at a distance.",
   "preview.lodCoarse": "Coarse blocks far away",
   "preview.lodCoarseHint":
-    "Very far away, whole areas of 64 blocks are drawn as blocks two and four times the size, with their textures. It also cuts draw calls by up to 64 times.",
+    "Very far away, areas of 64 blocks are drawn with blocks two and four times the size. Many fewer things to draw.",
   "preview.lodTint": "Colour each level",
   "preview.lodTint.shapes": "simplified shapes",
   "preview.lodTint.coarse2": "blocks ×2",
@@ -964,10 +974,10 @@ export const en = {
   "preview.copyStutterReport": "Copy stutter report",
   "preview.stutterReportCopied": "Copied — {count} stutters recorded.",
   "preview.stutterReportEmpty": "Turn on Diagnose stutters first, then reproduce the stutter.",
-  "preview.maxDpr": "Max device pixel ratio — {value}",
-  "preview.renderScale": "Render scale — {value}",
-  "preview.maxDrawDistance": "Max draw distance — {value}",
-  "preview.flySpeed": "Flight speed — {value} blocks/s",
+  "preview.maxDpr": "Max device pixel ratio",
+  "preview.renderScale": "Render scale",
+  "preview.maxDrawDistance": "Max draw distance",
+  "preview.flySpeed": "Flight speed",
   "preview.showGrid": "Show grid",
   "preview.wireframe": "Wireframe",
   "preview.wireframeHint": "Draws the edges of every triangle, to see what the mesher made.",
@@ -976,17 +986,25 @@ export const en = {
   "preview.sky": "Draw the sky",
   "preview.skyHint":
     "A gradient that follows the hour, a square sun and moon, and stars. Off leaves the flat background.",
-  "preview.timeOfDay": "Time of day — {time}",
+  "preview.timeOfDay": "Time of day",
   "preview.timeOfDayHint": "In game ticks: 0 dawn, 6000 noon, 12000 dusk, 18000 midnight.",
   "preview.daylightCycle": "Let time pass",
-  "preview.daylightSpeed": "{value} game minutes per second",
+  "preview.daylightSpeed": "Speed",
+  // A slider's value, beside its name rather than inside it.
+  "unit.degrees": "{value}°",
+  "unit.blocks": "{value} blocks",
+  "unit.blocksPerSecond": "{value} blocks/s",
+  "unit.gameMinutesPerSecond": "{value} game min/s",
+  "unit.times": "{value}×",
+  "unit.percent": "{value}%",
+  "unit.triangles": "{value} triangles",
   "preview.shadows": "Cast shadows",
   "preview.shadowsHint":
     "The most expensive thing in the viewport: a second pass over the geometry from the light’s point of view.",
   "preview.shadowQuality": "Shadow detail",
   "preview.globalIllumination": "Light the build from the sky",
   "preview.globalIlluminationHint":
-    "Every surface takes the colour of the sky it faces — blue from above, orange at sunset. It only reaches where the sky already did, so a sealed room stays dark.",
+    "Each surface takes the colour of the sky it faces: blue from above, orange at sunset. Only where the sky already reaches, so a sealed room stays dark.",
   "preview.globalIlluminationNeedsSky":
     "Needs the sky: the light comes from the sky itself, so with it off there is nothing to gather.",
   "preview.shaderMode": "Look",

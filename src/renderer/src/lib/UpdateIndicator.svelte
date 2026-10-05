@@ -56,21 +56,21 @@
   .update {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    font-size: 12px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
   }
 
   .arrow {
     display: grid;
     place-items: center;
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* Ready is the one state that is waiting on a click, so it is the one that
      stands out. */
   .update.ready {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
   }
 
   .name {

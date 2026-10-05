@@ -179,7 +179,6 @@
   .grip {
     width: 1px;
     height: 28px;
-    border-radius: 1px;
     background: var(--border);
   }
 

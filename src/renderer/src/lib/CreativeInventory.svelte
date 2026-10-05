@@ -185,7 +185,7 @@ import { legacyIdFor, type LegacyIndex } from "../../../shared/legacy_ids.js";
               <span class="pending" aria-hidden="true"></span>
             {/if}
             {#if legacyIdFor(legacy, block)}
-              <span class="legacy pixel">{legacyIdFor(legacy, block)}</span>
+              <span class="legacy figures">{legacyIdFor(legacy, block)}</span>
             {/if}
           </span>
           <span class="name">{blockLabel(block)}</span>

@@ -139,9 +139,13 @@
   <section class="callout info">
     <h3>{t("anchor.infoTitle")}</h3>
     <p>{t("anchor.infoWhat")}</p>
-    <p>{t("anchor.infoExample")}</p>
-    <p>{t("anchor.infoPivot")}</p>
-    <p class="hint">{t("anchor.infoStorage")}</p>
+    <!-- One paragraph to say what it is; the rest a press away. -->
+    <details class="more">
+      <summary>{t("anchor.more")}</summary>
+      <p>{t("anchor.infoExample")}</p>
+      <p>{t("anchor.infoPivot")}</p>
+      <p>{t("anchor.infoStorage")}</p>
+    </details>
   </section>
 
   <section>

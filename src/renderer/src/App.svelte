@@ -2179,6 +2179,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     };
   });
 
+  /** A notification as one sentence for a screen reader: the text, then the detail. */
+  function announcement(note: NonNullable<Status>): string {
+    return note.detail ? `${note.text} ${note.detail}` : note.text;
+  }
+
   function onWindowKey(event: KeyboardEvent): void {
     /*
      * With the pointer locked, Ctrl belongs to the camera and to nothing else.
@@ -5930,8 +5935,22 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       </Screen>
     {/if}
 
+    <!--
+      What a notification says, to a screen reader. Two regions that are
+      always in the document, because a live region announces a *change* to
+      its content: the toast below is created already holding its sentence,
+      and a region born full is one most readers say nothing about. A failure
+      interrupts (`role="alert"`); everything else waits its turn.
+    -->
+    <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {status !== null && status.tone !== "error" ? announcement(status) : ""}
+    </div>
+    <div class="sr-only" role="alert" aria-atomic="true">
+      {status !== null && status.tone === "error" ? announcement(status) : ""}
+    </div>
+
     {#if status}
-      <div class={`status slab ${status.tone}`} role="status">
+      <div class={`status slab ${status.tone}`}>
         <p>
           {status.text}
           {#if status.detail}<br /><small>{status.detail}</small>{/if}
@@ -6216,7 +6235,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   /* Lit while its panel is out, as a toggle should say. */
   .panel-toggle[aria-pressed="true"] {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /*

@@ -204,9 +204,14 @@
     either way, and a slider that comes and goes reads as a bug in the
     panel. There is simply nothing for it to make see-through.
   -->
-  <label class="field" class:inert={block === ""}>
-    <span>{t("void.opacity", { percent: Math.round(opacity * 100) })}</span>
+  <div class="field" class:inert={block === ""}>
+    <div class="slider-head">
+      <label for="void-opacity">{t("void.opacity")}</label>
+      <output for="void-opacity">{t("unit.percent", { value: Math.round(opacity * 100) })}</output>
+    </div>
     <input
+      id="void-opacity"
+      aria-valuetext={t("unit.percent", { value: Math.round(opacity * 100) })}
       type="range"
       min={VOID_OPACITY.min}
       max={VOID_OPACITY.max}
@@ -215,7 +220,7 @@
       disabled={busy || block === ""}
       oninput={(event) => onopacity(Number(event.currentTarget.value))}
     />
-  </label>
+  </div>
 
   <!--
     The rewrite, on a press of its own.
@@ -279,11 +284,6 @@
 
   .field {
     margin-bottom: var(--space-4);
-  }
-
-  .field > span {
-    display: block;
-    margin-bottom: var(--space-2);
   }
 
   .inert {

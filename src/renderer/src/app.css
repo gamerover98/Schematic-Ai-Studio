@@ -111,8 +111,10 @@
 
   /* ---- type ----
      Atkinson Hyperlegible for everything that is read, because it was drawn
-     for exactly that; Pixelify Sans for the titles of panels and the numbers
-     on slots, and nowhere else -- a pixel face in a paragraph is a toy. Both
+     for exactly that; Pixelify Sans for the titles of panels and the words
+     on slots, and nowhere else -- a pixel face in a paragraph is a toy. Not
+     for figures: at a slot's size its 5 is an S and its 2 a Z, so a number is
+     `.figures`, the body face in bold, which was drawn to tell them apart. Both
      ship in the app (OFL), so a machine without them draws the same window. */
   --font-body: "Atkinson Hyperlegible", system-ui, "Segoe UI", sans-serif;
   --font-pixel: "Pixelify Sans", "Atkinson Hyperlegible", system-ui, sans-serif;
@@ -570,6 +572,34 @@ label {
   margin-bottom: var(--space-2);
 }
 
+/*
+ * A slider's head: its name, and what it is set to, apart. The value used to
+ * be written into the label -- "Render scale — 1.0" -- so a screen reader read
+ * the name and the number as one sentence that changed under the pointer, and
+ * the label jumped about as the digits did. The value is an `<output>` for
+ * the control, at the trailing edge, in figures that keep their width.
+ */
+.slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.slider-head > label,
+.slider-head > span {
+  margin: 0;
+}
+
+.slider-head > output {
+  flex: none;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 fieldset {
   border: var(--bevel) solid;
   border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
@@ -750,6 +780,72 @@ button.link:hover:not(:disabled) {
   letter-spacing: 0.02em;
 }
 
+/* A number on a slot, a count or a key: bold in the body face, every digit
+   the same width. In the pixel face at 11 and 12px a 5 reads as an S and a 2
+   as a Z, which is exactly what a count must never be mistaken for. */
+/*
+ * The rest of an explanation, behind a disclosure. A control gets one line of
+ * help; what is worth knowing beyond that line is here, a press away, rather
+ * than four paragraphs above the field it explains. A native `<details>`, so
+ * the keyboard and a screen reader already know what it is.
+ */
+details.more {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+details.more > summary {
+  width: max-content;
+  cursor: pointer;
+  color: var(--text);
+}
+
+details.more[open] > summary {
+  margin-bottom: var(--space-2);
+}
+
+details.more p {
+  margin: 0 0 var(--space-2);
+}
+
+/* A list of shortcuts: the gesture, then what it does. */
+dl.keys {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+dl.keys dt {
+  color: var(--text);
+  font-weight: 700;
+}
+
+dl.keys dd {
+  margin: 0;
+}
+
+/* Read by a screen reader and drawn nowhere: a live region's words. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.figures {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
 /*
  * Every dialog is one of these: a slab over a scrim, with its title in the
  * pixel face. The components keep their own sizes and layouts; what a dialog
@@ -812,11 +908,20 @@ button.link:hover:not(:disabled) {
   margin: var(--space-2) 0 0;
 }
 
+/*
+ * Less motion, everywhere at once. The iteration count is the half that is
+ * easy to leave out: an infinite animation shortened to a hundredth of a
+ * millisecond does not stop, it flickers -- every blinking caret and pulsing
+ * dot in the window at the display's refresh rate. Run once, it ends on its
+ * last frame and stays there.
+ */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
   }
 }

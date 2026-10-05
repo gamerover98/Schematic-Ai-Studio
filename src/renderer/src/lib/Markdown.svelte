@@ -150,7 +150,7 @@
   }
 
   .markdown :global(li::marker) {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .markdown :global(blockquote) {
