@@ -317,7 +317,7 @@
    */
   .tool-window {
     position: absolute;
-    z-index: 5;
+    z-index: var(--z-window);
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     border: var(--bevel) solid;

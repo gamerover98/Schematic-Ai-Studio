@@ -280,49 +280,19 @@
 </div>
 
 <style>
+  /* The tool's choices are app.css's `.segmented`, as everywhere else. */
   .creative-options {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    font-size: 12px;
-  }
-
-  .segmented {
-    display: flex;
-    gap: 2px;
-    padding: 2px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-input);
-  }
-
-  .segmented button {
-    flex: 1;
-    min-width: 0;
-    padding: 4px 2px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .segmented button:hover {
-    color: var(--text);
-  }
-
-  .segmented button.active {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--bg-panel);
+    gap: var(--space-3);
+    font-size: var(--text-sm);
   }
 
   .row {
     display: flex;
-    gap: 8px;
+    gap: var(--space-3);
     align-items: center;
+    margin: 0;
   }
 
   .row > span {
@@ -349,14 +319,16 @@
 
   .check {
     display: flex;
-    gap: 6px;
+    gap: var(--space-2);
     align-items: center;
+    margin: 0;
+    color: var(--text);
   }
 
   .note {
     margin: 0;
     color: var(--text-dim);
-    font-size: 11px;
-    line-height: 1.35;
+    font-size: var(--text-sm);
+    line-height: 1.4;
   }
 </style>

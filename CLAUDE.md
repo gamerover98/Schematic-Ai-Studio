@@ -2214,6 +2214,31 @@ button to a screen reader, because what it opens is a list.
   first, so the focus landed on a popover still `visibility: hidden`, which the
   browser refuses without a word.
 
+**The tools' panel is the inventory too.** Its three tabs and the creative
+options' floating window draw from the scales alone -- `tests/ui.ts` walks
+fifteen components for a corner, a colour, a size or a stacking level of
+their own, and for the accent written as text.
+
+- **A block is shown as a block wherever a panel names one**: in a slot,
+  slot-dark in every theme with `.inset`'s bevel -- the materials, a field's
+  chips, the inspector's heading, a block's hover. The inspector and the hover
+  put the readable name (`blockLabel`) over the id in the mono face.
+- **A slot's count is the game's**: the pixel face, `--slot-text` with
+  `--slot-text-shadow`. They are tokens restated in all three palettes with
+  the same values, because the slot under them is dark in every theme, and
+  the contrast check holds the pair to 4.5:1 there.
+- **A choice of a few is `.segmented` in `app.css`**: slabs in a sunken
+  well, the chosen one pressed in and lit (`.active` or `aria-pressed`).
+  The camera switch, a creative tool's options, the terrain's footprint and a
+  map's plane had four looks; none keeps one of its own.
+- **A field holding blocks rings as a whole**, like the composer, and the
+  selector needs `:global`: the caret's input is `BlockPicker`'s, and
+  Svelte scopes the inside of `:has()` too -- `:where(.svelte-x):focus-visible`
+  -- so a scoped `.chips:has(:focus-visible)` asks for a focused element of
+  `BlockMixField` and never finds one. It compiles, and draws nothing.
+- **The floating options window is on `--z-window`**, over the hotbar and the
+  viewport's bars, which share a level of 5 until the overlays get theirs.
+
 **A floating panel is resizable, and its size is two settings per window.**
 `ToolWindow` was `width: 232px` in CSS with no size props at all — the number
 that sent the version history off to a modal, and that leaves the inspector
@@ -2250,9 +2275,11 @@ It is **asked for, not pushed**: the selection is the renderer's, so
 `App.svelte` asks once the selection has held still for 120 ms, one request in
 flight through `coalesce`. A 256x64x256 selection is about 35 ms in main.
 Only while the list is on screen, which is the Selection tab of the docked
-panel, with a selection: it used to be read off `DocumentState.palette` with
-nothing selected, for a window that could not show it. Main counts the whole
-schematic for `regions: null`, which nothing in the window asks yet.
+panel. **With nothing selected it is the whole schematic's** (`regions:
+null`), which is how the one stray block is found: a docked panel is always
+there, where the floating window a selection summoned was not. An answer is
+tagged with whose materials it counted, so the schematic's are never drawn as
+the selection's in the moment between the two.
 
 **A bed is one bed.** The
 list counted a bed as two -- a foot and a head, which is true of the file and
@@ -2301,7 +2328,10 @@ the window's own Escape drops the selection and the list with it. **A plain
 click on air fills Replace**, because air cannot be held and every empty
 cell glowing would be the outline of everything else; Ctrl adds air to With,
 since a slot of it cannot be dragged. A slot carries the exact state, so a
-replace of it finds exactly the cells the slot counted.
+replace of it finds exactly the cells the slot counted. **With nothing
+selected there are no fields** (`materialAction(…, fields: false)`): Replace
+and With wait for a selection, so Shift is a plain click and air does
+nothing, rather than writing into a field nobody can see.
 
 **A click on a slot lights the block up, through walls.** The game's Glowing
 effect is the model: an outline round the thing wherever it is, because
@@ -2330,7 +2360,9 @@ third and left the rest dark, which reads as a fault rather than a limit.
 
 Plain lights one slot and puts it out when it was the only one lit; Ctrl adds
 or takes out (`nextGlow`). Escape puts the glow out before it drops the
-selection, and a glow lit from the list goes with the selection. Over MCP
+selection, and a glow lit from the list goes when the list changes whose
+materials it shows: the selection's with the selection, the schematic's
+(`scope: "document"`, the whole schematic) when a selection appears. Over MCP
 `highlight_blocks` (`mcp/lifecycle.ts`, beside `capture_viewport`, because it
 reaches the window) lights blocks in a box or the whole schematic and stays
 until put out; it tells the window *what* to light (`IPC.glowBlocks`) and the

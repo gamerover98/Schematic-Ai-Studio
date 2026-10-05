@@ -660,6 +660,7 @@ export const en = {
   "materials.slot": "{block}: {count}",
   "materials.outside": "{count} cells of the selection lie outside the schematic and hold nothing.",
   "materials.hint": "Click: show where it is · Ctrl: show several · Shift: Replace · Ctrl+Shift: add to Replace · Right-click: details · Drag onto With, Replace or the hotbar (Ctrl adds)",
+  "materials.hintDocument": "Click: show where it is · Ctrl: show several · Right-click: details · Drag onto the hotbar",
   "materials.glowFinding": "Finding them…",
   "materials.glowLit.one": "1 block glows in the viewport.",
   "materials.glowLit.other": "{count} blocks glow in the viewport.",

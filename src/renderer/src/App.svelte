@@ -3300,37 +3300,42 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * is a walk over millions of cells.
    *
    * Only while the list is on screen, which is the Selection tab of the docked
-   * panel, with a selection. Main can count the whole schematic too
-   * (`regions: null`), and it pairs a bed's halves there as it does here; a
-   * window with nothing selected has nowhere to show it, so it does not ask
-   * on every edit for an answer nobody reads.
+   * panel. With nothing selected it is the whole schematic's (`regions:
+   * null`), which main counts without walking the box and pairs a bed's
+   * halves in as it does here -- the list is how you find the one stray
+   * block, and a docked panel has room for it where a floating window
+   * summoned by a selection did not.
    *
    * The last answer stays on screen until the next one lands, so the slots do
-   * not blank and refill on every edit.
+   * not blank and refill on every edit -- but only while it answers the same
+   * question: an answer is tagged with whose materials it counted, so the
+   * schematic's are never shown as the selection's in the moment between.
    */
-  let selectionMaterials = $state<SelectionPaletteSuccess | null>(null);
+  let selectionMaterials = $state<(SelectionPaletteSuccess & { scope: "selection" | "document" }) | null>(null);
   const refreshMaterials = coalesce(fetchMaterials);
 
   async function fetchMaterials(): Promise<void> {
-    if (selection === null || docState === null || !bridgeAvailable) {
+    if (docState === null || !bridgeAvailable) {
       selectionMaterials = null;
       return;
     }
+    const scope = selection === null ? "document" : "selection";
     // Every area, a cell two of them share counted once -- main walks the union.
-    const response = await api().selectionPalette({ regions: areasForIpc() });
-    // Dropped meanwhile: the effect has already cleared it, and a late answer
-    // must not put back the materials of a selection that is gone.
-    if (!response.ok || selection === null || docState === null) return;
+    const response = await api().selectionPalette({ regions: scope === "selection" ? areasForIpc() : null });
+    // Changed meanwhile: a late answer must not put back the materials of a
+    // selection that is gone, nor the schematic's over a new selection.
+    if (!response.ok || docState === null || (selection === null ? "document" : "selection") !== scope) return;
     selectionMaterials = {
       palette: response.palette,
       air: response.air,
       outside: response.outside,
       cells: response.cells,
+      scope,
     };
   }
 
   $effect(() => {
-    if (dockCollapsed || dockTab !== "selection" || selection === null || docState === null) {
+    if (dockCollapsed || dockTab !== "selection" || docState === null) {
       selectionMaterials = null;
       return;
     }
@@ -3344,8 +3349,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     return () => clearTimeout(timer);
   });
 
-  /** The selection's materials; the list is only drawn with one. */
-  const materials = $derived(docState === null || selection === null ? null : selectionMaterials);
+  /** Whose materials the list shows: the selection's, or with none the schematic's. */
+  const materialsScope = $derived(selection === null ? "document" : "selection");
+  const materials = $derived(
+    docState === null || selectionMaterials === null || selectionMaterials.scope !== materialsScope
+      ? null
+      : selectionMaterials,
+  );
 
   /**
    * What the viewport lights up, through walls, and why.
@@ -3361,10 +3371,16 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * after they have held still for a moment, one question in flight. Main
    * has the blocks; this only knows what was asked for.
    */
+  /*
+   * `"selection"` and `"document"` are a glow the list lit, of the areas or --
+   * with nothing selected -- of the whole schematic, and it goes when the list
+   * changes whose materials it shows. A box or `null` is one a model asked
+   * for, which stays.
+   */
   interface GlowState {
     slots: GlowSlot[];
     patterns: string[];
-    scope: "selection" | RegionSpec[] | null;
+    scope: "selection" | "document" | RegionSpec[] | null;
   }
   let glow = $state.raw<GlowState | null>(null);
   /** The last shell main sent, and the glow it was found for. */
@@ -3379,7 +3395,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     }
     if (wanted.scope === "selection" && selection === null) return;
     const response = await api().findBlocks({
-      regions: wanted.scope === "selection" ? areasForIpc() : wanted.scope,
+      regions: wanted.scope === "selection" ? areasForIpc() : wanted.scope === "document" ? null : wanted.scope,
       patterns: wanted.patterns,
     });
     // Put out or changed meanwhile: a late answer must not light what is no
@@ -3414,13 +3430,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   /** A slot was clicked to light it, or Ctrl-clicked: `nextGlow` decides. */
   function glowMaterial(slot: GlowSlot, add: boolean): void {
-    const current = glow?.scope === "selection" ? glow.slots : [];
+    const scope = materialsScope;
+    const current = glow?.scope === scope ? glow.slots : [];
     const slots = nextGlow(current, { block: slot.block, pair: [...slot.pair] }, add);
-    glow = slots.length === 0 ? null : { slots, patterns: glowPatterns(slots), scope: "selection" };
+    glow = slots.length === 0 ? null : { slots, patterns: glowPatterns(slots), scope };
   }
 
-  /** The slots the list draws pressed: only a glow it lit itself. */
-  const glowingSlots = $derived(glow?.scope === "selection" ? glow.slots.map((slot) => slot.block) : []);
+  /** The slots the list draws pressed: only a glow it lit itself, of what it shows. */
+  const glowingSlots = $derived(glow?.scope === materialsScope ? glow.slots.map((slot) => slot.block) : []);
+
+  // The schematic's list gives way to the selection's the moment there is
+  // one, and a glow lit from it goes too: the slots it was lit from are gone.
+  $effect(() => {
+    if (selection !== null && glow !== null && glow.scope === "document") glow = null;
+  });
   /** How many cells glow, once main has answered for this glow. */
   const glowAnswer = $derived(glowShell !== null && glowShell.for === glow ? glowShell : null);
 
@@ -5480,7 +5503,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     </div>
 
     <div class="bar-middle">
-      <div class="camera-modes" role="group" aria-label={t("viewport.cameraMode")}>
+      <div class="camera-modes segmented" role="group" aria-label={t("viewport.cameraMode")}>
         <button
           class:active={cameraMode === "orbit"}
           aria-pressed={cameraMode === "orbit"}
@@ -6271,30 +6294,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     gap: 8px;
   }
 
-  /*
-   * A segmented switch in the inventory's material: the two modes are slabs
-   * in a sunken well, and the one you are in is pressed into it and lit.
-   */
-  .camera-modes {
-    display: flex;
-    gap: var(--space-1);
-    padding: 2px;
-    border: var(--bevel) solid;
-    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
-    background: var(--well);
-  }
-
+  /* app.css's `.segmented`, with the room a bar's two words can have. */
   .camera-modes button {
-    min-height: calc(var(--control-h) - 4px);
     padding: 0 var(--space-4);
-    font-size: var(--text-sm);
-  }
-
-  .camera-modes button.active {
-    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 700;
   }
 
   .projection {

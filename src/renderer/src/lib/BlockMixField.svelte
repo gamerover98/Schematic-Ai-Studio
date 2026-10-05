@@ -331,7 +331,7 @@
     {#if specs.length > 0}
       <button
         type="button"
-        class="gear"
+        class="icon gear"
         class:open={tuning}
         aria-expanded={tuning}
         title={t("mix.tune")}
@@ -353,7 +353,7 @@
     </label>
     <button
       type="button"
-      class="dice"
+      class="icon dice"
       title={t("mix.reroll")}
       aria-label={t("mix.reroll")}
       onclick={() => emit({ ...mix, distribution: { ...mix.distribution, seed: freshSeed() } })}
@@ -436,9 +436,8 @@
 <style>
   .mix {
     display: flex;
-    align-items: flex-start;
-    gap: 4px;
-    border-radius: 4px;
+    align-items: stretch;
+    gap: var(--space-2);
   }
 
   /* Where a dragged block will land: the selection's own colour, as an outline. */
@@ -447,36 +446,48 @@
     outline-offset: 2px;
   }
 
+  /*
+   * The field: the game's text box, as every input here is, holding slots.
+   * The ring goes round the whole box, because the box is what you type into
+   * -- the caret's own input is a borderless strip at its end.
+   */
   .chips {
     flex: 1 1 auto;
     min-width: 0;
     display: flex;
     flex-wrap: wrap;
     align-items: flex-start;
-    gap: 4px;
-    padding: 3px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
+    gap: var(--space-2);
+    padding: var(--space-1);
+    border: 1px solid var(--field-edge);
     background: var(--bg-input);
+  }
+
+  /* `:global`, because the input is `BlockPicker`'s: scoped, the selector asks
+     for a focused element of this component and never finds one. */
+  .chips:has(:global(input:focus-visible)) {
+    outline: 2px solid var(--accent);
+    outline-offset: 0;
   }
 
   .chip {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 1px;
+    gap: var(--space-1);
     width: 38px;
   }
 
+  /* Each block in a slot of its own, as the inventory holds it. */
   .tile {
     position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: grid;
+    place-items: center;
     width: 32px;
     height: 32px;
-    border-radius: 4px;
-    background: var(--bg-panel);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
   }
 
   .tile img {
@@ -485,33 +496,33 @@
     image-rendering: pixelated;
   }
 
-  .pending {
-    font-size: 10px;
-    color: var(--text-dim);
-    text-transform: uppercase;
-  }
-
+  .pending,
   .glyph {
     display: grid;
     place-items: center;
-    color: var(--text-dim);
+    color: color-mix(in srgb, var(--slot-text) 70%, transparent);
   }
 
+  .pending {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+  }
+
+  /* A dot, so it is round: `--radius-round` is for exactly what is one. */
   .remove {
     position: absolute;
-    top: -4px;
-    right: -4px;
+    top: calc(-1 * var(--space-2));
+    right: calc(-1 * var(--space-2));
     display: none;
     place-items: center;
-    width: 14px;
-    height: 14px;
+    width: 16px;
+    height: 16px;
     min-height: 0;
     padding: 0;
     border: none;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--danger);
     color: var(--bg-panel);
-    cursor: pointer;
   }
 
   .remove:hover {
@@ -525,14 +536,14 @@
 
   .weight {
     width: 38px;
-    box-sizing: border-box;
-    padding: 1px 2px;
-    font-size: 10px;
+    min-height: 0;
+    padding: 0 var(--space-1);
+    font-size: var(--text-xs);
     text-align: center;
   }
 
   .share {
-    font-size: 9px;
+    font-size: var(--text-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
@@ -546,21 +557,21 @@
   .adder :global(input) {
     border: none;
     background: transparent;
-    padding: 4px 2px;
+    padding: var(--space-1) var(--space-2);
   }
 
-  /*
-   * Its padding is zeroed here, and that was the bug: the global `button` rule
-   * gives 8px 14px, which in a 26px-wide button left a content box narrower
-   * than nothing, and the icon was pushed off to the right of it.
-   */
+  .adder :global(input:focus-visible) {
+    outline: none;
+  }
+
+  /* A slab beside the field, the height of whatever the field holds. */
   .browse {
     flex: none;
     display: grid;
     place-items: center;
-    width: 26px;
+    width: var(--control-h);
+    min-height: var(--control-h);
     padding: 0;
-    align-self: stretch;
     color: var(--text-dim);
   }
 
@@ -568,58 +579,51 @@
     color: var(--text);
   }
 
-  /* Wraps rather than overflowing: the tool window is narrow by default. */
+  /* Wraps rather than overflowing: the panel is narrow. */
   .distribution {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px 6px;
-    margin-top: 2px;
-    font-size: 11px;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-1);
+    font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
   .distribution label {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-2);
     margin: 0;
   }
 
   .distribution input {
     width: 72px;
-    padding: 1px 4px;
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
   .kind {
     flex: 1 1 96px;
+    width: auto;
     min-width: 0;
-    padding: 1px 2px;
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
-  .gear {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 20px;
-    min-height: 0;
-    padding: 0;
-  }
-
-  .gear.open {
-    border-color: var(--accent);
-    color: var(--accent);
+  /* Open, it stays pressed in: the parameters below are its doing. */
+  .gear[aria-expanded="true"],
+  .gear[aria-expanded="true"]:hover:not(:disabled) {
+    color: var(--accent-text);
+    background: var(--bg-input);
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
   }
 
   .params {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
-    gap: 3px 8px;
-    margin-top: 4px;
-    font-size: 11px;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-2);
+    font-size: var(--text-sm);
   }
 
   .params label {
@@ -630,38 +634,17 @@
   .params input[type="number"],
   .params select {
     width: 100%;
-    box-sizing: border-box;
-    padding: 1px 4px;
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
   .params input[type="checkbox"] {
     justify-self: start;
-    margin: 0;
   }
 
   .note {
     grid-column: 1 / -1;
-    margin: 2px 0 0;
-    font-size: 10px;
+    margin: var(--space-1) 0 0;
+    font-size: var(--text-sm);
     color: var(--text-dim);
-  }
-
-  .dice {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 20px;
-    min-height: 0;
-    padding: 0;
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-
-  .dice:hover {
-    color: var(--text);
-    background: none;
   }
 </style>

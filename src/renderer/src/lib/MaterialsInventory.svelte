@@ -142,10 +142,14 @@
     hovered = null;
   }
 
+  /** Replace and With are beside the list only with a selection: see `materialAction`. */
+  const fields = $derived(scope === "selection");
+
   function act(slot: MaterialRow, event: MouseEvent, button: number): void {
     const action = materialAction(
       { button, ctrl: event.ctrlKey || event.metaKey, shift: event.shiftKey },
       slot.air,
+      fields,
     );
     if (action === "none") return;
     hoverEnd();
@@ -234,7 +238,7 @@
         {:else}
           <span class="pending" aria-hidden="true">{shortName(slot.block).slice(0, 2)}</span>
         {/if}
-        <span class="count" aria-hidden="true">{formatCount(slot.count)}</span>
+        <span class="count pixel" aria-hidden="true">{formatCount(slot.count)}</span>
       </button>
     {/each}
   </div>
@@ -260,7 +264,7 @@
 {#if outside > 0}
   <p class="note">{t("materials.outside", { count: outside.toLocaleString() })}</p>
 {/if}
-<p class="note">{t("materials.hint")}</p>
+<p class="note">{fields ? t("materials.hint") : t("materials.hintDocument")}</p>
 
 <BlockTooltip
   block={hoveredSlot?.block ?? null}
@@ -290,77 +294,75 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
   .heading {
-    font-weight: 600;
+    font-weight: 700;
   }
 
   .unify {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-1);
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-sm);
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
   }
 
-  .unify input {
-    margin: 0;
-  }
-
   .bar {
     display: flex;
-    gap: 4px;
+    gap: var(--space-2);
   }
 
   .search {
     flex: 1;
     min-width: 0;
-    padding: 3px 6px;
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
   .order {
     flex: 0 0 auto;
+    width: auto;
     max-width: 45%;
-    padding: 3px 4px;
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
   /*
-   * Scrolls inside itself rather than growing the window, at a share of the
-   * window's height -- the list's old rule, kept: drag the panel taller and the
-   * inventory gets taller with it.
+   * Scrolls inside itself rather than growing the panel, at a share of the
+   * window's height -- the list's old rule, kept: a taller window gives the
+   * inventory more rows.
    */
   .inventory {
     display: grid;
     grid-template-columns: repeat(auto-fill, 36px);
-    gap: 2px;
+    gap: var(--space-1);
     max-height: max(152px, 24vh);
     overflow-y: auto;
-    padding: 3px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg-panel);
   }
 
-  /* The game's slot: a square sunk into the panel, lit from the bottom right. */
+  /*
+   * The game's slot: a square sunk into the slab, dark in every theme, with
+   * the bevel every well here has -- `.inset`'s, so a slot and a field read
+   * as the same material.
+   */
   .slot {
     position: relative;
+    display: grid;
+    place-items: center;
     width: 36px;
     height: 36px;
+    min-height: 0;
     padding: 0;
-    border: none;
-    border-radius: 0;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
     background: var(--slot);
-    box-shadow:
-      inset 2px 2px 0 rgba(0, 0, 0, 0.35),
-      inset -2px -2px 0 rgba(255, 255, 255, 0.1);
-    cursor: pointer;
+  }
+
+  .slot:hover {
+    background: var(--slot);
   }
 
   /*
@@ -369,22 +371,8 @@
    * slot is already a hollow, so "pressed in" would look like every other.
    */
   .slot.lit {
-    box-shadow:
-      inset 0 0 0 2px var(--glow),
-      inset 3px 3px 0 rgba(255, 255, 255, 0.12);
-  }
-
-  .glow {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-  }
-
-  .glow .off {
-    flex: 0 0 auto;
-    padding: 2px 8px;
-    font-size: 11px;
+    border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+    box-shadow: inset 0 0 0 2px var(--glow);
   }
 
   .slot:hover::after,
@@ -392,14 +380,11 @@
     content: "";
     position: absolute;
     inset: 0;
-    background: rgba(255, 255, 255, 0.18);
+    background: color-mix(in srgb, var(--slot-text) 18%, transparent);
     pointer-events: none;
   }
 
   .slot img {
-    position: absolute;
-    left: 2px;
-    top: 2px;
     width: 32px;
     height: 32px;
     image-rendering: pixelated;
@@ -407,42 +392,49 @@
 
   .pending,
   .glyph {
-    position: absolute;
-    inset: 0;
     display: grid;
     place-items: center;
-    /* On the slot, which is dark in every theme, so not the panel's dim. */
-    color: rgb(255 255 255 / 70%);
+    color: color-mix(in srgb, var(--slot-text) 70%, transparent);
   }
 
   .pending {
-    font-size: 10px;
+    font-size: var(--text-xs);
     text-transform: uppercase;
   }
 
-
   /*
-   * The game's stack count: white with a hard shadow, in the corner, over the
-   * icon. Literal colours rather than tokens, because it is drawn on the
-   * block's own picture rather than on the panel, and that is what reads over
-   * any picture in either theme.
+   * The game's stack count: in the corner, over the icon, in the pixel face,
+   * white with a hard shadow -- which is what reads over any picture, and the
+   * slot under it is dark in every theme.
    */
   .count {
     position: absolute;
     right: 1px;
-    bottom: 1px;
-    color: #fff;
-    font-size: 11px;
-    font-weight: 700;
+    bottom: 0;
+    color: var(--slot-text);
+    font-size: var(--text-sm);
     line-height: 1;
-    text-shadow: 1px 1px 0 #3f3f3f;
+    text-shadow: 1px 1px 0 var(--slot-text-shadow);
     font-variant-numeric: tabular-nums;
     pointer-events: none;
   }
 
+  .glow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .glow .off {
+    flex: 0 0 auto;
+    padding: 0 var(--space-3);
+    font-size: var(--text-sm);
+  }
+
   .note {
     margin: 0;
-    font-size: 10px;
+    font-size: var(--text-sm);
     color: var(--text-dim);
   }
 </style>

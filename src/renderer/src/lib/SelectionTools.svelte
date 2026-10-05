@@ -236,7 +236,7 @@
 
 <div class="tools">
   {#if selection}
-    <p class="readout">
+    <p class="readout pixel">
       {t("selection.size", {
         width: selection.maxX - selection.minX + 1,
         height: selection.maxY - selection.minY + 1,
@@ -304,31 +304,36 @@
     </div>
   {/if}
 
-  {#if !none}
-    {#if materials !== null && (materials.palette.length > 0 || materials.air > 0 || materials.outside > 0)}
-      <div class="group">
-        <MaterialsInventory
-          title={selection ? t("materials.ofSelection") : t("materials.ofDocument")}
-          palette={materials.palette}
-          air={materials.air}
-          outside={materials.outside}
-          cells={materials.cells}
-          scope={selection ? "selection" : "document"}
-          {legacy}
-          unify={materialsUnify}
-          onunifychange={onmaterialsunifychange}
-          sort={materialsSort}
-          onsortchange={onmaterialssortchange}
-          onaction={onMaterial}
-          {glowing}
-          {glowTotal}
-          {glowCapped}
-          {glowCoarse}
-          {onglowclear}
-        />
-      </div>
-    {/if}
+  <!--
+    The whole schematic's materials with nothing selected: it is how you find
+    the one stray block, and a click lights it wherever it is. Replace and the
+    buttons below wait for a selection, because they act on one.
+  -->
+  {#if materials !== null && (materials.palette.length > 0 || materials.air > 0 || materials.outside > 0)}
+    <div class="group materials">
+      <MaterialsInventory
+        title={selection ? t("materials.ofSelection") : t("materials.ofDocument")}
+        palette={materials.palette}
+        air={materials.air}
+        outside={materials.outside}
+        cells={materials.cells}
+        scope={selection ? "selection" : "document"}
+        {legacy}
+        unify={materialsUnify}
+        onunifychange={onmaterialsunifychange}
+        sort={materialsSort}
+        onsortchange={onmaterialssortchange}
+        onaction={onMaterial}
+        {glowing}
+        {glowTotal}
+        {glowCapped}
+        {glowCoarse}
+        {onglowclear}
+      />
+    </div>
+  {/if}
 
+  {#if !none}
     <!--
       Replace first, then With, so the panel reads top to bottom the way the
       sentence does: replace these with those. It used to read the other way --
@@ -439,19 +444,19 @@
   .tools {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    font-size: 12px;
+    gap: var(--space-3);
   }
 
+  /* The size, in the pixel face: the one number this tab is about. */
   .readout {
     margin: 0;
-    font-weight: 600;
+    font-size: var(--text-lg);
     font-variant-numeric: tabular-nums;
   }
 
   .coords {
-    margin: -4px 0 0;
-    font-size: 11px;
+    margin: calc(-1 * var(--space-2)) 0 0;
+    font-size: var(--text-sm);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
@@ -460,7 +465,14 @@
   .group {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: var(--space-2);
+  }
+
+  /* A groove above the list, as between two exchanges in the chat. */
+  .materials {
+    padding-top: var(--space-3);
+    border-top: var(--bevel) solid var(--bevel-lo);
+    box-shadow: inset 0 var(--bevel) 0 var(--bevel-hi);
   }
 
   .areas {
@@ -469,13 +481,13 @@
     padding: 0;
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: var(--space-2);
   }
 
   .areas li {
     display: flex;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius);
     overflow: hidden;
   }
 
@@ -484,15 +496,19 @@
   }
 
   .areas button {
+    min-height: 24px;
     border: 0;
-    border-radius: 0;
-    padding: 2px 6px;
-    font-size: 11px;
+    padding: 0 var(--space-3);
+    font-size: var(--text-sm);
     background: transparent;
   }
 
+  .areas button:hover {
+    background: var(--bg-hover);
+  }
+
   .areas li.active .area {
-    font-weight: 600;
+    font-weight: 700;
   }
 
   .areas .dim {
@@ -503,7 +519,7 @@
   .areas .remove {
     display: grid;
     place-items: center;
-    width: 20px;
+    width: 24px;
     padding: 0;
     color: var(--text-dim);
   }
@@ -514,34 +530,26 @@
 
   .row {
     display: flex;
-    gap: 5px;
+    gap: var(--space-2);
   }
 
   .row button {
     flex: 1;
     min-width: 0;
-    padding: 5px 6px;
-    font-size: 12px;
-  }
-
-  /* The one button here that destroys blocks rather than moving or copying
-     them, coloured like the risk it carries. */
-  .danger {
-    border-color: var(--danger);
-    color: var(--danger);
+    padding: 0 var(--space-2);
   }
 
   .swap-row {
     display: flex;
     justify-content: center;
-    margin: -4px 0;
+    margin: calc(-1 * var(--space-2)) 0;
   }
 
   .swap {
     display: grid;
     place-items: center;
     width: 32px;
-    height: 22px;
+    height: 24px;
     min-height: 0;
     padding: 0;
   }

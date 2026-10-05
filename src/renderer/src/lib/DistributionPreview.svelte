@@ -105,7 +105,7 @@
 <div class="mix-map" class:expanded>
   {#if expanded}
     <div class="controls">
-      <div class="planes" role="group" aria-label={t("mix.map.plane")}>
+      <div class="planes segmented" role="group" aria-label={t("mix.map.plane")}>
         {#each MAP_PLANES as option (option)}
           <button
             type="button"
@@ -184,8 +184,8 @@
 
 <style>
   .mix-map {
-    margin-top: 4px;
-    font-size: 10px;
+    margin-top: var(--space-2);
+    font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
@@ -193,43 +193,20 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px 8px;
-    margin-bottom: 4px;
+    gap: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-2);
   }
 
+  /* The plane is app.css's `.segmented`; three letters each, so no wider. */
   .planes {
-    display: flex;
-  }
-
-  .planes button {
-    padding: 1px 6px;
-    font-size: 10px;
-    border-radius: 0;
-  }
-
-  .planes button:first-child {
-    border-radius: 4px 0 0 4px;
-  }
-
-  .planes button:last-child {
-    border-radius: 0 4px 4px 0;
-  }
-
-  .planes button + button {
-    margin-left: -1px;
-  }
-
-  .planes button.on {
-    border-color: var(--accent);
-    color: var(--accent);
-    position: relative;
+    flex: none;
   }
 
   .level {
     flex: 1 1 100px;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-2);
     margin: 0;
     min-width: 0;
   }
@@ -247,7 +224,7 @@
   .maps {
     display: flex;
     align-items: flex-start;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
   figure {
@@ -255,7 +232,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 2px;
+    gap: var(--space-1);
   }
 
   .expanded figure {
@@ -263,6 +240,7 @@
     min-width: 0;
   }
 
+  /* A picture sunk into the slab, as a slot holds an icon. */
   canvas {
     display: block;
     width: 56px;
@@ -270,9 +248,9 @@
     max-height: 56px;
     object-fit: contain;
     image-rendering: pixelated;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    background: var(--bg-input);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
   }
 
   .expanded canvas {
@@ -288,25 +266,24 @@
     list-style: none;
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: var(--space-1);
   }
 
   .legend li {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-2);
     min-width: 0;
   }
 
   .legend.wide {
-    margin-top: 4px;
+    margin-top: var(--space-2);
   }
 
   .swatch {
     flex: none;
-    width: 9px;
-    height: 9px;
-    border-radius: 2px;
+    width: 10px;
+    height: 10px;
     border: 1px solid var(--border);
   }
 
@@ -327,11 +304,7 @@
   .distinct {
     display: flex;
     align-items: center;
-    gap: 4px;
-    margin: 4px 0 0;
-  }
-
-  .distinct input {
-    margin: 0;
+    gap: var(--space-2);
+    margin: var(--space-2) 0 0;
   }
 </style>

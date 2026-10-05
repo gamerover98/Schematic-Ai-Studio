@@ -28,6 +28,7 @@
   import { placePopover, type AnchorRect } from "./floating.js";
   import { propertyRows } from "./inspector_rows.js";
   import { t, tn } from "./i18n.svelte.js";
+  import { blockLabel } from "./inventory.js";
 
   interface Props {
     /** The spelling to describe, or `null` for nothing to show. */
@@ -185,12 +186,15 @@
     style={placement === null ? "visibility: hidden" : `left: ${placement.x}px; top: ${placement.y}px`}
   >
     <div class="head">
-      {#if icons.get(block)}
-        <img src={icons.get(block)} alt="" width="48" height="48" />
-      {:else}
-        <span class="pending" aria-hidden="true"></span>
-      {/if}
-      <code class="id">{block}</code>
+      <span class="slot">
+        {#if icons.get(block)}
+          <img src={icons.get(block)} alt="" width="40" height="40" />
+        {/if}
+      </span>
+      <div class="names">
+        <span class="name">{blockLabel(block)}</span>
+        <code class="id">{block}</code>
+      </div>
     </div>
     {#if rows.length > 0}
       <dl class="props">
@@ -212,8 +216,8 @@
     {/if}
     {#if count !== null}
       <p class="line strong">
-        {tn("count.blocks", count)}{#if share !== null}
-          · {t(shareOf === "document" ? "blockInfo.shareDocument" : "blockInfo.share", {
+        <!-- The separator is a string: Svelte trims the space a block opens with. -->
+        {tn("count.blocks", count)}{#if share !== null}{" · "}{t(shareOf === "document" ? "blockInfo.shareDocument" : "blockInfo.share", {
             share: percent(share),
           })}{/if}
       </p>
@@ -235,16 +239,17 @@
 {/if}
 
 <style>
+  /* A slab on the popover tier: the chat's popovers and the block list's. */
   .tooltip {
     position: fixed;
-    z-index: 40;
+    z-index: var(--z-popover);
     max-width: min(300px, calc(100vw - 16px));
-    padding: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    padding: var(--space-3) var(--space-4);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
     background: var(--bg-panel);
-    box-shadow: 0 6px 18px var(--shadow);
-    font-size: 11px;
+    box-shadow: var(--shadow-float);
+    font-size: var(--text-sm);
     pointer-events: none;
   }
 
@@ -255,45 +260,64 @@
   .actions {
     display: flex;
     justify-content: flex-end;
-    gap: 4px;
-    margin-top: 8px;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
   }
 
   .actions button {
-    padding: 3px 8px;
-    font-size: 11px;
+    padding: 0 var(--space-3);
+    font-size: var(--text-sm);
   }
 
   .head {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-3);
   }
 
-  img,
-  .pending {
+  /* The block in a slot, as the list it was read from holds it. */
+  .slot {
     flex: none;
+    display: grid;
+    place-items: center;
     width: 48px;
     height: 48px;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
+  }
+
+  img {
+    width: 40px;
+    height: 40px;
     image-rendering: pixelated;
   }
 
-  .pending {
-    border-radius: 4px;
-    background: var(--bg-input);
+  .names {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .name {
+    font-size: var(--text-md);
+    font-weight: 700;
   }
 
   .id {
     min-width: 0;
-    font-size: 11px;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
     overflow-wrap: anywhere;
   }
 
   .props {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 1px 10px;
-    margin: 6px 0 0;
+    gap: var(--space-1) var(--space-4);
+    margin: var(--space-3) 0 0;
   }
 
   .props dt,
@@ -303,7 +327,7 @@
   }
 
   .props dd {
-    font-weight: 600;
+    font-weight: 700;
   }
 
   .props .unset {
@@ -312,12 +336,12 @@
   }
 
   .line {
-    margin: 5px 0 0;
+    margin: var(--space-2) 0 0;
     color: var(--text-dim);
   }
 
   .line.strong {
     color: var(--text);
-    font-weight: 600;
+    font-weight: 700;
   }
 </style>

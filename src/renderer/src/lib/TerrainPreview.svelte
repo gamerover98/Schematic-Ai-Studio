@@ -75,22 +75,23 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 3px;
+    gap: var(--space-1);
     margin: 0;
   }
 
+  /* A picture sunk into the slab, as a slot holds an icon. */
   canvas {
     width: 100%;
     max-width: 192px;
     aspect-ratio: auto;
     image-rendering: pixelated;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg-input);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
   }
 
   figcaption {
-    font-size: 11px;
+    font-size: var(--text-sm);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }

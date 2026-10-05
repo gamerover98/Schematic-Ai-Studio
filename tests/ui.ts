@@ -5413,18 +5413,15 @@ console.log("\n--- the materials, as an inventory ---");
     /setTimeout\(\(\) => \{[\s\S]{0,300}refreshMaterials\(\)/.test(app),
   );
   /*
-   * The list is drawn in the Selection tab of the docked panel, with a
-   * selection. It used to be read off `DocumentState.palette` with nothing
-   * selected, which counts the states the file holds -- a bed was two beds --
-   * for a window that could not show it; asking main for the whole schematic
-   * on every edit instead would be the same answer to nobody, paid for. With
-   * the panel put away or another tab up, the list is not on screen either.
+   * The list is drawn in the Selection tab of the docked panel: the
+   * selection's, or with nothing selected the whole schematic's, which main
+   * counts with a bed as one bed where `DocumentState.palette` counts the
+   * states the file holds. With the panel put away or another tab up, the
+   * list is not on screen, and nothing is asked for.
    */
   check(
     "nothing is counted while the list is not on screen",
-    app.includes(
-      'if (dockCollapsed || dockTab !== "selection" || selection === null || docState === null) {',
-    ),
+    app.includes('if (dockCollapsed || dockTab !== "selection" || docState === null) {'),
   );
   check("...and nothing is read off the document's state", !app.includes("documentMaterials("));
   const replaceArm = tools.slice(tools.indexOf('case "replace":'), tools.indexOf('case "state":'));
@@ -6590,7 +6587,7 @@ console.log("\n--- design system ---");
       .filter(([, , need, got]) => !(got >= need))
       .map(([fg, bg, need, got]) => `${fg} on ${bg} ${got.toFixed(2)} < ${need}`);
     equal(`every pair reads in the ${name} theme`, weak, []);
-    check(`...and the white count on a slot, in the ${name} theme`, ratio("#ffffff", palette.get("--slot")!) >= 4.5);
+    check(`...and the white count on a slot, in the ${name} theme`, ratio(palette.get("--slot-text")!, palette.get("--slot")!) >= 4.5);
   }
 
   const rule = (selector: string): string => {
@@ -6962,6 +6959,138 @@ console.log("\n--- chat ---");
   check(
     "the list takes the focus only once it is visible",
     /focused = true;[\s\S]{0,80}void tick\(\)\.then\(/.test(conversations),
+  );
+}
+
+// --- the tool panels: the left dock's three tabs, in the inventory's material -
+console.log("\n--- tool panels ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+
+  // Every surface of the three tabs, and of the window the creative options
+  // float in, picks from the scales: no corner, colour, size or stacking
+  // level of its own, and emerald as words is the text green.
+  const panels = [
+    "DockPanel",
+    "SelectionTools",
+    "MaterialsInventory",
+    "BlockMixField",
+    "BlockPicker",
+    "DistributionPreview",
+    "BlockTooltip",
+    "BannerPatternHint",
+    "InspectorPanel",
+    "BannerPatternEditor",
+    "TerrainPanel",
+    "TerrainOptions",
+    "TerrainPreview",
+    "CreativeOptions",
+    "ToolWindow",
+  ];
+  const offScale = panels.flatMap((name) => {
+    const style = styleOf(lib(`${name}.svelte`));
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(`${name}: a radius`);
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(`${name}: a colour`);
+    if (/font-size:\s*\d/.test(style)) faults.push(`${name}: a font size`);
+    if (/z-index:\s*\d/.test(style)) faults.push(`${name}: a stacking level`);
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(`${name}: the accent as text`);
+    return faults;
+  });
+  equal("the tool panels draw with the design system's scales and nothing else", offScale, []);
+
+  // The count on a slot, as the game prints a stack.
+  const inventory = lib("MaterialsInventory.svelte");
+  check(
+    "a slot's count is in the pixel face, in the slot's own white with its hard shadow",
+    inventory.includes('<span class="count pixel"') &&
+      /\.count \{[^}]*color: var\(--slot-text\);[^}]*text-shadow: [^;]*var\(--slot-text-shadow\);/.test(inventory),
+  );
+  check(
+    "...and that white is a token in all three palettes",
+    (css.match(/--slot-text: #/g) ?? []).length === 3 && (css.match(/--slot-text-shadow: #/g) ?? []).length === 3,
+  );
+
+  // Four choices of a few, one control.
+  check("a choice of a few is app.css's one segmented control", css.includes("\n.segmented {"));
+  for (const [name, source] of [
+    ["the camera switch", app],
+    ["a creative tool's options", lib("CreativeOptions.svelte")],
+    ["the terrain's options", lib("TerrainOptions.svelte")],
+    ["a map's plane", lib("DistributionPreview.svelte")],
+  ] as const) {
+    check(
+      `...worn by ${name}, with no look of its own`,
+      /class="[^"]*\bsegmented\b/.test(source) && !/\n\s*\.segmented[\s{]/.test(styleOf(source)),
+    );
+  }
+
+  // With nothing selected the list is the whole schematic's: how you find
+  // the one stray block, in a panel that is always there.
+  const tools = lib("SelectionTools.svelte");
+  check(
+    "with nothing selected the list is the schematic's",
+    /regions: scope === "selection" \? areasForIpc\(\) : null/.test(app) &&
+      !/dockTab !== "selection" \|\| selection === null/.test(app),
+  );
+  check(
+    "...drawn with or without a selection, ahead of the fields that need one",
+    tools.indexOf("<MaterialsInventory") > 0 && tools.indexOf("<MaterialsInventory") < tools.indexOf("{#if !none}"),
+  );
+  check(
+    "...and an answer is shown only for the question it answered",
+    /selectionMaterials\.scope !== materialsScope/.test(app),
+  );
+  const click = (button: number, ctrl = false, shift = false) => ({ button, ctrl, shift });
+  equal(
+    "with no fields beside the list a click only lights a block, Shift included",
+    [materialAction(click(0, false, true), false, false), materialAction(click(0, true, true), false, false)],
+    ["glow", "addGlow"],
+  );
+  equal(
+    "...air does nothing, having no field to go to",
+    [materialAction(click(0), true, false), materialAction(click(0, true), true, false)],
+    ["none", "none"],
+  );
+  equal("...and the right button still reads the slot", materialAction(click(2), false, false), "info");
+  check(
+    "...and the hint under it says so",
+    inventory.includes('fields ? t("materials.hint") : t("materials.hintDocument")'),
+  );
+  check(
+    "a glow lit from the schematic's list lights the whole schematic",
+    /wanted\.scope === "document" \? null/.test(app) && /const scope = materialsScope;/.test(app),
+  );
+  check(
+    "...and goes when a selection takes the list's place",
+    /if \(selection !== null && glow !== null && glow\.scope === "document"\) glow = null;/.test(app),
+  );
+
+  // A block is shown as a block wherever the panels name one.
+  const inspector = lib("InspectorPanel.svelte");
+  check(
+    "the inspector shows the block in a slot, with a name to read and the id to type",
+    inspector.includes('<span class="slot">') &&
+      inspector.includes("blockLabel(inspection.block)") &&
+      inspector.includes("requestBlockIcons([block])"),
+  );
+  check(
+    "...and so does a block's hover",
+    lib("BlockTooltip.svelte").includes('<span class="slot">') && lib("BlockTooltip.svelte").includes("blockLabel(block)"),
+  );
+  check(
+    "a field's blocks sit in slots, and the ring goes round the whole field",
+    /\.tile \{[^}]*background: var\(--slot\);/.test(lib("BlockMixField.svelte")) &&
+      /\.chips:has\(:global\(input:focus-visible\)\) \{\s*outline: 2px solid var\(--accent\);/.test(lib("BlockMixField.svelte")),
+  );
+  check(
+    "the floating options window is on the window tier, over the hotbar and the bars",
+    /\.tool-window \{[^}]*z-index: var\(--z-window\);/.test(lib("ToolWindow.svelte")),
   );
 }
 

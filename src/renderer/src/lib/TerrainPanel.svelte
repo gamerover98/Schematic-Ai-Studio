@@ -153,6 +153,15 @@
     min-width: 0;
   }
 
+  /* Laying a landscape, then reshaping what is there: a groove between the
+     two, as the selection tab draws above its materials. */
+  .row + .subtool {
+    margin-top: var(--space-2);
+    padding-top: var(--space-4);
+    border-top: var(--bevel) solid var(--bevel-lo);
+    box-shadow: inset 0 var(--bevel) 0 var(--bevel-hi);
+  }
+
   .subtool {
     display: flex;
     gap: var(--space-2);

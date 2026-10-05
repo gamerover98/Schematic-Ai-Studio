@@ -70,13 +70,20 @@ export type MaterialAction =
  * to With's mix, because a mix with some air in it is a ruin, is legal, and a
  * slot of air cannot be dragged. There is nothing to read about it that its
  * slot does not already say.
+ *
+ * **With nothing selected there are no fields** (`fields: false`): the list is
+ * the whole schematic's, Replace and With wait for a selection, and a click
+ * that wrote into a field nobody can see would surface later as a mystery.
+ * So Shift is a plain click there, and air does nothing at all.
  */
 export function materialAction(
   click: { button: number; ctrl: boolean; shift: boolean },
   air: boolean,
+  fields = true,
 ): MaterialAction {
   if (click.button === 2) return air ? "none" : "info";
   if (click.button !== 0) return "none";
+  if (!fields) return air ? "none" : click.ctrl ? "addGlow" : "glow";
   if (click.shift) return click.ctrl ? "addReplace" : "replace";
   if (air) return click.ctrl ? "addWith" : "replace";
   return click.ctrl ? "addGlow" : "glow";

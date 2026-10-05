@@ -47,6 +47,11 @@
      the game's white with a hard shadow, and on the old light theme's white
      slot that came out at 1:1 -- the main number of the materials list, gone. */
   --slot: #121215;
+  /* What is written on a slot -- a stack count -- in the game's white with
+     its hard shadow. Not `--text`, because the slot under it is dark in every
+     theme; the light blocks restate the same two values for that reason. */
+  --slot-text: #ffffff;
+  --slot-text-shadow: #3f3f3f;
   /* The groove a scrollbar runs in: a well, but not a slot -- on the light
      theme a slot-dark groove down every panel would be the loudest thing on it. */
   --well: #121215;
@@ -175,6 +180,8 @@
   --bg-hover: #efeff2;
   --bg-input: #f3f3f5;
   --slot: #3a3a40;
+  --slot-text: #ffffff;
+  --slot-text-shadow: #3f3f3f;
   --well: #a9a9b0;
   --bevel-hi: #f6f6f8;
   --bevel-lo: #8a8a92;
@@ -216,6 +223,8 @@
     --bg-hover: #efeff2;
     --bg-input: #f3f3f5;
     --slot: #3a3a40;
+    --slot-text: #ffffff;
+    --slot-text-shadow: #3f3f3f;
     --well: #a9a9b0;
     --bevel-hi: #f6f6f8;
     --bevel-lo: #8a8a92;
@@ -684,6 +693,40 @@ button.link {
 button.link:hover:not(:disabled) {
   background: none;
   text-decoration: underline;
+}
+
+/*
+ * A choice of a few, side by side: slabs in a sunken well, and the one chosen
+ * pressed into it and lit. The camera switch in the bar, a creative tool's
+ * mode, the plane a map is cut on -- four controls that had four looks.
+ * `.active` or `aria-pressed` marks the chosen one, under the pointer too.
+ */
+.segmented {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: var(--bevel) solid;
+  border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+  background: var(--well);
+}
+
+.segmented > button {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: calc(var(--control-h) - 2 * var(--space-1));
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segmented > button:is(.active, [aria-pressed="true"]),
+.segmented > button:is(.active, [aria-pressed="true"]):hover:not(:disabled) {
+  border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 700;
 }
 
 /* The pixel face: titles of panels and numbers on slots. */

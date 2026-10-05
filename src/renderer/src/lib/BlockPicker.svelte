@@ -318,9 +318,9 @@ const ROW_LIMIT = 120;
   li button .legacy {
     flex: none;
     margin-left: auto;
-    padding-left: 10px;
+    padding-left: var(--space-3);
     font-variant-numeric: tabular-nums;
-    opacity: 0.6;
+    color: var(--text-dim);
   }
 
   .picker {
@@ -329,38 +329,37 @@ const ROW_LIMIT = 120;
 
   input {
     width: 100%;
-    box-sizing: border-box;
   }
 
   /*
    * Positioned against the window by `placePopover`, not against the field.
    *
    * `ModelPicker`'s rule and its reason, which applies harder here: this field
-   * lives inside a `ToolWindow`, whose `.body` is `overflow-y: auto` and whose
-   * frame is `overflow: hidden` — so laid out from the field, a list of blocks
-   * is cut off by a panel a few rows tall, and its own margin box drives that
+   * lives inside a scrolling panel, so laid out from the field a list of
+   * blocks would be cut off by it, and its own margin box would drive that
    * scroller's overflow. `fixed` escapes both: nothing to clip it, and nothing
-   * it can resize. No ancestor here has a transform or a filter, which are what
-   * would make it a containing block again.
+   * it can resize. No ancestor here has a transform or a filter, which are
+   * what would make it a containing block again.
    *
    * It stays a DOM child of the picker, so dismiss-on-outside-click remains a
-   * plain `root.contains()` test and needs no portal.
+   * plain `root.contains()` test and needs no portal. A slab on the popover
+   * tier, as the chat's two popovers are.
    */
   .dropdown {
     position: fixed;
-    z-index: 20;
+    z-index: var(--z-popover);
     width: min(320px, calc(100vw - 16px));
-    padding: 4px;
+    padding: var(--space-2);
     background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    box-shadow: 0 4px 12px var(--shadow);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+    box-shadow: var(--shadow-float);
   }
 
   .count {
-    margin: 0 0 4px;
-    padding: 0 6px;
-    font-size: 11px;
+    margin: 0 0 var(--space-2);
+    padding: 0 var(--space-2);
+    font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
@@ -381,18 +380,16 @@ const ROW_LIMIT = 120;
    */
   .dropdown button {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     width: 100%;
-    box-sizing: border-box;
+    min-height: 24px;
     text-align: left;
-    padding: 4px 6px;
+    padding: 0 var(--space-2);
     background: none;
     border: none;
-    border-radius: 3px;
     color: inherit;
     font: inherit;
-    font-size: 12px;
-    cursor: pointer;
+    font-size: var(--text-sm);
     overflow: hidden;
   }
 

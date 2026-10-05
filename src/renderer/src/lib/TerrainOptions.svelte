@@ -306,19 +306,21 @@
   .terrain-options {
     display: flex;
     flex-direction: column;
-    gap: 7px;
-    font-size: 12px;
+    gap: var(--space-3);
+    font-size: var(--text-sm);
   }
 
   .row {
     display: flex;
-    gap: 6px;
+    gap: var(--space-2);
     align-items: center;
+    margin: 0;
   }
 
   .row > label:first-child,
   .row > span:first-child {
     flex: 0 0 72px;
+    margin: 0;
     color: var(--text-dim);
   }
 
@@ -329,27 +331,27 @@
     min-width: 0;
   }
 
-  .row button.icon {
-    flex: 0 0 26px;
-    height: 24px;
+  /* Open, it stays pressed in: the parameters below are its doing. */
+  button.icon[aria-expanded="true"],
+  button.icon[aria-expanded="true"]:hover:not(:disabled) {
+    color: var(--accent-text);
+    background: var(--bg-input);
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
   }
 
-  button.icon.open {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
+  /* The parameters, in a well under the noise they tune. */
   .params {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 4px 8px;
+    gap: var(--space-2) var(--space-3);
     align-items: center;
-    padding: 6px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    padding: var(--space-3);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
   }
 
   .params label {
+    margin: 0;
     color: var(--text-dim);
   }
 
@@ -360,48 +362,21 @@
 
   .pair {
     display: flex;
-    gap: 8px;
+    gap: var(--space-3);
   }
 
   .pair label {
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     min-width: 0;
+    margin: 0;
     color: var(--text-dim);
   }
 
   .pair input {
     min-width: 0;
-  }
-
-  .segmented {
-    display: flex;
-    gap: 2px;
-    padding: 2px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-input);
-  }
-
-  .segmented button {
-    flex: 1;
-    min-width: 0;
-    padding: 4px 2px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .segmented button.active {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--bg-panel);
   }
 
   output {
@@ -413,31 +388,32 @@
   .layer {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-2);
   }
 
   .layer-head {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
   .depth {
     display: flex;
-    gap: 4px;
+    gap: var(--space-2);
     align-items: center;
+    margin: 0;
     color: var(--text-dim);
   }
 
   .depth input {
-    width: 52px;
+    width: 56px;
   }
 
   .note {
     margin: 0;
     color: var(--text-dim);
-    font-size: 11px;
-    line-height: 1.35;
+    font-size: var(--text-sm);
+    line-height: 1.4;
   }
 </style>
