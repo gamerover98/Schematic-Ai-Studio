@@ -28,6 +28,14 @@
    * What the model did is sunk into the panel (`.sunken`), the way a slot is:
    * it is the machinery under the answer, and the answer stands on the slab
    * above it. While the turn is still going the well has an emerald edge.
+   *
+   * ## A step opens downwards
+   *
+   * What a row holds goes under its heading, the full width of the well, as a
+   * snippet does in a document. A step is `.step` rather than `.row` because
+   * `app.css` once had a global `.row`, a grid of 160px columns: as soon as
+   * the panel was wide enough for two of them, an opened step put its heading
+   * in one and its contents in the other, beside it.
    */
   import type { TraceItem } from "../../../shared/ipc.js";
   import { t, tn } from "./i18n.svelte.js";
@@ -89,7 +97,7 @@
 {#if items.length > 0}
   <div class="trace sunken" class:live>
     {#each items as item (item.id)}
-      <div class="row" class:running={item.running}>
+      <div class="step" class:running={item.running}>
         {#if hasBody(item)}
           <button
             class="head"
@@ -160,6 +168,13 @@
 
   .trace.live {
     box-shadow: inset 2px 0 0 var(--accent);
+  }
+
+  /* The heading, and under it what it opens: a column, never side by side. */
+  .step {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
   }
 
   /*
@@ -258,6 +273,7 @@
   }
 
   .body {
+    min-width: 0;
     padding: var(--space-1) 0 var(--space-3) var(--space-5);
   }
 

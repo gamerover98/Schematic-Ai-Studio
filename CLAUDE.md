@@ -2216,6 +2216,13 @@ button to a screen reader, because what it opens is a list.
   bevel. `.inset` is slot-dark in every theme, which is right under an icon and
   wrong under a paragraph on the light theme. The trace, the composer and a
   code block are wells.
+- **An opened trace step goes under its heading**, the width of the well. The
+  step was `.row`, and `app.css` had a global `.row` laying out columns of
+  160px that no component used -- every one that says `.row` lays it out
+  itself -- so once the chat was wide enough for two columns the thinking and
+  a tool's arguments opened *beside* their heading, squeezed against the right
+  edge. The global is gone and the step is `.step`; a generic class name in
+  `app.css` is a layout imposed on every component that happens to say it.
 - **What changed is the blocks, in slots**: the receipt asks
   `requestBlockIcons` for each tally shown and draws the count beside the
   slot in the pixel face, with the id in the hover. Air has no picture and is

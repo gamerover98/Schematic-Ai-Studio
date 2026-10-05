@@ -791,12 +791,6 @@ button.link:hover:not(:disabled) {
   border-left-color: var(--danger);
 }
 
-.row {
-  display: grid;
-  gap: var(--space-4);
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-}
-
 .field {
   margin-bottom: var(--space-4);
 }

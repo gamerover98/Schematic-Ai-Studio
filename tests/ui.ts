@@ -6926,6 +6926,15 @@ console.log("\n--- chat ---");
       chat.includes(".filter((block) => !isAir(block))"),
   );
   check("the trace is a well in the slab", lib("TraceView.svelte").includes('<div class="trace sunken" class:live>'));
+  // An opened step is a snippet under its heading. It came out beside it,
+  // squeezed against the right edge, because the step was called `.row` and
+  // app.css had a global `.row` laying out columns of 160px.
+  check(
+    "an opened trace step goes under its heading, the width of the well",
+    lib("TraceView.svelte").includes('<div class="step" class:running={item.running}>') &&
+      /\.step \{\s*display: flex;\s*flex-direction: column;/.test(styleOf(lib("TraceView.svelte"))),
+  );
+  check("...and app.css lays out no `.row` for a component that never asked", !/\n\.row \{/.test(css));
 
   // The two popovers: on their tier, said to a screen reader, and Escape
   // stays theirs -- the window's own drops the selection.
