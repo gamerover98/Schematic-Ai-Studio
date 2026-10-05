@@ -3518,6 +3518,14 @@ decorative the moment the shell refused: deleting it would silently make the
 one row in the app that exists to be pasted into a bug report unselectable, so
 it is checked too.
 
+**And the opt-ins are exactly why the gate has to decline the browser as
+well.** The chat log selects, so in flight Ctrl+A -- Chromium's select-all,
+untouched by a bare `return` -- highlighted the whole conversation on every
+strafe left under sprint. Reported from creative mode. The gate calls
+`preventDefault` before it returns: that stops the default action and nothing
+else, so the viewer and the hotbar still see the keydown, and none of them asks
+`defaultPrevented`.
+
 
 **Enablement is decided from main's own state**, not reported back by the
 renderer: `currentSession() !== null` plus the recents list main already owns.

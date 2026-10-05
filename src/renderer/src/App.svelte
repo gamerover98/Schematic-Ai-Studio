@@ -2198,8 +2198,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      *
      * Unmodified keys are untouched. `E` opens the inventory in flight because
      * that is where you want it, exactly as the game binds it.
+     *
+     * And the browser's own answer to the chord is declined with ours. Ctrl+A
+     * is select-all to Chromium, and the chat log is the one surface that opts
+     * back into selection, so every strafe left under sprint highlighted the
+     * whole conversation. `preventDefault` stops the default action and
+     * nothing else: the viewer and the hotbar still see the keydown.
      */
     if ((event.ctrlKey || event.metaKey) && document.pointerLockElement !== null) {
+      event.preventDefault();
       return;
     }
     /*

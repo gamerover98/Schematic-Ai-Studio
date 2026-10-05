@@ -4237,6 +4237,17 @@ console.log("\n--- in flight Ctrl belongs to the camera ---");
   // Blanket, not an allowlist: the point is that no Ctrl shortcut added later
   // has to be re-judged against WASD by whoever adds it.
   check("...and Ctrl and Cmd both count", /event\.ctrlKey \|\| event\.metaKey/.test(lines[gate] ?? ""));
+  /*
+   * The gate declines the browser's answer too, not only the app's. Ctrl+A is
+   * Chromium's select-all, and the chat log opts back into selection, so a
+   * bare `return` here left every strafe under sprint highlighting the whole
+   * conversation. Reported from creative mode.
+   */
+  check(
+    "...and stops the browser's default for the chord",
+    /^\s*event\.preventDefault\(\);\s*$/.test(lines[gate + 1] ?? ""),
+    lines[gate + 1],
+  );
 
   /*
    * The other side of the same sentence: with the lock held, Ctrl must stop
