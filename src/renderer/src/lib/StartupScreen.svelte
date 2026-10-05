@@ -19,7 +19,7 @@
    * well.
    */
   import logo from "../assets/logo.png";
-  import { t } from "./i18n.svelte.js";
+  import { formatNumber, t } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
 
   export interface StartupStep {
@@ -57,7 +57,7 @@
           <span class="label">{step.label}</span>
           {#if step.state === "running" && step.progress}
             <span class="count">
-              {step.progress.done.toLocaleString()} / {step.progress.total.toLocaleString()}
+              {formatNumber(step.progress.done)} / {formatNumber(step.progress.total)}
             </span>
           {/if}
         </li>

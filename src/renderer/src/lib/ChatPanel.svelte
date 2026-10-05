@@ -36,7 +36,7 @@
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import ChatComposer from "./ChatComposer.svelte";
   import ConversationPicker from "./ConversationPicker.svelte";
-  import { t, tn } from "./i18n.svelte.js";
+  import { formatNumber, t, tn } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
   import { blockLabel, isAir } from "./inventory.js";
   import Markdown from "./Markdown.svelte";
@@ -383,7 +383,7 @@
                 <span class="slot">
                   {#if icons.get(tally.block)}<img src={icons.get(tally.block)} alt="" />{/if}
                 </span>
-                <span class="count">−{tally.count.toLocaleString()}</span>
+                <span class="count">−{formatNumber(tally.count)}</span>
                 <span class="block">{blockLabel(tally.block)}</span>
               </li>
             {/each}
@@ -395,7 +395,7 @@
                 <span class="slot">
                   {#if icons.get(tally.block)}<img src={icons.get(tally.block)} alt="" />{/if}
                 </span>
-                <span class="count">+{tally.count.toLocaleString()}</span>
+                <span class="count">+{formatNumber(tally.count)}</span>
                 <span class="block">{blockLabel(tally.block)}</span>
               </li>
             {/each}

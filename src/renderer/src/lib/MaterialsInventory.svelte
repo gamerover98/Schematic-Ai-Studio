@@ -36,7 +36,7 @@
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { shortName } from "./block_spelling.js";
   import type { AnchorRect } from "./floating.js";
-  import { t, tn } from "./i18n.svelte.js";
+  import { formatNumber, t, tn } from "./i18n.svelte.js";
   import { formatCount, materialAction, materialRows, type MaterialAction, type MaterialRow } from "./materials.js";
 
   interface Props {
@@ -220,7 +220,7 @@
         bind:this={elements[index]}
         draggable={!slot.air}
         ondragstart={(event) => dragStart(slot, event)}
-        aria-label={t("materials.slot", { block: slot.block, count: slot.count.toLocaleString() })}
+        aria-label={t("materials.slot", { block: slot.block, count: formatNumber(slot.count) })}
         onclick={(event) => act(slot, event, 0)}
         oncontextmenu={(event) => {
           event.preventDefault();
@@ -262,7 +262,7 @@
 {/if}
 
 {#if outside > 0}
-  <p class="note">{t("materials.outside", { count: outside.toLocaleString() })}</p>
+  <p class="note">{t("materials.outside", { count: formatNumber(outside) })}</p>
 {/if}
 <p class="note">{fields ? t("materials.hint") : t("materials.hintDocument")}</p>
 

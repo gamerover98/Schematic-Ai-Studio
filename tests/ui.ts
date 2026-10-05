@@ -349,12 +349,40 @@ console.log("--- i18n lookup ---");
   equal("two selects the plural", translatePlural(catalog, "thing", 2), "2 things");
   equal("zero selects the plural", translatePlural(catalog, "thing", 0), "0 things");
   // Formatted as every other count in the window, so a call site never has to
-  // pick between the right form and the thousands separator.
+  // pick between the right form and the thousands separator -- and in the
+  // sentence's language, not the system's: an Italian machine wrote
+  // "2.056 blocks" into English, where the dot reads as a decimal point.
+  equal("...and the count comes out formatted", translatePlural(catalog, "thing", 12345), "12,345 things");
   equal(
-    "...and the count comes out formatted",
-    translatePlural(catalog, "thing", 12345),
-    `${(12345).toLocaleString()} things`,
+    "...in the language asked for",
+    translatePlural(catalog, "thing", 12345, undefined, "it"),
+    `${(12345).toLocaleString("it")} things`,
   );
+
+  /*
+   * And nowhere else in the window asks the system how to write a number.
+   * Dates do, on purpose (`age_label.ts`), so only the number form is refused:
+   * a bare `toLocaleString()` on anything that is not a `Date`.
+   */
+  {
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+        entry.isDirectory()
+          ? walk(path.join(dir, entry.name))
+          : /\.(svelte|ts)$/.test(entry.name)
+            ? [path.join(dir, entry.name)]
+            : [],
+      );
+    const bare = walk(RENDERER).flatMap((file) =>
+      readFileSync(file, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .split(/\r?\n/)
+        .filter((line) => !line.trimStart().startsWith("//"))
+        .filter((line) => /\.toLocaleString\(\)/.test(line) && !/new Date\([^)]*\)\.toLocaleString\(\)/.test(line))
+        .map((line) => `${path.relative(RENDERER, file)}: ${line.trim()}`),
+    );
+    equal("no number in the window is written in the system's language", bare, []);
+  }
 
   equal("missingKeys finds the gaps", missingKeys(catalog, ["plain", "nope", "gone"]), [
     "nope",

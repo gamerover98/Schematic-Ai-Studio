@@ -30,7 +30,7 @@
     AtlasPatch,
   } from "../../../shared/ipc.js";
   import type { GpuPreference, LodMode, ResolvedTheme } from "../../../shared/settings.js";
-  import { t } from "./i18n.svelte.js";
+  import { formatNumber, t } from "./i18n.svelte.js";
   import {
     antialiasSamples,
     fpsCap,
@@ -6935,7 +6935,7 @@ import { isTyping } from "./typing.js";
       {:else}
         <strong>{fps.fps}</strong> fps &middot; {fps.ms} ms<br />
       {/if}
-      {fps.triangles.toLocaleString()} tris &middot; {fps.calls} draws
+      {formatNumber(fps.triangles)} tris &middot; {fps.calls} draws
       {#if fps.lod}
         <br />{t("viewport.lodCounts", {
           full: fps.lod.full,

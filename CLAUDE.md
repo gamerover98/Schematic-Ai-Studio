@@ -4550,6 +4550,14 @@ Main-process wording — every `Failure.message` — is **not** translated. It
 arrives already phrased and is shown as it came; translating it would mean
 replacing those messages with error codes, which is a different job.
 
+**A number is written in the language of the sentence around it, never the
+system's.** `tn` and `formatNumber` in `i18n.svelte.ts` pass the current
+locale to `toLocaleString`; a bare `toLocaleString()` asks the operating
+system, and on an Italian machine the status bar read "2.056 blocks" -- a
+decimal point to an English reader. `tests/ui.ts` refuses a bare one on
+anything that is not a `Date`. Dates keep the system's format on purpose
+(`age_label.ts`).
+
 Two traps, both already paid for:
 
 - `i18n.svelte.ts` holds the locale in a `$state` and so **must** keep that

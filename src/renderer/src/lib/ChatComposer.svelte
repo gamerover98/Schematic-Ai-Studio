@@ -20,7 +20,7 @@
    */
   import type { RegionSpec } from "../../../shared/ipc.js";
   import type { ExportType, KeyStorageStatus, Settings } from "../../../shared/settings.js";
-  import { t } from "./i18n.svelte.js";
+  import { formatNumber, t } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
   import ModelPicker from "./ModelPicker.svelte";
 
@@ -218,7 +218,7 @@
           {selection.maxX - selection.minX + 1}×{selection.maxY - selection.minY + 1}×{selection.maxZ -
             selection.minZ +
             1}
-          · {volume.toLocaleString()}
+          · {formatNumber(volume)}
         </em>
         {#if otherAreas > 0}
           <em title={t("chat.otherAreas", { count: otherAreas })}>+{otherAreas}</em>
