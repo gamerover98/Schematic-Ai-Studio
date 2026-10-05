@@ -11,7 +11,14 @@
    * So it happens here instead, up front, where waiting is what the screen is
    * for. Naming the steps is the rest of it: "loading" says nothing, and the
    * one step that takes real time deserves to say why.
+   *
+   * It is the first thing the app shows, and the start screen is the second,
+   * so the two wear one header: the app's mark beside its name in the pixel
+   * face, on the slab every window here is made of. The bar is the game's
+   * loading bar in the inventory's material -- an emerald fill in a sunken
+   * well.
    */
+  import logo from "../assets/logo.png";
   import { t } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
 
@@ -32,9 +39,14 @@
 </script>
 
 <div class="startup" role="status" aria-live="polite">
-  <div class="card">
-    <h1>{t("app.title")}</h1>
-    <p class="lead">{t("startup.lead")}</p>
+  <div class="card slab">
+    <header>
+      <img class="logo" src={logo} alt="" width="48" height="48" />
+      <div class="titles">
+        <h1>{t("app.title")}</h1>
+        <p class="lead">{t("startup.lead")}</p>
+      </div>
+    </header>
 
     <ul>
       {#each steps as step (step.id)}
@@ -73,36 +85,54 @@
 </div>
 
 <style>
+  /* The top tier: it is over everything, the start screen included, until
+     the app can be used. Opaque, because there is nothing behind it yet. */
   .startup {
     position: fixed;
     inset: 0;
-    z-index: 200;
+    z-index: var(--z-top);
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px;
+    padding: var(--space-6);
     background: var(--bg);
   }
 
   .card {
-    width: min(380px, 100%);
-    padding: 24px 26px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
+    width: min(420px, 100%);
+    padding: var(--space-5);
+    box-shadow: var(--shadow-modal);
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    margin-bottom: var(--space-5);
+  }
+
+  .logo {
+    flex: none;
+    display: block;
+  }
+
+  .titles {
+    min-width: 0;
   }
 
   h1 {
-    margin: 0 0 4px;
-    font-size: 17px;
-    font-weight: 600;
+    margin: 0;
+    font-family: var(--font-pixel);
+    font-size: var(--text-xl);
+    font-weight: 500;
+    letter-spacing: 0.02em;
   }
 
   .lead {
-    margin: 0 0 18px;
-    font-size: 12px;
+    margin: var(--space-2) 0 0;
     color: var(--text-dim);
+    font-size: var(--text-sm);
+    line-height: 1.5;
   }
 
   ul {
@@ -114,10 +144,10 @@
   li {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 3px 0;
-    font-size: 12px;
+    gap: var(--space-3);
+    padding: var(--space-1) 0;
     color: var(--text-dim);
+    font-size: var(--text-sm);
   }
 
   li.running {
@@ -132,7 +162,7 @@
   }
 
   li.done .mark {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .label {
@@ -142,19 +172,21 @@
 
   .count {
     flex: none;
+    font-family: var(--font-pixel);
     font-variant-numeric: tabular-nums;
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
   .bar-row {
-    padding: 2px 0 6px 20px;
+    padding: var(--space-1) 0 var(--space-3) calc(12px + var(--space-3));
   }
 
   .bar {
     width: 100%;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--bg-input);
+    height: 12px;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--well);
     overflow: hidden;
   }
 

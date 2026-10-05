@@ -65,7 +65,7 @@
     </span>
     <span class="item">{container}</span>
   {:else}
-    <span class="item">{t("start.title")}</span>
+    <span class="item">{t("doc.nothingOpen")}</span>
   {/if}
   <span class="push"></span>
   {#if mcp}

@@ -33,6 +33,7 @@
    *   the scrim, and closing on that threw the dialog away mid-gesture.
    */
   import type { Snippet } from "svelte";
+  import { keepFocusInside } from "./focus_trap.js";
   import { t } from "./i18n.svelte.js";
   import Icon from "./Icon.svelte";
 
@@ -77,32 +78,6 @@
     };
   });
 
-  const FOCUSABLE =
-    'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
-
-  /** Tab goes round inside the dialog, never out into the window behind it. */
-  function keepFocusInside(event: KeyboardEvent): void {
-    if (dialog === null) return;
-    const items = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
-      (element) => element.getClientRects().length > 0,
-    );
-    if (items.length === 0) {
-      event.preventDefault();
-      dialog.focus();
-      return;
-    }
-    const first = items[0];
-    const last = items[items.length - 1];
-    const active = document.activeElement;
-    if (event.shiftKey && (active === first || active === dialog)) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-
   function onKey(event: KeyboardEvent): void {
     // The dialog's keyboard, whatever the key: see the header.
     event.stopPropagation();
@@ -111,8 +86,8 @@
       if (event.defaultPrevented) return;
       event.preventDefault();
       onclose();
-    } else if (event.key === "Tab") {
-      keepFocusInside(event);
+    } else if (event.key === "Tab" && dialog !== null) {
+      keepFocusInside(dialog, event);
     }
   }
 </script>

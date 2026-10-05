@@ -183,6 +183,10 @@ export const ICONS = {
   history: {
     paths: ["M4.2 13 A8 8 0 1 0 6.4 6.3", "M3.5 3.5 V8 H8", "M12 7.5 V12 L15 14"],
   },
+  /** A folder: open a file, or show one where it is on disk. */
+  folder: { paths: ["M3.5 18.5 V5.5 H9.5 L11.5 7.5 H20.5 V18.5 Z", "M3.5 10.5 H20.5"] },
+  /** The chat: a speech bubble, square as everything here is. */
+  chat: { paths: ["M4.5 5.5 H19.5 V15.5 H11 L7 19.5 V15.5 H4.5 Z"] },
   /** The docked panels, on the side each one is on. */
   panelLeft: { rects: [{ x: 3.5, y: 4.5, w: 17, h: 15, rx: 1 }], paths: ["M9.5 4.5 V19.5"] },
   panelRight: { rects: [{ x: 3.5, y: 4.5, w: 17, h: 15, rx: 1 }], paths: ["M14.5 4.5 V19.5"] },

@@ -83,6 +83,11 @@
     onstop: () => void;
     onsettingschange: (patch: Partial<Settings>) => void;
     onopensettings: () => void;
+    /**
+     * Bumped to put the caret in the box: the start screen's "describe it in
+     * the chat" is a way in only if the next keystroke lands here.
+     */
+    focusRequest?: number;
   }
 
   const {
@@ -105,6 +110,7 @@
     onstop,
     onsettingschange,
     onopensettings,
+    focusRequest = 0,
   }: Props = $props();
 
   let input = $state<HTMLTextAreaElement | null>(null);
@@ -133,6 +139,10 @@
   $effect(() => {
     void draft;
     autosize();
+  });
+
+  $effect(() => {
+    if (focusRequest > 0) input?.focus();
   });
 
   function submit(): void {

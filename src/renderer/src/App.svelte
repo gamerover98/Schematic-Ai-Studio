@@ -51,6 +51,7 @@ import GizmoBar from "./lib/GizmoBar.svelte";
     import ToolWindow from "./lib/ToolWindow.svelte";
   import { findOpenCodeModel, loadOpenCodeModels } from "./lib/models.svelte.js";
   import SidebarSplitter from "./lib/SidebarSplitter.svelte";
+import Screen from "./lib/Screen.svelte";
 import StartScreen from "./lib/StartScreen.svelte";
 import StartupScreen, { type StartupStep } from "./lib/StartupScreen.svelte";
 import VersionsModal from "./lib/VersionsModal.svelte";
@@ -2590,6 +2591,21 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * not be closed would delete the path it exists to advertise.
    */
   let startDismissed = $state(false);
+
+  /** Bumped to put the caret in the chat's box; see `describeInChat`. */
+  let composerFocus = $state(0);
+
+  /**
+   * The start screen's fourth way in: put it away and the caret in the chat,
+   * where a message with nothing open builds a schematic. The chat comes back
+   * first if it was put away, or the caret would land in a panel that is not
+   * drawn.
+   */
+  function describeInChat(): void {
+    startDismissed = true;
+    if (sidebarCollapsed) toggleSidebar();
+    composerFocus += 1;
+  }
 
   /**
    * `recovery` keeps precedence, as it always did -- that one is a question
@@ -5498,7 +5514,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         {busy}
         onsetting={openDocumentSetting}
         onstart={() => (startDismissed = false)}
-        startvisible={startVisible}
+        startvisible={startVisible || recovery !== null}
       />
     </div>
 
@@ -5781,6 +5797,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         onsettingschange={patchSettings}
         onopensettings={() => (settingsOpen = true)}
         oncollapse={toggleSidebar}
+        focusRequest={composerFocus}
       />
     </div>
   </section>
@@ -5834,6 +5851,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         onnew={() => void startNewDocument()}
         onopen={() => void openDocument()}
         onconvert={() => (convertOpen = true)}
+        ondescribe={describeInChat}
         onopenrecent={openDocumentAt}
         onopenartifact={(artifact) => void openDocumentAt(artifact.path)}
         onrevealartifact={(artifact) => api().revealPath(artifact.path)}
@@ -5853,26 +5871,31 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       <!--
         Deliberately blocking, unlike the status banner: this is the one
         question where dismissing it by accident loses work permanently, so it
-        does not have a close button and both answers are explicit.
+        does not have a close button and both answers are explicit. It is what
+        the window shows at launch in the start screen's place, so it is the
+        same kind of screen: the whole window, on the start screen's tier. It
+        used to be a card in the middle of the viewport with the bar, the chat
+        and the gear all live around it.
       -->
-      <div class="recovery" role="alertdialog" aria-labelledby="recovery-title">
-        <strong id="recovery-title">{t("recovery.title")}</strong>
-        <p>
-          {t("recovery.body", {
-            name: recovery.fileName ?? t("recovery.unnamed"),
-            blocks: tn("count.blocks", recovery.blockCount),
-            when: new Date(recovery.savedAt).toLocaleString(),
-          })}
-        </p>
-        <div class="buttons">
-          <button class="primary" onclick={() => resolveRecovery(true)} disabled={busy}>
-            {t("recovery.restore")}
-          </button>
+      <Screen
+        role="alertdialog"
+        title={t("recovery.title")}
+        lead={t("recovery.body", {
+          name: recovery.fileName ?? t("recovery.unnamed"),
+          blocks: tn("count.blocks", recovery.blockCount),
+          when: new Date(recovery.savedAt).toLocaleString(),
+        })}
+        width={480}
+      >
+        {#snippet footer()}
           <button onclick={() => resolveRecovery(false)} disabled={busy}>
             {t("recovery.discard")}
           </button>
-        </div>
-      </div>
+          <button class="primary" onclick={() => resolveRecovery(true)} disabled={busy}>
+            {t("recovery.restore")}
+          </button>
+        {/snippet}
+      </Screen>
     {/if}
 
     {#if status}
@@ -6267,31 +6290,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   .drop-hint span {
     font-size: 12px;
     color: var(--text-dim);
-  }
-
-  .recovery {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 6;
-    width: min(440px, calc(100% - 48px));
-    padding: 16px 18px;
-    border: 1px solid var(--accent);
-    border-radius: 10px;
-    background: var(--bg-panel);
-    box-shadow: 0 12px 40px var(--shadow);
-  }
-
-  .recovery p {
-    margin: 8px 0 14px;
-    font-size: 13px;
-    color: var(--text-dim);
-  }
-
-  .recovery .buttons {
-    display: flex;
-    gap: 8px;
   }
 
   /* app.css's `.segmented`, with the room a bar's two words can have. */

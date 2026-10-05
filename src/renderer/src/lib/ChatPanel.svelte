@@ -133,6 +133,8 @@
     onopensettings: () => void;
     /** Puts the panel away; the bar's toggle and Ctrl+B bring it back. */
     oncollapse: () => void;
+    /** Bumped to put the caret in the composer; see `ChatComposer`. */
+    focusRequest?: number;
   }
 
   const {
@@ -171,6 +173,7 @@
     onsettingschange,
     onopensettings,
     oncollapse,
+    focusRequest = 0,
   }: Props = $props();
 
   /** The few tallies that matter, and how many were left out. */
@@ -465,6 +468,7 @@
       {onstop}
       {onsettingschange}
       {onopensettings}
+      {focusRequest}
     />
     {#if remembered > 0}
       <p class="hint memory">{tn("chat.remembered", remembered)}</p>

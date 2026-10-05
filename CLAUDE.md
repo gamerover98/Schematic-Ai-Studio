@@ -2093,8 +2093,8 @@ receives geometry and has no business knowing what a recent document is.
 **It blocks the window, and it can be dismissed. Both halves are the rule.** It
 used to be a card over a live app — `pointer-events: none` on the container with
 `auto` on the card alone — so the camera buttons, the gear and the whole sidebar
-took clicks aimed at a document that was not there. It is a scrim now, on the
-modal tier, with the skeleton every other modal has.
+took clicks aimed at a document that was not there. It is a scrim now, over
+the whole window: `Screen.svelte`, below.
 
 Dropping a file still works, and the reasoning that once argued against a
 full-bleed cover is the reasoning that makes it safe: the handlers are on
@@ -2122,6 +2122,18 @@ place that says so; a screen covering the chat that could not be put away would
 delete the path it advertises. So Escape, the backdrop and a close button put it
 away, and it comes back from the document bar and from Ctrl+K — the same rule as
 the version history, for the same reason.
+
+**It says so with a tile, not a sentence.** The screen is four ways in, each a
+slab with its icon in a slot and a line saying what it takes: New (the lit
+one), Open, Convert, and **Describe it in the chat**. That last one was a
+sentence at the foot of the card asking the reader to close it and go and
+type; pressing the tile does both -- `describeInChat` puts the screen away,
+brings the chat back if it was put away, and bumps `composerFocus`, which
+reaches `ChatComposer` as `focusRequest` and puts the caret in the box. New
+and Open wait for `busy`; Convert and the chat never do. The Open tile and the
+drop overlay name the four formats a drop opens, and `tests/ui.ts` reads them
+out of `SCHEMATIC_EXTENSIONS`: the hint said ".schem or .schematic" for as
+long as a drop had opened four.
 
 **And with nothing open there is no Edit menu at all**, rather than one holding
 two permanently greyed rows. Both were already disabled, which is the honest
@@ -2173,7 +2185,7 @@ float.
   can press.
 - **The start screen steps aside for the dialogs it opens**, and since the
   dialogs became one component it is a tier of its own as well, `--z-screen`,
-  just under `--z-modal`. It comes later in the document than every dialog, so
+  just under `--z-modal` (`Screen.svelte`). It comes later in the document than every dialog, so
   on the same tier it painted over New's and Convert's -- and over Settings
   opened with Ctrl+, while it was up, which the step-aside list did not name.
 - **The compass moved to the top-right corner**, where a 3D editor keeps its
@@ -2281,6 +2293,33 @@ row chosen or Enter, and the Empty space dialog wired its choice to the first:
 typing "stone" made the empty space `s`, then `st`, then `sto` -- three
 requests to main, each a block that does not exist, and the last one stayed.
 It keeps what is typed as a draft now and chooses on `onpick`.
+
+**What the window shows with no document is `Screen.svelte`**: the start
+screen, and the recovery question in its place when an earlier session left
+work unsaved. A sibling of `Modal`, not a use of it, and the difference is the
+keyboard. A dialog stops every key; this is the window's resting state, and the
+app's commands -- Ctrl+K, Ctrl+, -- have to work from it. So **a Ctrl chord goes
+through to the window and a plain key stays on the screen**: with nothing open
+the single-key shortcuts have nothing to act on, and with a schematic opened
+behind the recovery question by an MCP client, E would open the inventory over
+a question about lost work. The rest is a dialog's: `.modal`, the pointer lock
+let go, the focus in and Tab kept inside (`focus_trap.ts`, which `Modal`
+shares), and a backdrop press that keeps the focus in the card. It hands no
+focus back on the way out, because what opened it was the launch.
+
+- **`--z-screen`**, just under `--z-modal`: a dialog opened from it, or Settings
+  from Ctrl+, lands on top.
+- **No `ondismiss`, no way out but the answers**: no close button, and Escape
+  and the backdrop do nothing. That is the recovery question, which used to be
+  a card in the middle of the viewport with the bar, the chat and the gear all
+  live around it. While it is up the bar does not offer Start either:
+  `startvisible` is `startVisible || recovery !== null`.
+- **The loading screen wears the same header** -- the app's mark beside its
+  name in the pixel face -- on `--z-top`, with the game's loading bar in the
+  inventory's material.
+- **The command palette gives the focus back** to what had it, unless something
+  has taken it since: Ctrl+K and Escape over the start screen left it on the
+  page, and the screen's keys with it.
 
 **The settings are ten panes in four groups**, each pane in sections: App
 (General, Updates), Viewport (Scene, Lighting, Textures & colours), Performance

@@ -34,7 +34,8 @@
      * reached by typing into the chat with nothing open, and a screen covering
      * the chat that could not be put away would delete the path it advertises.
      * This is the way back, and `startvisible` is what stops it offering to
-     * summon something already on screen.
+     * summon something already on screen -- or something that cannot come back
+     * yet, because the recovery question is up in its place.
      */
     onstart: () => void;
     startvisible: boolean;

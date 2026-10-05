@@ -6803,7 +6803,7 @@ console.log("\n--- shell ---");
     "Convert is reached from File and from the start screen",
     app.includes("api().onMenuConvert(() => (convertOpen = true))") &&
       app.includes("onconvert={() => (convertOpen = true)}") &&
-      /<button onclick=\{onconvert\}/.test(lib("StartScreen.svelte")),
+      /<button class="action" onclick=\{onconvert\}>/.test(lib("StartScreen.svelte")),
   );
   // Every scrim is on the modal tier and the start screen comes later in the
   // document, so it painted over the dialogs it had just opened.
@@ -7119,7 +7119,10 @@ console.log("\n--- dialogs and settings ---");
     "...leaves an Escape something inside already took",
     /if \(event\.key === "Escape"\) \{\s*if \(event\.defaultPrevented\) return;/.test(modal),
   );
-  check("...keeps Tab inside itself", /else if \(event\.key === "Tab"\) \{\s*keepFocusInside\(event\);/.test(modal));
+  check(
+    "...keeps Tab inside itself",
+    /else if \(event\.key === "Tab" && dialog !== null\) \{\s*keepFocusInside\(dialog, event\);/.test(modal),
+  );
   check("...gives the focus back to what opened it", /opener\.focus\(\{ preventScroll: true \}\)/.test(modal));
   check(
     "...and closes from the backdrop only for a press that began there",
@@ -7184,7 +7187,7 @@ console.log("\n--- dialogs and settings ---");
   // have to land on top of it.
   const tier = (name: string): number => Number(new RegExp(name + ": (\\d+);").exec(css)?.[1] ?? NaN);
   check("the start screen is a tier of its own, under every dialog", tier("--z-screen") < tier("--z-modal"));
-  check("...and wears it", /\.start \{[^}]*z-index: var\(--z-screen\);/.test(lib("StartScreen.svelte")));
+  check("...and the screens wear it", /\.screen \{[^}]*z-index: var\(--z-screen\);/.test(lib("Screen.svelte")));
   check(
     "the empty space field chooses a block when one is picked, not on every keystroke",
     lib("VoidBlockModal.svelte").includes("onchange={(next) => (typed = next)}") &&
@@ -7246,6 +7249,119 @@ console.log("\n--- dialogs and settings ---");
     "the open schematic's level-of-detail state comes first, not under six controls",
     settings.indexOf("lodStatusLine}") < settings.indexOf('id="lod-mode"'),
   );
+}
+
+// --- the start screen --------------------------------------------------------
+console.log("\n--- the start screen ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+  const scriptOf = (source: string): string => source.slice(0, source.indexOf("</script>"));
+  const screen = lib("Screen.svelte");
+  const start = lib("StartScreen.svelte");
+
+  // The window's resting state, so the app's commands work from it: Ctrl+K
+  // and Ctrl+, are the window's, a plain key stays on the screen. A dialog
+  // stops every key, and a start screen that did would lose both.
+  check(
+    "a Ctrl chord goes through a screen to the window, a plain key stays on it",
+    /\} else if \(!\(event\.ctrlKey \|\| event\.metaKey\)\) \{\s*\/\/[^\n]*\n\s*event\.stopPropagation\(\);/.test(screen) &&
+      !/function onKey\(event: KeyboardEvent\): void \{\s*event\.stopPropagation\(\);/.test(screen),
+  );
+  check(
+    "...keeps Tab inside itself, as a dialog does",
+    /if \(event\.key === "Tab"\) \{\s*event\.stopPropagation\(\);\s*if \(card !== null\) keepFocusInside\(card, event\);/.test(screen),
+  );
+  check(
+    "...and one that cannot be put away has no close button and ignores Escape and the backdrop",
+    /\{#if ondismiss !== undefined\}\s*<button class="icon close"/.test(screen) &&
+      /if \(ondismiss === undefined \|\| event\.defaultPrevented\) return;/.test(screen) &&
+      screen.includes("if (ondismiss !== undefined && pressedOnScrim && event.target === event.currentTarget) ondismiss();"),
+  );
+  check(
+    "the start screen is a screen, with no scrim or Escape of its own",
+    start.includes('import Screen from "./Screen.svelte";') &&
+      /<Screen title=\{t\("app\.title"\)\}[^>]*\{ondismiss\}/.test(start) &&
+      !/event\.key === "Escape"/.test(scriptOf(start)) &&
+      !start.includes('class="start"'),
+  );
+  // The question about lost work is what launch shows in the start screen's
+  // place. It was a card in the middle of the viewport with the bar, the chat
+  // and the gear all live around it.
+  const recovery = /\{#if recovery\}[\s\S]*?\{\/if\}/.exec(app)?.[0] ?? "";
+  check(
+    "the recovery question is a screen too, with two answers and no way to dismiss it",
+    /<Screen\s+role="alertdialog"/.test(recovery) &&
+      !recovery.includes("ondismiss") &&
+      recovery.includes("resolveRecovery(true)") &&
+      recovery.includes("resolveRecovery(false)"),
+  );
+  check("...and its old card is gone from the viewport", !/\.recovery \{/.test(styleOf(app)));
+
+  // Four ways in, each a tile. The chat's was a sentence asking the reader to
+  // close the screen and go and type; pressing the tile does both.
+  const tile = (handler: string): string => new RegExp('<button class="action( primary)?" onclick=\\{' + handler + "\\}[^>]*>").exec(start)?.[0] ?? "";
+  check(
+    "New, Open, Convert and the chat are four tiles, New the lit one",
+    tile("onnew").includes("primary") && [tile("onopen"), tile("onconvert"), tile("ondescribe")].every((tag) => tag !== "" && !tag.includes("primary")),
+  );
+  check(
+    "...New and Open wait for the app, Convert and the chat never do",
+    tile("onnew").includes("disabled={busy}") &&
+      tile("onopen").includes("disabled={busy}") &&
+      !tile("onconvert").includes("disabled") &&
+      !tile("ondescribe").includes("disabled"),
+  );
+  check(
+    "the chat's tile puts the screen away, brings the chat back and puts the caret in it",
+    /function describeInChat\(\): void \{\s*startDismissed = true;\s*if \(sidebarCollapsed\) toggleSidebar\(\);\s*composerFocus \+= 1;/.test(app) &&
+      app.includes("ondescribe={describeInChat}") &&
+      app.includes("focusRequest={composerFocus}") &&
+      lib("ChatPanel.svelte").includes("{focusRequest}") &&
+      /\$effect\(\(\) => \{\s*if \(focusRequest > 0\) input\?\.focus\(\);/.test(lib("ChatComposer.svelte")),
+  );
+  // The hint said ".schem or .schematic" for two releases after a drop
+  // learned to open four formats.
+  const opened = [...(/const SCHEMATIC_EXTENSIONS = \[([^\]]*)\]/.exec(app)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  equal(
+    "the start screen and the drop overlay name every format a drop opens",
+    opened.filter((extension) => !en["start.openHint"].includes(extension) || !en["viewport.dropTypes"].includes(extension)),
+    [],
+  );
+  check("...and there are four of them to name", opened.length === 4);
+  check(
+    "the bar offers no way back to the start screen while the recovery question holds its place",
+    app.includes("startvisible={startVisible || recovery !== null}"),
+  );
+  // Ctrl+K from the start screen, then Escape: the focus was left on the
+  // page, and the screen's own keys with it.
+  const palette = lib("CommandPalette.svelte");
+  check(
+    "the command palette gives the focus back to what had it, unless something has taken it since",
+    /const opener = document\.activeElement instanceof HTMLElement \? document\.activeElement : null;\s*return \(\) => \{/.test(palette) &&
+      palette.includes("(now === null || now === document.body || now === input)") &&
+      palette.indexOf("const opener = document.activeElement") < palette.indexOf("input?.focus();"),
+  );
+  check(
+    "the loading screen is the top tier, over the start screen",
+    /\.startup \{[^}]*z-index: var\(--z-top\);/.test(lib("StartupScreen.svelte")),
+  );
+
+  const offScale = ["Screen", "StartScreen", "StartupScreen"].flatMap((name) => {
+    const style = styleOf(lib(name + ".svelte"));
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(name + ": a radius");
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(name + ": a colour");
+    if (/font-size:\s*\d/.test(style)) faults.push(name + ": a font size");
+    if (/z-index:\s*\d/.test(style)) faults.push(name + ": a stacking level");
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(name + ": the accent as text");
+    if (/backdrop-filter/.test(style)) faults.push(name + ": a blur");
+    return faults;
+  });
+  equal("the launch screens draw with the design system's scales and nothing else", offScale, []);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

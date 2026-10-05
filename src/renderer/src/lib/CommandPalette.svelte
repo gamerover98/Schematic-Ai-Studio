@@ -68,6 +68,24 @@
 
   const matches = $derived(searchCommands(commands, query));
 
+  /*
+   * The focus goes back where it was on the way out, as a dialog's does. Put
+   * away with Escape over the start screen, the palette left it on the page,
+   * and the screen's own keys went with it. Only while nothing else has taken
+   * it: a command that opens a dialog hands the focus to that dialog. Before
+   * the effect below, so what is captured is what had the focus, not the box.
+   */
+  $effect(() => {
+    if (!open) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      const now = document.activeElement;
+      if (opener !== null && opener.isConnected && (now === null || now === document.body || now === input)) {
+        opener.focus({ preventScroll: true });
+      }
+    };
+  });
+
   // Opening starts fresh and takes the keyboard. Without the focus the first
   // thing typed goes to whatever had it before — in Creative mode, the camera.
   $effect(() => {
