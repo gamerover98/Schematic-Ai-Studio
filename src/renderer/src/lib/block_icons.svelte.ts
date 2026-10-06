@@ -126,6 +126,22 @@ export function primeBlockIcons(): Promise<void> {
   return warmed ?? Promise.resolve();
 }
 
+/**
+ * Throws every icon away and warms again, for a resource pack that changed.
+ *
+ * Main has a new baker and a new atlas layout by then, but nothing here would
+ * ask: every block is in `requested` and would stay drawn in the old pack.
+ * Bumping `generation` makes every caller ask again straight away, against the
+ * new atlas, and the warm-up repaints them once more when it settles.
+ */
+export function resetBlockIcons(): void {
+  warmed = null;
+  painted = new Map();
+  requested = new Set();
+  generation += 1;
+  warm();
+}
+
 function warm(): void {
   if (warmed !== null) return;
   warmed = (async () => {

@@ -105,6 +105,8 @@ import {
 } from "../src/main/domain/document.js";
 import { SpongeSchematicWriter } from "../src/main/services/schematic.js";
 import { loadSkyTextures } from "../src/main/services/sky_textures.js";
+import { resourcePackProblem } from "../src/main/services/pack_reader.js";
+import { PNG } from "pngjs";
 import { dataVersionFor, VERSION_NAMES, VERSION_TABLE } from "../src/main/services/versions.js";
 import {
   coerceEditing,
@@ -429,6 +431,53 @@ try {
       "editing a block changes the render",
       meshDigest(fromDocument.mesh) !== meshDigest(afterEdit.mesh),
     );
+
+    /*
+     * The chosen resource pack is the one drawn. Every caller in
+     * `handlers.ts` passed `null` for it, so choosing a pack changed nothing:
+     * the path lived in a variable of the window's. A folder pack with one
+     * stone texture in a colour no bundled texture has, laid over the
+     * bundled pack, has to reach the atlas, and as a layout of its own --
+     * the chunk cache and the window both tell atlases apart by layout.
+     */
+    const packDir = path.join(workDir, "red-pack");
+    await mkdir(path.join(packDir, "assets/minecraft/textures/block"), { recursive: true });
+    const tile = new PNG({ width: 16, height: 16 });
+    for (let i = 0; i < tile.data.length; i += 4) tile.data.set([1, 254, 3, 255], i);
+    await writeFile(path.join(packDir, "assets/minecraft/textures/block/stone.png"), PNG.sync.write(tile));
+    const stone = createDocument({ width: 1, height: 1, length: 1, format: "sponge3" });
+    setBlock(stone, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    const marked = (pixels: Uint8Array): number => {
+      let count = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if (pixels[i] === 1 && pixels[i + 1] === 254 && pixels[i + 2] === 3) count += 1;
+      }
+      return count;
+    };
+    const bundledStone = await buildDocumentPreview(stone, {
+      resourcePackPath: null,
+      fallbackResourcePackPath: bundledPack,
+    });
+    const packStone = await buildDocumentPreview(stone, {
+      resourcePackPath: packDir,
+      fallbackResourcePackPath: bundledPack,
+    });
+    equal("the bundled pack has no texture in the test pack's colour", marked(fullAtlas(bundledStone.atlas).pixels), 0);
+    check("a chosen pack's stone is the stone drawn", marked(fullAtlas(packStone.atlas).pixels) >= 16 * 16);
+    check("...on an atlas of its own layout", packStone.atlas.layout !== bundledStone.atlas.layout);
+    check(
+      "every handler draws from the chosen pack",
+      !readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "ipc", "handlers.ts"), "utf8").includes("resourcePackPath: null"),
+    );
+    equal("a folder with textures is a resource pack", await resourcePackProblem(packDir), null);
+    check("a folder without them is refused by name", (await resourcePackProblem(workDir))?.includes("not a resource pack") === true);
+    const notZip = path.join(workDir, "not-a-pack.zip");
+    await writeFile(notZip, "hello");
+    check("a file that is not a zip is refused", (await resourcePackProblem(notZip)) !== null);
+    check("an unreadable pack draws the bundled one instead of failing", marked(fullAtlas((await buildDocumentPreview(stone, {
+      resourcePackPath: notZip,
+      fallbackResourcePackPath: bundledPack,
+    })).atlas).pixels) === 0);
 
     /*
      * Block icons, and the property that was broken: every geometry in one
@@ -2313,6 +2362,7 @@ console.log("\n--- settings coercion ---");
     version: "JE_1_20_1",
     exportType: "mcfunction",
     outputDir: "C:/builds",
+    resourcePack: "C:/packs/faithful.zip",
     preview: { ...DEFAULT_SETTINGS.preview, wireframe: true, maxDrawDistance: 1024 },
     ui,
     mcp,
@@ -2321,6 +2371,11 @@ console.log("\n--- settings coercion ---");
   } satisfies Settings;
 
   equal("every settings field survives a round-trip", coerceSettings(settings), settings);
+  equal(
+    "an empty resource pack is the bundled one, not a path",
+    [coerceSettings({ resourcePack: "" }).resourcePack, coerceSettings({ resourcePack: 3 }).resourcePack, coerceSettings({}).resourcePack],
+    [null, null, null],
+  );
 
   /*
    * The levels of detail, read the way main and the viewer both read them.

@@ -1154,6 +1154,7 @@ export const en = {
   "task.deleting": "Deleting the selected blocks",
   "task.moving": "Moving the selection",
   "task.savingLayout": "Saving the panel layout",
+  "task.changingPack": "Changing the resource pack",
   "task.openingChooser": "Opening the schematic chooser",
   "task.openingPicker": "Opening the file chooser",
   "task.opening": "Opening the schematic",

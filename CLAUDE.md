@@ -8060,6 +8060,34 @@ the clock faster on a 144Hz screen; "sixty game minutes per real second" is a
 claim about wall-clock time. It writes a mirror in `App.svelte` rather than the
 setting, because the setting is on disk and this moves ten times a second.
 
+**The chosen resource pack is `Settings.resourcePack`, and for a long time it
+reached nothing.** It was a variable of `App.svelte`'s, read only by
+`IPC.preview`, which nothing calls; every handler that meshes, draws an icon
+or reads the sky passed `resourcePackPath: null`. So choosing a pack changed no
+pixel, and the choice was gone at the next launch.
+
+`packPaths()` in `ipc/handlers.ts` is the one answer now: the setting laid over
+the bundled pack, which fills in whatever it lacks. `tests/services.ts` refuses
+a `resourcePackPath: null` left in that file, and draws a stone from a folder
+pack in a colour no bundled texture has. Three things are load-bearing:
+
+- **a new pack is a new atlas layout, and that is what invalidates
+  everything.** The baker cache is keyed on the pack and `layouts` counts every
+  packing in the process, so the chunk cache, the window's atlas and the icons
+  all see a layout they do not hold and start again. Nothing else has to
+  remember to;
+- **the window asks for everything again** (`setResourcePack`): main restarts
+  the icon warm-up on the new baker when the setting is saved
+  (`packChanged`), and the renderer throws its icons away
+  (`resetBlockIcons`), refetches the sun, the moon and the anchor's axe, and
+  re-requests the mesh. The icons alone would stay in the old pack, because
+  every block is already in `requested`;
+- **a pack that will not open draws the bundled one rather than failing.**
+  `resourcePackProblem` refuses it at the picker by name (no
+  `assets/minecraft/textures/`, or not a zip); a file that went bad later is
+  skipped by `ResourcePackTextures.create`. The setting outlives the file, and
+  a throw there would take every mesh and every icon down with it.
+
 **`biomeColor` and `waterColor` are the two preview settings that rebuild the
 GLB.** Foliage and water both ship greyscale and are tinted per biome — from
 two different colours, which is why there are two settings. The tint is

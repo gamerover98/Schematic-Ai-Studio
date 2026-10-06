@@ -198,9 +198,10 @@ import {
   useCheckpointDirectory,
 } from "../services/checkpoints.js";
 import { loadAllowedBlocks, traceOf } from "../core.js";
-import { buildBlockIcons, warmBlockIcons } from "../services/block_icons.js";
+import { buildBlockIcons, forgetBlockIcons, warmBlockIcons } from "../services/block_icons.js";
 import { listArtifacts } from "../services/artifacts.js";
 import { loadAnchorTexture, loadSkyTextures } from "../services/sky_textures.js";
+import { forgetPackTextures, resourcePackProblem } from "../services/pack_reader.js";
 import { SchematicFormatError } from "../pipeline/loader.js";
 import { classifyGenerateError, generate } from "../services/generate.js";
 import { fetchOpenCodeModels } from "../services/opencode.js";
@@ -300,6 +301,29 @@ const FILE_FILTERS: Readonly<
     },
   ],
 };
+
+/** Set once the warm-up exists; see where it is assigned. */
+let packChanged: () => void = () => {};
+
+/**
+ * The two packs every texture is read from: the one chosen in the settings,
+ * laid over the bundled one.
+ *
+ * Every caller that meshes, draws an icon or reads the sky asks this. They
+ * each passed `null` for the chosen pack, so choosing one in the settings
+ * changed nothing anywhere -- the path lived in a variable of the window's
+ * and reached only `IPC.preview`, which nothing calls.
+ */
+async function packPaths(): Promise<{
+  resourcePackPath: string | null;
+  fallbackResourcePackPath: string | null;
+}> {
+  const settings = await getSettings();
+  return {
+    resourcePackPath: settings.resourcePack,
+    fallbackResourcePackPath: await defaultResourcePackPath(),
+  };
+}
 
 /**
  * Agent runs the user can still stop, by request id.
@@ -604,6 +628,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.settingsSet, async (_event, next: Settings): Promise<Settings> => {
     const before = await getSettings();
     const saved = await setSettings(next);
+    if (saved.resourcePack !== before.resourcePack) packChanged();
     if (servingChanged(before.mcp, saved.mcp) && saved.mcp.enabled) {
       await startMcpServer(saved.mcp);
     }
@@ -831,6 +856,13 @@ ${report.stack}`),
       }
     }
 
+    // Opened now, for the folder's reason: a file that is not a pack would
+    // otherwise be chosen and then quietly draw the bundled one.
+    if (req.kind === "resource-pack") {
+      const problem = await resourcePackProblem(picked);
+      if (problem !== null) return { path: null, name: null, error: problem };
+    }
+
     return { path: picked, name: picked.split(/[\\/]/).pop() ?? picked };
   });
 
@@ -924,8 +956,7 @@ ${report.stack}`),
           // documents while the window sat still.
           req.blocks.slice(0, MAX_ICONS_PER_REQUEST),
           {
-            resourcePackPath: null,
-            fallbackResourcePackPath: await defaultResourcePackPath(),
+            ...(await packPaths()),
             biomeColor: settings.preview.biomeColor,
             waterColor: settings.preview.waterColor,
           },
@@ -981,8 +1012,7 @@ ${report.stack}`),
       return await warmBlockIcons(
         [...(await loadAllowedBlocks(resourcesDir()))],
         {
-          resourcePackPath: null,
-          fallbackResourcePackPath: await defaultResourcePackPath(),
+          ...(await packPaths()),
           biomeColor: settings.preview.biomeColor,
           waterColor: settings.preview.waterColor,
         },
@@ -1005,6 +1035,20 @@ ${report.stack}`),
       return 0;
     }
   });
+
+  /*
+   * A new pack is a new baker, so the icons the warm-up decoded belong to the
+   * old one: the warm-up runs again on the new pack, and the textures the sky
+   * and the anchor were read from are let go. The window asks for its icons,
+   * its sky and its mesh again once the setting is saved.
+   */
+  packChanged = (): void => {
+    forgetPackTextures();
+    forgetBlockIcons();
+    warming = null;
+    warmProgress = { done: 0, total: 0 };
+    void startWarming().catch(() => {});
+  };
 
   // Off it goes, before the window exists. Errors are the handler's problem;
   // an unhandled rejection here would be a crash on a slow disk.
@@ -1363,8 +1407,7 @@ ${report.stack}`),
         const mesh = await documentMesh(
           session,
           {
-            resourcePackPath: null,
-            fallbackResourcePackPath: await defaultResourcePackPath(),
+            ...(await packPaths()),
             biomeColor: settings.biomeColor,
             showMarkers: settings.showMarkers,
             // The document's own, not a setting: what empty space is made of
@@ -1600,7 +1643,8 @@ ${report.stack}`),
 
   ipcMain.handle(IPC.anchorTexture, async (): Promise<PackTexture | null> => {
     try {
-      return await loadAnchorTexture(null, await defaultResourcePackPath());
+      const pack = await packPaths();
+      return await loadAnchorTexture(pack.resourcePackPath, pack.fallbackResourcePackPath);
     } catch {
       // A pack that cannot be read means the marker is drawn as the plain green
       // box, which still says where the anchor is. Not worth a banner.
@@ -1703,8 +1747,7 @@ ${report.stack}`),
       try {
         const settings = await getSettings();
         const result = await regionMesh(requireSession(), regions, {
-          resourcePackPath: null,
-          fallbackResourcePackPath: await defaultResourcePackPath(),
+          ...(await packPaths()),
           biomeColor: settings.preview.biomeColor,
           showMarkers: settings.preview.showMarkers,
           waterColor: settings.preview.waterColor,
@@ -1752,8 +1795,7 @@ ${report.stack}`),
     try {
       const settings = await getSettings();
       const result = await clipboardMesh(requireSession(), {
-        resourcePackPath: null,
-        fallbackResourcePackPath: await defaultResourcePackPath(),
+        ...(await packPaths()),
         biomeColor: settings.preview.biomeColor,
         showMarkers: settings.preview.showMarkers,
         waterColor: settings.preview.waterColor,
@@ -1766,7 +1808,8 @@ ${report.stack}`),
 
   ipcMain.handle(IPC.skyTextures, async (): Promise<SkyTextures> => {
     try {
-      return await loadSkyTextures(null, await defaultResourcePackPath());
+      const pack = await packPaths();
+      return await loadSkyTextures(pack.resourcePackPath, pack.fallbackResourcePackPath);
     } catch {
       // A pack that cannot be read is a sky drawn with plain squares, which is
       // what it was before the pack was asked. Not worth a banner.

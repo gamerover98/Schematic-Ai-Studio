@@ -1080,6 +1080,14 @@ export interface Settings {
   exportType: ExportType;
   /** Empty means "use the app's default generated/ directory under userData". */
   outputDir: string;
+  /**
+   * The resource pack the blocks, the icons and the sky are drawn from, as a
+   * `.zip` or a folder; `null` is the bundled one. It lays over the bundled
+   * pack rather than replacing it, so a pack covering only some blocks keeps
+   * the rest. Here rather than in `preview` because `preview` is spread over
+   * the defaults unvalidated, and this is a path main opens.
+   */
+  resourcePack: string | null;
   preview: PreviewSettings;
   ui: UiSettings;
   mcp: McpSettings;
@@ -1111,6 +1119,7 @@ export const DEFAULT_SETTINGS: Settings = {
   version: "JE_26_2",
   exportType: "schem",
   outputDir: "",
+  resourcePack: null,
   preview: { ...DEFAULT_PREVIEW_SETTINGS },
   ui: { ...DEFAULT_UI_SETTINGS },
   mcp: { ...DEFAULT_MCP_SETTINGS },

@@ -62,7 +62,7 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { glowPatterns, nextGlow, type GlowSlot } from "./lib/materials.js";
   import { isFileDrop, trackPageDrags } from "./lib/block_drag.js";
   import { applyTraceEvent } from "./lib/trace.js";
-  import { primeBlockIcons } from "./lib/block_icons.svelte.js";
+  import { primeBlockIcons, resetBlockIcons } from "./lib/block_icons.svelte.js";
   import {
     emptyTimeline,
     forgetTimeline,
@@ -234,8 +234,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   let imagePath = $state<string | null>(null);
   let imageName = $state<string | null>(null);
-  let resourcePackPath = $state<string | null>(null);
-  let resourcePackName = $state<string | null>(null);
 
   /** component.py:281-282's `st.session_state["bgpt_last_schem_path"]`. */
 
@@ -3038,6 +3036,28 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     return uiWrites;
   }
 
+  /**
+   * The pack every block, icon and sky body is drawn from.
+   *
+   * It is a setting, so main reads it and it survives a restart. It used to be
+   * a variable of this window's that reached only the file preview nothing
+   * calls, so choosing a pack changed nothing anywhere. Saving it makes main
+   * warm the icons again on the new baker; the window then asks for its
+   * icons, its sky and its mesh again, because nothing it holds was drawn
+   * from the new pack.
+   */
+  async function setResourcePack(path: string | null): Promise<void> {
+    try {
+      await patchSettings({ resourcePack: path });
+      resetBlockIcons();
+      skyTextures = await api().getSkyTextures();
+      anchorTexture = await api().getAnchorTexture();
+      if (docState !== null) await refreshDocument();
+    } catch (err) {
+      failed(err, t("task.changingPack"));
+    }
+  }
+
   /** Persist on every change; the Python UI persisted nothing at all. */
   async function patchSettings(patch: Partial<Settings>): Promise<void> {
     settings = await api().setSettings(forIpc({ ...settings, ...patch }));
@@ -3256,8 +3276,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       imagePath = picked.path;
       imageName = picked.name;
     } else if (kind === "resource-pack") {
-      resourcePackPath = picked.path;
-      resourcePackName = picked.name;
+      void setResourcePack(picked.path);
     } else if (kind === "mcp-root") {
       void patchSettings({ mcp: { ...settings.mcp, root: picked.path } });
     } else if (kind === "directory") {
@@ -5365,8 +5384,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   open={settingsOpen}
   {settings}
   {keyStatus}
-  {resourcePackPath}
-  {resourcePackName}
+  resourcePackPath={settings.resourcePack}
+  resourcePackName={settings.resourcePack?.split(/[\\/]/).pop() ?? null}
   {versions}
   {defaultOutputDir}
   {busy}
@@ -5381,10 +5400,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   onpreviewchange={patchPreview}
   onuichange={patchUi}
   onpickresourcepack={() => pick("resource-pack")}
-  onclearresourcepack={() => {
-    resourcePackPath = null;
-    resourcePackName = null;
-  }}
+  onclearresourcepack={() => void setResourcePack(null)}
   onsavekey={saveKey}
   onclearkey={clearKey}
   {mcpStatus}

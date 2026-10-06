@@ -13,6 +13,9 @@
  * while reporting success. Raw RGBA has nothing to decode.
  */
 
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import AdmZip from "adm-zip";
 import { ResourcePackTextures } from "../pipeline/model_baker.js";
 import type { RgbaImage } from "../pipeline/types.js";
 import type { PackTexture } from "../../shared/ipc.js";
@@ -37,4 +40,34 @@ export function toPackTexture(image: RgbaImage): PackTexture {
 /** Dropped when the resource pack changes, like every other cached read. */
 export function forgetPackTextures(): void {
   cached = null;
+}
+
+/** Where a resource pack keeps what this app reads out of it. */
+const TEXTURES_DIR = "assets/minecraft/textures/";
+
+/**
+ * Why `packPath` cannot be used as a resource pack, or `null` when it can.
+ *
+ * Asked when the pack is chosen, so a wrong file is refused with a sentence
+ * rather than chosen and then silently drawing the bundled pack: anything
+ * without `assets/minecraft/textures/` at its root would be opened, searched
+ * for every texture, and found to hold none of them.
+ */
+export async function resourcePackProblem(packPath: string): Promise<string | null> {
+  const name = path.basename(packPath);
+  const stat = await fs.stat(packPath).catch(() => null);
+  if (stat === null) return `${name} does not exist.`;
+  if (stat.isDirectory()) {
+    const textures = await fs.stat(path.join(packPath, TEXTURES_DIR)).catch(() => null);
+    return textures?.isDirectory() ? null : `${name} is not a resource pack: it has no ${TEXTURES_DIR} folder.`;
+  }
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(packPath);
+  } catch {
+    return `${name} could not be opened as a .zip.`;
+  }
+  return zip.getEntries().some((entry) => entry.entryName.replace(/\\/g, "/").startsWith(TEXTURES_DIR))
+    ? null
+    : `${name} is not a resource pack: it has no ${TEXTURES_DIR} folder.`;
 }

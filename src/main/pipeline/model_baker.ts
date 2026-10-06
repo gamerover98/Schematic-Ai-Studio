@@ -1131,8 +1131,18 @@ export class ResourcePackTextures {
         .then(() => true)
         .catch(() => false);
       if (exists) {
-        sources.push(await ResourcePackSource.create(candidate));
-        seen.add(resolved);
+        /*
+         * A pack that will not open is left out rather than thrown: the
+         * user's pack is a setting that outlives the file, and a zip replaced
+         * by something unreadable would otherwise take every mesh and every
+         * icon down with it. The bundled pack behind it still draws.
+         */
+        try {
+          sources.push(await ResourcePackSource.create(candidate));
+          seen.add(resolved);
+        } catch (err) {
+          console.warn(`[resource pack] ${candidate} could not be opened:`, err);
+        }
       }
     }
 
