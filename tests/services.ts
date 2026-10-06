@@ -61,6 +61,10 @@ import {
 } from "../src/main/services/hotbars.js";
 import {
   carryDocumentStores,
+  RenameRefusedError,
+  renameDocumentFile,
+  renamedPath,
+  renameProblem,
 } from "../src/main/services/document_move.js";
 import { listSnapshots, takeSnapshot, useSnapshotDirectory } from "../src/main/services/snapshots.js";
 import { checkpointExists, takeCheckpoint, useCheckpointDirectory } from "../src/main/services/checkpoints.js";
@@ -3053,13 +3057,16 @@ console.log("\n--- a schematic changes its path ---");
   await takeSnapshot(session, "manual", "with the moat");
   await writeHotbar(castle, { slots: [...DEFAULT_HOTBAR], slot: 3 });
 
-  // --- move: everything goes, nothing is left behind
+  // --- rename: everything goes, nothing is left behind
+  const moved = await renameDocumentFile(session, "fortress");
   const fortress = path.join(files, "fortress.schem");
-  await carryDocumentStores(castle, fortress, "move");
+  equal("a rename keeps the folder and the extension", moved, { from: castle, to: fortress });
+  check("...moves the file", existsSync(fortress) && !existsSync(castle));
+  equal("...and the document is that file now", session.doc.filePath, fortress);
   equal("the chat on screen stays", conversationState().entries.length, 2);
   resetConversation(null);
   await adoptSubject(fortress);
-  equal("...and the new path brings it back", conversationState().entries.map((e) => e.text), [
+  equal("...and reopening the renamed file brings it back", conversationState().entries.map((e) => e.text), [
     "dig a moat",
     "Dug one.",
   ]);
@@ -3068,6 +3075,28 @@ console.log("\n--- a schematic changes its path ---");
   equal("nothing is left under the old name: chats", await stored(castle), null);
   equal("...versions", await listSnapshots(castle), []);
   equal("...hotbar", (await readHotbar(castle)).slot, 0);
+
+  // --- refusals, with nothing touched
+  const refusal = async (name: string): Promise<string | null> => {
+    try {
+      await renameDocumentFile(session, name);
+      return null;
+    } catch (err) {
+      return err instanceof RenameRefusedError ? err.message : `not a refusal: ${String(err)}`;
+    }
+  };
+  await writeFile(path.join(files, "keep.schem"), "somebody else's");
+  check("a name that is taken is refused", (await refusal("keep"))?.includes("already exists") === true);
+  equal("...and the file there is untouched", await readFile(path.join(files, "keep.schem"), "utf8"), "somebody else's");
+  check("a name with a separator is refused", (await refusal("a/b")) !== null);
+  check("an empty name is refused", (await refusal("  ")) !== null);
+  check("a name Windows keeps is refused", (await refusal("CON")) !== null);
+  check("a name ending in a dot is refused", (await refusal("fort.")) !== null);
+  equal("...and none of them moved anything", session.doc.filePath, fortress);
+  equal("the extension typed is not doubled", renamedPath(fortress, "keep.schem"), path.join(files, "keep.schem"));
+  equal("a fine name has no problem", renameProblem("Castle 2 (final)"), null);
+  const unsaved = { doc: createDocument({ width: 1, height: 1, length: 1, format: "sponge3" }), history: createHistory(), mesh: null, voidBlock: "" };
+  check("an unsaved schematic has nothing to rename", await renameDocumentFile(unsaved, "x").then(() => false, (err) => err instanceof RenameRefusedError));
 
   // --- Save As: a copy each, and the chat on screen follows the new file
   const copy = path.join(files, "fortress-copy.schem");
@@ -3133,10 +3162,21 @@ console.log("\n--- saving is working on it ---");
     windowSave.includes("rememberDocument(result.filePath)"),
   );
   check("...and so does a save over MCP", mcpSave.includes("rememberDocument(result.filePath)"));
-  // Save As copies what is kept under the old path, on both roads.
+  // Save As copies what is kept under the old path, on both roads, and a
+  // rename moves the recents entry on both.
   check(
     "a Save As from the window and over MCP carries the chats",
     [windowSave, mcpSave].every((source) => source.includes('carryDocumentStores(before, result.filePath, "copy")')),
+  );
+  const windowRename = between(handlers, "IPC.docRename", "ipcMain.handle(");
+  const mcpRename = between(server, "rename: async", "close:");
+  check(
+    "a rename updates the recents, on both roads",
+    [windowRename, mcpRename].every((source) => source.includes("rememberRenamed(")),
+  );
+  check(
+    "...as opening does, on both roads",
+    windowOpen.includes("rememberDocument(filePath)") && mcpOpen.includes("rememberDocument(filePath)"),
   );
   // Half of it is how the two came apart: the app's list without the OS's, or
   // the other way round. Nothing outside `menu.ts` may call either on its own.

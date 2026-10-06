@@ -39,6 +39,7 @@
   import DimensionsModal from "./lib/DimensionsModal.svelte";
 import VoidBlockModal from "./lib/VoidBlockModal.svelte";
 import VersionModal from "./lib/VersionModal.svelte";
+  import RenameModal from "./lib/RenameModal.svelte";
 import {
   buildLegacyIndex,
   resolveBlockInput,
@@ -911,6 +912,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       ? new Set<string>()
       : blocksInDocument(docState.palette, docState.size, docState.blockCount),
   );
+  let renameOpen = $state(false);
+  let renameError = $state("");
   let mcVersionOpen = $state(false);
   let mcVersionError = $state("");
   /**
@@ -5081,9 +5084,42 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * which steps aside for it.
    */
 
+  /**
+   * Renames the open file, and with it everything kept under its path.
+   *
+   * The refusals are main's and come back into the dialog, whose scrim
+   * covers the banner. Renaming is not saving: unsaved changes stay unsaved.
+   */
+  async function renameDocument(name: string): Promise<void> {
+    renameError = "";
+    busy = true;
+    try {
+      await flushHotbar();
+      const response = await api().renameDocument(name);
+      if (!response.ok) {
+        renameError = response.message;
+        return;
+      }
+      const moved = followFile(response.filePath);
+      docState = response.state;
+      if (moved) await caughtUpWithFile();
+      void refreshRecents();
+      renameOpen = false;
+      status = { tone: "ok", text: t("status.renamed", { name: response.state.fileName ?? name }) };
+    } catch (err) {
+      renameError = err instanceof Error ? err.message : String(err);
+    } finally {
+      busy = false;
+    }
+  }
+
   /** One of the schematic's own settings, from the Document menu beside its name. */
   function openDocumentSetting(item: DocumentMenuItem): void {
     switch (item) {
+      case "rename":
+        renameError = "";
+        renameOpen = true;
+        break;
       case "version":
         mcVersionOpen = true;
         break;
@@ -5449,6 +5485,18 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   oncheckupdates={() => void checkUpdates()}
   ondownloadupdate={() => void downloadUpdate()}
   oninstallupdate={() => void installUpdate()}
+/>
+
+<RenameModal
+  open={docState !== null && docState.filePath !== null && renameOpen}
+  fileName={docState?.fileName ?? ""}
+  {busy}
+  error={renameError}
+  onrename={(name) => void renameDocument(name)}
+  onclose={() => {
+    renameOpen = false;
+    renameError = "";
+  }}
 />
 
 <VersionModal

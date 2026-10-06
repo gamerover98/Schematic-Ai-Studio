@@ -288,6 +288,11 @@ export const IPC = {
   docSetOffset: "bgpt:doc:offset:set",
   docSave: "bgpt:doc:save",
   /**
+   * Renames the open schematic's file in its folder, and takes its chats, its
+   * version history and its hotbar with it.
+   */
+  docRename: "bgpt:doc:rename",
+  /**
    * The open schematic's own version history: list, add, go back, throw away.
    *
    * Four verbs, four channels. Distinct from the chat's checkpoints, which
@@ -2284,6 +2289,14 @@ export type InspectResponse = Result<BlockInspection>;
 export type SchematicNbtResponse = Result<SchematicNbtText>;
 export type SaveResponse = Result<SaveSuccess>;
 
+export interface RenameSuccess {
+  /** Where the file is now. */
+  filePath: string;
+  state: DocumentState;
+}
+
+export type RenameResponse = Result<RenameSuccess>;
+
 // ---------------------------------------------------------------------------
 // The MCP server
 // ---------------------------------------------------------------------------
@@ -2501,6 +2514,8 @@ export interface BgptApi {
   /** Write the clipboard in. Undoable as one step. */
   pasteClipboard(request: PasteRequest): Promise<EditResponse>;
   saveDocument(request: SaveRequest): Promise<SaveResponse>;
+  /** A new name for the open file, without its extension. See `IPC.docRename`. */
+  renameDocument(name: string): Promise<RenameResponse>;
   /**
    * The filesystem path behind a dropped `File`, or `""` when it has none.
    * Synchronous, and the one method here that is not an IPC call: it is

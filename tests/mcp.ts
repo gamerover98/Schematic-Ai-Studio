@@ -160,6 +160,13 @@ function fakeLifecycle(over: Partial<Lifecycle> & { log?: string[] } = {}): Life
         cropped: null,
       };
     },
+    rename: async (session, name) => {
+      log.push(`rename:${name}`);
+      const from = session.doc.filePath ?? "";
+      const to = path.join(path.dirname(from), `${name}${path.extname(from)}`);
+      session.doc.filePath = to;
+      return { from, to };
+    },
     close: () => {
       log.push("close");
       closeDocument();
@@ -1153,6 +1160,36 @@ try {
       raised !== null && raised.includes("save_document_as"),
       String(raised),
     );
+
+    // Renaming needs a file, and keeps to the root like every other verb
+    // that touches one. The rename itself is `document_move.ts`'s, and
+    // `tests/services.ts` drives it against real files.
+    let unsavedRename: string | null = null;
+    try {
+      await callTool("rename_document", { name: "castle" }, options(sink));
+    } catch (err) {
+      unsavedRename = err instanceof Error ? err.message : String(err);
+    }
+    check(
+      "renaming an unsaved document points at save_document_as",
+      unsavedRename !== null && unsavedRename.includes("save_document_as"),
+      String(unsavedRename),
+    );
+    const renaming = currentSession();
+    if (renaming !== null) renaming.doc.filePath = abs("elsewhere", "x.schem");
+    let outside: string | null = null;
+    try {
+      await callTool("rename_document", { name: "castle" }, options(sink));
+    } catch (err) {
+      outside = err instanceof Error ? err.message : String(err);
+    }
+    check("a file outside the root is not renamed", outside !== null && outside.includes("outside"), String(outside));
+    if (renaming !== null) renaming.doc.filePath = abs("builds", "x.schem");
+    const renamed = (await callTool("rename_document", { name: "castle" }, options(sink))).result as {
+      from: string;
+      filePath: string;
+    };
+    equal("rename_document answers where the file is now", renamed.filePath, abs("builds", "castle.schem"));
 
     // A block tool with nothing open is a refusal, not a crash -- and it names
     // the way forward.

@@ -26,7 +26,7 @@ import { IPC } from "../shared/ipc.js";
 import { menuModel, windowTitle, type MenuCommand, type MenuItemModel } from "./menu_model.js";
 import { isDirty } from "./domain/history.js";
 import { currentSession } from "./services/session.js";
-import { getRecentDocuments, rememberRecentDocument } from "./services/settings-store.js";
+import { forgetRecentDocument, getRecentDocuments, rememberRecentDocument } from "./services/settings-store.js";
 import path from "path";
 
 let window: (() => BrowserWindow | null) | null = null;
@@ -201,4 +201,15 @@ export function installMenu(getWindow: () => BrowserWindow | null): void {
 export async function rememberDocument(filePath: string): Promise<void> {
   await rememberRecentDocument(filePath);
   app.addRecentDocument(filePath);
+}
+
+/**
+ * A renamed schematic, in the recents: the new path recorded, the old one
+ * taken off. Left on, the old entry would be a row that fails every time it is
+ * clicked. The OS's jump list keeps it until the OS drops it: Electron can
+ * clear that list but not take one entry off it.
+ */
+export async function rememberRenamed(from: string, to: string): Promise<void> {
+  await forgetRecentDocument(from);
+  await rememberDocument(to);
 }

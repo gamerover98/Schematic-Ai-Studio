@@ -54,6 +54,7 @@ import {
   type RecoveryPeekResponse,
   type SaveRequest,
   type SaveResponse,
+  type RenameResponse,
   type SetKeyRequest,
   type ClipboardResponse,
   type PasteRequest,
@@ -191,6 +192,8 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.docSetOffset, anchor) as Promise<EditResponse>,
   saveDocument: (request: SaveRequest) =>
     ipcRenderer.invoke(IPC.docSave, request) as Promise<SaveResponse>,
+  renameDocument: (name: string) =>
+    ipcRenderer.invoke(IPC.docRename, name) as Promise<RenameResponse>,
   /**
    * The filesystem path of a dropped file.
    *

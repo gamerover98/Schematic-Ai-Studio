@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  export type DocumentMenuItem = "version" | "dimensions" | "void" | "anchor" | "nbt";
+  export type DocumentMenuItem = "rename" | "version" | "dimensions" | "void" | "anchor" | "nbt";
 </script>
 
 <script lang="ts">
@@ -25,16 +25,27 @@
 
   interface Props {
     disabled?: boolean;
+    /**
+     * Whether the schematic is a file yet. One never saved has nothing to
+     * rename, and the row says so rather than disappearing.
+     */
+    saved?: boolean;
     onpick: (item: DocumentMenuItem) => void;
   }
 
-  const { disabled = false, onpick }: Props = $props();
+  const { disabled = false, saved = true, onpick }: Props = $props();
 
   /**
    * In menu order, each with its label and the sentence it used to carry as a
    * title -- shown under the label now, so it needs no tooltip repeating it.
    */
-  const ITEMS: readonly { id: DocumentMenuItem; label: string; hint: string }[] = $derived([
+  const ITEMS: readonly { id: DocumentMenuItem; label: string; hint: string; off?: boolean }[] = $derived([
+    {
+      id: "rename",
+      label: t("docMenu.rename"),
+      hint: saved ? t("rename.openHint") : t("rename.unsaved"),
+      off: !saved,
+    },
     { id: "version", label: t("docMenu.version"), hint: t("mcversion.openHint") },
     { id: "dimensions", label: t("docMenu.dimensions"), hint: t("dimensions.openHint") },
     { id: "void", label: t("docMenu.void"), hint: t("void.openHint") },
@@ -54,7 +65,7 @@
     open = true;
     if (!focusFirst) return;
     await tick();
-    panel?.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
+    panel?.querySelector<HTMLButtonElement>("[role=menuitem]:not(:disabled)")?.focus();
   }
 
   function close(returnFocus: boolean): void {
@@ -81,7 +92,7 @@
   }
 
   function onMenuKey(event: KeyboardEvent): void {
-    const items = [...(panel?.querySelectorAll<HTMLButtonElement>("[role=menuitem]") ?? [])];
+    const items = [...(panel?.querySelectorAll<HTMLButtonElement>("[role=menuitem]:not(:disabled)") ?? [])];
     const at = items.indexOf(document.activeElement as HTMLButtonElement);
     let next: number | null = null;
     if (event.key === "ArrowDown") next = (at + 1) % items.length;
@@ -162,7 +173,7 @@
       onkeydown={onMenuKey}
     >
       {#each ITEMS as item (item.id)}
-        <button role="menuitem" onclick={() => pick(item.id)}>
+        <button role="menuitem" disabled={item.off === true} onclick={() => pick(item.id)}>
           <span class="label">{item.label}</span>
           <span class="hint">{item.hint}</span>
         </button>
@@ -209,9 +220,14 @@
     text-align: left;
   }
 
-  .menu button:hover,
+  .menu button:hover:not(:disabled),
   .menu button:focus-visible {
     background: var(--bg-hover);
+  }
+
+  /* A verb that is not available yet still says why, so it stays readable. */
+  .menu button:disabled .label {
+    color: var(--text-dim);
   }
 
   .label {

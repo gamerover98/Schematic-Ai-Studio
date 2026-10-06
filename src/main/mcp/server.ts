@@ -85,8 +85,8 @@ import {
   getSettings,
   setMcpToken,
 } from "../services/settings-store.js";
-import { rememberDocument } from "../menu.js";
-import { carryDocumentStores } from "../services/document_move.js";
+import { rememberDocument, rememberRenamed } from "../menu.js";
+import { carryDocumentStores, renameDocumentFile } from "../services/document_move.js";
 import { type Lifecycle } from "./lifecycle.js";
 
 /** How many calls the activity log remembers. */
@@ -300,6 +300,11 @@ function lifecycleHost(): Lifecycle {
       // reached the recents. The window's own Save does the same.
       await rememberDocument(result.filePath);
       return result;
+    },
+    rename: async (session, name) => {
+      const moved = await renameDocumentFile(session, name);
+      if (moved.from !== moved.to) await rememberRenamed(moved.from, moved.to);
+      return moved;
     },
     close: closeDocument,
     recents: async () =>

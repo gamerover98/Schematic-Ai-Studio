@@ -66,6 +66,7 @@ import {
   type ScaleRequest,
   type SaveRequest,
   type SaveResponse,
+  type RenameResponse,
   type ClipboardResponse,
   type PasteRequest,
   type RegionSpec,
@@ -271,8 +272,12 @@ import {
   useHotbarDirectory,
   writeHotbar,
 } from "../services/hotbars.js";
-import { refreshShell, rememberDocument, setKeysToCamera } from "../menu.js";
-import { carryDocumentStores } from "../services/document_move.js";
+import { refreshShell, rememberDocument, rememberRenamed, setKeysToCamera } from "../menu.js";
+import {
+  carryDocumentStores,
+  RenameRefusedError,
+  renameDocumentFile,
+} from "../services/document_move.js";
 import { shellState, useWindow } from "../services/broadcast.js";
 import {
   mcpActivity,
@@ -1221,7 +1226,7 @@ ${report.stack}`),
   };
 
   const failure = (err: unknown): Failure => {
-    if (err instanceof NoDocumentError) {
+    if (err instanceof NoDocumentError || err instanceof RenameRefusedError) {
       return { ok: false, kind: "invalid-input", message: err.message };
     }
     if (err instanceof NoSaveTargetError || err instanceof EditTooLargeError) {
@@ -1998,6 +2003,24 @@ ${report.stack}`),
         cropped: result.cropped,
         state: shellState(session),
       };
+    } catch (err) {
+      return failure(err);
+    }
+  });
+
+  /*
+   * Renaming the open file, with everything kept under its path.
+   *
+   * The refusals are `renameDocumentFile`'s; this adds the recents, which
+   * need Electron. Main has moved the hotbar before it answers, so the
+   * window's swap to the new path finds it there.
+   */
+  ipcMain.handle(IPC.docRename, async (_event, name: string): Promise<RenameResponse> => {
+    try {
+      const session = requireSession();
+      const { from, to } = await renameDocumentFile(session, String(name));
+      if (from !== to) await rememberRenamed(from, to);
+      return { ok: true, filePath: to, state: shellState(session) };
     } catch (err) {
       return failure(err);
     }

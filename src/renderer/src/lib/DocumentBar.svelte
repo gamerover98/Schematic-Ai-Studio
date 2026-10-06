@@ -57,7 +57,7 @@
       {doc.fileName ?? t("doc.untitled")}{doc.dirty ? " •" : ""}
     </strong>
   </div>
-  <DocumentMenu disabled={busy} onpick={onsetting} />
+  <DocumentMenu disabled={busy} saved={doc.filePath !== null} onpick={onsetting} />
 {/if}
 
 <style>

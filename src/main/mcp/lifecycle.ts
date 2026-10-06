@@ -107,6 +107,11 @@ export interface Lifecycle {
      */
     cropped: { from: [number, number, number]; to: [number, number, number] } | null;
   }>;
+  /**
+   * Renames the open file in its folder and takes its chats, versions and
+   * hotbar with it; `renameDocumentFile`'s refusals, plus the recents.
+   */
+  rename(session: DocumentSession, name: string): Promise<{ from: string; to: string }>;
   close(): void;
   recents(): Promise<readonly { filePath: string; openedAt: number }[]>;
   /** Moves a file to the OS trash. Never `unlink` — see `mayDelete`. */
@@ -835,6 +840,37 @@ export const LIFECYCLE_SPECS: readonly LifecycleSpec[] = [
         cropped: result.cropped,
         degraded: result.degraded,
       };
+    },
+  },
+
+  {
+    name: "rename_document",
+    description:
+      "Rename the open schematic's file in its own folder, keeping its extension. Its conversations, version history and hotbar go with it, which renaming the file outside the app would lose. Refuses a name that is already taken, and a schematic that has never been saved. Unsaved changes stay unsaved.",
+    schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The new file name, without the extension." },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    destructive: false,
+    async run(host, args) {
+      const { name } = args as { name: string };
+      const session = host.session();
+      if (session === null) throw new McpRefusal("No schematic is open.");
+      if (session.doc.filePath === null) {
+        throw new McpRefusal(
+          "This schematic has never been saved, so it has no file to rename. Use save_document_as.",
+        );
+      }
+      // The folder stays the same, so the file it is in is the one to check.
+      must(withinRoot(await host.root(), session.doc.filePath));
+      const { from, to } = await host.rename(session, String(name ?? ""));
+      host.announce(session);
+      return { from, filePath: to };
     },
   },
 

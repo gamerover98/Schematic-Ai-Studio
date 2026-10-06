@@ -1401,6 +1401,46 @@ agent has no memory of. `runAgent` therefore takes `history` and returns
 a value the tests can see instead of something inferred from what the model was
 sent.
 
+**A schematic that changes its path takes what is kept under it, and for a long
+time nothing did.** The conversations with the project notes, the version
+history and the hotbar are all keyed on `storeFileName(path)`, so a file renamed
+outside the app came back with none of them -- reported as the chats with the AI
+being lost -- and **Save As left the chat behind** while a comment beside the
+call said it followed: `adoptSubject` with a new path saves the chat under the
+*old* one and loads the new one, empty.
+
+`services/document_move.ts` is the one place, Electron-free, with two modes:
+
+- **move**, for the Document menu's Rename and `rename_document`. Same folder,
+  same extension (the format's), and **refused** rather than moved aside over a
+  file that exists: renaming must not touch somebody else's file, which is the
+  one way it differs from `save_document_as`. Unsaved changes stay unsaved.
+- **copy**, for Save As, by the user's choice: the new file starts with the
+  chats, the versions and the bar, and the old one keeps its own. Each copied
+  conversation gets **copies of its checkpoints** (`copyCheckpoint`), because
+  pruning or deleting a conversation removes its checkpoints and two files
+  sharing one would lose it through the other.
+
+Three things are easy to get wrong:
+
+- **the record is rewritten, never renamed on disk.** `coerceRecord` refuses a
+  record whose `filePath` names another file, so a file moved to the new hash
+  reads as a hash collision and the chats vanish all the same;
+- **the live conversation carries on under its id** (`carryConversations`),
+  which is not `adoptSubject`. On a copy the chat on screen takes the copied
+  entries, whose checkpoint ids are the new file's;
+- **the window moves the bar's subject before `docState` says so**
+  (`followFile`). Left to the path effect, `adoptHotbar` writes the bar under
+  the old path and reads the new one, so a rename left a stray bar behind and a
+  first save of an untitled schematic started over from the factory nine. A
+  rename or a Save As over MCP still goes through that effect, which costs a
+  stray bar file under the old name and nothing else.
+
+Each store is carried on its own and a failure is a warning: by then the file
+has been renamed or written, and refusing would report a failure about an act
+that happened. The recents take the new path and drop the old one
+(`rememberRenamed`); `tests/services.ts` requires it and the copy on both roads.
+
 **Recovering is opening, and every way of putting a file on screen has to say
 so.** A conversation is stored under the file *path*, so a document that arrives
 without `adoptSubject` arrives without its history — which is exactly what the
