@@ -4544,8 +4544,14 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * request to redraw the selection each time, and it is why the mode is
    * armed by the copy itself rather than by the picture arriving: a mesh that
    * failed would otherwise change what the next drag did, silently.
+   *
+   * **Raw, and it has to be.** `armStamp` keeps the stamp it armed and asks
+   * `stamp !== armed` when the picture lands; a deep `$state` stores a proxy
+   * of the object, so that was true on every answer and every picture was
+   * thrown away -- the stamp moved as an empty box. It is geometry anyway,
+   * which nothing should proxy.
    */
-  let stamp = $state<{ chunks: ChunkGeometry[] } | null>(null);
+  let stamp = $state.raw<{ chunks: ChunkGeometry[] } | null>(null);
 
   /**
    * Whether a paste leaves this document's empty space where it falls.

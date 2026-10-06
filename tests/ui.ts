@@ -5051,6 +5051,17 @@ console.log("\n--- the picture a copy leaves behind ---");
     "...and a late answer cannot overwrite a newer copy",
     arm.includes("stamp !== armed"),
   );
+  /*
+   * And that comparison is only an identity test while `stamp` is raw. Plain
+   * `$state` stores a proxy of the object assigned, so `stamp !== armed` was
+   * true on every answer and every picture was thrown away: the stamp moved
+   * as an empty box, and the check above went on passing.
+   */
+  check(
+    "...which needs the stamp to be the object it was given",
+    /let stamp = \$state\.raw</.test(app),
+    "a deep $state stores a proxy, and the identity guard discards every picture",
+  );
 
   /*
    * With a stamp armed the arrows carry the box. Both halves, because either

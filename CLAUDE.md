@@ -3973,6 +3973,14 @@ cannot overwrite a newer copy either: the fill is guarded on the **identity**
 of the object the arming created, which is `chunked_mesh.ts`'s rule for
 deciding that a chunk moved.
 
+**And identity needs `stamp` to be `$state.raw`, which for a long time it was
+not.** A deep `$state` stores a *proxy* of the object assigned, so
+`stamp !== armed` was true on every answer and every picture was thrown away:
+the stamp moved as an empty box and nothing anywhere said so. The check on the
+guard went on passing, because it looked for the comparison and not for what
+the comparison compares; `tests/ui.ts` now requires the declaration too. Found
+by importing a schematic, where the ghost is the only way to see what is held.
+
 **A stamped move writes nothing**, and `commitMove` decides that before it
 calls main. The selection step it records is an ordinary one, because no
 transaction was pushed — `adoptEditedSelection` works that out by comparing the
