@@ -86,6 +86,23 @@ export const HANDLE_RADIUS = 0.19;
 /** How long a click on a handle takes to fly the camera, in milliseconds. */
 export const FLIGHT_MS = 420;
 
+/**
+ * How long a flight lasts for somebody who did or did not ask for less motion.
+ *
+ * Zero is an arrival, not a one-millisecond flight -- `flightAt` says so -- so
+ * with `prefers-reduced-motion` a click on a handle cuts to the new view. The
+ * camera swinging round the build is precisely the kind of motion that setting
+ * exists to stop, and the view it lands on is the whole of what was asked.
+ */
+export function flightDuration(reducedMotion: boolean): number {
+  return reducedMotion ? 0 : FLIGHT_MS;
+}
+
+/** Whether the system asks for less motion. False where there is no window. */
+export function prefersReducedMotion(): boolean {
+  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 function rotate(v: Vec3, q: Quat): Vec3 {
   // The usual `v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v)`.
   const tx = 2 * (q.y * v.z - q.z * v.y);

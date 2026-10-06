@@ -31,7 +31,19 @@
  */
 
 import path from "path";
+import { PNG } from "pngjs";
 
+import { DEFAULT_FRAME, effectiveShares, MixSyntaxError, parseMix } from "../../shared/block_mix.js";
+import {
+  categoryColour,
+  distributionMap,
+  levelRange,
+  MAP_MAX_SIZE,
+  MAP_PLANES,
+  mapPicture,
+  type MapPlane,
+} from "../../shared/distribution_map.js";
+import type { Box } from "../../shared/regions.js";
 import { type SchematicFormat } from "../../shared/schematic.js";
 import {
   MC_VERSION_NAMES,
@@ -42,6 +54,18 @@ import {
 } from "../../shared/mc_versions.js";
 import { mayDelete, mayReplaceDocument, withinRoot, type Verdict } from "./policy.js";
 import { type DocumentSession } from "../services/session.js";
+import {
+  AIM_SIDES,
+  DEFAULT_AIM_ELEVATION,
+  MAX_AIM_ELEVATION,
+  parseCameraAim,
+  resolveCameraAim,
+  type CameraPlacement,
+} from "../../shared/camera_aim.js";
+import type { CameraState, GlowRequest } from "../../shared/ipc.js";
+import { findBlocks } from "../domain/find_blocks.js";
+import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { paletteEntryCacheKey, type PaletteEntry } from "../pipeline/types.js";
 
 /** Everything these tools need that they must not import for themselves. */
 export interface Lifecycle {
@@ -104,11 +128,32 @@ export interface Lifecycle {
   /**
    * A picture of the 3D viewport, as PNG bytes already base64-encoded.
    *
+   * `camera` is where to put the camera first, already resolved; `null` leaves
+   * it where the user had it. The answer carries where it actually stood, which
+   * is `null` only when the window could not say.
+   *
    * `null` when there is no window to photograph — the process outlives its
    * window on macOS, and a client asking then should be told so rather than
    * handed a blank image.
    */
-  capture(): Promise<{ data: string; width: number; height: number } | null>;
+  capture(camera: CameraPlacement | null): Promise<{
+    data: string;
+    width: number;
+    height: number;
+    camera: CameraState | null;
+  } | null>;
+  /**
+   * How far the viewport draws, in blocks.
+   *
+   * Asked per call for `allowDelete`'s reason: it is a setting the user can
+   * move, and a camera stood behind the far plane photographs an empty sky.
+   */
+  drawDistance(): Promise<number>;
+  /**
+   * Lights blocks up in the user's viewport, or puts the glow out for no
+   * patterns. `false` when there is no window to tell.
+   */
+  glow(request: GlowRequest): boolean;
   /** The open schematic's own version history, newest first. */
   versions(): Promise<readonly { id: string; label: string; at: number }[]>;
   /** Snapshot the current state under a label. */
@@ -210,12 +255,17 @@ const DISCARD = {
  * invisible in a block list — a roof one block short, a wall inside out, a
  * staircase facing the wall.
  *
- * It photographs the window as it *is*, including the camera angle the user
- * left it at. Aiming the camera would need main to make a request *of* the
- * renderer and wait for it, and main can only send — a correlation id and a
- * reply channel is real work and is deliberately not in this change. So the
- * description says what the picture is of, rather than letting a model assume
- * it chose the angle.
+ * Without `camera` it photographs the window as it *is*, the angle the user
+ * left it at. With one it moves the camera first -- a side of the build by
+ * compass word, or a position -- waits for that frame to be drawn, and then
+ * takes the picture. The camera **stays** there afterwards, which is the user's
+ * choice and the honest one: the person watching sees what the model looked at,
+ * and R puts the establishing shot back.
+ *
+ * Still `readOnly`. The flag is a promise about the schematic, the undo stack
+ * and the clipboard, and none of them moves; the view is presentation, the way
+ * a scrollbar is. Marking it otherwise would put a permission prompt in front
+ * of every look a model takes at its own work.
  */
 /**
  * The `version` property every tool that names one shares.
@@ -241,24 +291,330 @@ const VERSION_PROPERTY = {
     versionRangesSentence(),
 } as const;
 
+const POINT = {
+  type: "object",
+  properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } },
+  required: ["x", "y", "z"],
+  additionalProperties: false,
+} as const;
+
 const CAPTURE: LifecycleSpec = {
   name: "capture_viewport",
   description:
-    "A picture of the 3D viewport as the user is currently looking at it — their camera angle, their lighting, their theme. Use it to check what you have built actually looks right; a block list cannot show you a wall facing the wrong way. You cannot aim the camera, so ask the user to move it if you need another angle.",
-  schema: { type: "object", properties: {}, additionalProperties: false },
+    "A picture of the 3D viewport — the user's lighting and theme. Use it to check that what you have built actually looks right; a block list cannot show you a wall facing the wrong way. " +
+    "Without `camera` it shows the view the user left. With `camera` it first moves the camera, and the camera stays there afterwards, so the user sees what you looked at. " +
+    "Coordinates are the schematic's own blocks: north is -z, east is +x, up is +y. " +
+    "The answer says where the camera stood.",
+  schema: {
+    type: "object",
+    properties: {
+      camera: {
+        type: "object",
+        description:
+          "Where to look from. `{}` is the establishing shot of the whole schematic. " +
+          "`from` names the side the camera stands on (from `north` shows the north face of the build); " +
+          "`target` defaults to the middle of the schematic and `distance` to far enough to see all of it. " +
+          "Or give an exact `position` instead of `from`.",
+        properties: {
+          target: { ...POINT, description: "The point to look at, in blocks." },
+          position: { ...POINT, description: "Exactly where the camera stands. Not with from." },
+          from: { type: "string", enum: [...AIM_SIDES] },
+          elevation: {
+            type: "number",
+            minimum: -MAX_AIM_ELEVATION,
+            maximum: MAX_AIM_ELEVATION,
+            description: `Degrees above the horizontal, with a compass side in from. Default ${DEFAULT_AIM_ELEVATION}.`,
+          },
+          distance: { type: "number", exclusiveMinimum: 0, description: "Blocks from the target." },
+        },
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
+  },
   readOnly: true,
   destructive: false,
-  async run(host) {
-    const shot = await host.capture();
+  async run(host, args) {
+    const aim = parseCameraAim((args as { camera?: unknown } | null)?.camera);
+    if (!aim.ok) throw new McpRefusal(aim.refused);
+
+    let camera: CameraPlacement | null = null;
+    let notes: readonly string[] = [];
+    if (aim.value !== null) {
+      /*
+       * Resolved against the open document, which is what "the middle of the
+       * schematic" and "far enough to see all of it" are measured from. With
+       * nothing open there is nothing those words can mean, and the viewport
+       * is showing the start screen besides.
+       */
+      const session = host.session();
+      if (session === null) {
+        throw new McpRefusal(
+          "No schematic is open, so there is nothing to aim the camera at. Use open_document or create_document first.",
+        );
+      }
+      const { doc } = session;
+      const resolved = resolveCameraAim(
+        aim.value,
+        { width: doc.width, height: doc.height, length: doc.length },
+        await host.drawDistance(),
+      );
+      if (!resolved.ok) throw new McpRefusal(resolved.refused);
+      camera = resolved.value.camera;
+      notes = resolved.value.notes;
+    }
+
+    const shot = await host.capture(camera);
     if (shot === null) {
       throw new McpRefusal(
         "There is no window open to photograph. Ask the user to bring Schematic AI Studio " +
           "to the front and try again.",
       );
     }
-    return shot;
+    return notes.length === 0 ? shot : { ...shot, note: notes.join(" ") };
   },
 };
+
+/** The longer side of `preview_distribution`'s picture is at least this many pixels. */
+const PREVIEW_PIXELS = 256;
+
+const AXIS_INTEGER = { type: "integer" } as const;
+
+/**
+ * A mix's distribution, drawn: the same map the panel shows beside the
+ * parameters, as one picture.
+ *
+ * Beside `capture_viewport` because it answers with an image and changes
+ * nothing, so it needs no transaction -- which is the line between the four
+ * tables, rather than whether a tool has effects to inject. It is not in
+ * `TOOL_SPECS` because the chat inside the app would receive the picture as
+ * base64 inside JSON, which costs the tokens and shows the model nothing.
+ *
+ * It needs no document: what a mix would look like is a question before there
+ * is anything to fill. The blocks are not checked against the version for the
+ * same reason -- nothing is placed -- and `fill_region` checks them when they
+ * are.
+ */
+const PREVIEW: LifecycleSpec = {
+  name: "preview_distribution",
+  description:
+    "A picture of how a mix of blocks would be laid out, before filling with it: one plane of the region, the distribution's values on the left (darkest lowest) and the blocks they give on the right, one colour per block, with a legend in the text. " +
+    "Use it to choose a distribution and its parameters (frequency, octaves, size...) by looking rather than by filling and undoing. " +
+    "`block` is the mix as fill_region takes it, e.g. #perlin{seed=7,frequency=0.1}70%stone,30%andesite. " +
+    "The map is the same cell for cell as a block placed by hand; a fill meets the shares exactly, so its shares may differ from the map's by a few percent. " +
+    "Coordinates are the schematic's own blocks: north is -z, east is +x, up is +y.",
+  schema: {
+    type: "object",
+    properties: {
+      block: { type: "string", description: "The mix, in fill_region's spelling." },
+      region: {
+        type: "object",
+        description:
+          "The box the shares are taken over and the map shows, in blocks. Default: the open schematic, or a 64-block cube at the origin with nothing open.",
+        properties: {
+          minX: AXIS_INTEGER,
+          minY: AXIS_INTEGER,
+          minZ: AXIS_INTEGER,
+          maxX: AXIS_INTEGER,
+          maxY: AXIS_INTEGER,
+          maxZ: AXIS_INTEGER,
+        },
+        required: ["minX", "minY", "minZ", "maxX", "maxY", "maxZ"],
+        additionalProperties: false,
+      },
+      plane: {
+        type: "string",
+        enum: [...MAP_PLANES],
+        description: "xz: from above, north at the top (default). xy: from the south, up at the top. zy: from the west, up at the top.",
+      },
+      level: {
+        type: "integer",
+        description: "Where the plane cuts the region along its third axis: y for xz, z for xy, x for zy. Default: the middle.",
+      },
+    },
+    required: ["block"],
+    additionalProperties: false,
+  },
+  readOnly: true,
+  destructive: false,
+  async run(host, args) {
+    const input = (args ?? {}) as {
+      block?: unknown;
+      region?: Box;
+      plane?: MapPlane;
+      level?: number;
+    };
+    if (typeof input.block !== "string" || input.block.trim() === "") {
+      throw new McpRefusal("Say which blocks to mix, as fill_region spells them: 70%stone,30%andesite.");
+    }
+    let mix;
+    try {
+      mix = parseMix(input.block);
+    } catch (err) {
+      throw new McpRefusal(err instanceof MixSyntaxError ? err.message : String(err));
+    }
+
+    let frame: Box;
+    if (input.region !== undefined) {
+      const r = input.region;
+      if (r.minX > r.maxX || r.minY > r.maxY || r.minZ > r.maxZ) {
+        throw new McpRefusal("Each min in region has to be at most its max.");
+      }
+      frame = r;
+    } else {
+      const session = host.session();
+      frame =
+        session === null
+          ? DEFAULT_FRAME
+          : { minX: 0, minY: 0, minZ: 0, maxX: session.doc.width - 1, maxY: session.doc.height - 1, maxZ: session.doc.length - 1 };
+    }
+    const plane: MapPlane = input.plane ?? "xz";
+    if (!MAP_PLANES.includes(plane)) throw new McpRefusal(`plane is one of ${MAP_PLANES.join(", ")}, not ${String(plane)}.`);
+    const range = levelRange(frame, plane);
+    const level = input.level ?? Math.floor((range.min + range.max) / 2);
+
+    const map = distributionMap({ mix, frame, plane, level });
+    const scale = Math.max(1, Math.ceil(PREVIEW_PIXELS / Math.max(map.width, map.height)));
+    const picture = mapPicture(map, categoryColour, scale);
+    const png = new PNG({ width: picture.width, height: picture.height });
+    png.data = Buffer.from(picture.data.buffer, picture.data.byteOffset, picture.data.byteLength);
+
+    const shares = effectiveShares(mix.entries);
+    const pixels = map.width * map.height;
+    const hex = (rgb: readonly number[]): string => `#${rgb.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+    const spanAcross = high(frame, map.across) - low(frame, map.across) + 1;
+    const spanDown = high(frame, map.down) - low(frame, map.down) + 1;
+    return {
+      data: PNG.sync.write(png).toString("base64"),
+      width: picture.width,
+      height: picture.height,
+      left: "the distribution's value at each cell, darkest lowest; blocks are dealt out by these values, the first block to the darkest",
+      right: "the block each cell gets, in the colours of the legend",
+      region: frame,
+      plane,
+      [map.cut]: map.level,
+      across: `${map.across} from ${map.columns[0]} to ${map.columns[map.width - 1]}, left to right`,
+      down: `${map.down} from ${map.rows[0]} to ${map.rows[map.height - 1]}, top to bottom`,
+      legend: mix.entries.map((entry, index) => ({
+        block: entry.block,
+        colour: hex(categoryColour(index)),
+        asked: Number(shares[index].toFixed(3)),
+        shown: Number(((map.counts[index] ?? 0) / pixels).toFixed(3)),
+      })),
+      ...(spanAcross > map.width || spanDown > map.height
+        ? { note: `The region is wider than ${MAP_MAX_SIZE} blocks, so each pixel is one cell sampled from every few rather than every cell.` }
+        : {}),
+    };
+  },
+};
+
+/**
+ * Points at something in the build the user is looking at.
+ *
+ * Beside `capture_viewport` for its reason: it changes nothing in the
+ * schematic, the undo stack or the clipboard, only what the window shows, and
+ * it needs the window, which only this table's host can reach. Not in
+ * `TOOL_SPECS`, so the chat inside the app does not have it -- it has no
+ * way to tell the window anything, and `find_blocks` answers the question.
+ *
+ * The count is found here, from the open document, and the window is told
+ * only *what* to light: it asks main for the shell itself, as a click in the
+ * materials list does, and keeps it current as the build changes.
+ */
+const HIGHLIGHT: LifecycleSpec = {
+  name: "highlight_blocks",
+  description:
+    "Lights blocks up in the user's 3D viewport with a glow that shows through walls, so you can show them what you mean: the cracked blocks, the stray dirt, the redstone. " +
+    "`blocks` is matched as find_blocks matches it: a block named without states in every state. " +
+    "Searches the whole schematic unless a region is given. The glow stays until the user presses Escape or clicks a material, " +
+    "or you call this again; call it with no `blocks` to put it out. Changes nothing in the schematic.",
+  schema: {
+    type: "object",
+    properties: {
+      blocks: { type: "string", description: "One block or several separated by commas. Omit to put the glow out." },
+      region: {
+        type: "object",
+        description: "Only the blocks inside this box, in blocks. Default: the whole schematic.",
+        properties: {
+          minX: AXIS_INTEGER,
+          minY: AXIS_INTEGER,
+          minZ: AXIS_INTEGER,
+          maxX: AXIS_INTEGER,
+          maxY: AXIS_INTEGER,
+          maxZ: AXIS_INTEGER,
+        },
+        required: ["minX", "minY", "minZ", "maxX", "maxY", "maxZ"],
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
+  },
+  readOnly: true,
+  destructive: false,
+  async run(host, args) {
+    const input = (args ?? {}) as { blocks?: unknown; region?: Box };
+    const blocks = typeof input.blocks === "string" ? input.blocks.trim() : "";
+    if (blocks === "") {
+      return host.glow({ patterns: [], regions: null })
+        ? { lit: false, note: "The glow is out." }
+        : { lit: false, note: "There is no window open, so nothing was lit." };
+    }
+    const session = host.session();
+    if (session === null) {
+      throw new McpRefusal("No schematic is open, so there is nothing to light. Use open_document or create_document first.");
+    }
+    let patterns: PaletteEntry[];
+    try {
+      patterns = parseMix(blocks).entries.map((entry) =>
+        parsePaletteEntry(entry.block.split("[", 1)[0].includes(":") ? entry.block : `minecraft:${entry.block}`),
+      );
+    } catch (err) {
+      throw new McpRefusal(err instanceof MixSyntaxError ? err.message : String(err));
+    }
+    const { doc } = session;
+    let region: Box | null = null;
+    if (input.region !== undefined) {
+      const r = input.region;
+      if (r.minX > r.maxX || r.minY > r.maxY || r.minZ > r.maxZ) {
+        throw new McpRefusal("Each min in region has to be at most its max.");
+      }
+      region = {
+        minX: Math.max(0, r.minX),
+        minY: Math.max(0, r.minY),
+        minZ: Math.max(0, r.minZ),
+        maxX: Math.min(doc.width - 1, r.maxX),
+        maxY: Math.min(doc.height - 1, r.maxY),
+        maxZ: Math.min(doc.length - 1, r.maxZ),
+      };
+    }
+    const outside =
+      region !== null && (region.minX > region.maxX || region.minY > region.maxY || region.minZ > region.maxZ);
+    const found = outside
+      ? { total: 0, bounds: null }
+      : findBlocks(doc, region === null ? null : [region], patterns, { faces: false });
+    const spelled = patterns.map(paletteEntryCacheKey);
+    const shown = host.glow({ patterns: spelled, regions: region === null || outside ? null : [region] });
+    if (!shown) {
+      throw new McpRefusal("There is no window open to light anything in. Ask the user to bring Schematic AI Studio to the front.");
+    }
+    return {
+      lit: found.total > 0,
+      total: found.total,
+      bounds: found.bounds,
+      ...(found.total === 0
+        ? { note: "None of those blocks is there, so nothing glows. get_palette lists how the blocks in the schematic are spelled." }
+        : {}),
+    };
+  },
+};
+
+function low(frame: Box, axis: "x" | "y" | "z"): number {
+  return axis === "x" ? frame.minX : axis === "y" ? frame.minY : frame.minZ;
+}
+
+function high(frame: Box, axis: "x" | "y" | "z"): number {
+  return axis === "x" ? frame.maxX : axis === "y" ? frame.maxY : frame.maxZ;
+}
 
 export const LIFECYCLE_SPECS: readonly LifecycleSpec[] = [
   {
@@ -600,6 +956,8 @@ export const LIFECYCLE_SPECS: readonly LifecycleSpec[] = [
   },
 
   CAPTURE,
+  PREVIEW,
+  HIGHLIGHT,
 ];
 
 export function findLifecycle(name: string): LifecycleSpec | null {

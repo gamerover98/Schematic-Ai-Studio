@@ -8,13 +8,43 @@
  * with nothing open is refused rather than crashing the main process.
  */
 
-import { mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { documentSize, getBlock, setBlock, setBlockEntity } from "../src/main/domain/document.js";
+import { parse as parseNbt } from "prismarine-nbt";
+
+import {
+  documentSize,
+  getBlock,
+  getBlockEntity,
+  setBlock,
+  setBlockEntity,
+} from "../src/main/domain/document.js";
 import { DOCUMENT_SIZE } from "../src/shared/settings.js";
+import { singleMix, type MixSpec } from "../src/shared/ipc.js";
+import {
+  addToMix,
+  cellValues,
+  DISTRIBUTION_KINDS,
+  effectiveShares,
+  formatDistribution,
+  formatMix,
+  MixSyntaxError,
+  normalizeDistribution,
+  parseMix,
+  pickAt,
+  quotas,
+  singleBlockMix,
+  type Distribution,
+  type DistributionKind,
+} from "../src/shared/block_mix.js";
+import { distributionMap, MAP_MAX_SIZE, MAP_PLANES } from "../src/shared/distribution_map.js";
+import { noiseSeed, perlin3, simplex3 } from "../src/shared/noise.js";
+import { unionVolume } from "../src/shared/regions.js";
+import { assignByQuota } from "../src/main/domain/mix.js";
+import { coerceHotbar } from "../src/main/services/settings_coerce.js";
 import {
   DEFAULT_LEGACY_VERSION,
   dataVersionOf,
@@ -35,6 +65,7 @@ import {
   setSessionVoidBlock,
   OutsideDocumentError,
   ResizeWouldLoseBlocksError,
+  RegionCountError,
   resizeSession,
   closeDocument,
   copySelection,
@@ -60,6 +91,8 @@ import {
   requireSession,
   saveSession,
   scaleRegion,
+  selectionPalette,
+  findInDocument,
   transformRegion,
   undoEdit,
 } from "../src/main/services/session.js";
@@ -72,6 +105,7 @@ import {
 import { parseSnbt, stringifySnbt } from "../src/main/domain/snbt.js";
 import type { NbtCompound } from "../src/main/pipeline/types.js";
 import type { DocumentSession } from "../src/main/services/session.js";
+import { BannerPatternError, readBanner } from "../src/main/pipeline/banner_nbt.js";
 import { clearBakerCache } from "../src/main/services/preview.js";
 import { loadStructure } from "../src/main/pipeline/loader.js";
 import {
@@ -82,9 +116,27 @@ import {
   takeCheckpoint,
   useCheckpointDirectory,
 } from "../src/main/services/checkpoints.js";
-import { contentShiftSince, isDirty, undo } from "../src/main/domain/history.js";
+import { contentShiftSince, historyMark, isDirty, undo } from "../src/main/domain/history.js";
 import { anchorOf, countBlocks, createDocument, documentFromLoaded } from "../src/main/domain/document.js";
+import { findBlocks } from "../src/main/domain/find_blocks.js";
+import {
+  forEachShapeCell,
+  normalizeShape,
+  shapeCells,
+  ShapeError,
+  type ShapeSpec,
+} from "../src/shared/shapes.js";
 import { UnrepresentableBlocksError } from "../src/main/services/writers.js";
+import {
+  EROSION_PRESET_NAMES,
+  erosionRule,
+  heightField,
+  inFootprint,
+  normalizeHeightField,
+  TerrainError,
+  terrainLayer,
+  type HeightField,
+} from "../src/shared/terrain.js";
 import { SpongeSchematicWriter } from "../src/main/services/schematic.js";
 import { dataVersionFor } from "../src/main/services/versions.js";
 
@@ -205,9 +257,9 @@ try {
     const session = requireSession();
     const changed = applyEdit(session, {
       kind: "replace",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 },
-      from: { namespacedName: "minecraft:cobblestone" },
-      to: stone,
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 }],
+      from: [{ namespacedName: "minecraft:cobblestone" }],
+      to: singleMix(stone),
     });
     equal("the replace reports how many blocks it touched", changed, 2);
 
@@ -236,8 +288,8 @@ try {
     const before = documentState(session).canUndo;
     applyEdit(session, {
       kind: "fill",
-      region: { minX: 0, minY: 2, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 },
-      block: planks,
+      regions: [{ minX: 0, minY: 2, minZ: 0, maxX: 2, maxY: 2, maxZ: 2 }],
+      mix: singleMix(planks),
     });
     equal("a fill is one step", documentState(session).undoLabel, "Fill with minecraft:oak_planks");
     check("...on top of the previous one", before);
@@ -265,8 +317,8 @@ try {
         try {
           applyEdit(session, {
             kind: "fill",
-            region: { minX: -1000, minY: -1000, minZ: -1000, maxX: 1000, maxY: 1000, maxZ: 1000 },
-            block: stone,
+            regions: [{ minX: -1000, minY: -1000, minZ: -1000, maxX: 1000, maxY: 1000, maxZ: 1000 }],
+            mix: singleMix(stone),
           });
           return false;
         } catch (err) {
@@ -278,8 +330,8 @@ try {
 
     const changed = applyEdit(session, {
       kind: "fill",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 },
-      block: stone,
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 }],
+      mix: singleMix(stone),
     });
     equal("a fill of the whole document still works", changed, 512);
 
@@ -291,8 +343,8 @@ try {
         try {
           applyEdit(huge, {
             kind: "fill",
-            region: { minX: 0, minY: 0, minZ: 0, maxX: 255, maxY: 255, maxZ: 255 },
-            block: stone,
+            regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 255, maxY: 255, maxZ: 255 }],
+            mix: singleMix(stone),
           });
           return false;
         } catch (err) {
@@ -399,6 +451,7 @@ try {
     const again = await documentMesh(session, previewOptions, {
       mesh: full.mesh.token,
       atlas: full.mesh.atlasVersion,
+      atlasLayout: full.mesh.atlasLayout,
     });
     check("asking again with the same token ships no geometry", again.mesh.chunks.length === 0);
     check("...and is marked as a delta, not as an empty document", again.mesh.partial);
@@ -409,6 +462,7 @@ try {
     const delta = await documentMesh(session, previewOptions, {
       mesh: again.mesh.token,
       atlas: again.mesh.atlasVersion,
+      atlasLayout: again.mesh.atlasLayout,
     });
     check("an edit ships something", delta.mesh.chunks.length > 0);
     check(
@@ -417,6 +471,16 @@ try {
       `${delta.mesh.chunks.length} of ${chunkCount}`,
     );
     check("...still without the atlas", delta.mesh.atlas === null);
+    /*
+     * A version without its layout cannot say which packing it is a version
+     * of, and two packings can share a count -- so it gets the whole sheet,
+     * which is always a correct answer.
+     */
+    const unlabelled = await documentMesh(session, previewOptions, {
+      mesh: delta.mesh.token,
+      atlas: delta.mesh.atlasVersion,
+    });
+    check("a version without a layout is sent the whole atlas", unlabelled.mesh.atlas !== null);
 
     // A token from before that edit is not one main can subtract from.
     const stale = await documentMesh(session, previewOptions, {
@@ -1209,6 +1273,66 @@ console.log("\n--- the right button opens what it lands on ---");
       "minecraft:stone",
     );
   }
+
+  /*
+   * A copper golem statue takes its next pose, which is the game's other
+   * right-click: `useItemOn` calls `getNextPose()` and places nothing. The
+   * order is the enum's and the cycle comes back round.
+   */
+  for (const name of ["minecraft:copper_golem_statue", "minecraft:waxed_oxidized_copper_golem_statue"]) {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 0, 1, { namespacedName: name, properties: { facing: "south" } });
+    setBlockEntity(session.doc, 1, 0, 1, {
+      id: "minecraft:copper_golem_statue",
+      pos: [1, 0, 1],
+      nbt: { CustomName: { type: "string", value: "Ramino" } },
+    });
+    const use = () =>
+      applyEdit(session, {
+        kind: "use",
+        x: 1,
+        y: 0,
+        z: 0,
+        block: { namespacedName: "minecraft:stone", properties: {} },
+        against: "north",
+      });
+    const pose = () => getBlock(session.doc, 1, 0, 1).properties.copper_golem_pose;
+    const seen: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      use();
+      seen.push(pose());
+    }
+    const short = name.replace("minecraft:", "");
+    equal(`${short}: four right-clicks go round the four poses`, seen, ["sitting", "running", "star", "standing"]);
+    equal("...placing nothing in front of it", getBlock(session.doc, 1, 0, 0).namespacedName, "minecraft:air");
+    equal("...keeping its facing", getBlock(session.doc, 1, 0, 1).properties.facing, "south");
+    equal(
+      "...and its block entity",
+      getBlockEntity(session.doc, 1, 0, 1)?.nbt.CustomName,
+      { type: "string", value: "Ramino" },
+    );
+    undoEdit(session);
+    equal("...and one undo takes back one pose", pose(), "star");
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 0, 1, { namespacedName: "minecraft:copper_golem_statue", properties: {} });
+    applyEdit(session, {
+      kind: "setBlock",
+      x: 1,
+      y: 0,
+      z: 0,
+      block: { namespacedName: "minecraft:stone", properties: {} },
+      against: "north",
+    });
+    equal(
+      "a sneaking click on a statue still places beside it",
+      getBlock(session.doc, 1, 0, 0).namespacedName,
+      "minecraft:stone",
+    );
+    equal("...and leaves the pose alone", getBlock(session.doc, 1, 0, 1).properties.copper_golem_pose, undefined);
+  }
 }
 
 // --- two slabs are one block ------------------------------------------------
@@ -1277,8 +1401,8 @@ console.log("\n--- two slabs are one block ---");
   const filled = newDocument({ width: 2, height: 4, length: 2 });
   applyEdit(filled, {
     kind: "fill",
-    region: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 1, maxZ: 0 },
-    block: slab("bottom"),
+    regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 1, maxZ: 0 }],
+    mix: singleMix(slab("bottom")),
   });
   equal("a fill never merges", getBlock(filled.doc, 0, 0, 0).properties.type, "bottom");
   equal("...at either level", getBlock(filled.doc, 0, 1, 0).properties.type, "bottom");
@@ -1337,8 +1461,8 @@ console.log("\n--- connecting to the neighbours ---");
   const filled = newDocument({ width: 6, height: 2, length: 6 });
   applyEdit(filled, {
     kind: "fill",
-    region: { minX: 0, minY: 0, minZ: 2, maxX: 4, maxY: 0, maxZ: 2 },
-    block: fence(),
+    regions: [{ minX: 0, minY: 0, minZ: 2, maxX: 4, maxY: 0, maxZ: 2 }],
+    mix: singleMix(fence()),
   });
   const line = (x: number) => getBlock(filled.doc, x, 0, 2).properties;
   equal("a filled line of fence connects along itself", [line(1).east, line(1).west], ["true", "true"]);
@@ -1353,8 +1477,8 @@ console.log("\n--- connecting to the neighbours ---");
   };
   applyEdit(walls, {
     kind: "fill",
-    region: { minX: 1, minY: 0, minZ: 1, maxX: 3, maxY: 0, maxZ: 1 },
-    block: wall,
+    regions: [{ minX: 1, minY: 0, minZ: 1, maxX: 3, maxY: 0, maxZ: 1 }],
+    mix: singleMix(wall),
   });
   const middle = getBlock(walls.doc, 2, 0, 1).properties;
   equal("a wall in a run connects both ways", [middle.east, middle.west], ["low", "low"]);
@@ -2120,8 +2244,8 @@ console.log("\n--- a solid block is not replaced ---");
     setBlock(session.doc, 6, 0, 6, iron);
     applyEdit(session, {
       kind: "fill",
-      region: { minX: 6, minY: 0, minZ: 6, maxX: 6, maxY: 0, maxZ: 6 },
-      block: { namespacedName: "minecraft:stone" },
+      regions: [{ minX: 6, minY: 0, minZ: 6, maxX: 6, maxY: 0, maxZ: 6 }],
+      mix: singleMix({ namespacedName: "minecraft:stone" }),
     });
     equal(
       "a fill still writes over a solid block",
@@ -2283,7 +2407,7 @@ console.log("\n--- a growth that moves the build says so ---");
 
   {
     const session = marked();
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: -4, y: 0, z: 0 });
     const shift = contentShiftSince(session.history, before);
 
@@ -2313,7 +2437,7 @@ console.log("\n--- a growth that moves the build says so ---");
    */
   {
     const session = marked();
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: 20, y: 0, z: 0 });
     equal("a move past the far face moves nothing", contentShiftSince(session.history, before), [
       0, 0, 0,
@@ -2326,7 +2450,7 @@ console.log("\n--- a growth that moves the build says so ---");
   {
     const session = marked();
     copySelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 });
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     pasteSelection(session, { x: 0, y: -2, z: 0 });
     equal("a paste below the origin says how far it moved", contentShiftSince(session.history, before), [
       0, 2, 0,
@@ -2334,7 +2458,7 @@ console.log("\n--- a growth that moves the build says so ---");
   }
   {
     const session = marked();
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     transformRegion(
       session,
       { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
@@ -2347,7 +2471,7 @@ console.log("\n--- a growth that moves the build says so ---");
   }
   {
     const session = marked();
-    const before = session.history.nextId;
+    const before = historyMark(session.history);
     scaleRegion(
       session,
       { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 },
@@ -2365,7 +2489,7 @@ console.log("\n--- a growth that moves the build says so ---");
   {
     const session = marked();
     moveRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }, { x: -4, y: 0, z: 0 });
-    const after = session.history.nextId;
+    const after = historyMark(session.history);
     equal("a later edit does not inherit an earlier shift", contentShiftSince(session.history, after), [
       0, 0, 0,
     ]);
@@ -2458,8 +2582,8 @@ console.log("\n--- growing to reach a region ---");
     const session = newDocument({ width: 8, height: 8, length: 8 });
     const changed = applyEdit(session, {
       kind: "fill",
-      region: { minX: 6, minY: 0, minZ: 0, maxX: 11, maxY: 1, maxZ: 1 },
-      block: stone,
+      regions: [{ minX: 6, minY: 0, minZ: 0, maxX: 11, maxY: 1, maxZ: 1 }],
+      mix: singleMix(stone),
     });
     equal("the fill writes every cell it asked for", changed, 6 * 2 * 2);
     equal("...and the document grew to hold them", documentState(session).size, [12, 8, 8]);
@@ -2487,8 +2611,8 @@ console.log("\n--- growing to reach a region ---");
     applyEdit(session, { kind: "setBlock", x: 0, y: 0, z: 0, block: stone });
     applyEdit(session, {
       kind: "fill",
-      region: { minX: -3, minY: 0, minZ: 0, maxX: -1, maxY: 0, maxZ: 0 },
-      block: stone,
+      regions: [{ minX: -3, minY: 0, minZ: 0, maxX: -1, maxY: 0, maxZ: 0 }],
+      mix: singleMix(stone),
     });
     equal("reaching below zero grows the box", documentState(session).size, [11, 8, 8]);
     equal(
@@ -2511,14 +2635,14 @@ console.log("\n--- growing to reach a region ---");
     const session = newDocument({ width: 8, height: 8, length: 8 });
     applyEdit(session, {
       kind: "fill",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 },
-      block: stone,
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 }],
+      mix: singleMix(stone),
     });
     applyEdit(session, {
       kind: "replace",
-      region: { minX: 0, minY: 0, minZ: 0, maxX: 40, maxY: 0, maxZ: 0 },
-      from: stone,
-      to: { namespacedName: "minecraft:oak_planks", properties: {} },
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 40, maxY: 0, maxZ: 0 }],
+      from: [stone],
+      to: singleMix({ namespacedName: "minecraft:oak_planks", properties: {} }),
     });
     equal("a replace past the edge leaves the size alone", documentState(session).size, [8, 8, 8]);
     equal(
@@ -2536,8 +2660,8 @@ console.log("\n--- growing to reach a region ---");
     try {
       applyEdit(session, {
         kind: "fill",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 4000, maxY: 4000, maxZ: 4000 },
-        block: stone,
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 4000, maxY: 4000, maxZ: 4000 }],
+        mix: singleMix(stone),
       });
     } catch (err) {
       raised = err;
@@ -2558,8 +2682,8 @@ console.log("\n--- crop on save ---");
   const session = newDocument({ width: 24, height: 24, length: 24 });
   applyEdit(session, {
     kind: "fill",
-    region: { minX: 8, minY: 3, minZ: 5, maxX: 11, maxY: 4, maxZ: 9 },
-    block: { namespacedName: "minecraft:stone", properties: {} },
+    regions: [{ minX: 8, minY: 3, minZ: 5, maxX: 11, maxY: 4, maxZ: 9 }],
+    mix: singleMix({ namespacedName: "minecraft:stone", properties: {} }),
   });
 
   const target = path.join(workDir, "trimmed.schem");
@@ -2606,8 +2730,8 @@ for (const format of ["sponge3", "sponge2", "mcedit"] as const) {
   const session = newDocument({ width: 16, height: 16, length: 16 }, format);
   applyEdit(session, {
     kind: "fill",
-    region: { minX: 4, minY: 2, minZ: 4, maxX: 6, maxY: 3, maxZ: 6 },
-    block: { namespacedName: "minecraft:stone", properties: {} },
+    regions: [{ minX: 4, minY: 2, minZ: 4, maxX: 6, maxY: 3, maxZ: 6 }],
+    mix: singleMix({ namespacedName: "minecraft:stone", properties: {} }),
   });
   setWorldEditAnchor(session.doc, session.history, [5, 2, 5], "Set the anchor");
 
@@ -2649,8 +2773,8 @@ console.log("\n--- checkpoints ---");
   // exists for and the case a checkpoint must *not* apply it to.
   applyEdit(session, {
     kind: "fill",
-    region: { minX: 2, minY: 0, minZ: 2, maxX: 5, maxY: 1, maxZ: 5 },
-    block: stone,
+    regions: [{ minX: 2, minY: 0, minZ: 2, maxX: 5, maxY: 1, maxZ: 5 }],
+    mix: singleMix(stone),
   });
 
   const before = await takeCheckpoint(session, [{ role: "user", content: "the first turn" }]);
@@ -2670,8 +2794,8 @@ console.log("\n--- checkpoints ---");
   // Now change it, and go back.
   applyEdit(session, {
     kind: "fill",
-    region: { minX: 10, minY: 0, minZ: 10, maxX: 20, maxY: 5, maxZ: 20 },
-    block: stone,
+    regions: [{ minX: 10, minY: 0, minZ: 10, maxX: 20, maxY: 5, maxZ: 20 }],
+    mix: singleMix(stone),
   });
   const grown = documentState(session).blockCount;
   check("the second edit landed", grown > 4 * 2 * 4, String(grown));
@@ -2826,6 +2950,263 @@ console.log("\n--- every material is reported ---");
  * cell along `facing`, which is where the camera was looking when the block was
  * picked up -- so all of this is `applyEdit`'s, not the renderer's.
  */
+/*
+ * A vine hangs from a vine.
+ *
+ * A vine is replaceable, so clicking one with a vine used to write the vine
+ * back over itself and a column could not be hung. It goes under the bottom
+ * of the column now, clinging to the sides of the vine above it.
+ */
+console.log("\n--- a vine hangs from a vine ---");
+{
+  const VINE = "minecraft:vine";
+  const vineOn = (props: Record<string, string>) => ({ namespacedName: VINE, properties: props });
+  const hanging = () => {
+    const session = newDocument({ width: 4, height: 7, length: 4 });
+    setBlock(session.doc, 1, 5, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 1, 5, 1, vineOn({ north: "true", east: "false", south: "false", west: "false", up: "false" }));
+    return session;
+  };
+  const click = (
+    session: ReturnType<typeof newDocument>,
+    at: [number, number, number],
+    against: "up" | "down" | "north" | "south" | "east" | "west",
+    block = VINE,
+  ) =>
+    applyEdit(session, {
+      kind: "setBlock",
+      x: at[0],
+      y: at[1],
+      z: at[2],
+      block: { namespacedName: block, properties: {} },
+      against,
+    });
+  const at = (session: ReturnType<typeof newDocument>, x: number, y: number, z: number) => {
+    const b = getBlock(session.doc, x, y, z);
+    return b.namespacedName === VINE ? `vine north=${b.properties.north}` : b.namespacedName;
+  };
+
+  {
+    const session = hanging();
+    click(session, [1, 5, 2], "south");
+    equal("a vine clicked from the front hangs under it", at(session, 1, 4, 1), "vine north=true");
+    equal("...and the clicked vine is still there, unchanged", at(session, 1, 5, 1), "vine north=true");
+    equal("...and nothing was put in front of it", at(session, 1, 5, 2), "minecraft:air");
+
+    click(session, [1, 4, 1], "down");
+    equal("a vine clicked from below goes under the column", at(session, 1, 3, 1), "vine north=true");
+
+    click(session, [1, 5, 2], "south");
+    equal("clicking the top of a three-long column adds a fourth", at(session, 1, 2, 1), "vine north=true");
+
+    // One wall beside the lowest vine alone, and it takes that too.
+    setBlock(session.doc, 2, 1, 1, { namespacedName: "minecraft:stone", properties: {} });
+    click(session, [1, 5, 2], "south");
+    const bottom = getBlock(session.doc, 1, 1, 1);
+    equal(
+      "...and a vine beside a wall clings to it as well as hanging",
+      [bottom.properties.north, bottom.properties.east],
+      ["true", "true"],
+    );
+  }
+
+  {
+    const session = hanging();
+    setBlock(session.doc, 1, 4, 1, { namespacedName: "minecraft:stone", properties: {} });
+    equal("a column with stone under it is refused", click(session, [1, 5, 2], "south"), 0);
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 3, length: 4 });
+    setBlock(session.doc, 1, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 1, 0, 1, vineOn({ north: "true" }));
+    click(session, [1, 0, 2], "south");
+    equal("a vine hung past the floor grows the schematic", session.doc.height, 4);
+    equal("...and the content moves up over it", at(session, 1, 1, 1), "vine north=true");
+    equal("...with the new vine underneath", at(session, 1, 0, 1), "vine north=true");
+  }
+
+  {
+    const session = hanging();
+    click(session, [1, 5, 2], "south", "minecraft:stone");
+    equal("stone clicked onto a vine still replaces it", at(session, 1, 5, 1), "minecraft:stone");
+  }
+
+  {
+    // A four-long column, and the wall only the top one clings to goes away.
+    const session = hanging();
+    for (const y of [4, 3, 2]) setBlock(session.doc, 1, y, 1, vineOn({ north: "true" }));
+    applyEdit(session, {
+      kind: "setBlock",
+      x: 1,
+      y: 5,
+      z: 0,
+      block: { namespacedName: "minecraft:air", properties: {} },
+      against: "south",
+    });
+    equal(
+      "breaking the wall a column hangs from lets go of the whole column",
+      [5, 4, 3, 2].map((y) => at(session, 1, y, 1)),
+      Array(4).fill("vine north=false"),
+    );
+    undo(session.doc, session.history);
+    equal(
+      "...and one undo puts it all back",
+      [5, 4, 3, 2].map((y) => at(session, 1, y, 1)),
+      Array(4).fill("vine north=true"),
+    );
+  }
+
+  {
+    /*
+     * What a vine clings to is a whole face of a collision shape, and main
+     * computes that per palette entry: leaves and glass are not full opaque
+     * cubes and still hold a vine, beside it or overhead; water holds none.
+     */
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    const put = (x: number, y: number, z: number, name: string) =>
+      setBlock(session.doc, x, y, z, { namespacedName: `minecraft:${name}`, properties: {} });
+    put(3, 1, 1, "oak_leaves");
+    click(session, [2, 1, 1], "west");
+    equal("a vine placed against leaves clings to them", getBlock(session.doc, 2, 1, 1).properties.east, "true");
+
+    put(1, 4, 3, "oak_leaves");
+    click(session, [1, 3, 3], "down");
+    equal("a vine placed under leaves hangs from their underside", getBlock(session.doc, 1, 3, 3).properties.up, "true");
+
+    put(3, 4, 3, "glass");
+    click(session, [3, 3, 3], "down");
+    equal("...and from glass", getBlock(session.doc, 3, 3, 3).properties.up, "true");
+
+    put(0, 1, 3, "water");
+    put(1, 0, 3, "stone");
+    click(session, [1, 1, 3], "up");
+    equal("but water beside a vine holds nothing up", getBlock(session.doc, 1, 1, 3).properties.west, "false");
+  }
+
+  {
+    /*
+     * Empty space is empty whatever block it is made of. With barrier chosen
+     * as the empty space block, the barriers around a build are the empty
+     * space itself -- and a vine clung to them on every side, which was the
+     * report. A barrier placed on purpose in a document whose empty space is
+     * air is a real block and still holds one, as in the game.
+     */
+    const put = (s: ReturnType<typeof newDocument>, x: number, y: number, z: number, name: string) =>
+      setBlock(s.doc, x, y, z, { namespacedName: `minecraft:${name}`, properties: {} });
+
+    const air = newDocument({ width: 5, height: 5, length: 5 });
+    put(air, 3, 1, 1, "barrier");
+    click(air, [2, 1, 1], "west");
+    equal("with air as empty space a barrier is a block and holds a vine", getBlock(air.doc, 2, 1, 1).properties.east, "true");
+
+    // The handler passes the session's empty space with every edit; so does this.
+    const place = (
+      s: ReturnType<typeof newDocument>,
+      at3: [number, number, number],
+      against: "up" | "down" | "north" | "south" | "east" | "west",
+      block = VINE,
+    ) =>
+      applyEdit(
+        s,
+        { kind: "setBlock", x: at3[0], y: at3[1], z: at3[2], block: { namespacedName: block, properties: {} }, against },
+        { voidBlock: s.voidBlock },
+      );
+    const barrier = newDocument({ width: 5, height: 5, length: 5 });
+    setSessionVoidBlock(barrier, "minecraft:barrier", { replaceExisting: true });
+    put(barrier, 1, 1, 1, "stone");
+    place(barrier, [2, 1, 1], "east");
+    const vine = getBlock(barrier.doc, 2, 1, 1);
+    equal("with barrier as empty space the vine clings to the stone it was placed on", vine.properties.west, "true");
+    equal("...and not to the empty space beside it", vine.properties.east, "false");
+    equal("...nor to the empty space in front", vine.properties.north, "false");
+    equal("...nor hangs from the empty space above", vine.properties.up, "false");
+
+    /*
+     * Converting air to barrier is the step that fills the space with
+     * barriers, and the connection pass runs inside it -- so the session has
+     * to name barrier as empty space *before* that pass, or the vine beside
+     * the converted cells takes them for walls in the very step that made
+     * them empty. Checked on a vine because a fence cannot see it: a barrier
+     * is see-through and never counted as solid to one.
+     */
+    const converted = newDocument({ width: 5, height: 5, length: 5 });
+    put(converted, 1, 2, 2, "stone");
+    click(converted, [2, 2, 2], "east");
+    equal("before the conversion the vine clings to its stone", getBlock(converted.doc, 2, 2, 2).properties.west, "true");
+    setSessionVoidBlock(converted, "minecraft:barrier", { replaceExisting: true });
+    equal("air converted to barrier fills the empty space with barrier", getBlock(converted.doc, 3, 2, 2).namespacedName, "minecraft:barrier");
+    const after = getBlock(converted.doc, 2, 2, 2);
+    equal("...and the vine does not cling to the new empty space", after.properties.east, "false");
+    equal("...nor hang from it", after.properties.up, "false");
+    equal("...and keeps its stone", after.properties.west, "true");
+  }
+}
+
+/*
+ * A tripwire connects to what it runs into, which nothing derived: every wire
+ * lay north-south with all four sides false whatever was beside it.
+ */
+console.log("\n--- a tripwire connects to wires and hooks ---");
+{
+  const session = newDocument({ width: 5, height: 3, length: 3 });
+  for (let x = 0; x < 5; x += 1) {
+    setBlock(session.doc, x, 0, 1, { namespacedName: "minecraft:stone", properties: {} });
+  }
+  const place = (x: number, name: string, properties: Record<string, string>) =>
+    applyEdit(session, {
+      kind: "setBlock",
+      x,
+      y: 1,
+      z: 1,
+      block: { namespacedName: `minecraft:${name}`, properties },
+      against: "up",
+    });
+  const sides = (x: number) => {
+    const p = getBlock(session.doc, x, 1, 1).properties;
+    return ["north", "east", "south", "west"].filter((face) => p[face] === "true").join(",");
+  };
+  const EAST_WEST = { north: "false", south: "false", east: "true", west: "true" };
+
+  place(2, "tripwire", EAST_WEST);
+  equal("a lone wire laid east-west keeps its run", sides(2), "east,west");
+  place(3, "tripwire", EAST_WEST);
+  equal("a second wire beside it connects the pair", [sides(2), sides(3)], ["east", "west"]);
+  place(1, "tripwire_hook", { facing: "east", attached: "false", powered: "false" });
+  equal("a hook pointing at the run is connected to", sides(2), "east,west");
+  place(4, "tripwire_hook", { facing: "east", attached: "false", powered: "false" });
+  equal("...and one pointing away is not", sides(3), "west");
+}
+
+/*
+ * The undo stack is capped, so its length is not an ordering, and the renderer
+ * orders its selection history against main's by what `documentState` reports.
+ * Past 200 transactions the length stopped moving and Ctrl+Z reached only the
+ * selections. The top transaction's id is what the renderer keys on now.
+ */
+console.log("\n--- the history position keeps moving past the undo cap ---");
+{
+  const session = newDocument({ width: 16, height: 1, length: 16 });
+  const ids: number[] = [];
+  for (let i = 0; i < 205; i += 1) {
+    applyEdit(session, {
+      kind: "setBlock",
+      x: i % 16,
+      y: 0,
+      z: Math.floor(i / 16),
+      block: { namespacedName: "minecraft:stone", properties: {} },
+    });
+    ids.push(documentState(session).undoTransactionId ?? 0);
+  }
+  equal("the undo stack's length stops at its cap", documentState(session).undoDepth, 200);
+  check(
+    "...while the top transaction's id rises at every edit, past the cap too",
+    ids.every((id, i) => i === 0 || id > ids[i - 1]),
+  );
+  undo(session.doc, session.history);
+  equal("an undo lands back on the id from before the last edit", documentState(session).undoTransactionId, ids[203]);
+}
+
 console.log("\n--- a bed is two blocks ---");
 {
   const bedAt = (
@@ -3037,6 +3418,130 @@ console.log("\n--- a door is two blocks ---");
 }
 
 /*
+ * A double plant is two blocks, placed the way a door is.
+ *
+ * Tall grass, large fern, the four tall flowers, tall seagrass, the small
+ * dripleaf and the pitcher plant are vanilla's `DoublePlantBlock`: placing one
+ * places both halves, and a lone lower half is a tuft cut off at the top. The
+ * family is asked of the registry (`half` is `lower|upper`), so these checks
+ * name the members that would be easy to lose and the one that must stay out.
+ */
+console.log("\n--- a double plant is two blocks ---");
+{
+  const halfAt = (session: ReturnType<typeof newDocument>, y: number) => {
+    const at = getBlock(session.doc, 2, y, 2);
+    return `${at.namespacedName}:${at.properties.half ?? "-"}`;
+  };
+  const plant = (session: ReturnType<typeof newDocument>, name: string, options?: Parameters<typeof applyEdit>[2]) =>
+    applyEdit(
+      session,
+      { kind: "setBlock", x: 2, y: 1, z: 2, block: { namespacedName: name, properties: {} } },
+      options,
+    );
+
+  for (const name of ["tall_grass", "large_fern", "sunflower", "lilac", "rose_bush", "peony", "small_dripleaf", "pitcher_plant", "tall_seagrass"]) {
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    equal(`${name} places both halves`, plant(session, `minecraft:${name}`), 2);
+    equal(`...its lower half where it was clicked`, halfAt(session, 1), `minecraft:${name}:lower`);
+    equal(`...and its upper half above`, halfAt(session, 2), `minecraft:${name}:upper`);
+  }
+
+  {
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    plant(session, "minecraft:tall_grass");
+    undo(session.doc, session.history);
+    equal("one undo takes both halves of a plant", halfAt(session, 2), "minecraft:air:-");
+  }
+
+  {
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    setBlock(session.doc, 2, 2, 2, { namespacedName: "minecraft:stone", properties: {} });
+    equal("a plant with stone above it is not placed", plant(session, "minecraft:sunflower"), 0);
+    setBlock(session.doc, 2, 2, 2, { namespacedName: "minecraft:short_grass", properties: {} });
+    equal("...while short grass above it is replaced", plant(session, "minecraft:sunflower"), 2);
+    equal("...by the upper half", halfAt(session, 2), "minecraft:sunflower:upper");
+  }
+
+  {
+    // Planted as a seed; the crop grows its upper half from stage 3.
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    equal("a pitcher crop is one block", plant(session, "minecraft:pitcher_crop"), 1);
+    equal("...with nothing above it", halfAt(session, 2), "minecraft:air:-");
+  }
+
+  {
+    // An explicit upper half is somebody placing one on purpose.
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    const changed = applyEdit(session, {
+      kind: "setBlock",
+      x: 2,
+      y: 1,
+      z: 2,
+      block: { namespacedName: "minecraft:peony", properties: { half: "upper" } },
+    });
+    equal("an explicit upper half of a plant is placed alone", changed, 1);
+  }
+
+  {
+    // 1.8.8 to 1.12.2 hold the same six names, through `175:0..13`.
+    const names = legacyBlockNames(await loadLegacyBlockTable(LEGACY_BLOCKS));
+    const session = newDocument({ width: 5, height: 5, length: 5 }, "mcedit", null);
+    equal(
+      "a legacy schematic places both halves of a rose bush",
+      plant(session, "minecraft:rose_bush", { placeableNames: names, versionLabel: "1.12.2" }),
+      2,
+    );
+    equal("...upper above lower", halfAt(session, 2), "minecraft:rose_bush:upper");
+  }
+}
+
+/*
+ * Empty space made of something other than air is still empty to a bed and a
+ * door. The far half asked for the word `air`, so with barrier chosen as the
+ * empty space block every far cell read as occupied and neither could be placed.
+ */
+console.log("\n--- two-part blocks in empty space that is not air ---");
+{
+  const barrier = { namespacedName: "minecraft:barrier", properties: {} };
+  const barrierDocument = () => {
+    const session = newDocument({ width: 5, height: 5, length: 5 });
+    for (let x = 0; x < 5; x += 1)
+      for (let y = 0; y < 5; y += 1)
+        for (let z = 0; z < 5; z += 1) setBlock(session.doc, x, y, z, barrier);
+    return session;
+  };
+  const options = { voidBlock: "minecraft:barrier" };
+
+  {
+    const session = barrierDocument();
+    const changed = applyEdit(
+      session,
+      { kind: "setBlock", x: 2, y: 1, z: 2, block: { namespacedName: "minecraft:red_bed", properties: { facing: "north" } } },
+      options,
+    );
+    equal("a bed is placed in barrier empty space", changed, 2);
+    equal("...with its head in the next cell", getBlock(session.doc, 2, 1, 1).properties.part, "head");
+  }
+  {
+    const session = barrierDocument();
+    const changed = applyEdit(
+      session,
+      { kind: "setBlock", x: 2, y: 1, z: 2, block: { namespacedName: "minecraft:oak_door", properties: { facing: "north" } } },
+      options,
+    );
+    equal("...and so is a door", changed, 2);
+  }
+  {
+    const session = barrierDocument();
+    const changed = applyEdit(
+      session,
+      { kind: "setBlock", x: 2, y: 1, z: 2, block: { namespacedName: "minecraft:red_bed", properties: { facing: "north" } } },
+    );
+    equal("...while a real barrier, with air as the empty space, still blocks it", changed, 0);
+  }
+}
+
+/*
  * A block placed into water comes out waterlogged.
  *
  * That is what the game does — a fence, a slab or a stair put into a pond
@@ -3205,11 +3710,148 @@ console.log("\n--- redstone needs a floor ---");
     "a fill of dust in mid-air is not refused",
     applyEdit(filled, {
       kind: "fill",
-      region: { minX: 0, minY: 2, minZ: 0, maxX: 3, maxY: 2, maxZ: 0 },
-      block: { namespacedName: "minecraft:redstone_wire", properties: {} },
+      regions: [{ minX: 0, minY: 2, minZ: 0, maxX: 3, maxY: 2, maxZ: 0 }],
+      mix: singleMix({ namespacedName: "minecraft:redstone_wire", properties: {} }),
     }),
     4,
   );
+}
+
+/*
+ * A rail climbing a step, end to end, and in a 1.12.2 document saved as MCEdit.
+ *
+ * The rule reads the cells above and below each side, which `connect.ts`
+ * already gathers for redstone; what the block-level checks cannot see is that
+ * placing the upper rail revisits the lower one, which is one block down and
+ * one along. And legacy is where this has to land exactly: `legacy_blocks.json`
+ * spells `66:2..5` and `27:2..5` as the four climbs, and the MCEdit writer
+ * matches the whole state, so a climb with one property too many would be
+ * written as a flat rail and reported as degraded.
+ */
+console.log("\n--- a rail climbs a step, in both eras ---");
+{
+  const dir = await mkdtemp(path.join(tmpdir(), "sas-rail-"));
+  try {
+    const session = newDocument({ width: 3, height: 4, length: 3 }, "mcedit", dataVersionOf("JE_1_12_2"));
+    const put = (x: number, y: number, z: number, name: string, properties: Record<string, string> = {}) =>
+      applyEdit(session, {
+        kind: "setBlock",
+        x,
+        y,
+        z,
+        block: { namespacedName: `minecraft:${name}`, properties },
+      });
+    const shapeAt = (x: number, y: number, z: number) => getBlock(session.doc, x, y, z).properties.shape;
+
+    // A staircase of stone two steps high, with a track up it at z = 0 and a
+    // powered one at z = 2. The row between is left empty, so the two are not
+    // neighbours of each other.
+    for (const z of [0, 2]) {
+      for (let x = 0; x < 3; x += 1) {
+        for (let y = 0; y <= x; y += 1) put(x, y, z, "stone");
+      }
+    }
+    for (let x = 0; x < 3; x += 1) {
+      put(x, x + 1, 0, "rail");
+      put(x, x + 1, 2, "powered_rail", { powered: "false" });
+    }
+    equal("the foot of the step climbs east", shapeAt(0, 1, 0), "ascending_east");
+    equal("...and so does the middle", shapeAt(1, 2, 0), "ascending_east");
+    equal("...and the top lies flat", shapeAt(2, 3, 0), "east_west");
+    equal(
+      "a powered track climbs the same step",
+      [shapeAt(0, 1, 2), shapeAt(1, 2, 2), shapeAt(2, 3, 2)],
+      ["ascending_east", "ascending_east", "east_west"],
+    );
+
+    const saved = await saveSession(session, {
+      filePath: path.join(dir, "climb.schematic"),
+      format: "mcedit",
+      legacyBlocksPath: LEGACY_BLOCKS,
+    });
+    equal("nothing is degraded on the way out", saved.degraded, []);
+
+    // The bytes themselves: MCEdit indexes (y * length + z) * width + x.
+    const { parsed } = await parseNbt(await readFile(saved.filePath));
+    const root = parsed.value as unknown as NbtCompound;
+    const number = (key: string) => Number((root[key] as { value: number }).value);
+    const bytes = (key: string) => (root[key] as { value: number[] }).value;
+    const [width, length] = [number("Width"), number("Length")];
+    const at = (x: number, y: number, z: number) => (y * length + z) * width + x;
+    const cells = [at(0, 1, 0), at(1, 2, 0), at(2, 3, 0)];
+    const powered = [at(0, 1, 2), at(1, 2, 2), at(2, 3, 2)];
+    equal("the file holds rails", cells.map((i) => bytes("Blocks")[i] & 0xff), [66, 66, 66]);
+    equal("...climbing east, which is data 2, and flat at the top", cells.map((i) => bytes("Data")[i]), [2, 2, 1]);
+    equal("the powered track is 27 with the same data", powered.map((i) => [bytes("Blocks")[i] & 0xff, bytes("Data")[i]]), [
+      [27, 2],
+      [27, 2],
+      [27, 1],
+    ]);
+
+    const reopened = await openDocument(saved.filePath, { legacyBlocksPath: LEGACY_BLOCKS });
+    equal(
+      "...and it opens again as the same climb",
+      [0, 1, 2].map((x) => getBlock(reopened.doc, x, x + 1, 0).properties.shape),
+      ["ascending_east", "ascending_east", "east_west"],
+    );
+
+    // Breaking the top lays the middle flat again: it has nothing to climb to.
+    applyEdit(reopened, { kind: "setBlock", x: 2, y: 3, z: 0, block: { namespacedName: "minecraft:air" } });
+    equal(
+      "breaking the top rail lays the one below it flat",
+      getBlock(reopened.doc, 1, 2, 0).properties.shape,
+      "east_west",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    closeDocument();
+  }
+}
+
+/*
+ * A pointed dripstone column, end to end: the rule, the cells it reads, and
+ * the cells the pass decides are stale.
+ *
+ * Its thickness depends on the block two along the column, so `connect.ts`
+ * gathers the cells two above and two below and has to revisit them after an
+ * edit. The block-level checks call `connectedState` with a map built by hand
+ * and cannot see that half: without it, the top of a column goes on saying
+ * `frustum` after a third block has made it the `base`.
+ */
+console.log("\n--- a pointed dripstone column ---");
+{
+  const session = newDocument({ width: 1, height: 6, length: 1 });
+  const put = (y: number, name: string, properties: Record<string, string>) =>
+    applyEdit(session, {
+      kind: "setBlock",
+      x: 0,
+      y,
+      z: 0,
+      block: { namespacedName: `minecraft:${name}`, properties },
+    });
+  const thickness = (y: number): string | undefined => getBlock(session.doc, 0, y, 0).properties.thickness;
+  // What a placement by hand carries: the direction from the camera, and the
+  // intention to merge.
+  const hanging = { vertical_direction: "down", thickness: "tip_merge" };
+  const standing = { vertical_direction: "up", thickness: "tip_merge" };
+
+  put(5, "stone", {});
+  put(4, "pointed_dripstone", hanging);
+  equal("one hanging from the ceiling is a tip", thickness(4), "tip");
+  put(3, "pointed_dripstone", hanging);
+  equal("a second under it makes the first its frustum", thickness(4), "frustum");
+  equal("...and is the tip itself", thickness(3), "tip");
+  put(2, "pointed_dripstone", hanging);
+  equal("a third reaches two up and makes the top the base", thickness(4), "base");
+  equal("...the one under it the frustum", thickness(3), "frustum");
+  equal("...and is the tip itself", thickness(2), "tip");
+
+  put(0, "pointed_dripstone", standing);
+  put(1, "pointed_dripstone", standing);
+  equal("a stalagmite rising to meet it merges", thickness(1), "tip_merge");
+  equal("...and so does the stalactite's tip", thickness(2), "tip_merge");
+  equal("...while the stalagmite's foot is its frustum", thickness(0), "frustum");
+  equal("...and the top of the stalactite is still the base", thickness(4), "base");
 }
 
 console.log("\n--- dimensions ---");
@@ -3222,8 +3864,8 @@ console.log("\n--- dimensions ---");
       session,
       {
         kind: "fill",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 0 },
-        block: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 0 }],
+        mix: singleMix({ namespacedName: "minecraft:stone" }),
       },
       { autoGrow },
     );
@@ -3261,8 +3903,8 @@ console.log("\n--- dimensions ---");
       session,
       {
         kind: "fill",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 },
-        block: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }],
+        mix: singleMix({ namespacedName: "minecraft:stone" }),
       },
       { autoGrow: false },
     );
@@ -4414,9 +5056,9 @@ console.log("\n--- a replace names a block, not one of its states ---");
       "a bare name matches every state of that block",
       applyEdit(session, {
         kind: "replace",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
-        from: { namespacedName: "minecraft:oak_stairs" },
-        to: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 }],
+        from: [{ namespacedName: "minecraft:oak_stairs" }],
+        to: singleMix({ namespacedName: "minecraft:stone" }),
       }),
       3,
     );
@@ -4445,9 +5087,9 @@ console.log("\n--- a replace names a block, not one of its states ---");
       "a stated from matches only that state",
       applyEdit(session, {
         kind: "replace",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
-        from: stateful("north"),
-        to: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 }],
+        from: [stateful("north")],
+        to: singleMix({ namespacedName: "minecraft:stone" }),
       }),
       1,
     );
@@ -4470,9 +5112,9 @@ console.log("\n--- a replace names a block, not one of its states ---");
       "replacing something that is not there changes nothing",
       applyEdit(session, {
         kind: "replace",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 1 },
-        from: { namespacedName: "minecraft:deepslate" },
-        to: { namespacedName: "minecraft:stone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 1 }],
+        from: [{ namespacedName: "minecraft:deepslate" }],
+        to: singleMix({ namespacedName: "minecraft:stone" }),
       }),
       0,
     );
@@ -4511,9 +5153,9 @@ console.log("\n--- a replace names a block, not one of its states ---");
       "...and the name a person types still matches them",
       applyEdit(session, {
         kind: "replace",
-        region: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 },
-        from: { namespacedName: "minecraft:oak_fence" },
-        to: { namespacedName: "minecraft:cobblestone" },
+        regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 3 }],
+        from: [{ namespacedName: "minecraft:oak_fence" }],
+        to: singleMix({ namespacedName: "minecraft:cobblestone" }),
       }),
       4,
     );
@@ -4579,8 +5221,8 @@ console.log("\n--- a legacy schematic refuses blocks that did not exist yet ---"
           session,
           {
             kind: "fill",
-            region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 },
-            block: { namespacedName: "minecraft:deepslate" },
+            regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }],
+            mix: singleMix({ namespacedName: "minecraft:deepslate" }),
           },
           legacy,
         ),
@@ -4593,9 +5235,9 @@ console.log("\n--- a legacy schematic refuses blocks that did not exist yet ---"
           session,
           {
             kind: "replace",
-            region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 },
-            from: { namespacedName: "minecraft:stone" },
-            to: { namespacedName: "minecraft:deepslate" },
+            regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }],
+            from: [{ namespacedName: "minecraft:stone" }],
+            to: singleMix({ namespacedName: "minecraft:deepslate" }),
           },
           legacy,
         ),
@@ -4618,9 +5260,9 @@ console.log("\n--- a legacy schematic refuses blocks that did not exist yet ---"
         session,
         {
           kind: "replace",
-          region: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 },
-          from: { namespacedName: "minecraft:deepslate" },
-          to: { namespacedName: "minecraft:stone" },
+          regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }],
+          from: [{ namespacedName: "minecraft:deepslate" }],
+          to: singleMix({ namespacedName: "minecraft:stone" }),
         },
         legacy,
       ),
@@ -4799,6 +5441,2098 @@ console.log("\n--- which era a document is in ---");
   }
 }
 
+// --- a banner is placed with its design --------------------------------------
+/*
+ * The design is a block entity, and `setBlock` drops the block entity of what
+ * it displaces -- so the design has to be written after the block, in the same
+ * transaction, and in the spelling the schematic's version reads.
+ */
+console.log("\n--- a banner is placed with its design ---");
+{
+  const names = legacyBlockNames(await loadLegacyBlockTable(LEGACY_BLOCKS));
+  const PATTERNS = '[{"pattern":"mojang","color":"orange"},{"pattern":"flower","color":"magenta"}]';
+  const LAYERS = [
+    { pattern: "mojang", color: "orange" },
+    { pattern: "flower", color: "magenta" },
+  ];
+  const thrown = (run: () => void): Error | null => {
+    try {
+      run();
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err : new Error(String(err));
+    }
+  };
+  const banner = (x: number, y: number, z: number, patterns = PATTERNS, name = "minecraft:magenta_banner") => ({
+    kind: "setBlock" as const,
+    x,
+    y,
+    z,
+    block: { namespacedName: name, properties: { rotation: "0" }, bannerPatterns: patterns },
+  });
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const depth = session.history.undoStack.length;
+    applyEdit(session, banner(1, 1, 1));
+    const record = getBlockEntity(session.doc, 1, 1, 1);
+    equal("placed by hand, a banner carries its design", record === null ? null : readBanner(record.nbt, "named").layers, LAYERS);
+    check("...in 1.20.5's spelling", record !== null && record.nbt.patterns !== undefined && record.nbt.Patterns === undefined);
+    equal("...under the block entity id the game uses", record?.id, "minecraft:banner");
+    equal("...as one step", session.history.undoStack.length, depth + 1);
+    undoEdit(session);
+    check(
+      "one undo takes back the banner and its design together",
+      getBlock(session.doc, 1, 1, 1).namespacedName === "minecraft:air" && getBlockEntity(session.doc, 1, 1, 1) === null,
+    );
+
+    const refused = thrown(() => applyEdit(session, banner(2, 1, 1, PATTERNS, "minecraft:stone")));
+    check("patterns on a block that is not a banner are refused", refused instanceof BannerPatternError, String(refused));
+    equal("...and nothing is placed", getBlock(session.doc, 2, 1, 1).namespacedName, "minecraft:air");
+
+    /*
+     * A replace writes the design onto the cells it replaced, and only those:
+     * a banner of the same kind already standing there was not asked to change.
+     */
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 3, 0, 0, { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" } });
+    applyEdit(session, {
+      kind: "replace",
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 0 }],
+      from: [{ namespacedName: "minecraft:stone" }],
+      to: singleMix({ namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" }, bannerPatterns: PATTERNS }),
+    });
+    check("a replace writes the design where it replaced", getBlockEntity(session.doc, 0, 0, 0) !== null);
+    equal("...and not onto a banner that was already there", getBlockEntity(session.doc, 3, 0, 0), null);
+    closeDocument();
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_20_4"));
+    applyEdit(session, {
+      kind: "fill",
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 }],
+      mix: singleMix({ namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" }, bannerPatterns: PATTERNS }),
+    });
+    const both = [0, 1].map((x) => getBlockEntity(session.doc, x, 0, 0));
+    check(
+      "a fill writes the design onto every banner, in 1.20.4's spelling",
+      both.every((record) => record !== null && record.nbt.Patterns !== undefined && record.nbt.patterns === undefined),
+    );
+    const newer = thrown(() => applyEdit(session, banner(3, 3, 3, '[{pattern:"flow",color:"blue"}]')));
+    check(
+      "a design newer than the schematic's version is refused by name",
+      newer instanceof BannerPatternError && newer.message.includes("flow"),
+      String(newer),
+    );
+    equal("...before anything is placed", getBlock(session.doc, 3, 3, 3).namespacedName, "minecraft:air");
+    closeDocument();
+  }
+
+  {
+    // Before the Flattening a banner is white by name and coloured by `Base`.
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "mcedit", null);
+    applyEdit(session, banner(0, 0, 0, PATTERNS, "minecraft:white_banner"), {
+      placeableNames: names,
+      versionLabel: "1.12.2",
+    });
+    const record = getBlockEntity(session.doc, 0, 0, 0);
+    check("a legacy banner's design is in the old spelling", record !== null && record.nbt.Patterns !== undefined);
+    equal("...with its colours inverted", record === null ? null : readBanner(record.nbt, "legacy").layers, LAYERS);
+    equal("...and a Base saying white, without which it would be black", record?.nbt.Base, { type: "int", value: 15 });
+    equal("...under the id 1.8 knows", record?.id, "minecraft:Banner");
+    closeDocument();
+  }
+
+  /*
+   * A version change rewrites every banner for the version it lands in. Left
+   * alone, the reader here draws all three spellings and nothing would look
+   * wrong -- until the file reached the game, where every banner is blank.
+   */
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, banner(1, 1, 1));
+    applyEdit(session, banner(2, 1, 1, '[{pattern:"flow",color:"blue"},{pattern:"border",color:"black"}]'));
+
+    const refusal = thrown(() => setDocumentVersion(session, "JE_1_20_4"));
+    check(
+      "a design the target does not have is refused first and counted",
+      refusal instanceof VersionWouldLoseBlocksError && refusal.message.includes("flow") && refusal.layers.count === 1,
+      String(refusal),
+    );
+    check("...and nothing moved", session.doc.dataVersion === dataVersionOf("JE_1_21_4"));
+
+    setDocumentVersion(session, "JE_1_20_4", { dropUnrepresentable: true });
+    const kept = getBlockEntity(session.doc, 1, 1, 1);
+    equal("going back to 1.20.4 respells the design", kept === null ? null : readBanner(kept.nbt, "coded").layers, LAYERS);
+    check("...leaving no 1.20.5 list behind", kept !== null && kept.nbt.patterns === undefined);
+    const trimmed = getBlockEntity(session.doc, 2, 1, 1);
+    equal(
+      "...and takes off only the layer it cannot hold",
+      trimmed === null ? null : readBanner(trimmed.nbt, "coded").layers,
+      [{ pattern: "border", color: "black" }],
+    );
+
+    setDocumentVersion(session, "JE_1_21_4");
+    const forward = getBlockEntity(session.doc, 1, 1, 1);
+    check("and forward again it is 1.20.5's spelling", forward !== null && forward.nbt.patterns !== undefined && forward.nbt.Patterns === undefined);
+    closeDocument();
+  }
+
+  {
+    // Back past the Flattening, a magenta banner is a white one whose Base says magenta.
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "mcedit", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, banner(0, 0, 0));
+    setBlock(session.doc, 1, 0, 0, { namespacedName: "minecraft:red_banner", properties: { rotation: "4" } });
+    setDocumentVersion(session, "JE_1_12_2", { placeableNames: names });
+    equal("a coloured banner is a white one before 1.13", getBlock(session.doc, 0, 0, 0).namespacedName, "minecraft:white_banner");
+    const patterned = getBlockEntity(session.doc, 0, 0, 0);
+    equal("...whose Base keeps its colour", patterned === null ? null : readBanner(patterned.nbt, "legacy").base, "magenta");
+    equal("...and whose design survives, inverted", patterned === null ? null : readBanner(patterned.nbt, "legacy").layers, LAYERS);
+    const plain = getBlockEntity(session.doc, 1, 0, 0);
+    equal("a plain one is given a Base, or it would be black", plain === null ? null : readBanner(plain.nbt, "legacy").base, "red");
+    equal("...and keeps its rotation", getBlock(session.doc, 1, 0, 0).properties.rotation, "4");
+    closeDocument();
+  }
+
+  {
+    // And forward past it, Base becomes the name.
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_12_2"));
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:white_banner", properties: { rotation: "0" } });
+    setBlockEntity(session.doc, 0, 0, 0, {
+      id: "minecraft:Banner",
+      pos: [0, 0, 0],
+      nbt: { Base: { type: "int", value: 4 }, Patterns: { type: "list", value: { type: "end", value: [] } } },
+    });
+    setDocumentVersion(session, "JE_1_13");
+    // 4 is a dye's damage value before 1.13 -- lapis lazuli -- so blue, where the
+    // modern numbering would have read yellow.
+    equal("a legacy Base becomes the banner's name after the Flattening", getBlock(session.doc, 0, 0, 0).namespacedName, "minecraft:blue_banner");
+    const record = getBlockEntity(session.doc, 0, 0, 0);
+    check("...and leaves the block entity", record !== null && record.nbt.Base === undefined, JSON.stringify(record?.nbt));
+    closeDocument();
+  }
+
+  {
+    /*
+     * A rename used to take the block entity with it: `remap` writes through
+     * `setBlock`, which drops what it displaces. A 1.13 sign renamed to
+     * `oak_sign` for 1.14 lost its text.
+     */
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_13"));
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:sign", properties: { rotation: "0" } });
+    setBlockEntity(session.doc, 0, 0, 0, {
+      id: "minecraft:sign",
+      pos: [0, 0, 0],
+      nbt: { Text1: { type: "string", value: '{"text":"kept"}' } },
+    });
+    setDocumentVersion(session, "JE_1_14");
+    equal("a renamed sign is renamed", getBlock(session.doc, 0, 0, 0).namespacedName, "minecraft:oak_sign");
+    equal(
+      "...and keeps what was written on it",
+      getBlockEntity(session.doc, 0, 0, 0)?.nbt.Text1,
+      { type: "string", value: '{"text":"kept"}' },
+    );
+    closeDocument();
+  }
+
+  {
+    // `inspect_block`'s spelling is one `set_block` reads back.
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, banner(0, 0, 0));
+    equal(
+      "inspecting a patterned banner spells the block that places it again",
+      inspect(session, 0, 0, 0).blockData,
+      'minecraft:magenta_banner[rotation=0,banner_patterns=[{pattern:"mojang",color:"orange"},{pattern:"flower",color:"magenta"}]]',
+    );
+    equal("...and a plain block has no such spelling", inspect(session, 1, 1, 1).blockData, undefined);
+    closeDocument();
+  }
+}
+
+
+// --- a banner already placed is repainted, turned and kept --------------------
+/*
+ * The inspector's `setState` is how a design reaches a banner already in the
+ * document, and how its state is edited. Both used to go through `setBlock`
+ * alone, which drops the block entity of the cell it writes: turning a
+ * patterned banner in the inspector erased its design.
+ */
+console.log("\n--- a banner already placed is repainted, turned and kept ---");
+{
+  const names = legacyBlockNames(await loadLegacyBlockTable(LEGACY_BLOCKS));
+  const PATTERNS = '[{pattern:"mojang",color:"orange"},{pattern:"flower",color:"magenta"}]';
+  const LAYERS = [
+    { pattern: "mojang", color: "orange" },
+    { pattern: "flower", color: "magenta" },
+  ];
+  const repaint = (x: number, y: number, z: number, name: string, properties: Record<string, string>, patterns: string) => ({
+    kind: "setState" as const,
+    x,
+    y,
+    z,
+    block: { namespacedName: name, properties, bannerPatterns: patterns },
+  });
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 1, 1, 1, { namespacedName: "minecraft:magenta_banner", properties: { rotation: "0" } });
+    equal("a plain banner is offered to the pattern editor, with no layers", inspect(session, 1, 1, 1).banner, { layers: [] });
+    equal("...and a block that is not a banner is not", inspect(session, 0, 0, 0).banner, undefined);
+
+    const depth = session.history.undoStack.length;
+    applyEdit(session, repaint(1, 1, 1, "minecraft:magenta_banner", { rotation: "0" }, PATTERNS));
+    equal("the inspector puts a design on a banner already in the document", inspect(session, 1, 1, 1).banner?.layers, LAYERS);
+    equal("...as one step", session.history.undoStack.length, depth + 1);
+
+    applyEdit(session, {
+      kind: "setState",
+      x: 1,
+      y: 1,
+      z: 1,
+      block: { namespacedName: "minecraft:magenta_banner", properties: { rotation: "4" } },
+    });
+    equal("turning it in the inspector turns it", getBlock(session.doc, 1, 1, 1).properties.rotation, "4");
+    equal("...and keeps its design", inspect(session, 1, 1, 1).banner?.layers, LAYERS);
+
+    applyEdit(session, repaint(1, 1, 1, "minecraft:magenta_banner", { rotation: "4" }, "[]"));
+    const cleared = getBlockEntity(session.doc, 1, 1, 1);
+    check("an empty list takes the design off", cleared !== null && cleared.nbt.patterns === undefined, JSON.stringify(cleared?.nbt));
+
+    // A chest's contents are the same fact about a different block.
+    setBlock(session.doc, 2, 0, 0, { namespacedName: "minecraft:chest", properties: { facing: "north" } });
+    setBlockEntity(session.doc, 2, 0, 0, { id: "minecraft:chest", pos: [2, 0, 0], nbt: { Lock: { type: "string", value: "kept" } } });
+    applyEdit(session, { kind: "setState", x: 2, y: 0, z: 0, block: { namespacedName: "minecraft:chest", properties: { facing: "east" } } });
+    equal("a chest turned in the inspector keeps what it holds", getBlockEntity(session.doc, 2, 0, 0)?.nbt.Lock, { type: "string", value: "kept" });
+    applyEdit(session, { kind: "setState", x: 2, y: 0, z: 0, block: { namespacedName: "minecraft:stone", properties: {} } });
+    equal("...while a different block does not inherit it", getBlockEntity(session.doc, 2, 0, 0), null);
+    closeDocument();
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_20_4"));
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:blue_banner", properties: {} });
+    applyEdit(session, repaint(0, 0, 0, "minecraft:blue_banner", {}, PATTERNS));
+    const record = getBlockEntity(session.doc, 0, 0, 0);
+    check("...in 1.20.4's spelling on a 1.20.4 schematic", record !== null && record.nbt.Patterns !== undefined && record.nbt.patterns === undefined);
+    let refused: unknown = null;
+    try {
+      applyEdit(session, repaint(0, 0, 0, "minecraft:blue_banner", {}, '[{pattern:"flow",color:"blue"}]'));
+    } catch (err) {
+      refused = err;
+    }
+    check("...and a design that version lacks is refused by name", refused instanceof BannerPatternError && refused.message.includes("flow"), String(refused));
+    closeDocument();
+  }
+
+  {
+    const session = newDocument({ width: 2, height: 2, length: 2 }, "mcedit", null);
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:white_banner", properties: { rotation: "0" } });
+    setBlockEntity(session.doc, 0, 0, 0, { id: "minecraft:Banner", pos: [0, 0, 0], nbt: { Base: { type: "int", value: 1 } } });
+    applyEdit(session, repaint(0, 0, 0, "minecraft:white_banner", { rotation: "0" }, PATTERNS), {
+      placeableNames: names,
+      versionLabel: "1.12.2",
+    });
+    const record = getBlockEntity(session.doc, 0, 0, 0);
+    equal("a legacy banner repainted keeps the colour its Base gives it", record === null ? null : readBanner(record.nbt, "legacy").base, "red");
+    equal("...and takes the design, inverted", record === null ? null : readBanner(record.nbt, "legacy").layers, LAYERS);
+    closeDocument();
+  }
+
+  {
+    /*
+     * A banner placed by a fill carries no `rotation`, and a turn rewrites only
+     * the properties an entry carries -- so the gizmo turned it into itself and
+     * it stood where it was. It starts from what is drawn: 0.
+     */
+    const session = newDocument({ width: 3, height: 3, length: 3 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 1, 1, 1, { namespacedName: "minecraft:magenta_banner", properties: {} });
+    applyEdit(session, repaint(1, 1, 1, "minecraft:magenta_banner", {}, PATTERNS));
+    const one = { minX: 1, minY: 1, minZ: 1, maxX: 1, maxY: 1, maxZ: 1 };
+    transformRegion(session, one, { kind: "rotate", steps: 1 });
+    equal("a banner with no rotation turns a quarter with the gizmo", getBlock(session.doc, 1, 1, 1).properties.rotation, "4");
+    equal("...and keeps its design", inspect(session, 1, 1, 1).banner?.layers, LAYERS);
+    transformRegion(session, one, { kind: "mirror", axis: "x" });
+    equal("a mirrored one is reflected", getBlock(session.doc, 1, 1, 1).properties.rotation, "12");
+    equal("...and keeps its design too", inspect(session, 1, 1, 1).banner?.layers, LAYERS);
+
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:red_wall_banner", properties: {} });
+    transformRegion(session, { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 }, { kind: "rotate", steps: 1 });
+    equal("a wall banner with no facing turns from the east it is drawn facing", getBlock(session.doc, 0, 0, 0).properties.facing, "south");
+
+    setBlock(session.doc, 2, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    transformRegion(session, { minX: 2, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 }, { kind: "rotate", steps: 1 });
+    equal("...while a block with no such property is given none", getBlock(session.doc, 2, 0, 0).properties, {});
+    closeDocument();
+  }
+}
+
+console.log("\n--- a mix of blocks, shared out exactly ---");
+{
+  const banner =
+    'minecraft:white_banner[banner_patterns=[{pattern:"mojang",color:"red"},{pattern:"border",color:"blue"}]]';
+  const mix = parseMix(`#random{seed=7}70%minecraft:stone,30%${banner}`);
+  equal("a weighted mix reads its weights", mix.entries.map((entry) => entry.weight), [70, 30]);
+  equal("...keeps a banner's commas inside its own entry", mix.entries[1].block, banner);
+  equal("...and its seed", mix.distribution, { kind: "random", seed: 7 });
+  equal("it is written back the way it was read", parseMix(formatMix(mix)), mix);
+  equal("a plain block is a mix of one", parseMix("minecraft:oak_stairs[facing=east]").entries, [
+    { block: "minecraft:oak_stairs[facing=east]", weight: 1 },
+  ]);
+  equal("...and comes back as itself", formatMix(singleBlockMix("minecraft:stone")), "minecraft:stone");
+  equal("a weight left out is one, as WorldEdit has it", parseMix("2%stone,dirt").entries.map((e) => e.weight), [2, 1]);
+  equal("weights are shares of their sum", effectiveShares([{ weight: 2 }, { weight: 1 }, { weight: 1 }]), [0.5, 0.25, 0.25]);
+  equal(
+    "a block added takes an equal footing",
+    effectiveShares(addToMix(parseMix("70%stone,30%dirt"), "gravel").entries).map((share) => Math.round(share * 1000)),
+    [467, 200, 333],
+  );
+  check(
+    "every weight zero is refused",
+    (() => {
+      try {
+        parseMix("0%stone,0%dirt");
+        return false;
+      } catch {
+        return true;
+      }
+    })(),
+  );
+  equal("quotas sum to the cells, largest remainder first", quotas([1 / 3, 1 / 3, 1 / 3], 10), [4, 3, 3]);
+
+  // The bins have to split exactly however lumpy the values are.
+  const values = Float64Array.from({ length: 1000 }, (_unused, i) => (i % 7 === 0 ? 0.5 : (i * 7919) % 1000));
+  const assigned = assignByQuota(values, [0.7, 0.3]);
+  equal("a ranked split meets 70/30 exactly", [0, 1].map((k) => assigned.filter((v) => v === k).length), [700, 300]);
+  const highest = [...values.keys()].sort((a, b) => values[b] - values[a] || b - a)[0];
+  equal("...giving the highest values the last share", assigned[highest], 1);
+
+  const fillMix = (session: DocumentSession, spec: MixSpec, seed: number) =>
+    applyEdit(session, {
+      kind: "fill",
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 9, maxZ: 9 }],
+      mix: { ...spec, distribution: { kind: "random", seed } },
+    });
+  const seventyThirty: MixSpec = {
+    entries: [
+      { block: { namespacedName: "minecraft:stone" }, weight: 70 },
+      { block: { namespacedName: "minecraft:andesite" }, weight: 30 },
+    ],
+    distribution: { kind: "random", seed: 0 },
+  };
+  const tally = (session: DocumentSession) => {
+    const counts: Record<string, number> = {};
+    for (let x = 0; x < 10; x += 1)
+      for (let y = 0; y < 10; y += 1)
+        for (let z = 0; z < 10; z += 1) {
+          const name = getBlock(session.doc, x, y, z).namespacedName;
+          counts[name] = (counts[name] ?? 0) + 1;
+        }
+    // Sorted, so the comparison is about the counts and not the walk order.
+    return Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)));
+  };
+  const picture = (session: DocumentSession) => {
+    const cells: string[] = [];
+    for (let x = 0; x < 10; x += 1)
+      for (let y = 0; y < 10; y += 1)
+        for (let z = 0; z < 10; z += 1) cells.push(getBlock(session.doc, x, y, z).namespacedName);
+    return cells.join(",");
+  };
+
+  const first = newDocument({ width: 10, height: 10, length: 10 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  equal("a 70/30 fill writes every cell", fillMix(first, seventyThirty, 42), 1000);
+  equal("...exactly 700 and 300", tally(first), { "minecraft:andesite": 300, "minecraft:stone": 700 });
+  equal("...as one undo step", documentState(first).undoLabel, "Fill with a mix of 2 blocks");
+  const one = picture(first);
+  closeDocument();
+
+  const second = newDocument({ width: 10, height: 10, length: 10 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  fillMix(second, seventyThirty, 42);
+  check("the same seed is the same picture", picture(second) === one);
+  closeDocument();
+
+  const third = newDocument({ width: 10, height: 10, length: 10 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  fillMix(third, seventyThirty, 43);
+  check("another seed is another picture", picture(third) !== one);
+  equal("...with the same shares", tally(third), { "minecraft:andesite": 300, "minecraft:stone": 700 });
+
+  // Replace: a list of blocks to look for, and a mix to put in their place.
+  applyEdit(third, {
+    kind: "replace",
+    regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 9, maxZ: 9 }],
+    from: [{ namespacedName: "minecraft:stone" }, { namespacedName: "minecraft:andesite" }],
+    to: {
+      entries: [
+        { block: { namespacedName: "minecraft:dirt" }, weight: 1 },
+        { block: { namespacedName: "minecraft:gravel" }, weight: 1 },
+      ],
+      distribution: { kind: "random", seed: 5 },
+    },
+  });
+  equal("a replace takes every block it was told to look for", tally(third), {
+    "minecraft:dirt": 500,
+    "minecraft:gravel": 500,
+  });
+  equal("...and says what it did", documentState(third).undoLabel, "Replace 2 blocks with a mix of 2 blocks");
+  const paletteBefore = third.doc.palette.length;
+  const missed = applyEdit(third, {
+    kind: "replace",
+    regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 9, maxZ: 9 }],
+    from: [{ namespacedName: "minecraft:diamond_block" }],
+    to: singleMix({ namespacedName: "minecraft:emerald_block" }),
+  });
+  equal("a replace that finds nothing changes nothing", missed, 0);
+  equal("...and interns nothing", third.doc.palette.length, paletteBefore);
+  closeDocument();
+
+  // Two regions that overlap are one set of cells.
+  const overlap = newDocument({ width: 8, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  const regions = [
+    { minX: 0, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 0 },
+    { minX: 3, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 },
+  ];
+  equal("overlapping regions count their shared cells once", unionVolume(regions), 8);
+  equal(
+    "a fill over them writes each cell once",
+    applyEdit(overlap, { kind: "fill", regions, mix: singleMix({ namespacedName: "minecraft:stone" }) }),
+    8,
+  );
+  closeDocument();
+  const split = newDocument({ width: 8, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  applyEdit(split, {
+    kind: "fill",
+    regions: [
+      { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+      { minX: 6, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 },
+    ],
+    mix: singleMix({ namespacedName: "minecraft:stone" }),
+  });
+  equal(
+    "...and the gap between two regions is left alone",
+    [0, 3, 7].map((x) => getBlock(split.doc, x, 0, 0).namespacedName),
+    ["minecraft:stone", "minecraft:air", "minecraft:stone"],
+  );
+  check(
+    "an edit naming no region is refused by name",
+    (() => {
+      try {
+        applyEdit(split, { kind: "fill", regions: [], mix: singleMix({ namespacedName: "minecraft:stone" }) });
+        return false;
+      } catch (err) {
+        return err instanceof RegionCountError;
+      }
+    })(),
+  );
+  closeDocument();
+
+  // One cell decided alone: the shares hold on average, and a cell is stable.
+  const handMix = parseMix("#random{seed=3}3%stone,1%dirt");
+  let stones = 0;
+  for (let x = 0; x < 40; x += 1)
+    for (let z = 0; z < 40; z += 1) if (pickAt(handMix, x, 0, z).block === "stone") stones += 1;
+  check(
+    "a block placed by hand from a mix meets its share on average",
+    Math.abs(stones / 1600 - 0.75) < 0.05,
+    String(stones),
+  );
+  check("...and the same cell always gets the same block", pickAt(handMix, 5, 6, 7) === pickAt(handMix, 5, 6, 7));
+
+  equal(
+    "a hotbar slot may hold a mix",
+    coerceHotbar({ slots: ["70%stone,30%dirt"], slot: 0 }).slots[0],
+    "70%stone,30%dirt",
+  );
+  check(
+    "...but a slot of nothing but air is still the default",
+    coerceHotbar({ slots: ["50%air,50%minecraft:air"], slot: 0 }).slots[0] !== "50%air,50%minecraft:air",
+  );
+}
+
+console.log("\n--- what the selection is made of ---");
+{
+  const session = newDocument({ width: 8, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  applyEdit(session, {
+    kind: "fill",
+    regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 0, maxZ: 1 }],
+    mix: singleMix({ namespacedName: "minecraft:stone" }),
+  });
+  applyEdit(session, {
+    kind: "fill",
+    regions: [{ minX: 4, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 0 }],
+    mix: singleMix({ namespacedName: "minecraft:oak_stairs", properties: { facing: "east" } }),
+  });
+
+  const left = selectionPalette(session, [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }]);
+  equal("the materials are the selection's, not the document's", left.palette, [
+    { block: "minecraft:stone", count: 4 },
+  ]);
+  equal("...with the air in it counted apart", [left.air, left.outside, left.cells], [4, 0, 8]);
+
+  // x 0..4 and x 3..5 share x 3..4: twelve cells, not sixteen.
+  const both = selectionPalette(session, [
+    { minX: 0, minY: 0, minZ: 0, maxX: 4, maxY: 0, maxZ: 1 },
+    { minX: 3, minY: 0, minZ: 0, maxX: 5, maxY: 0, maxZ: 1 },
+  ]);
+  const stairs = both.palette.find((entry) => entry.block.startsWith("minecraft:oak_stairs"));
+  equal(
+    "two areas that overlap are counted once",
+    [both.palette.find((entry) => entry.block === "minecraft:stone")?.count, stairs?.count, both.air, both.cells],
+    [8, 1, 3, 12],
+  );
+  check("...and a block keeps its state in the list, as the replace will match it", stairs?.block.includes("facing=east") === true);
+
+  /*
+   * A cell of an area past the edge holds nothing, and a replace of air would
+   * never reach it -- so it is not air.
+   */
+  const past = selectionPalette(session, [{ minX: 6, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 0 }]);
+  equal("cells outside the document are outside, not air", [past.air, past.outside, past.cells], [2, 2, 4]);
+  const away = selectionPalette(session, [{ minX: 20, minY: 0, minZ: 0, maxX: 21, maxY: 0, maxZ: 0 }]);
+  equal("...even when the whole area is", [away.palette.length, away.air, away.outside], [0, 0, 2]);
+
+  check(
+    "a count naming no area is refused by name",
+    (() => {
+      try {
+        selectionPalette(session, []);
+        return false;
+      } catch (err) {
+        return err instanceof RegionCountError;
+      }
+    })(),
+  );
+
+  /*
+   * The whole document is asked for too, and with nothing of two cells in it
+   * the answer is the counts the document keeps -- `DocumentState.palette`,
+   * with the air said apart.
+   */
+  const whole = selectionPalette(session, null);
+  equal(
+    "the whole document, with nothing in two parts, is the counts it keeps",
+    whole.palette,
+    documentState(session).palette,
+  );
+  equal("...with its air and its cells", [whole.air, whole.outside, whole.cells], [23, 0, 32]);
+  closeDocument();
+}
+
+console.log("\n--- a block of two cells is counted once ---");
+{
+  /*
+   * A bed was counted as two beds, a door as two doors: true of the file, a
+   * foot and a head, and false of the build. Written straight into the
+   * document rather than placed, so the cells are exactly these and nothing
+   * the placement rules decide.
+   */
+  const session = newDocument({ width: 8, height: 3, length: 3 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  const put = (x: number, y: number, z: number, namespacedName: string, properties: Record<string, string>): void => {
+    setBlock(session.doc, x, y, z, { namespacedName, properties });
+  };
+  const bed = (part: string, facing = "north"): Record<string, string> => ({ facing, occupied: "false", part });
+  put(0, 0, 1, "minecraft:red_bed", bed("foot"));
+  put(0, 0, 0, "minecraft:red_bed", bed("head"));
+  const door = (half: string): Record<string, string> => ({
+    facing: "north",
+    half,
+    hinge: "left",
+    open: "false",
+    powered: "false",
+  });
+  put(2, 0, 0, "minecraft:oak_door", door("lower"));
+  put(2, 1, 0, "minecraft:oak_door", door("upper"));
+  put(4, 0, 0, "minecraft:sunflower", { half: "lower" });
+  put(4, 1, 0, "minecraft:sunflower", { half: "upper" });
+  put(5, 0, 0, "minecraft:piston", { extended: "true", facing: "east" });
+  put(6, 0, 0, "minecraft:piston_head", { facing: "east", short: "false", type: "normal" });
+  // A head whose foot would be past the edge of the document.
+  put(6, 0, 2, "minecraft:red_bed", bed("head"));
+
+  const rows = (palette: readonly { block: string; count: number; pair?: string[] }[]): string[] =>
+    palette.map((row) => `${row.block} ${row.count}${row.pair ? ` +${row.pair.join("+")}` : ""}`).sort();
+  const foot = "minecraft:red_bed[facing=north,occupied=false,part=foot]";
+  const head = "minecraft:red_bed[facing=north,occupied=false,part=head]";
+  const lower = "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]";
+  const upper = "minecraft:oak_door[facing=north,half=upper,hinge=left,open=false,powered=false]";
+
+  const all = selectionPalette(session, null);
+  equal("a bed, a door, a sunflower and a piston are one of each", rows(all.palette), [
+    `${foot} 1 +${head}`,
+    `${head} 1`,
+    `${lower} 1 +${upper}`,
+    "minecraft:piston[extended=true,facing=east] 1 +minecraft:piston_head[facing=east,short=false,type=normal]",
+    "minecraft:sunflower[half=lower] 1 +minecraft:sunflower[half=upper]",
+  ].sort());
+  equal(
+    "...and every cell is still a cell: the air is what is left",
+    all.air,
+    8 * 3 * 3 - 9,
+  );
+
+  equal(
+    "half a bed in the selection is half a bed",
+    rows(selectionPalette(session, [{ minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 }]).palette),
+    [`${head} 1`],
+  );
+  equal(
+    "the foot on its own is counted as a foot, with nothing paired",
+    rows(selectionPalette(session, [{ minX: 0, minY: 0, minZ: 1, maxX: 0, maxY: 0, maxZ: 1 }]).palette),
+    [`${foot} 1`],
+  );
+  equal(
+    "two areas holding one half each hold one bed",
+    rows(
+      selectionPalette(session, [
+        { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 },
+        { minX: 0, minY: 0, minZ: 1, maxX: 0, maxY: 0, maxZ: 1 },
+      ]).palette,
+    ),
+    [`${foot} 1 +${head}`],
+  );
+  equal(
+    "two areas that both hold the whole bed hold one bed",
+    rows(
+      selectionPalette(session, [
+        { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 1 },
+        { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 1 },
+      ]).palette,
+    ),
+    [`${foot} 1 +${head}`],
+  );
+
+  /*
+   * A far half belongs only with the block it came with: a different bed one
+   * step back, or one facing elsewhere, is a neighbour rather than a partner.
+   */
+  put(0, 0, 1, "minecraft:blue_bed", bed("foot"));
+  check(
+    "a head beside another colour's foot is a head",
+    rows(selectionPalette(session, null).palette).includes(`${head} 2`),
+  );
+  put(0, 0, 1, "minecraft:red_bed", bed("foot", "south"));
+  check(
+    "...and beside a foot facing away, too",
+    rows(selectionPalette(session, null).palette).includes(`${head} 2`),
+  );
+  put(5, 0, 0, "minecraft:sticky_piston", { extended: "true", facing: "east" });
+  check(
+    "a normal piston's head on a sticky piston is a head",
+    rows(selectionPalette(session, null).palette).includes(
+      "minecraft:piston_head[facing=east,short=false,type=normal] 1",
+    ),
+  );
+  closeDocument();
+}
+
+console.log("\n--- where a block is, as the shell the glow is drawn from ---");
+{
+  /*
+   * A material clicked in the list glows in the viewport, which has no blocks:
+   * main sends the faces of the matching cells that touch no other matching
+   * cell, four integers each. Written straight into the document, so the
+   * cells are exactly these.
+   */
+  const session = newDocument({ width: 8, height: 3, length: 3 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  const put = (x: number, y: number, z: number, namespacedName: string, properties: Record<string, string> = {}): void => {
+    setBlock(session.doc, x, y, z, { namespacedName, properties });
+  };
+  put(0, 0, 0, "minecraft:stone");
+  put(1, 0, 0, "minecraft:stone");
+  put(5, 1, 1, "minecraft:stone");
+  put(3, 0, 2, "minecraft:oak_stairs", { facing: "east" });
+  put(4, 0, 2, "minecraft:oak_stairs", { facing: "north" });
+
+  /** The faces, as "x,y,z/side", sorted. */
+  const faces = (found: { faces: Int32Array }): string[] => {
+    const out: string[] = [];
+    for (let at = 0; at < found.faces.length; at += 4) {
+      out.push(`${found.faces[at]},${found.faces[at + 1]},${found.faces[at + 2]}/${found.faces[at + 3]}`);
+    }
+    return out.sort();
+  };
+  const find = (patterns: string[], regions: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }[] | null = null) =>
+    findInDocument(session, { regions, patterns });
+
+  const stone = find(["minecraft:stone"]);
+  equal("every stone is found", stone.total, 3);
+  equal("...and two that touch share no face: 10 for the pair, 6 for the one alone", stone.faces.length / 4, 16);
+  check(
+    "...the face between the pair is the one left out",
+    !faces(stone).includes("0,0,0/0") && !faces(stone).includes("1,0,0/1") && faces(stone).includes("1,0,0/0"),
+  );
+  equal("a bare name finds the block in every state", find(["oak_stairs"]).total, 2);
+  equal("...and a stated one only that state", find(["minecraft:oak_stairs[facing=east]"]).total, 1);
+  equal("two patterns are one set", find(["stone", "oak_stairs"]).total, 5);
+
+  // A selection holding one of the pair: the shell ends at its edge.
+  const half = find(["stone"], [{ minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 2, maxZ: 2 }]);
+  equal("in the selected areas only", half.total, 1);
+  check("...with a face where the selection ends, though the block carries on", faces(half).includes("0,0,0/0"));
+  equal(
+    "areas overlapping find a cell once",
+    find(["stone"], [
+      { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+      { minX: 1, minY: 0, minZ: 0, maxX: 5, maxY: 2, maxZ: 2 },
+    ]).total,
+    3,
+  );
+  equal("a block the document does not hold is found nowhere", find(["minecraft:diamond_block"]).total, 0);
+  equal("no patterns find nothing", find([]).faces.length, 0);
+
+  /*
+   * Past the cap the shell is drawn in coarser cells rather than cut off: cut
+   * off, the glow lit the first part of the walk and left the rest dark,
+   * which read as a fault. Only past the coarsest cell is it cut, and then
+   * the answer says so.
+   */
+  const capped = findBlocks(session.doc, null, [{ namespacedName: "minecraft:stone", properties: {} }], { maxFaces: 3 });
+  equal(
+    "a shell that fits nowhere stops at the cap and says so",
+    [capped.faces.length / 4, capped.capped, capped.total, capped.scale],
+    [3, true, 3, 16],
+  );
+  {
+    // Sixteen stones on a checkerboard: 96 faces one at a time, 18 in cells of two.
+    const board = newDocument({ width: 8, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    for (let x = 0; x < 8; x += 1) {
+      for (let y = 0; y < 2; y += 1) {
+        for (let z = 0; z < 2; z += 1) {
+          if ((x + y + z) % 2 === 0) setBlock(board.doc, x, y, z, { namespacedName: "minecraft:stone", properties: {} });
+        }
+      }
+    }
+    const stoneOnly = [{ namespacedName: "minecraft:stone", properties: {} }];
+    const fine = findBlocks(board.doc, null, stoneOnly);
+    equal("one block at a time while it fits", [fine.faces.length / 4, fine.scale, fine.capped], [96, 1, false]);
+    const coarse = findBlocks(board.doc, null, stoneOnly, { maxFaces: 20 });
+    equal("past the cap, the whole set in cells of two", [coarse.faces.length / 4, coarse.scale, coarse.capped, coarse.total], [18, 2, false, 16]);
+    const xs: number[] = [];
+    for (let at = 0; at < coarse.faces.length; at += 4) xs.push(coarse.faces[at]);
+    equal("...from one end of the set to the other, on the coarse grid", [Math.min(...xs), Math.max(...xs), xs.every((x) => x % 2 === 0)], [0, 6, true]);
+    closeDocument();
+  }
+
+  /*
+   * Content coordinates: a growth below the origin moves the content and the
+   * frame together, so the shell's numbers do not move and the viewport
+   * stands it where it stands the chunks.
+   */
+  const before = faces(stone);
+  applyEdit(session, {
+    kind: "fill",
+    regions: [{ minX: -2, minY: 0, minZ: 0, maxX: -2, maxY: 0, maxZ: 0 }],
+    mix: singleMix({ namespacedName: "minecraft:dirt" }),
+  });
+  const after = find(["stone"]);
+  equal("a growth below the origin leaves the shell where it was", faces(after), before);
+  equal("...and says where the content now stands", after.frame, [2, 0, 0]);
+  closeDocument();
+}
+
+// --- shapes ------------------------------------------------------------------
+//
+// WorldEdit's shapes, inscribed in a box. The reference is a literal port of
+// `EditSession.makeSphere`, `makeCylinder` and `makePyramid` (see the
+// `mc-building-tools` skill): the same loops, the same early exits, the same
+// `radius + 0.5`. Compared cell for cell, and beside it a handful of counts
+// written out by hand, so a mistake in the port cannot confirm itself.
+console.log("\n--- shapes ---");
+{
+  const lengthSq = (...v: number[]): number => v.reduce((sum, x) => sum + x * x, 0);
+  const weSphere = (rx: number, ry: number, rz: number, filled: boolean): Set<string> => {
+    const cells = new Set<string>();
+    rx += 0.5;
+    ry += 0.5;
+    rz += 0.5;
+    const cx = Math.ceil(rx);
+    const cy = Math.ceil(ry);
+    const cz = Math.ceil(rz);
+    let nextXn = 0;
+    forX: for (let x = 0; x <= cx; ++x) {
+      const xn = nextXn;
+      nextXn = (x + 1) / rx;
+      let nextYn = 0;
+      forY: for (let y = 0; y <= cy; ++y) {
+        const yn = nextYn;
+        nextYn = (y + 1) / ry;
+        let nextZn = 0;
+        for (let z = 0; z <= cz; ++z) {
+          const zn = nextZn;
+          nextZn = (z + 1) / rz;
+          if (lengthSq(xn, yn, zn) > 1) {
+            if (z === 0) {
+              if (y === 0) break forX;
+              break forY;
+            }
+            break;
+          }
+          if (!filled && lengthSq(nextXn, yn, zn) <= 1 && lengthSq(xn, nextYn, zn) <= 1 && lengthSq(xn, yn, nextZn) <= 1) {
+            continue;
+          }
+          for (const [a, b, c] of [[x, y, z], [-x, y, z], [x, -y, z], [x, y, -z], [-x, -y, z], [x, -y, -z], [-x, y, -z], [-x, -y, -z]]) {
+            cells.add(`${a},${b},${c}`);
+          }
+        }
+      }
+    }
+    return cells;
+  };
+  const weCylinder = (rx: number, rz: number, height: number, filled: boolean): Set<string> => {
+    const cells = new Set<string>();
+    rx += 0.5;
+    rz += 0.5;
+    const cx = Math.ceil(rx);
+    const cz = Math.ceil(rz);
+    let nextXn = 0;
+    forX: for (let x = 0; x <= cx; ++x) {
+      const xn = nextXn;
+      nextXn = (x + 1) / rx;
+      let nextZn = 0;
+      for (let z = 0; z <= cz; ++z) {
+        const zn = nextZn;
+        nextZn = (z + 1) / rz;
+        if (lengthSq(xn, zn) > 1) {
+          if (z === 0) break forX;
+          break;
+        }
+        if (!filled && lengthSq(nextXn, zn) <= 1 && lengthSq(xn, nextZn) <= 1) continue;
+        for (let y = 0; y < height; ++y) {
+          for (const [a, c] of [[x, z], [-x, z], [x, -z], [-x, -z]]) cells.add(`${a},${y},${c}`);
+        }
+      }
+    }
+    return cells;
+  };
+  const wePyramid = (size: number, filled: boolean): Set<string> => {
+    const cells = new Set<string>();
+    const height = size;
+    for (let y = 0; y <= height; ++y) {
+      size--;
+      for (let x = 0; x <= size; ++x) {
+        for (let z = 0; z <= size; ++z) {
+          if ((filled && z <= size && x <= size) || z === size || x === size) {
+            for (const [a, c] of [[x, z], [-x, z], [x, -z], [-x, -z]]) cells.add(`${a},${y},${c}`);
+          }
+        }
+      }
+    }
+    return cells;
+  };
+
+  const cellsOf = (spec: ShapeSpec, window: Parameters<typeof shapeCells>[1] = null): Set<string> => {
+    const out = new Set<string>();
+    forEachShapeCell(shapeCells(spec, window), (x, y, z) => out.add(`${x},${y},${z}`));
+    return out;
+  };
+  const sameCells = (a: Set<string>, b: Set<string>): boolean => a.size === b.size && [...a].every((key) => b.has(key));
+  const around = (rx: number, ry: number, rz: number) => ({ minX: -rx, minY: -ry, minZ: -rz, maxX: rx, maxY: ry, maxZ: rz });
+
+  const misses: string[] = [];
+  for (let r = 0; r <= 8; r += 1) {
+    for (const hollow of [false, true]) {
+      if (!sameCells(cellsOf({ kind: "sphere", box: around(r, r, r), hollow }), weSphere(r, r, r, !hollow))) {
+        misses.push(`sphere ${r}${hollow ? " hollow" : ""}`);
+      }
+      const tube = { minX: -r, minY: 0, minZ: -r, maxX: r, maxY: 2, maxZ: r };
+      if (!sameCells(cellsOf({ kind: "cylinder", box: tube, hollow }), weCylinder(r, r, 3, !hollow))) {
+        misses.push(`cylinder ${r}${hollow ? " hollow" : ""}`);
+      }
+    }
+  }
+  for (const [a, b, c] of [[3, 1, 2], [5, 2, 7], [1, 4, 0]]) {
+    for (const hollow of [false, true]) {
+      if (!sameCells(cellsOf({ kind: "sphere", box: around(a, b, c), hollow }), weSphere(a, b, c, !hollow))) {
+        misses.push(`ellipsoid ${a},${b},${c}${hollow ? " hollow" : ""}`);
+      }
+    }
+  }
+  for (let s = 1; s <= 8; s += 1) {
+    for (const hollow of [false, true]) {
+      const box = { minX: -(s - 1), minY: 0, minZ: -(s - 1), maxX: s - 1, maxY: s - 1, maxZ: s - 1 };
+      if (!sameCells(cellsOf({ kind: "pyramid", box, hollow }), wePyramid(s, !hollow))) {
+        misses.push(`pyramid ${s}${hollow ? " hollow" : ""}`);
+      }
+    }
+  }
+  equal("every sphere, ellipsoid, cylinder and pyramid is WorldEdit's, cell for cell", misses, []);
+
+  const count = (spec: ShapeSpec): number => shapeCells(spec).count;
+  equal(
+    "...and the counts, written out: //sphere 1, 3; //hsphere 3; //cyl 2 1; //pyramid 3; //hpyramid 3",
+    [
+      count({ kind: "sphere", box: around(1, 1, 1) }),
+      count({ kind: "sphere", box: around(3, 3, 3) }),
+      count({ kind: "sphere", box: around(3, 3, 3), hollow: true }),
+      count({ kind: "cylinder", box: { minX: -2, minY: 0, minZ: -2, maxX: 2, maxY: 0, maxZ: 2 } }),
+      count({ kind: "pyramid", box: { minX: -2, minY: 0, minZ: -2, maxX: 2, maxY: 2, maxZ: 2 } }),
+      count({ kind: "pyramid", box: { minX: -2, minY: 0, minZ: -2, maxX: 2, maxY: 2, maxZ: 2 }, hollow: true }),
+    ],
+    [19, 179, 98, 21, 35, 25],
+  );
+
+  // A cylinder along x is the one along y turned over.
+  equal(
+    "a cylinder lying along x is the standing one turned",
+    count({ kind: "cylinder", axis: "x", box: { minX: 0, minY: -3, minZ: -3, maxX: 4, maxY: 3, maxZ: 3 } }),
+    count({ kind: "cylinder", axis: "y", box: { minX: -3, minY: 0, minZ: -3, maxX: 3, maxY: 4, maxZ: 3 } }),
+  );
+
+  // Which faces a shell has is each command's own answer.
+  const layer = (spec: ShapeSpec, y: number): number => [...cellsOf(spec)].filter((key) => key.split(",")[1] === String(y)).length;
+  const tube = { kind: "cylinder", box: { minX: -3, minY: 0, minZ: -3, maxX: 3, maxY: 4, maxZ: 3 }, hollow: true } as const;
+  equal("a hollow cylinder is an open tube: its top is a ring like its middle", layer(tube, 4), layer(tube, 2));
+  const roof = { kind: "pyramid", box: { minX: -2, minY: 0, minZ: -2, maxX: 2, maxY: 2, maxZ: 2 }, hollow: true } as const;
+  equal("a hollow pyramid has no floor: its bottom layer is a ring of 16", layer(roof, 0), 16);
+  equal("a hollow box is closed on all six sides", count({ kind: "box", box: around(2, 2, 2), hollow: true }), 125 - 27);
+  const walls = { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 3, maxZ: 9 };
+  equal("walls are the four sides, no floor or ceiling", count({ kind: "walls", box: walls }), 36 * 4);
+  equal("...two blocks thick", count({ kind: "walls", box: walls, thickness: 2 }), (100 - 36) * 4);
+  equal("...and the same whichever two corners name the box", count({ kind: "walls", box: { minX: 9, minY: 3, minZ: 0, maxX: 0, maxY: 0, maxZ: 9 } }), 144);
+  const thick = cellsOf({ kind: "sphere", box: around(6, 6, 6), hollow: true, thickness: 2 });
+  const thin = cellsOf({ kind: "sphere", box: around(6, 6, 6), hollow: true });
+  check(
+    "a thicker shell holds the thinner one and more",
+    [...thin].every((key) => thick.has(key)) && thick.size > thin.size,
+  );
+  equal("a box is every cell", count({ kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 1, maxZ: 2 } }), 24);
+  equal("an even box has an even sphere: 2x2x2 is all eight", count({ kind: "sphere", box: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 } }), 8);
+
+  /*
+   * A shape cut by a window is that shape, cut: the part inside the window,
+   * shell and all, and no new face where the cut falls.
+   */
+  const cutAt = { minX: 0, minY: -10, minZ: -10, maxX: 10, maxY: 10, maxZ: 10 };
+  for (const hollow of [false, true]) {
+    const whole = cellsOf({ kind: "sphere", box: around(4, 4, 4), hollow });
+    const half = cellsOf({ kind: "sphere", box: around(4, 4, 4), hollow }, cutAt);
+    equal(
+      `a ${hollow ? "hollow " : ""}sphere cut by the edge is the half of the sphere, not a smaller sphere`,
+      [...half].sort(),
+      [...whole].filter((key) => Number(key.split(",")[0]) >= 0).sort(),
+    );
+  }
+  equal("a window that misses the shape holds nothing", shapeCells({ kind: "box", box: around(1, 1, 1) }, { minX: 5, minY: 5, minZ: 5, maxX: 6, maxY: 6, maxZ: 6 }).count, 0);
+
+  const refused = (spec: ShapeSpec, words: string): boolean => {
+    try {
+      normalizeShape(spec);
+      return false;
+    } catch (err) {
+      return err instanceof ShapeError && err.message.includes(words);
+    }
+  };
+  check("a shape that does not exist is refused by name", refused({ kind: "cone" as never, box: around(1, 1, 1) }, "cone"));
+  check("...an axis that does not exist too", refused({ kind: "cylinder", axis: "w" as never, box: around(1, 1, 1) }, "axis"));
+  check("...and a shell no blocks thick", refused({ kind: "sphere", hollow: true, thickness: 0, box: around(1, 1, 1) }, "thick"));
+
+  // --- drawn into a document ---------------------------------------------------
+  const stone = { namespacedName: "minecraft:stone" };
+  const glass = { namespacedName: "minecraft:glass" };
+  const draw = (session: ReturnType<typeof newDocument>, request: Partial<Extract<Parameters<typeof applyEdit>[1], { kind: "shape" }>> & { shape: ShapeSpec }, options = {}) =>
+    applyEdit(session, { kind: "shape", mix: singleMix(stone), ...request }, options);
+
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 3, 3, 3, { namespacedName: "minecraft:dirt", properties: {} });
+    const ball = { kind: "sphere", box: { minX: 0, minY: 0, minZ: 0, maxX: 6, maxY: 6, maxZ: 6 } } as const;
+    const wrote = draw(session, { shape: ball, mix: singleMix(glass), mode: "empty" });
+    equal("drawn only into empty space, it fills round what is there", wrote, 178);
+    equal("...and leaves it", getBlock(session.doc, 3, 3, 3).namespacedName, "minecraft:dirt");
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...labelled with the shape", (session.history.undoStack[0]?.label ?? "").includes("sphere"));
+    const over = draw(session, { shape: { kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 } }, mode: "filled" });
+    equal("drawn only over what is there, it recolours it", over, 179);
+    equal("...the dirt included", getBlock(session.doc, 3, 3, 3).namespacedName, "minecraft:stone");
+    equal("...and nothing round it", getBlock(session.doc, 7, 7, 7).namespacedName, "minecraft:air");
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    const wrote = draw(session, { shape: { kind: "box", box: { minX: -3, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 } }, mix: singleMix(glass), mode: "filled" });
+    equal("over what is there, a shape past the edge does not grow the document", [session.doc.width, wrote], [4, 1]);
+    const mark = historyMark(session.history);
+    draw(session, { shape: { kind: "sphere", box: { minX: -2, minY: 0, minZ: 0, maxX: 0, maxY: 2, maxZ: 2 } } });
+    equal("anywhere else it grows, below the origin too", session.doc.width, 6);
+    equal("...and says how far the content moved", contentShiftSince(session.history, mark), [2, 0, 0]);
+    let refusedOutside = false;
+    try {
+      draw(session, { shape: { kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 0 } } }, { autoGrow: false });
+    } catch (err) {
+      refusedOutside = err instanceof OutsideDocumentError;
+    }
+    check("with resizing off, a shape outside the box is refused by name", refusedOutside);
+    closeDocument();
+  }
+  {
+    // A box drawn is a fill of the same region, voxel for voxel, mix and all.
+    const mix = parseMix("#perlin{seed=3,frequency=0.2}60%stone,40%andesite");
+    const spec: MixSpec = {
+      entries: mix.entries.map((entry) => ({ block: { namespacedName: entry.block }, weight: entry.weight })),
+      distribution: mix.distribution,
+    };
+    const region = { minX: 1, minY: 0, minZ: 1, maxX: 6, maxY: 3, maxZ: 5 };
+    const a = newDocument({ width: 8, height: 4, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(a, { kind: "fill", regions: [region], mix: spec });
+    const filled = Array.from(a.doc.voxels, (index) => a.doc.palette[index].namespacedName).join();
+    const b = newDocument({ width: 8, height: 4, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(b, { kind: "shape", shape: { kind: "box", box: region }, mix: spec });
+    const drawn = Array.from(b.doc.voxels, (index) => b.doc.palette[index].namespacedName).join();
+    equal("a box drawn is the fill of its region, mix and all", drawn, filled);
+    closeDocument();
+  }
+  {
+    // A brush stroke: touches with one stroke are one Ctrl+Z.
+    const session = newDocument({ width: 8, height: 4, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    for (let x = 0; x < 6; x += 2) {
+      draw(session, { shape: { kind: "sphere", box: { minX: x, minY: 0, minZ: 0, maxX: x + 1, maxY: 1, maxZ: 1 } }, stroke: "stroke-1" });
+    }
+    equal("touches of one stroke are one step", session.history.undoStack.length, 1);
+    undoEdit(session);
+    equal("...taken back by one undo", documentState(session).blockCount, 0);
+    draw(session, { shape: { kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 } }, stroke: "stroke-2" });
+    draw(session, { shape: { kind: "box", box: { minX: 1, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 } } });
+    draw(session, { shape: { kind: "box", box: { minX: 2, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 } }, stroke: "stroke-2" });
+    equal("a shape with no stroke between two touches closes the stroke", session.history.undoStack.length, 3);
+    closeDocument();
+  }
+}
+
+console.log("\n--- terrain from a noise ---");
+{
+  const field: HeightField = {
+    noise: { kind: "perlin", seed: 7, params: { frequency: 0.05, octaves: 3 } },
+    base: 3,
+    amplitude: 9,
+  };
+
+  // --- the surface ---------------------------------------------------------
+  const top = heightField(field);
+  let lowest = Infinity;
+  let highest = -Infinity;
+  let strays = 0;
+  for (let x = -120; x < 120; x += 1) {
+    for (let z = -120; z < 120; z += 1) {
+      const y = top(x, z);
+      if (y < lowest) lowest = y;
+      if (y > highest) highest = y;
+      if (!Number.isInteger(y) || y < 3 || y > 12) strays += 1;
+    }
+  }
+  equal("the surface is a whole height between the base and the base plus the relief", strays, 0);
+  equal("...and over a wide area it reaches both", [lowest, highest], [3, 12]);
+  {
+    // The calibration is in the noise's own units, so a landscape four times
+    // as wide still runs the whole relief rather than a quarter of it.
+    const wide = heightField({ ...field, noise: { ...field.noise, params: { frequency: 0.0125, octaves: 3 } } });
+    let low = Infinity;
+    let high = -Infinity;
+    for (let x = -480; x < 480; x += 4) {
+      for (let z = -480; z < 480; z += 4) {
+        const y = wide(x, z);
+        low = Math.min(low, y);
+        high = Math.max(high, y);
+      }
+    }
+    equal("...whatever the frequency, the relief is the one asked for", [low, high], [3, 12]);
+  }
+  equal("the same settings are the same landscape", heightField(field)(17, -4), top(17, -4));
+  let differs = 0;
+  const reseeded = heightField({ ...field, noise: { ...field.noise, seed: 8 } });
+  for (let x = 0; x < 64; x += 1) if (reseeded(x, x) !== top(x, x)) differs += 1;
+  check("...and another seed is another one", differs > 16, String(differs));
+  equal("no relief is flat ground at the base", [heightField({ ...field, amplitude: 0 })(5, 5), heightField({ ...field, amplitude: 0 })(-90, 3)], [3, 3]);
+  equal(
+    "the noise is read in the content, so the frame moves the landscape with the blocks",
+    [heightField(field, [4, 0, -2])(14, 8), heightField(field, [4, 0, -2])(4, -2)],
+    [top(10, 10), top(0, 0)],
+  );
+  equal(
+    "a column is its surface block, the subsoil under it, then rock; empty space above",
+    [10, 11, 9, 8, 7, 6].map((y) => terrainLayer(y, 10, 3)),
+    ["surface", "above", "subsoil", "subsoil", "subsoil", "rock"],
+  );
+  equal("...and with no subsoil the rock starts right under the surface", terrainLayer(9, 10, 0), "rock");
+
+  const refusedField = (raw: Parameters<typeof normalizeHeightField>[0], words: string): boolean => {
+    try {
+      normalizeHeightField(raw);
+      return false;
+    } catch (err) {
+      return err instanceof TerrainError && err.message.includes(words);
+    }
+  };
+  check("a gradient is not a terrain, and says so", refusedField({ noise: { kind: "gradient" } }, "gradient"));
+  check("...nor is salt and pepper", refusedField({ noise: { kind: "random" } }, "random"));
+  check("...a parameter the noise does not take is refused by name", refusedField({ noise: { kind: "perlin", params: { size: 3 } } }, "size"));
+  check("...and so is a base that is not a number", refusedField({ noise: { kind: "perlin" }, base: "high" }, "base"));
+  equal(
+    "a base or a relief past its range is brought inside it",
+    (({ base, amplitude }) => [base, amplitude])(normalizeHeightField({ noise: { kind: "simplex" }, base: 99999, amplitude: -5 })),
+    [1024, 0],
+  );
+
+  // --- laid into a document ------------------------------------------------
+  const grass = { namespacedName: "minecraft:grass_block" };
+  const dirt = { namespacedName: "minecraft:dirt" };
+  const stone = { namespacedName: "minecraft:stone" };
+  const gold = { namespacedName: "minecraft:gold_block", properties: {} };
+  type TerrainEdit = Extract<Parameters<typeof applyEdit>[1], { kind: "terrain" }>;
+  const lay = (area: TerrainEdit["area"], mode: TerrainEdit["terrain"]["mode"], extra: Partial<TerrainEdit> = {}): TerrainEdit => ({
+    kind: "terrain",
+    area,
+    terrain: { field, surface: singleMix(grass), subsoil: singleMix(dirt), rock: singleMix(stone), subsoilDepth: 2, mode },
+    ...extra,
+  });
+  const expected = (y: number, surface: number): string =>
+    ({ above: "minecraft:air", surface: "minecraft:grass_block", subsoil: "minecraft:dirt", rock: "minecraft:stone" })[
+      terrainLayer(y, surface, 2)
+    ];
+  /** Cells of the columns `inside` that are not what the terrain says, read in the content. */
+  const misplaced = (session: DocumentSession, inside: (x: number, z: number) => boolean): number => {
+    const surface = heightField(field, session.doc.frame);
+    let wrong = 0;
+    for (let x = 0; x < session.doc.width; x += 1) {
+      for (let z = 0; z < session.doc.length; z += 1) {
+        if (!inside(x, z)) continue;
+        const at = surface(x, z);
+        for (let y = 0; y < session.doc.height; y += 1) {
+          if (getBlock(session.doc, x, y, z).namespacedName !== expected(y, at)) wrong += 1;
+        }
+      }
+    }
+    return wrong;
+  };
+  const whole = (n: number) => ({ minX: 0, minY: 0, minZ: 0, maxX: n - 1, maxY: n - 1, maxZ: n - 1 });
+
+  {
+    const session = newDocument({ width: 16, height: 16, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const wrote = applyEdit(session, lay({ kind: "regions", regions: [whole(16)] }, "set"));
+    check("set: something was laid", wrote > 0, String(wrote));
+    equal("...every column is the terrain, layer by layer", misplaced(session, () => true), 0);
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...labelled as terrain", (session.history.undoStack[0]?.label ?? "").includes("terrain"));
+    equal("laying the same terrain again changes nothing", applyEdit(session, lay({ kind: "regions", regions: [whole(16)] }, "set")), 0);
+    undoEdit(session);
+    equal("...and one undo takes it all back", documentState(session).blockCount, 0);
+    closeDocument();
+  }
+  {
+    // Raise fills only empty cells: a block in the ground and one above it stay.
+    const session = newDocument({ width: 16, height: 16, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setBlock(session.doc, 5, 0, 5, gold);
+    setBlock(session.doc, 6, 15, 6, gold);
+    applyEdit(session, lay({ kind: "regions", regions: [whole(16)] }, "raise"));
+    equal(
+      "raise: what was there stays, under the ground and over it",
+      [getBlock(session.doc, 5, 0, 5).namespacedName, getBlock(session.doc, 6, 15, 6).namespacedName],
+      ["minecraft:gold_block", "minecraft:gold_block"],
+    );
+    equal(
+      "...and every other cell is the terrain",
+      misplaced(session, (x, z) => !(x === 5 && z === 5) && !(x === 6 && z === 6)),
+      0,
+    );
+    closeDocument();
+  }
+  {
+    // Dig clears only what stands over the surface, and adds nothing.
+    const session = newDocument({ width: 16, height: 16, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, { kind: "fill", regions: [whole(16)], mix: singleMix(gold) });
+    applyEdit(session, lay({ kind: "regions", regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 15, maxY: 30, maxZ: 15 }] }, "dig"));
+    let wrong = 0;
+    for (let x = 0; x < 16; x += 1) {
+      for (let z = 0; z < 16; z += 1) {
+        const at = top(x, z);
+        for (let y = 0; y < 16; y += 1) {
+          const name = getBlock(session.doc, x, y, z).namespacedName;
+          if (name !== (y > at ? "minecraft:air" : "minecraft:gold_block")) wrong += 1;
+        }
+      }
+    }
+    equal("dig: above the surface is cleared and below it is left", wrong, 0);
+    equal("...and digging never grows the document", session.doc.height, 16);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 16, height: 16, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, { kind: "fill", regions: [whole(16)], mix: singleMix(gold) });
+    applyEdit(session, lay({ kind: "regions", regions: [whole(16)] }, "dig"), { voidBlock: "minecraft:water" });
+    equal("what is dug away becomes the document's empty space", getBlock(session.doc, 3, 15, 3).namespacedName, "minecraft:water");
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, lay({ kind: "regions", regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 11, maxY: 7, maxZ: 7 }] }, "set"));
+    equal("over a selection past the edge, set grows to the selection as a fill does", session.doc.width, 12);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, lay({ kind: "regions", regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 60, maxZ: 7 }] }, "raise"));
+    let tallest = -Infinity;
+    for (let x = 0; x < 8; x += 1) for (let z = 0; z < 8; z += 1) tallest = Math.max(tallest, top(x, z));
+    equal("...raise grows only to the highest ground it builds, not to a tall selection's ceiling", session.doc.height, Math.max(8, tallest + 1));
+    closeDocument();
+  }
+
+  // --- painted in by the brush -----------------------------------------------
+  {
+    const session = newDocument({ width: 8, height: 4, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, lay({ kind: "brush", x: 4, y: 0, z: 4, radius: 2, footprint: "disc" }, "set", { stroke: "terrain-1" }));
+    const first = (x: number, z: number) => inFootprint("disc", x - 4, z - 4, 2);
+    equal("a touch lays the columns under its footprint", misplaced(session, first), 0);
+    let outside = 0;
+    for (let x = 0; x < session.doc.width; x += 1) {
+      for (let z = 0; z < session.doc.length; z += 1) {
+        if (first(x, z)) continue;
+        for (let y = 0; y < session.doc.height; y += 1) if (getBlock(session.doc, x, y, z).namespacedName !== "minecraft:air") outside += 1;
+      }
+    }
+    equal("...the columns beside it are left empty", outside, 0);
+    const mark = historyMark(session.history);
+    applyEdit(session, lay({ kind: "brush", x: 0, y: 0, z: 0, radius: 2, footprint: "disc" }, "set", { stroke: "terrain-1" }));
+    equal("a touch past the low edge grows the document and moves the content", contentShiftSince(session.history, mark), [2, 0, 2]);
+    const moved = (x: number, z: number) => inFootprint("disc", x - 6, z - 6, 2);
+    const second = (x: number, z: number) => inFootprint("disc", x - 2, z - 2, 2);
+    equal(
+      "...and the landscape moved with it: both touches are one surface, without a seam",
+      misplaced(session, (x, z) => moved(x, z) || second(x, z)),
+      0,
+    );
+    equal("...as one step for the stroke", session.history.undoStack.length, 1);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 16, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const square = (x: number, z: number) => Math.abs(x - 4) <= 1 && Math.abs(z - 4) <= 1;
+    applyEdit(session, lay({ kind: "brush", x: 4, y: 9, z: 4, radius: 1, footprint: "square" }, "set"));
+    equal("a square brush lays every column of its square, whatever height it was aimed at", misplaced(session, square), 0);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const refusedEdit = (request: TerrainEdit, words: string): boolean => {
+      try {
+        applyEdit(session, request);
+        return false;
+      } catch (err) {
+        return err instanceof TerrainError && err.message.includes(words);
+      }
+    };
+    const brush = { kind: "brush" as const, x: 1, y: 1, z: 1, radius: 2, footprint: "disc" as const };
+    check("a brush that is not a disc or a square is refused by name", refusedEdit(lay({ ...brush, footprint: "hexagon" as never }, "set"), "hexagon"));
+    check("...and so is a radius past the reach", refusedEdit(lay({ ...brush, radius: 65 }, "set"), "radius"));
+    check("...and a mode there is not", refusedEdit(lay(brush, "flatten" as never), "flatten"));
+    check(
+      "...and a subsoil deeper than the range",
+      refusedEdit({ ...lay(brush, "set"), terrain: { ...lay(brush, "set").terrain, subsoilDepth: 40 } }, "subsoil"),
+    );
+    check(
+      "...and a noise a terrain cannot be made of",
+      refusedEdit({ ...lay(brush, "set"), terrain: { ...lay(brush, "set").terrain, field: { ...field, noise: { kind: "gradient", seed: 1 } } } }, "gradient"),
+    );
+    let outside = false;
+    try {
+      applyEdit(session, lay({ ...brush, x: 30 }, "set"), { autoGrow: false });
+    } catch (err) {
+      outside = err instanceof OutsideDocumentError;
+    }
+    check("with resizing off, a terrain outside the box is refused by name", outside);
+    closeDocument();
+  }
+}
+
+console.log("\n--- smoothing and erosion, held to WorldEdit and VoxelSniper ---");
+{
+  type World = string[][][];
+  const W = 24;
+  const H = 16;
+  const L = 24;
+  const AIR = "minecraft:air";
+  const blank = (): World => Array.from({ length: W }, () => Array.from({ length: H }, () => new Array<string>(L).fill(AIR)));
+  const copyOf = (world: World): World => world.map((plane) => plane.map((row) => [...row]));
+  const at = (world: World, x: number, y: number, z: number): string =>
+    x < 0 || y < 0 || z < 0 || x >= W || y >= H || z >= L ? AIR : world[x][y][z];
+
+  /** A rough landscape: stone under dirt under grass, spikes, a pond, and flowers on top. */
+  const landscape = (seed: number): World => {
+    const world = blank();
+    const random = (x: number, z: number, salt: number) => {
+      let h = Math.imul(x * 374761393 + z * 668265263 + seed * 2147483647 + salt, 1274126177);
+      h = (h ^ (h >>> 13)) >>> 0;
+      return h / 4294967296;
+    };
+    for (let x = 0; x < W; x += 1) {
+      for (let z = 0; z < L; z += 1) {
+        const top = 3 + Math.floor(random(x, z, 1) * 9);
+        for (let y = 0; y <= top; y += 1) world[x][y][z] = y === top ? "minecraft:grass_block" : y >= top - 2 ? "minecraft:dirt" : "minecraft:stone";
+        if (random(x, z, 2) < 0.15 && top + 1 < H) world[x][top + 1][z] = "minecraft:poppy";
+        if (x > 15 && z > 15 && top < 6) for (let y = top + 1; y <= 6; y += 1) world[x][y][z] = "minecraft:water";
+      }
+    }
+    return world;
+  };
+
+  const docOf = (world: World) => {
+    const session = newDocument({ width: W, height: H, length: L }, "sponge3", dataVersionOf("JE_1_21_4"));
+    for (let x = 0; x < W; x += 1) {
+      for (let y = 0; y < H; y += 1) {
+        for (let z = 0; z < L; z += 1) {
+          if (world[x][y][z] !== AIR) setBlock(session.doc, x, y, z, { namespacedName: world[x][y][z], properties: {} });
+        }
+      }
+    }
+    return session;
+  };
+  const differences = (session: DocumentSession, world: World): number => {
+    let wrong = 0;
+    for (let x = 0; x < W; x += 1) {
+      for (let y = 0; y < H; y += 1) {
+        for (let z = 0; z < L; z += 1) {
+          if (getBlock(session.doc, x, y, z).namespacedName !== world[x][y][z]) wrong += 1;
+        }
+      }
+    }
+    return wrong;
+  };
+
+  /*
+   * A literal port of WorldEdit's HeightMap, HeightMapFilter and
+   * GaussianKernel: the same loops, the same clamps, the same reads of the
+   * session after its own writes, in Java's float arithmetic. Kept apart from
+   * domain/terrain.ts on purpose, so the two can disagree.
+   */
+  const weSmooth = (source: World, box: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }, iterations: number): World => {
+    const world = copyOf(source);
+    const blocks = (name: string) => name === "minecraft:stone" || name === "minecraft:dirt" || name === "minecraft:grass_block";
+    const width = box.maxX - box.minX + 1;
+    const height = box.maxZ - box.minZ + 1;
+    const getHighest = (x: number, z: number, minY: number, maxY: number) => {
+      for (let y = maxY; y >= minY; --y) if (blocks(world[x][y][z])) return y;
+      return minY;
+    };
+    const data: number[] = new Array(width * height);
+    for (let z = 0; z < height; ++z) for (let x = 0; x < width; ++x) data[z * width + x] = getHighest(x + box.minX, z + box.minZ, box.minY, box.maxY);
+    // GaussianKernel(5, 1.0)
+    const radius = 5;
+    const diameter = radius * 2 + 1;
+    const kernel: number[] = new Array(diameter * diameter);
+    const sigma22 = 2 * 1.0 * 1.0;
+    const constant = Math.PI * sigma22;
+    let sum = 0;
+    for (let y = -radius; y <= radius; ++y) {
+      for (let x = -radius; x <= radius; ++x) {
+        const value = Math.fround(Math.exp(-(x * x + y * y) / sigma22) / constant);
+        kernel[(y + radius) * diameter + x + radius] = value;
+        sum = Math.fround(sum + value);
+      }
+    }
+    for (let i = 0; i < kernel.length; i++) kernel[i] = Math.fround(kernel[i] / sum);
+    const filter = (inData: number[]): number[] => {
+      const out: number[] = new Array(inData.length);
+      let index = 0;
+      for (let y = 0; y < height; ++y) {
+        for (let x = 0; x < width; ++x) {
+          let z = 0;
+          for (let ky = 0; ky < diameter; ++ky) {
+            let offsetY = y + ky - radius;
+            if (offsetY < 0 || offsetY >= height) offsetY = y;
+            offsetY *= width;
+            for (let kx = 0; kx < diameter; ++kx) {
+              const f = kernel[ky * diameter + kx];
+              if (f === 0) continue;
+              let offsetX = x + kx - radius;
+              if (offsetX < 0 || offsetX >= width) offsetX = x;
+              z = Math.fround(z + Math.fround(f * Math.fround(inData[offsetY + offsetX])));
+            }
+          }
+          out[index++] = Math.floor(Math.fround(z + 0.5));
+        }
+      }
+      return out;
+    };
+    let newData = [...data];
+    for (let i = 0; i < iterations; ++i) newData = filter(newData);
+    const originY = box.minY;
+    for (let z = 0; z < height; ++z) {
+      for (let x = 0; x < width; ++x) {
+        const index = z * width + x;
+        const curHeight = data[index];
+        const newHeight = Math.min(box.maxY, newData[index]);
+        const xr = x + box.minX;
+        const zr = z + box.minZ;
+        const scale = (curHeight - originY) / (newHeight - originY);
+        if (newHeight > curHeight) {
+          const existing = world[xr][curHeight][zr];
+          if (existing !== "minecraft:water" && existing !== "minecraft:lava") {
+            world[xr][newHeight][zr] = existing;
+            for (let y = newHeight - 1 - originY; y >= 0; --y) {
+              const copyFrom = Math.floor(y * scale);
+              world[xr][originY + y][zr] = world[xr][originY + copyFrom][zr];
+            }
+          }
+        } else if (curHeight > newHeight) {
+          for (let y = 0; y < newHeight - originY; ++y) {
+            const copyFrom = Math.floor(y * scale);
+            world[xr][originY + y][zr] = world[xr][originY + copyFrom][zr];
+          }
+          world[xr][newHeight][zr] = world[xr][curHeight][zr];
+          for (let y = newHeight + 1; y <= curHeight; ++y) world[xr][y][zr] = AIR;
+        }
+      }
+    }
+    return world;
+  };
+
+  const smooth = (session: DocumentSession, regions: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }[], iterations: number) =>
+    applyEdit(session, { kind: "smooth", area: { kind: "regions", regions }, iterations });
+
+  const whole = { minX: 0, minY: 0, minZ: 0, maxX: W - 1, maxY: H - 1, maxZ: L - 1 };
+  for (const [seed, iterations, box] of [
+    [1, 1, whole],
+    [2, 4, whole],
+    [3, 2, { minX: 3, minY: 2, minZ: 1, maxX: 19, maxY: 13, maxZ: 22 }],
+    [4, 6, { minX: 0, minY: 4, minZ: 0, maxX: 11, maxY: 9, maxZ: 23 }],
+  ] as const) {
+    const world = landscape(seed);
+    const session = docOf(world);
+    smooth(session, [box], iterations);
+    equal(`//smooth ${iterations} over ${JSON.stringify(box)} is WorldEdit's, block for block`, differences(session, weSmooth(world, box, iterations)), 0);
+    closeDocument();
+  }
+  {
+    const world = landscape(5);
+    const session = docOf(world);
+    const heights = (s: DocumentSession) => {
+      const out: number[] = [];
+      for (let x = 0; x < W; x += 1) {
+        for (let z = 0; z < L; z += 1) {
+          let y = H - 1;
+          while (y > 0 && !["minecraft:stone", "minecraft:dirt", "minecraft:grass_block"].includes(getBlock(s.doc, x, y, z).namespacedName)) y -= 1;
+          out.push(y);
+        }
+      }
+      return out;
+    };
+    const spread = (values: number[]) => {
+      const mean = values.reduce((a, b) => a + b, 0) / values.length;
+      return values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+    };
+    const before = spread(heights(session));
+    smooth(session, [whole], 4);
+    const after = spread(heights(session));
+    check("smoothing takes the spikes out of the heights", after < before / 2, `${before.toFixed(2)} -> ${after.toFixed(2)}`);
+    equal("...as one step", session.history.undoStack.length, 1);
+    equal("...and never grows the document", [session.doc.width, session.doc.height, session.doc.length], [W, H, L]);
+    closeDocument();
+  }
+  {
+    const world = blank();
+    for (let x = 0; x < W; x += 1) for (let z = 0; z < L; z += 1) for (let y = 0; y <= 4; y += 1) world[x][y][z] = "minecraft:stone";
+    const session = docOf(world);
+    equal("flat ground is already smooth", smooth(session, [whole], 3), 0);
+    closeDocument();
+  }
+  {
+    // The brush: SmoothBrush's box round the cell aimed at, its disc written.
+    const world = landscape(6);
+    const session = docOf(world);
+    applyEdit(session, { kind: "smooth", area: { kind: "brush", x: 12, y: 6, z: 12, radius: 4, footprint: "disc" }, iterations: 4, stroke: "smooth-1" });
+    let outside = 0;
+    for (let x = 0; x < W; x += 1) {
+      for (let z = 0; z < L; z += 1) {
+        if (inFootprint("disc", x - 12, z - 12, 4)) continue;
+        for (let y = 0; y < H; y += 1) if (getBlock(session.doc, x, y, z).namespacedName !== world[x][y][z]) outside += 1;
+      }
+    }
+    equal("the smooth brush writes only the columns of its disc", outside, 0);
+    const reference = weSmooth(world, { minX: 8, minY: 2, minZ: 8, maxX: 16, maxY: 15, maxZ: 16 }, 4);
+    let inside = 0;
+    for (let x = 0; x < W; x += 1) {
+      for (let z = 0; z < L; z += 1) {
+        if (!inFootprint("disc", x - 12, z - 12, 4)) continue;
+        for (let y = 0; y < H; y += 1) if (getBlock(session.doc, x, y, z).namespacedName !== reference[x][y][z]) inside += 1;
+      }
+    }
+    equal("...and inside it, WorldEdit's smooth of the box round it, ten more above, cut by the schematic", inside, 0);
+    applyEdit(session, { kind: "smooth", area: { kind: "brush", x: 6, y: 6, z: 6, radius: 3, footprint: "square" }, iterations: 4, stroke: "smooth-1" });
+    equal("...and a stroke is one step", session.history.undoStack.length, 1);
+    closeDocument();
+  }
+
+  /*
+   * A literal port of VoxelSniper's ErodeBrush: the tracker keyed by pass,
+   * every read of a pass from the passes before it, the HashMap tally walked
+   * in insertion order -- which is what this app breaks ties by.
+   */
+  const vsErode = (
+    source: World,
+    inside: (x: number, y: number, z: number) => boolean,
+    bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number },
+    rule: { erosionFaces: number; erosionRecursion: number; fillFaces: number; fillRecursion: number },
+  ): World => {
+    const changes = new Map<number, Map<string, string>>();
+    const flat = new Map<string, string>();
+    let nextIteration = 0;
+    const get = (x: number, y: number, z: number, iteration: number): string => {
+      for (let i = iteration - 1; i >= 0; --i) {
+        const found = changes.get(i)?.get(`${x},${y},${z}`);
+        if (found !== undefined) return found;
+      }
+      return at(source, x, y, z);
+    };
+    const put = (x: number, y: number, z: number, value: string, iteration: number) => {
+      if (!changes.has(iteration)) changes.set(iteration, new Map());
+      changes.get(iteration)!.set(`${x},${y},${z}`, value);
+      flat.set(`${x},${y},${z}`, value);
+    };
+    const open = (name: string) => name === AIR || name === "minecraft:water" || name === "minecraft:lava";
+    const faces = [[0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0]];
+    for (let i = 0; i < rule.erosionRecursion; ++i) {
+      const current = nextIteration++;
+      for (let x = bounds.minX; x <= bounds.maxX; ++x) {
+        for (let z = bounds.minZ; z <= bounds.maxZ; ++z) {
+          for (let y = bounds.minY; y <= bounds.maxY; ++y) {
+            if (!inside(x, y, z)) continue;
+            if (open(get(x, y, z, current))) continue;
+            let count = 0;
+            for (const [dx, dy, dz] of faces) if (open(get(x + dx, y + dy, z + dz, current))) count++;
+            if (count >= rule.erosionFaces) put(x, y, z, AIR, current);
+          }
+        }
+      }
+    }
+    for (let i = 0; i < rule.fillRecursion; ++i) {
+      const current = nextIteration++;
+      for (let x = bounds.minX; x <= bounds.maxX; ++x) {
+        for (let z = bounds.minZ; z <= bounds.maxZ; ++z) {
+          for (let y = bounds.minY; y <= bounds.maxY; ++y) {
+            if (!inside(x, y, z)) continue;
+            if (!open(get(x, y, z, current))) continue;
+            let count = 0;
+            const blockCount = new Map<string, number>();
+            for (const [dx, dy, dz] of faces) {
+              const relative = get(x + dx, y + dy, z + dz, current);
+              if (!open(relative)) {
+                count++;
+                blockCount.set(relative, (blockCount.get(relative) ?? 0) + 1);
+              }
+            }
+            let material = AIR;
+            let amount = 0;
+            for (const [wrapper, currentCount] of blockCount) {
+              if (amount <= currentCount) {
+                material = wrapper;
+                amount = currentCount;
+              }
+            }
+            if (count >= rule.fillFaces) put(x, y, z, material, current);
+          }
+        }
+      }
+    }
+    const world = copyOf(source);
+    for (const [key, value] of flat) {
+      const [x, y, z] = key.split(",").map(Number);
+      if (x >= 0 && y >= 0 && z >= 0 && x < W && y < H && z < L) world[x][y][z] = value;
+    }
+    return world;
+  };
+
+  /** A lumpy rock with ore in it, a pond against it and a few loose blocks. */
+  const rock = (seed: number): World => {
+    const world = blank();
+    const field = cellValues(normalizeDistribution({ kind: "simplex", seed, params: { frequency: 0.18 } }));
+    for (let x = 0; x < W; x += 1) {
+      for (let y = 0; y < H; y += 1) {
+        for (let z = 0; z < L; z += 1) {
+          const v = field(x, y, z) + (6 - y) * 0.06;
+          if (v > 0.05) world[x][y][z] = v > 0.45 ? "minecraft:andesite" : (x + y + z) % 7 === 0 ? "minecraft:coal_ore" : "minecraft:stone";
+          else if (y < 3) world[x][y][z] = "minecraft:water";
+        }
+      }
+    }
+    return world;
+  };
+  for (const preset of EROSION_PRESET_NAMES) {
+    for (const inverse of [false, true]) {
+      const world = rock(preset.length * 7 + (inverse ? 1 : 0));
+      const session = docOf(world);
+      const rule = erosionRule(preset, inverse);
+      applyEdit(session, { kind: "erode", area: { kind: "brush", x: 12, y: 7, z: 11, radius: 6, footprint: "disc" }, rule });
+      const centre = { x: 12, y: 7, z: 11 };
+      const expected = vsErode(
+        world,
+        (x, y, z) => (x - centre.x) ** 2 + (y - centre.y) ** 2 + (z - centre.z) ** 2 <= 36,
+        { minX: 6, minY: 1, minZ: 5, maxX: 18, maxY: 13, maxZ: 17 },
+        rule,
+      );
+      equal(`the erode brush, ${preset}${inverse ? " inverted" : ""}, is VoxelSniper's, block for block`, differences(session, expected), 0);
+      closeDocument();
+    }
+  }
+  {
+    const world = rock(40);
+    const session = docOf(world);
+    const region = { minX: 2, minY: 0, minZ: 3, maxX: 20, maxY: 12, maxZ: 15 };
+    applyEdit(session, { kind: "erode", area: { kind: "regions", regions: [region] }, rule: erosionRule("melt") });
+    const inBox = (x: number, y: number, z: number) => x >= 2 && x <= 20 && y >= 0 && y <= 12 && z >= 3 && z <= 15;
+    equal("over a selection it erodes every cell of the box, VoxelSniper's passes", differences(session, vsErode(world, inBox, region, erosionRule("melt"))), 0);
+    closeDocument();
+  }
+  {
+    // What the presets are for, said in blocks.
+    const world = blank();
+    for (let x = 0; x < W; x += 1) for (let z = 0; z < L; z += 1) for (let y = 0; y <= 4; y += 1) world[x][y][z] = "minecraft:stone";
+    world[5][10][5] = "minecraft:stone";
+    world[9][4][9] = AIR;
+    const session = docOf(world);
+    applyEdit(session, { kind: "erode", area: { kind: "regions", regions: [whole] }, rule: erosionRule("floatclean") });
+    equal("floatclean takes away a block floating on its own", getBlock(session.doc, 5, 10, 5).namespacedName, AIR);
+    equal("...but leaves a hole open to the sky, which has only five solid sides", getBlock(session.doc, 9, 4, 9).namespacedName, AIR);
+    applyEdit(session, { kind: "erode", area: { kind: "regions", regions: [whole] }, rule: erosionRule("fill") });
+    equal("fill fills a hole in the ground", getBlock(session.doc, 9, 4, 9).namespacedName, "minecraft:stone");
+    equal("...and erosion never grows the document", session.doc.height, H);
+    closeDocument();
+  }
+  {
+    const session = newDocument({ width: 8, height: 8, length: 8 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    const refusedTerrain = (request: Parameters<typeof applyEdit>[1], words: string): boolean => {
+      try {
+        applyEdit(session, request);
+        return false;
+      } catch (err) {
+        return err instanceof TerrainError && err.message.includes(words);
+      }
+    };
+    check("smoothing no times is refused by name", refusedTerrain({ kind: "smooth", area: { kind: "regions", regions: [whole] }, iterations: 0 }, "Smoothing"));
+    check(
+      "...and so is an erosion that counts seven faces of a cube",
+      refusedTerrain({ kind: "erode", area: { kind: "regions", regions: [whole] }, rule: { ...erosionRule("melt"), erosionFaces: 7 } }, "erosionFaces"),
+    );
+    closeDocument();
+  }
+}
+
+console.log("\n--- a mix shared out by a pattern ---");
+{
+  const refusedWith = (text: string, words: string): boolean => {
+    try {
+      parseMix(text);
+      return false;
+    } catch (err) {
+      return err instanceof MixSyntaxError && err.message.includes(words);
+    }
+  };
+
+  // The spelling: a distribution in front, its parameters inside.
+  const patchy = parseMix("#perlin{seed=7,frequency=0.1,octaves=4}70%stone,30%andesite");
+  equal("a distribution's parameters are read", patchy.distribution, {
+    kind: "perlin",
+    seed: 7,
+    params: { frequency: 0.1, octaves: 4 },
+  });
+  equal("...and written back as they were", formatMix(patchy), "#perlin{seed=7,frequency=0.1,octaves=4}70%stone,30%andesite");
+  equal("amplitude is another name for persistence", parseMix("#perlin{amplitude=0.7}1%a,1%b").distribution.params, {
+    persistence: 0.7,
+  });
+  equal("a number out of range is clamped into it", parseMix("#perlin{frequency=5,octaves=20}1%a,1%b").distribution.params, {
+    frequency: 1,
+    octaves: 8,
+  });
+  equal("a choice and a switch are read", parseMix("#gradient{axis=X,reverse=yes}1%a,1%b").distribution.params, {
+    axis: "x",
+    reverse: true,
+  });
+  check("a parameter the distribution does not take is refused by name", refusedWith("#perlin{size=3}1%a,1%b", "size"));
+  check("...and so is a choice it does not have", refusedWith("#voronoi{mode=hexagons}1%a,1%b", "patches, distance, edges"));
+  check("...and a number that is not one", refusedWith("#perlin{frequency=fast}1%a,1%b", "has to be a number"));
+  check("...and a distribution there is not", refusedWith("#plasma{seed=1}1%a,1%b", "#plasma is not a distribution"));
+  equal("the plain unseeded random writes no prefix at all", formatDistribution({ kind: "random", seed: 0 }), "");
+
+  /*
+   * Pinned to the seed: the same numbers in main, where a fill is written, and
+   * in the renderer, where a block is placed by hand. A change to the noise
+   * that moves these moves every pattern anybody has already built.
+   */
+  const close = (a: number, b: number) => Math.abs(a - b) < 1e-12;
+  const { perm } = noiseSeed(42);
+  check("Perlin noise is pinned to its seed", close(perlin3(perm, 1.5, 2.25, -3.75), -0.024539470672607422));
+  check("...and simplex noise", close(simplex3(perm, 1.5, 2.25, -3.75), 0.6787552083333334));
+  const pinned: Record<DistributionKind, number> = {
+    random: 0.3194502159021795,
+    perlin: 0.04076837267020556,
+    simplex: -0.2864331616031672,
+    ridged: 0.6462038432916208,
+    voronoi: 0.30481334926230164,
+    gradient: 5.214115989728534,
+  };
+  for (const kind of DISTRIBUTION_KINDS) {
+    check(
+      `the ${kind} field is pinned to its seed`,
+      close(cellValues(normalizeDistribution({ kind, seed: 42 }))(3, 4, 5), pinned[kind]),
+    );
+  }
+  let outside = 0;
+  for (let i = 0; i < 20_000; i += 1) {
+    for (const value of [perlin3(perm, i * 0.137, i * 0.071, i * 0.293), simplex3(perm, i * 0.137, i * 0.071, i * 0.293)]) {
+      if (!(value >= -1 && value <= 1)) outside += 1;
+    }
+  }
+  equal("both noises stay within [-1, 1]", outside, 0);
+
+  // A fill meets the shares exactly whatever the pattern.
+  const shared: Record<string, Record<string, number>> = {};
+  for (const kind of DISTRIBUTION_KINDS) {
+    const session = newDocument({ width: 16, height: 1, length: 16 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    applyEdit(session, {
+      kind: "fill",
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 15, maxY: 0, maxZ: 15 }],
+      mix: {
+        entries: [
+          { block: { namespacedName: "minecraft:stone" }, weight: 70 },
+          { block: { namespacedName: "minecraft:andesite" }, weight: 30 },
+        ],
+        distribution: { kind, seed: 11 },
+      },
+    });
+    const counts: Record<string, number> = {};
+    for (let x = 0; x < 16; x += 1)
+      for (let z = 0; z < 16; z += 1) {
+        const name = getBlock(session.doc, x, 0, z).namespacedName;
+        counts[name] = (counts[name] ?? 0) + 1;
+      }
+    shared[kind] = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)));
+    closeDocument();
+  }
+  equal(
+    "every distribution meets 70/30 exactly over 256 cells",
+    shared,
+    Object.fromEntries(DISTRIBUTION_KINDS.map((kind) => [kind, { "minecraft:andesite": 77, "minecraft:stone": 179 }])),
+  );
+
+  /*
+   * And the patterns are patterns: across a 50/50 split, noise puts like next
+   * to like, where random scatters. Counted as neighbouring pairs that differ.
+   */
+  const seams = (kind: DistributionKind): number => {
+    const values = cellValues(normalizeDistribution({ kind, seed: 5 }));
+    const field = new Float64Array(32 * 32);
+    for (let x = 0; x < 32; x += 1) for (let z = 0; z < 32; z += 1) field[x * 32 + z] = values(x, 0, z);
+    const choice = assignByQuota(field, [0.5, 0.5]);
+    let count = 0;
+    for (let x = 0; x < 32; x += 1)
+      for (let z = 0; z < 32; z += 1) {
+        if (x + 1 < 32 && choice[x * 32 + z] !== choice[(x + 1) * 32 + z]) count += 1;
+        if (z + 1 < 32 && choice[x * 32 + z] !== choice[x * 32 + z + 1]) count += 1;
+      }
+    return count;
+  };
+  const scattered = seams("random");
+  for (const kind of ["perlin", "simplex", "voronoi", "gradient"] as const) {
+    check(`${kind} comes in patches where random scatters`, seams(kind) * 3 < scattered, `${seams(kind)} against ${scattered}`);
+  }
+
+  // A gradient puts the first block at the low end of its axis.
+  const ramp = newDocument({ width: 3, height: 10, length: 3 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  const fillRamp = (reverse: boolean) =>
+    applyEdit(ramp, {
+      kind: "fill",
+      regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 9, maxZ: 2 }],
+      mix: {
+        entries: [
+          { block: { namespacedName: "minecraft:stone" }, weight: 1 },
+          { block: { namespacedName: "minecraft:dirt" }, weight: 1 },
+        ],
+        distribution: { kind: "gradient", seed: 1, params: { axis: "y", edge: 0, reverse } },
+      },
+    });
+  const column = () => Array.from({ length: 10 }, (_unused, y) => getBlock(ramp.doc, 1, y, 1).namespacedName.slice(10));
+  fillRamp(false);
+  equal("a gradient runs from the first block at the bottom to the last at the top", column(), [
+    "stone", "stone", "stone", "stone", "stone", "dirt", "dirt", "dirt", "dirt", "dirt",
+  ]);
+  fillRamp(true);
+  equal("...and the other way round reversed", column(), [
+    "dirt", "dirt", "dirt", "dirt", "dirt", "stone", "stone", "stone", "stone", "stone",
+  ]);
+
+  // The wire never went near the parser, so main checks what it carries.
+  check(
+    "a distribution main does not know is refused by name",
+    (() => {
+      try {
+        applyEdit(ramp, {
+          kind: "fill",
+          regions: [{ minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 9, maxZ: 2 }],
+          mix: {
+            entries: [
+              { block: { namespacedName: "minecraft:stone" }, weight: 1 },
+              { block: { namespacedName: "minecraft:dirt" }, weight: 1 },
+            ],
+            distribution: { kind: "plasma", seed: 1 } as unknown as Distribution,
+          },
+        });
+        return false;
+      } catch (err) {
+        return err instanceof MixSyntaxError;
+      }
+    })(),
+  );
+  closeDocument();
+
+  // By hand: the same field, cut where a sample of it over the frame says.
+  const frame = { minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 9, maxZ: 2 };
+  const handRamp = parseMix("#gradient{axis=y,edge=0}1%stone,1%dirt");
+  equal(
+    "a gradient placed by hand cuts at the middle of the frame",
+    [2, 4, 5, 7].map((y) => pickAt(handRamp, 1, y, 1, frame).block),
+    ["stone", "stone", "dirt", "dirt"],
+  );
+  const handNoise = parseMix("#perlin{seed=8}7%stone,3%dirt");
+  const wide = { minX: 0, minY: 0, minZ: 0, maxX: 47, maxY: 0, maxZ: 47 };
+  let stone = 0;
+  for (let x = 0; x < 48; x += 1) for (let z = 0; z < 48; z += 1) if (pickAt(handNoise, x, 0, z, wide).block === "stone") stone += 1;
+  check(
+    "noise placed by hand meets its shares on average",
+    Math.abs(stone / (48 * 48) - 0.7) < 0.07,
+    `${((100 * stone) / (48 * 48)).toFixed(1)}% stone`,
+  );
+
+  // --- the map beside the parameters ---------------------------------------
+  //
+  // It has to be the same answer, or it is a picture of something else: every
+  // pixel is the block `pickAt` gives that cell over the same frame.
+  const mapFrame = { minX: 3, minY: -2, minZ: 5, maxX: 42, maxY: 9, maxZ: 34 };
+  const mapMix = parseMix("#perlin{seed=11,frequency=0.12}5%stone,3%andesite,2%gravel");
+  for (const plane of MAP_PLANES) {
+    const map = distributionMap({ mix: mapMix, frame: mapFrame, plane, level: 4 });
+    let agree = 0;
+    for (let row = 0; row < map.height; row += 1) {
+      for (let column = 0; column < map.width; column += 1) {
+        const cell = { x: 0, y: 0, z: 0 };
+        cell[map.cut] = map.level;
+        cell[map.across] = map.columns[column];
+        cell[map.down] = map.rows[row];
+        if (mapMix.entries[map.entries[row * map.width + column]] === pickAt(mapMix, cell.x, cell.y, cell.z, mapFrame)) agree += 1;
+      }
+    }
+    equal(`the ${plane} map gives every cell the block the hand would`, agree, map.width * map.height);
+  }
+  const top = distributionMap({ mix: mapMix, frame: mapFrame, plane: "xz", level: 4 });
+  equal("...one pixel per cell while the frame fits", [top.width, top.height], [40, 30]);
+  equal(
+    "...and the same map twice",
+    Array.from(distributionMap({ mix: mapMix, frame: mapFrame, plane: "xz", level: 4 }).entries),
+    Array.from(top.entries),
+  );
+  equal("...with north at the top", [top.rows[0], top.rows[top.height - 1]], [5, 34]);
+  const front = distributionMap({ mix: mapMix, frame: mapFrame, plane: "xy", level: 99 });
+  equal("a side view has up at the top", [front.rows[0], front.rows[front.height - 1]], [9, -2]);
+  equal("...and a level outside the frame is brought into it", front.level, 34);
+
+  const rampMap = distributionMap({ mix: parseMix("#gradient{axis=y,edge=0}1%stone,1%dirt"), frame, plane: "xy", level: 1 });
+  equal(
+    "a gradient up the frame reads bottom to top in a side view",
+    [rampMap.entries[0], rampMap.entries[(rampMap.height - 1) * rampMap.width]],
+    [1, 0],
+  );
+
+  const broad = distributionMap({
+    mix: handNoise,
+    frame: { minX: 0, minY: 0, minZ: 0, maxX: 299, maxY: 0, maxZ: 47 },
+    plane: "xz",
+    level: 0,
+  });
+  equal("a frame wider than the limit is sampled to it", broad.width, MAP_MAX_SIZE);
+  check(
+    "...across the whole of it",
+    broad.columns[0] >= 0 && broad.columns[0] < 3 && broad.columns[broad.width - 1] > 296 && broad.columns[broad.width - 1] <= 299,
+    `${broad.columns[0]}..${broad.columns[broad.width - 1]}`,
+  );
+  const shown = broad.counts[0] / (broad.width * broad.height);
+  check("...and its shares come within a few percent of the mix", Math.abs(shown - 0.7) < 0.07, `${(100 * shown).toFixed(1)}% stone`);
+  equal("the counts cover every pixel", broad.counts.reduce((sum, count) => sum + count, 0), broad.width * broad.height);
+}
+
+
+// --- several areas, one selection --------------------------------------------
+//
+// Two areas with a gap between them, and a block standing in the gap. Every
+// region verb acts on the areas and leaves the gap exactly as it was: nobody
+// selected it, so nothing may be read from it, cleared in it or carried out of
+// it. The block in the gap is what makes each check see the difference -- with
+// the gap empty, a verb working on the bounds would pass all of them.
+console.log("\n--- several areas, one selection ---");
+{
+  const row = (session: DocumentSession, y = 0): string[] =>
+    Array.from({ length: session.doc.width }, (_unused, x) =>
+      getBlock(session.doc, x, y, 0).namespacedName.replace("minecraft:", ""),
+    );
+  const put = (session: DocumentSession, x: number, name: string): void => {
+    setBlock(session.doc, x, 0, 0, { namespacedName: `minecraft:${name}`, properties: {} });
+  };
+  const fresh = (): DocumentSession => {
+    const session = newDocument({ width: 12, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    put(session, 0, "stone");
+    put(session, 1, "stone");
+    put(session, 4, "gold_block");
+    put(session, 6, "dirt");
+    put(session, 7, "dirt");
+    return session;
+  };
+  const left = { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 };
+  const right = { minX: 6, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 };
+  const start = ["stone", "stone", "air", "air", "gold_block", "air", "dirt", "dirt", "air", "air", "air", "air"];
+
+  // A move carries both areas by the corner of their bounds.
+  let session = fresh();
+  moveRegion(session, [left, right], { x: 2, y: 0, z: 0 });
+  equal("two areas move together, and the block between them stays", row(session), [
+    "air", "air", "stone", "stone", "gold_block", "air", "air", "air", "dirt", "dirt", "air", "air",
+  ]);
+  equal("...as one undo step", session.history.undoStack.length, 1);
+  undoEdit(session);
+  equal("...which puts both back", row(session), start);
+  closeDocument();
+
+  /*
+   * A mirror of the bounds sends each area to the other end. In place, which
+   * is the case that needs the clearing pass: a reflection is a bijection on
+   * the bounds and not on the areas, so the cells an area left would otherwise
+   * keep their blocks.
+   */
+  session = fresh();
+  transformRegion(session, [left, right], { kind: "mirror", axis: "x" });
+  equal("a mirror swaps the two areas and leaves the gap alone", row(session), [
+    "dirt", "dirt", "air", "air", "gold_block", "air", "stone", "stone", "air", "air", "air", "air",
+  ]);
+  closeDocument();
+
+  // A copy keeps the arrangement and not the gap; a paste puts it back so.
+  session = fresh();
+  const held = copySelection(session, [left, right]);
+  equal("a copy of two areas spans their bounds", [held.width, held.blocks], [8, 4]);
+  check(
+    "...and takes nothing from the gap",
+    held.cells.every((cell) => cell.entry.namespacedName !== "minecraft:gold_block"),
+  );
+  pasteSelection(session, { x: 3, y: 0, z: 0 });
+  equal("a paste lands them in the same arrangement, over the gap's block", row(session), [
+    "stone", "stone", "air", "stone", "stone", "air", "dirt", "dirt", "air", "dirt", "dirt", "air",
+  ]);
+  closeDocument();
+
+  session = fresh();
+  cutSelection(session, [left, right]);
+  equal("a cut empties the areas and not the gap", row(session), [
+    "air", "air", "air", "air", "gold_block", "air", "air", "air", "air", "air", "air", "air",
+  ]);
+  closeDocument();
+
+  // Overlapping areas are one set of cells.
+  session = fresh();
+  const overlapping = copySelection(session, [
+    { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 },
+    { minX: 1, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 },
+  ]);
+  equal("a block two areas share is copied once", overlapping.blocks, 2);
+  check(
+    "no areas at all is refused by name",
+    (() => {
+      try {
+        copySelection(session, []);
+        return false;
+      } catch (err) {
+        return err instanceof RegionCountError;
+      }
+    })(),
+  );
+  closeDocument();
+
+  /*
+   * A scale writes only what came from an area. The gap's cells at the
+   * destination are not written from the gap -- the block that was in it is
+   * not doubled -- and the document grows to hold the result, as one step.
+   */
+  session = newDocument({ width: 12, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  put(session, 0, "stone");
+  put(session, 1, "gold_block");
+  put(session, 2, "dirt");
+  scaleRegion(
+    session,
+    [
+      { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 },
+      { minX: 2, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 },
+    ],
+    { kind: "multiply", factor: 2 },
+    { to: { x: 0, y: 0, z: 0 } },
+  );
+  equal("a scale of two areas doubles each and not the gap", row(session).slice(0, 6), [
+    "stone", "stone", "air", "air", "dirt", "dirt",
+  ]);
+  equal("...on every layer it grew to", row(session, 1).slice(0, 6), [
+    "stone", "stone", "air", "air", "dirt", "dirt",
+  ]);
+  equal("...as one undo step", session.history.undoStack.length, 1);
+  undoEdit(session);
+  equal("...which takes the growth back too", [session.doc.height, row(session).slice(0, 3)], [
+    1,
+    ["stone", "gold_block", "dirt"],
+  ]);
+  closeDocument();
+}
+
+
+// --- a region edit leaves the document's empty space ------------------------
+//
+// The empty space is the session's, so a caller that says nothing gets it.
+// Every MCP verb and the window's cut said nothing, and got air: an underwater
+// build cut, moved or turned came back with dry holes in it. Called here with
+// no options at all, which is exactly how those callers call.
+console.log("\n--- a region edit leaves the document's empty space ---");
+{
+  const pond = (): DocumentSession => {
+    const session = newDocument({ width: 8, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+    setSessionVoidBlock(session, "minecraft:water");
+    setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 1, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    return session;
+  };
+  const at = (session: DocumentSession, x: number) => getBlock(session.doc, x, 0, 0).namespacedName;
+  const two = { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 };
+
+  let session = pond();
+  cutSelection(session, two);
+  equal("a cut told nothing leaves the empty space", [at(session, 0), at(session, 1)], [
+    "minecraft:water",
+    "minecraft:water",
+  ]);
+  closeDocument();
+
+  session = pond();
+  moveRegion(session, two, { x: 4, y: 0, z: 0 });
+  equal("...and so does a move", [at(session, 0), at(session, 4)], ["minecraft:water", "minecraft:stone"]);
+  closeDocument();
+
+  session = pond();
+  transformRegion(session, two, { kind: "rotate", steps: 2 }, { to: { x: 5, y: 0, z: 0 } });
+  equal("...and a turn that lands somewhere else", at(session, 0), "minecraft:water");
+  closeDocument();
+
+  // A caller that does say still wins, and air is the answer with no choice made.
+  session = pond();
+  cutSelection(session, two, { voidBlock: "minecraft:air" });
+  equal("a caller that names a block still gets that block", at(session, 0), "minecraft:air");
+  closeDocument();
+
+  session = newDocument({ width: 4, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_21_4"));
+  setBlock(session.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+  cutSelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 });
+  equal("...and with no empty space chosen a cut leaves air", at(session, 0), "minecraft:air");
+  closeDocument();
+}
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

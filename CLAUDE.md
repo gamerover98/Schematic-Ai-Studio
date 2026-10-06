@@ -89,6 +89,10 @@ They are thin wrappers over the npm scripts, which stay the source of truth:
 `check.sh` runs typecheck plus every suite and does **not** stop at the first
 failure — a runner that aborts early hides how much else is broken.
 
+`npm run bench:edit` measures what one placed block costs in main on three
+large documents, step by step. It fails nothing; its numbers belong in the
+commit and beside the change that moved them.
+
 ## Invariants — do not quietly change these
 
 **The document's palette is append-only while editing.** Clearing an entry that
@@ -138,10 +142,13 @@ all until that check existed.
 
 **It is derived from the transaction rather than returned by five functions.**
 `tx.resize` is the one place that knows and every growing path goes through
-it, so `contentShiftSince(history, id)` sums the resizes pushed since an id
-captured before the call. The id is what makes an edit that changed nothing
-report nothing rather than inherit the previous edit's answer —
-`runTransaction` pushes no transaction for a recorder with no commands.
+it, so `contentShiftSince(history, mark)` sums the resizes recorded since a
+`historyMark` taken before the call. The mark is what makes an edit that
+changed nothing report nothing rather than inherit the previous edit's answer —
+`runTransaction` pushes no transaction for a recorder with no commands. It is
+a mark rather than an id because a brush touch pushes nothing either: it
+appends to the stroke's transaction (below), so the mark carries how long the
+top was, and a touch reports its own growth and not the stroke's.
 
 In the renderer `runDocument` carries the live selection, its anchor and the
 pivot, because it is the one place every edit passes through. The four commits
@@ -276,7 +283,7 @@ anything updates it, and until then it draws as half a bed — and a lone door
 half is a door you walk through. Both were written as one block, so the
 schematic looked right here and came apart when it was pasted.
 
-`TWO_PART` in `services/session.ts` is the table and there are two rows, which
+`TWO_PART` in `shared/two_part.ts` is the table and there are two rows, which
 is one more than there are shapes of answer: the far cell is one step along
 `facing` for a bed — where the camera was looking when the block was picked up —
 and always the cell above for a door. Both halves go in **one transaction**, or
@@ -284,6 +291,21 @@ Ctrl+Z would take a door back a half at a time. `_trapdoor` does not end in
 `_door` (it ends "pdoor"), which is why the suffix needs no guard and why
 `tests/session.ts` says so out loud: it is a true sentence about string endings
 that nobody would check and everybody would rely on.
+
+**A double plant is the third row, and it is asked of the registry.** Tall
+grass, large fern, the four tall flowers, tall seagrass, the small dripleaf and
+the pitcher plant are vanilla's `DoublePlantBlock` and go in as two cells, the
+upper one above, like a door. A `half` whose legal values are exactly
+`lower|upper` is that family (a slab's and a stair's is `top|bottom`), so the
+rows match on a predicate rather than a suffix. `pitcher_crop` carries the same
+`half` and is left out by name: it is planted as a seed. The pre-Flattening
+era needs nothing extra, because `legacy_blocks.json` spells `175:0..5` and
+`175:8..13` as these six names with `half=lower` and `half=upper`.
+
+**The far cell is free by the near cell's rule.** Empty space, whatever block
+it is made of, or a replaceable block. It asked for the word `air`, so with
+barrier or water as the empty space block every far cell held the void block
+and no bed or door could be placed at all.
 
 **Nothing is placed if the far half has nowhere to go.** That is the game's rule
 and it is the safe half of it: refusing over a flower is a smaller wrong than
@@ -350,6 +372,24 @@ break already writes it, and an underwater build coming back full of bubbles
 would have lost exactly what `editing.voidBlock` exists to preserve. It falls
 back to air when the empty space block is itself too new for the target —
 `structure_void` being 1.10, that is a real case rather than a defensive one.
+
+**A rename keeps the block entity, and it did not.** `tx.remap` writes through
+`setBlock`, which treats any write as displacing what was there, so every cell
+the version change renamed or restated lost its block entity with nothing
+counted: a 1.13 `sign` renamed to `oak_sign` for 1.14 came out blank. The
+records of every renamed or restated cell are taken before the remap and put
+back after it; a dropped block keeps nothing, as before.
+
+**And a banner is restated as well, because what it looks like is not in the
+block.** `restateBanners` in `domain/banner_place.ts` rewrites every banner's
+block entity in the target's spelling (the table is in the banner section
+below), and past the Flattening it moves the colour too: `magenta_banner`
+becomes `white_banner` with `Base` saying magenta going back, and `Base`
+becomes the name going forward. A design the target does not have is **counted
+into the same refusal a lost block gets** -- `VersionWouldLoseBlocksError.layers`
+-- and removed only with `dropUnrepresentable`. The reader draws all three
+spellings whatever the version says, so a version change that left banners
+alone would look right here and be blank in the game it was made for.
 
 **Two tables, and which one answers is decided by the era rather than by
 merging them.** `legacy_blocks.json` enumerates the pre-Flattening set exactly;
@@ -429,6 +469,331 @@ index cost. The palette may grow underneath the pass -- `setBlock` interns `to`
 if it is new -- and reading past the end yields `undefined`, which is falsy and
 is the right answer: a row added during the pass *is* `to`.
 
+**A block field holds a mix, and one block is a mix of one.**
+`shared/block_mix.ts` is WorldEdit's random pattern, `70%stone,30%andesite`,
+and it is the one spelling: the With field, a hotbar slot and the edit wire all
+carry it. A single block is written as the bare id, so every string stored
+before mixes existed is a mix already and nothing migrates. The number before
+`%` is a **weight**, normalised against the others, as WorldEdit has it; the
+chips show the share it comes to.
+
+**A fill meets the shares exactly, and that is what the distribution is for.**
+`domain/mix.ts` gives every cell a value from the distribution, ranks them and
+cuts the ranking at the quotas, so 70/30 over a thousand cells is 700 and 300.
+The ranking is two linear passes over a 65,536-bin histogram with only the
+cells of a cut bin sorted, because a comparator sort of eight million cells is
+seconds. The value comes from the cell's position and a **seed** and never
+from `Math.random` at write time, so the same fill twice is the same picture;
+the dice in the field are what change it. A block placed **by hand** from a
+mix has no set of cells to share out, so `pickAt` decides that cell alone and
+meets the shares only on average.
+
+**The distribution is a field over the document, and only its order
+matters.** `shared/noise.ts` has Perlin, simplex, ridged multifractal and
+Worley noise. Each is written as published, and `tests/session.ts` pins
+its values to the seed. `cellValues` samples each one at the centre of
+the cell, in document coordinates, so two areas filled with the same mix
+make one pattern across the seam. A fill ranks the values and cuts the
+ranking at the shares. Three things follow:
+
+- **There is no amplitude.** Multiplying every value by one number leaves
+  the ranking as it was. Inside a fractal sum, amplitude means how much
+  each finer octave counts, and that is `persistence`. The spelling takes
+  `amplitude` as another name for it, and the panel explains this beside
+  the field.
+- **The order of the entries is the order of the values.** The first block
+  gets the lowest values: the bottom of a gradient, the centre of a
+  Voronoi ring.
+- **A Voronoi patch is one value plus a hair of distance.** Without the
+  hair, the patch that a cut falls inside would be split along the walk
+  order, which is a straight line through it.
+
+`normalizeDistribution` reads a distribution from both directions: from
+the spelling, and from the wire, which never goes through the parser. A
+number out of range is clamped. A name or a choice that does not exist
+is refused by name.
+
+**By hand there is no ranking, so `pickAt` cuts at a sample.** It takes 32
+values per axis over a frame, and `App.svelte` passes the document's box
+as that frame. It cuts where the shares fall in the sample. For `random`
+the cuts are the shares themselves. The frame exists so that a gradient
+placed by hand runs from one end of the document to the other.
+
+**A mix shows its distribution before anything is filled with it.**
+`shared/distribution_map.ts` samples one plane of the field over a frame and
+gives each pixel the entry `pickAt` would, through the exported `cutsFor`. It
+is not a second estimate, and `tests/session.ts` holds every pixel of all
+three planes to `pickAt`. A fill ranks exactly, so its shares can differ from
+the map's by a few percent. A thin slice of large Voronoi patches can differ
+by more, which is why both the panel and the tool print the share they show
+beside the share asked for.
+
+- **The planes are named by their axes**: `xz` from above with north at the
+  top, `xy` from the south, `zy` from the west. Up is up in both side views.
+- **The frame is what a fill covers**: the box round every selected area, or
+  the schematic with nothing selected (what the hand uses), else
+  `DEFAULT_FRAME`. Past `MAP_MAX_SIZE` cells per side it is sampled with
+  `cutsFor`'s own spacing rather than shrunk.
+- **`DistributionPreview` in `BlockMixField`.** A thumbnail beside the shares
+  while the parameters are closed. With them open, the values in grey and
+  the blocks side by side, plus the plane, a level slider and the legend.
+  Each block is painted in its icon's average colour (`icon_colour.ts`).
+  Similar blocks then look alike, which is the picture's job, and "Distinct
+  colours" swaps in `CATEGORY_COLOURS` to tell them apart. Its root class is
+  `mix-map` because `App.svelte`'s viewport section is already `.preview`.
+- **`preview_distribution` is in `mcp/lifecycle.ts`, not `TOOL_SPECS`.** It
+  changes nothing, so it needs no transaction, and an image inside the chat's
+  JSON would show the in-app model nothing. It needs no document. One
+  picture carries both halves (`mapPicture`), with the legend as text beside
+  it.
+
+**`writeMix` is in `domain/mix.ts`, so the agent and the panel write the
+same way.** `fill_region` and `replace_blocks` take the same spelling, and
+their `from` takes a list. A single block still goes through its old path.
+Every block of a mix is checked against the version before anything is
+written, and one the version does not have refuses the whole edit. The
+tool descriptions list each distribution and its parameters from
+`DISTRIBUTION_PARAMS`, so a parameter added there reaches MCP with no
+other edit.
+
+**The edit wire takes `regions[]`.** `EditRequest.fill` and `replace`
+name several boxes, which are one set of cells: `shared/regions.ts` walks their
+union once, so an overlap is written and counted once, and the gap between two
+boxes is never touched. No bitmap over the bounding box, because two small
+areas far apart have a bounding box of hundreds of millions of cells.
+
+**A shape is a fill over other cells.** `EditRequest.shape` writes a mix the
+way `fill` does -- `writeMix`, shares met exactly, the document growing to hold
+it, one transaction -- and only *which* cells differ. `writeMix` takes a
+`CellSet` beside regions for it, and a `CellFilter` that is either `replace`'s
+patterns or a predicate. `shared/shapes.ts` is the geometry, in `shared/`
+because the creative tools will draw the same cells as a ghost.
+
+- **WorldEdit's shapes, inscribed in a box.** A sphere keeps the cells whose
+  centre is inside the ellipsoid touching the box's faces, measured in half
+  sizes, which on a box `2r + 1` across is `makeSphere`'s `x / (r + 0.5)`
+  exactly. A cylinder is that over two axes, a pyramid steps in one block a
+  side per layer up (a long footprint is a hipped roof), walls are a box's four
+  sides. `tests/session.ts` carries a literal port of `EditSession` and
+  requires every shape cell for cell, with counts written out beside it so the
+  port cannot confirm itself. `.claude/skills/mc-building-tools` has the
+  sources and the tables.
+- **Hollow is each command's own answer.** A cell is in the shell when the
+  cell `thickness` steps away along a *hollow axis* is outside; every shape is
+  convex, so that one look is enough. A sphere and a box are closed
+  (`//hsphere`, `//faces`), a cylinder is an open tube (`//hcyl`), a pyramid
+  has no floor (`//hpyramid`), walls neither floor nor ceiling (`//walls`).
+  Closing the tube's caps "for consistency" fails the port comparison.
+- **The mask covers a window, and a look past it asks the rule.** The window is
+  the box cut to the document, so the memory is a byte per cell of what can
+  change; a shape past the edge is that shape cut, not a smaller one, and the
+  shell at the cut is the shell the whole shape has there.
+- **`mode: "filled"` does not grow**, for `replace`'s reason: it writes only
+  over blocks already there. `empty` and `filled` ask `emptiness`, so the void
+  block is empty here too.
+
+`draw_shape` is in `TOOL_SPECS`, so the chat and MCP share it. It inscribes in
+the region it was *given*, not the trimmed one, and does not grow, like every
+agent tool; it says when part of the shape fell outside. Its description names
+the WorldEdit equivalents, which is prose no test reads.
+
+**A brush stroke is one undo step, and keeps its id.**
+`TransactionOptions.mergeKey` (`EditRequest.shape.stroke` on the wire): a
+touch with the key of the transaction on top joins it rather than pushing its
+own, through `commit` in `history.ts`. Keeping the **id** is the half that
+matters outside main: `undoTransactionId` does not move, so the renderer's
+selection timeline sees one edit. A new id per touch would also have made a
+save in mid-stroke silent, since joining does not move the depth `isDirty`
+reads. `history.open` holds the stroke, and anything but its next touch closes
+it: an edit without the key, an undo, a redo and **a save**
+(`markHistorySaved`). A touch that changes nothing pushes nothing and keeps it
+open. `tests/history.ts` fails if the save stops closing it.
+
+**In flight the right button is a tool.** `shared/creative.ts` names them --
+place, brush, shape, walls -- and keeps their settings in
+`UiSettings.creative`; `renderer/lib/creative_tools.ts` is the rules, plain for
+`selection_drag.ts`'s reason; `CreativeToolBar.svelte` sits over the hotbar in
+flight only, and `CreativeOptions.svelte` is the tool's floating window. B
+cycles and `[` `]` size, read off `event.code` because on an Italian keyboard
+they are AltGr chords and AltGr arrives as Ctrl+Alt. Every tool writes
+`EditRequest.shape` through `queueBuild`, with the hand's mix, so the ghost the
+viewer draws is `shapeCells`' cells and cannot disagree with the edit.
+
+- **A stroke never touches down inside what it has already reached**
+  (`reachOf`: each touch's shape grown by a block). The crosshair finds the
+  first block along its ray, and after a touch that is the touch's own output,
+  so a held button grew spheres towards the camera, or bored a tunnel away from
+  it, twenty times a second. Found by doing it: one second made a 32-wide
+  schematic 51. Nothing is drawn between two touches either: the line between
+  two surface points runs through the air or the ground.
+- **The brush is centred on the block aimed at** (VoxelSniper's ball brush),
+  and **stands on the build grid** when nothing is, or every touch on an empty
+  schematic's floor would reach below the origin. The rubber writes the empty
+  space block in `filled` mode, so it never grows anything.
+- **The first corner is the app's**, `cornerAt`, because what forgets it is
+  heard there: another tool, camera or document, Escape, and **the loss of the
+  pointer lock** -- the browser spends an Escape on releasing the lock, and
+  whether the keydown arrives as well is not something to build on.
+  `followShift` moves it with the content.
+- **Two corners build from the lower one up to the higher one or to the set
+  height, whichever is taller.** "The set height when level, the span
+  otherwise" was the plan, and turned a four-high wall on ground one block
+  uneven into a two-high one.
+- **In flight the camera follows a growth below the origin** (the delta path,
+  `moved`): the build used to jump under the crosshair, and the next touch
+  landed as far from it as it had jumped. Orbit is unchanged.
+
+`patchUi` is queued, and the tools are why: each write spreads `settings.ui`,
+which only moves when main answers, so two in one instant both spread the old
+block and the second undid the first. The options window opens against the
+docked panel, not against the right edge: `ToolWindow` keeps only a margin of a
+panel inside the pane, so one pushed past it hangs over the chat. It is the one
+tool window that still floats, because it is settings for what the right button
+does in flight, and the user asked for those to float.
+
+**Terrain is a surface from a noise, and it is the same surface everywhere.**
+`shared/terrain.ts` gives every column the height of its top block,
+`heightField`; under it one block of surface, `subsoilDepth` of subsoil, then
+rock, and empty space above. `domain/terrain.ts` writes the four layers with
+`writeMix`, so each is a mix met exactly and the whole is one transaction. The
+creative brush paints it in (`CreativeSettings.terrain`), the selection's
+Terrain section lays it over the areas, `generate_terrain` is in `TOOL_SPECS`,
+and the three put down the same landscape for the same settings.
+
+- **The noise is calibrated in its own units, never against the area.** Its
+  half-percentile and its 99.5th, sampled on a lattice spaced by a frequency's
+  reciprocal or a Voronoi cell's size, are the bottom and the top, so the
+  surface runs from `base` to `base + amplitude`. Stretched to the area
+  instead, two touches of the brush would be two landscapes with a cliff
+  between them.
+- **It is read in the content, `x - frame[0]`** (`DocumentState.frame`, the
+  sum of every growth below the origin). A touch past the low edge moves every
+  block; read in the grid, the landscape stays put while the ground already
+  laid moves, and the next touch meets it with a step the size of the growth.
+  The ghost and the panel's picture read the frame too. The frame starts at
+  zero when a file is opened, so a landscape continued after reopening a
+  schematic that had grown below the origin does not meet the old one.
+- **`set` leaves a cell that already holds its layer's block**, so a second
+  touch changes nothing. Written again, grass is not the same block: the
+  connection pass gives it `snowy` after the write, so the bare spelling
+  differs from what is there, and a mix would be shared out again over other
+  cells and shimmer under the crosshair. `raise` writes only into empty cells,
+  `dig` only empties cells above the surface; the left button always digs.
+- **What grows the document is what is built**: ground, up to the highest
+  column. Over a selection `set` grows to the selection, as a fill of it
+  would; `dig` never grows. A brush touch is the columns under its footprint
+  from `min(0, base)` to the higher of the schematic's top and the
+  landscape's.
+- **`random` and `gradient` are not terrains.** One is a bed of nails, the
+  other a coordinate, which calibrates to nothing; they are refused by name.
+
+**Smoothing is WorldEdit's `//smooth` and erosion is VoxelSniper's erode
+brush, each transcribed and each held to a port.** `smoothHeights` and
+`erodeCells` in `domain/terrain.ts`; `tests/session.ts` carries a literal port
+of `HeightMap` and of `ErodeBrush` and compares block for block, every preset
+both ways. The creative Smooth and Erode tools, the selection's two buttons and
+`smooth_terrain` / `erode` over MCP all write through them, and none of them
+grows the document: they reshape what is there.
+
+- **Smoothing is in Java's `float`** (`Math.fround`), the kernel included, and
+  a neighbour past the map's edge is read from the column itself, not the
+  nearest edge -- both are WorldEdit's and both move heights by one. Columns
+  are *stretched*: the top block is kept and moved, the cells under it copy
+  from the old column at the same proportion.
+- **Ground is a block that fills its cell or covers its floor or ceiling**
+  (`groundFor`): WorldEdit asks whether a block stops movement, which this app
+  cannot ask. A flower or a fence on the ground is not ground, and neither is
+  water or the empty space block.
+- **The smooth brush is `SmoothBrush`'s box**, the radius round the cell aimed
+  at and ten blocks more above, written only in the footprint's columns.
+  Several selected areas are smoothed one after another, as several
+  `//smooth`s would be, so an overlap is smoothed twice.
+- **Erosion's passes each read the one before** (the tracker), outside the
+  document counts as open, and the fill's commonest neighbour is counted by
+  the whole state -- FastAsyncVoxelSniper's copy; Reimagined counts by
+  material and would stand every log upright. A tie goes to the last of the
+  tied blocks in the order first met, because Java walks a `HashMap`, which has
+  no order to be faithful to.
+- **VoxelSniper's `none` preset is not offered**: zero faces erodes every solid
+  cell and fills every open one, which turns a sphere inside out. The brush is
+  VoxelSniper's sphere, `d^2 <= r^2`, not WorldEdit's `r + 0.5`, and its left
+  button runs the inverse, the gunpowder.
+
+`noise(kind, x, y, z, params)` in a build script is `cellValues` behind a host
+callback that answers a number (`registerHostQuery` in `core.ts`). It is the
+third thing across the sandbox's bridge and the first that returns anything,
+and it may cross because it computes from numbers and touches nothing.
+
+**A selection may be several areas, and the gap between them is nobody's.**
+Shift+Alt+drag adds an area and Alt+click removes one. Shift+Alt+click inside
+an area makes it the active one. A plain Shift-drag or a click starts the
+selection over.
+
+In the renderer, `selection` stays the **active** area. That is what let the
+other areas arrive without rewriting the dozens of places that read it: they
+go on meaning the box being worked on, with the face handles and the
+inspector. The other areas sit beside it in `otherAreas`, with `areaSlot` for
+the panel's order. `selection_set.ts` holds the rules. Only the verbs that act
+on the whole selection ask for every area: fill, replace, delete, copy, cut,
+the materials, and the gizmo.
+
+**One gizmo, rigid, on the bounds of every area.** Move, turn, mirror and
+scale carry all the areas as one shape about one origin. Main is told the
+corner where the bounds land, and each box lands where the same map sends it.
+`moveRegion`, `transformRegion`, `scaleRegion`, `copySelection`, `cutSelection`
+and `regionMesh` take `Areas`, which is one box or several. The transform
+passes the boxes down as a **mask**. A cell outside the mask is not read,
+cleared or written from. Two consequences are easy to undo by tidying:
+
+- **With a mask a transform is never in place.** A turn of the bounds is a
+  bijection on the bounds, not on the areas inside them. So a cell can land
+  on the gap, and the cell it left would keep its block unless the mask is
+  cleared first.
+- **A clipboard of several areas carries the mask.** `includeAir` clears the
+  destination before writing. Clearing the whole bounding box there would
+  wipe, at the destination, the same gap nobody selected at the source.
+
+`tests/session.ts` puts a block in the gap for exactly this reason. With the
+gap empty, a verb working on the bounds passes every check. Sabotaging the
+mask fails six of them.
+
+**The other areas are dropped by an effect, so a step must not record them.**
+Every site that drops the selection writes `selection = null` and nothing
+else. The effect that drops the pivot also empties `otherAreas`, a microtask
+later. In between, a recorder flush would store "no active area, two others",
+a state no gesture can work from. So `selectionNow` writes the others empty
+whenever there is no active area.
+
+**Alt+click must keep its release from the menu bar.** On Windows, releasing
+a lone Alt focuses the menu bar. Electron decides "lone" from the keyboard
+alone, so a mouse click in between does not count. Every Alt+click on an area
+would leave the next keystroke opening a menu. Electron acts only on key
+events the page did not handle, so the viewer calls `preventDefault` on that
+one release, armed by a press with Alt. Alt pressed and released on its own
+still reaches the menu.
+
+**The agent is told every area and defaults to the active one.** Each tool
+takes one box, and the model has to be able to name each area. An explicit
+region on another selected area is inside the selection, so the "outside the
+user's selection" note asks the union.
+
+**Replace is a list of blocks to look for, and it comes first.** The panel
+reads top to bottom as the sentence does -- Replace these, With those -- where
+it used to read "Block", then "Replace" with a button saying "with the block
+above". `from` is a list of patterns, each matched the way a single one always
+was. The Replace field hides weights and **keeps them in its text**, so ⇅ is
+lossless: swapping twice gives back exactly what was there.
+
+**A chip's states are edited on the chip, not on the document.**
+`BlockStateModal` rewrites the spelling a fill or a placement will write; the
+neighbour rules still have the last word when it lands. On a pre-Flattening
+document it is the grid of the id's `ID:DATA` rows instead, because the modern
+state editor would offer combinations that era cannot store. The tooltip says
+which `ID:DATA` a state will be stored as from `LegacyIndex.byState`, which
+`tests/formats.ts` holds equal to the MCEdit writer's own `byState` over the
+whole table -- a tooltip promising a number the file will not contain is worse
+than none.
+
 **A search that matches the namespace matches everything, and that was the
 load behind a total freeze.** `rank` in `block_search.ts` ended with
 `id.includes(query)` on the **namespaced** id. Every block here is
@@ -451,6 +816,14 @@ decides, and the namespace cannot come back as a way of matching everything.
 a failure names which letter; the check it replaced compared against
 `b.includes(q)` on the full id, which did not merely miss the fault, it stated
 it as the requirement.
+
+**And a space is an underscore, in every search that names a block.** No block
+name contains a space, so `oak slab` in the creative inventory found nothing at
+all while `oak_slab` found the slab — the spelling a person types first was the
+one guaranteed to fail. `blockQuery` in `shared/block_query.ts` is the one
+reading of a query now: trimmed, lowercased, the namespace stripped, and a run
+of whitespace one underscore. The picker, the inventory and `list_blocks` all
+ask it, which also made the namespace strip one copy where it had been two.
 
 **`blockRegistry` is `$state.raw`, and the line below it says why.** Plain
 `$state` on an array is a deep proxy, so reading it inside a `$derived`
@@ -544,14 +917,33 @@ entry registers the listeners **before the mount**, so a failure during mount
 is reported too, and reports **once** — an error handler that reports a loop is
 a loop of reports. Main counts what follows and says so in the dialog.
 
-Offering a reload is safe to offer for a reason worth stating: **autosave is
-main's**, on a 20-second timer, and main is the half still working. So the
-snapshot is current however long the window has been dead, and
-`failure_prompt.ts` says so rather than leaving somebody to weigh a reload
-against an unknown. It is Electron-free for `discard_prompt.ts`'s reason, and
-`ipcMain.on` is a third way to serve a channel that `tests/services.ts`'s walk
-had to be taught — it knew `handle` and `send`, and called a served channel
-unserved.
+Offering a reload is safe to offer for a reason worth stating: **the document
+is main's**, and main is the half still working. The reload is
+`webContents.reload()`, so the session, its unsaved changes and its undo stack
+are all there afterwards, and the new window picks them up (below). Autosave is
+main's too, on a 20-second timer, and is the net under a reload that does not
+help. `failure_prompt.ts` says all of that, and what a reload does cost: the
+selection, the camera, a message half typed. It is Electron-free for
+`discard_prompt.ts`'s reason, and `ipcMain.on` is a third way to serve a
+channel that `tests/services.ts`'s walk had to be taught — it knew `handle` and
+`send`, and called a served channel unserved.
+
+**A reloaded window asks main what is open, and for a long time it did not.**
+`getDocumentState` was on the bridge with no caller, so a reload started a
+renderer with `docState` null over a session main still held, dirty and
+autosaving. The window said "Nothing open", and the next New or Open replaced
+the work without a question, because `mayDiscard` asks only about a document
+the window knows of. The dialog said a reload cost twenty seconds and the undo
+history, which was true of the screen and false of main. Found while testing
+the noise maps.
+
+`adoptWhatMainHolds` in `App.svelte` runs in the startup `finally`, before the
+startup screen goes. It takes the state, the project notes (the `docState`
+handler sends them, as `docOpen` does), the conversation and the version list,
+and frames the camera. The conversation is asked for with nothing open too,
+because a chat held with nothing open is main's as well. It is **not an
+open**: no baseline version, and the selection, which was the window's, does
+not come back. At a cold launch main holds nothing and it changes nothing.
 
 **`scrollIntoView` scrolls every scrollable ancestor, and this app has a
 floating panel that watches its own geometry.** `BlockPicker`'s dropdown keeps
@@ -996,6 +1388,31 @@ replace the document with another state of the same file, and the subject has
 not moved. So `tests/services.ts` names the two handlers that open a file rather
 than walking every `adoptDocument` — the rule is about opening, not adopting.
 
+**The recovery prompt can be answered with a schematic open**, and it was
+written as though it could not. It stays on screen while something is opened
+from the File menu, a drop or an MCP client, and three things went wrong once
+something was. Found by driving the app over MCP with a stale snapshot in the
+profile:
+
+- **Discard answered `state: null`**, so the window went back to "Nothing open"
+  with the schematic still drawn and still open in main. It answers whatever is
+  open now;
+- **Restore replaced the open document without asking.** The window asks first
+  when that has unsaved changes, with `discardPrompt("restore")`, before the
+  prompt is put away, so a no leaves the question on screen;
+- **the first snapshot of the new document wrote over the work the prompt was
+  asking about**, twenty seconds after its first edit. Restore would then have
+  brought back the new document under the old one's name.
+
+The third is why the snapshot is read **at launch**, into `unanswered` in
+`ipc/handlers.ts`, rather than when the window asks: the window asks after the
+startup steps, by which time an MCP client may have opened and edited
+something. Until it is answered, `startAutosave`'s `hold` keeps the timer off
+the files, which leaves the newer work without a net for as long as the
+question is on screen. The older work is the one nobody has seen. Because of
+that hold, the window asks in a `finally`: a recovery never offered would leave
+the whole session without autosave.
+
 The subject rule has one case that looks like a bug and is not: opening a file
 the conversation has **no subject** for is an *adoption*, not a reset. That is
 the chat that built something with nothing open — the generator writes the file
@@ -1006,6 +1423,17 @@ answer. Opening a *different* file still saves and swaps.
 the obvious rule and it is wrong: a run that fails leaves its entry in the log
 and never enters the model's memory, so counting from the renderer drifts by one
 for every error above it.
+
+**Saving is working on a file too, and only opening said so.** The recents
+list was reachable through Open alone, so a schematic created and then saved
+-- from the window or over MCP -- never appeared in it: a file you just made
+is a file you never opened. `rememberDocument` in `menu.ts` is the one call
+now, the app's list and the OS jump list together, from both opens and both
+saves; `tests/services.ts` reads the four sites out of the source and refuses
+any other module recording half of it. The window rereads the list after its
+own save and on every `docChanged`, because it used to reread it only when it
+opened or closed something itself, and an MCP client doing either left the
+start screen as it was at launch.
 
 **A checkpoint is not cropped, and is keyed on `doc.revision`.** `saveSession`
 trims to content; a snapshot must not, for the same reason autosave must not —
@@ -1404,6 +1832,51 @@ which is where a run has to start anyway.
 axis the block is born with, the slab merge, `use`, and the replaceable
 redirect, which steps back along it to find what was clicked.
 
+**A vine hangs from a vine, and that rule is main's rather than the
+renderer's.** A vine is replaceable, so the redirect sent a vine clicked onto a
+vine back into the clicked cell: a vine written over itself, and a column that
+could not be hung by hand. The chain's answer could not be reused. It
+recognises a chain by its geometry, and a vine's plane says nothing to a
+renderer that holds no schematic. `hangingVineTarget` in `session.ts` runs
+ahead of the redirect. A vine clicked onto any vine of a column, from any side,
+goes into the first cell under the column that is not a vine (the user chose
+this over the cell directly below), with `against: "down"`. From there it is an
+ordinary placement: refused over a block that is not replaceable, and grows the
+document past the floor.
+
+What it clings to is `connectedState`'s, after vanilla's
+`VineBlock.canSupportAtFace`. A side is held up by a whole face of a collision
+shape on that side (`NeighbourBlock.sturdy`, not `solid`: leaves and glass hold
+a vine, beside it and overhead, as a jungle canopy does; water does not)
+**or by the vine above having that side**, so a hanging vine inherits the
+column's sides and takes any wall beside it too. `up` is not inherited; it is
+the underside of the block above, placeable since 1.13 (17w47a). A vine
+left with no support stays, as the cross, where vanilla would drop it.
+
+**And the empty space holds nothing up, whatever block it is made of.** With
+barrier as the empty space block, every empty cell around a build is a full
+collision cube, and vines clung to it on every side. Reported from creative
+mode. `connect.ts` reads the void block as air through `emptySpaceFor`, which
+`session.ts` registers once and reads live, because the answer is the
+session's and `runTransaction` is reached from some twenty call sites that
+carry only a document and a history. A barrier placed on purpose, in a document
+whose empty space is air, is a block and still holds a vine, as in the game.
+`setSessionVoidBlock` names the new block **before** its conversion runs:
+the connection pass is inside that transaction, and with the old answer the
+vine beside the converted cells would take them for walls. `tests/session.ts`
+fails without either half. A fence cannot see this: a barrier is see-through
+and was never solid to one.
+
+**That makes a vine column the one place `deriveConnections` is not a single
+sweep.** A change to one vine changes what every vine under it may keep, and a
+column has no bound, so dripstone's three-cell window is no answer here. When a
+vine is rewritten, the vines below it are derived again one by one, until one
+does not move or the column ends. `rederive` deliberately skips the
+`isDependent` check, because a vine the pass already rewrote has a palette
+index past the end of that array. Breaking the wall a four-long column hangs
+from lets go of all four in one transaction, and `tests/session.ts` fails
+without the walk.
+
 The epsilon is not a tuning knob and the rule is deliberately narrow: a tie
 means the existing answer was a coin toss, so only those change. Everything
 with a real winner keeps the answer it always had, which is why the lectern is
@@ -1433,7 +1906,7 @@ what the inventory never offered. That is the same failure the hand-written
 `DEFAULT_STATE` had, one layer down, and it is the argument for generating a set
 rather than curating one.
 
-**Seven vendored datasets, seven generators, seven skills.** The pattern is the
+**Eight vendored datasets, eight generators, eight skills.** The pattern is the
 same each time and it is the one to copy: the answers are looked up, recorded
 with where they came from, and the generator replaces only the rows between two
 markers. Running with nothing new must change no bytes — if it rewrites the file
@@ -1448,8 +1921,9 @@ every time, the ordering or the formatting has drifted and *that* is the bug.
 | `resources/litematica_versions.json` | `gen-litematica-versions.mjs` | `mc-litematic` |
 | `resources/command_syntax.json` | `gen-command-syntax.mjs` | `mc-commands` |
 | `resources/block_versions.json` | `gen-block-versions.mjs` | `mc-block-versions` |
+| `resources/banner_patterns.json` | `gen-banner-patterns.mjs` | `mc-banner-patterns` |
 
-**Every one of them now names what reads it downstream, and six of the seven
+**Every one of them now names what reads it downstream, and seven of the eight
 say «the MCP wire».** That section was missing and its absence had a cost: the
 skills described JSON → generator → table and stopped, so somebody could do
 everything `mc-versions` asked, twice, and leave `DEFAULT_SETTINGS.version`
@@ -1590,8 +2064,8 @@ Where the three went, and why each destination is the honest one:
   `ToolWindow` was a fixed 232px and a row here reads `manual · 64×32×64 ·
   12,048 blocks` with a Restore beside it, so every row ellipsised. It differs
   from the tools and the inspector in the way that decides its default: nothing
-  *summons* it — a selection brings the tools back and a click brings the
-  inspector back — so it starts closed and has a button in the document bar. A
+  *summons* it — a selection brings up the tools' tab and a click the
+  inspector's — so it starts closed and has a button in the bar, History. A
   panel with no way back is a feature you delete by accident.
 - the **generated files** to the start screen beside the recents. Their only two
   verbs are "open this" and "show me where it is", which are that screen's whole
@@ -1619,8 +2093,8 @@ receives geometry and has no business knowing what a recent document is.
 **It blocks the window, and it can be dismissed. Both halves are the rule.** It
 used to be a card over a live app — `pointer-events: none` on the container with
 `auto` on the card alone — so the camera buttons, the gear and the whole sidebar
-took clicks aimed at a document that was not there. It is a scrim now, on the
-modal tier, with the skeleton every other modal has.
+took clicks aimed at a document that was not there. It is a scrim now, over
+the whole window: `Screen.svelte`, below.
 
 Dropping a file still works, and the reasoning that once argued against a
 full-bleed cover is the reasoning that makes it safe: the handlers are on
@@ -1628,12 +2102,38 @@ full-bleed cover is the reasoning that makes it safe: the handlers are on
 does to its painting, drag events bubble, and `App.svelte` counts enters against
 leaves *because* children fire them — so one more child changes nothing.
 
+**A drag that starts in the window is never a file.** The viewport decided a
+drop was a file by the drag carrying `Files`, and Chromium says yes for an
+image dragged from inside the page: it hands it over as `download.png`. So
+pulling a material's icon onto the canvas came back as "download.png cannot
+be opened as a schematic". `lib/block_drag.ts` has three answers, each for
+what the others miss: `img { -webkit-user-drag: none }` in `app.css`, so no
+picture starts a drag at all; `BLOCK_MIME`, which a block dragged on purpose
+carries and nothing else, not even `text/plain`; and `trackPageDrags`, which
+marks any drag that began in the page. Its `dragend` does not arrive when the
+source left the page mid-drag, as a keyed list does, so a `drop` caught on the
+way down clears it after its own listeners have run, and so does the next
+pointer move, which no drag lets through. The guard is asked at the drop as
+well as at the highlight, before anything reads `files`.
+
 Dismissable because **with nothing open a chat message goes to the generator**.
 That is how a schematic gets built from a sentence, and this screen is the only
 place that says so; a screen covering the chat that could not be put away would
 delete the path it advertises. So Escape, the backdrop and a close button put it
 away, and it comes back from the document bar and from Ctrl+K — the same rule as
 the version history, for the same reason.
+
+**It says so with a tile, not a sentence.** The screen is four ways in, each a
+slab with its icon in a slot and a line saying what it takes: New (the lit
+one), Open, Convert, and **Describe it in the chat**. That last one was a
+sentence at the foot of the card asking the reader to close it and go and
+type; pressing the tile does both -- `describeInChat` puts the screen away,
+brings the chat back if it was put away, and bumps `composerFocus`, which
+reaches `ChatComposer` as `focusRequest` and puts the caret in the box. New
+and Open wait for `busy`; Convert and the chat never do. The Open tile and the
+drop overlay name the four formats a drop opens, and `tests/ui.ts` reads them
+out of `SCHEMATIC_EXTENSIONS`: the hint said ".schem or .schematic" for as
+long as a drop had opened four.
 
 **And with nothing open there is no Edit menu at all**, rather than one holding
 two permanently greyed rows. Both were already disabled, which is the honest
@@ -1654,6 +2154,276 @@ visible only inside the sidebar's second tab — so the app could tell you there
 was unsaved work, but only while you were looking away from what you were
 building. The title is main's (`windowTitle` in `menu_model.ts`), with the dirty
 marker leading, because a taskbar button truncates from the right.
+
+**The shell is docked: a bar in three thirds, a panel either side, a status
+bar.** The user's choice from the UX audit's three directions -- the
+workbench's structure in the inventory's material. Tool windows dock to the
+edges; the windows that are settings (the creative options, every modal)
+float.
+
+- **The bar** is a grid of `1fr auto 1fr`, so the camera switch stays in the
+  middle of the window whatever the sides hold: the document on the left (its
+  name and a **Document** menu holding its version, dimensions, empty space,
+  anchor and NBT, which were six buttons along the bar), how you look at it in
+  the middle, Undo, Redo, History, the gear and the two panel toggles on the
+  right. **Convert** is about files rather than the open document, so it moved
+  to File (`menuConvert`) and the start screen.
+- **The left panel** (`DockPanel`) is the selection's tools, the inspector and
+  the terrain as tabs, where two floating windows used to open over the build,
+  over each other and over the HUD. The gesture picks the tab, as it used to
+  bring a window back: a click asks for the inspector, and selecting a region
+  brings up the tools -- **only on the way into a region**, or dragging a face
+  would pull the panel off the Terrain tab every frame. The tabs are snippets
+  named `selectionTab`, `inspectorTab`, `terrainTab`: a snippet binds its name
+  in `App.svelte`'s markup, and one called `selection` shadows the selection
+  every prop inside it is passed. Its width and whether it is put away are
+  `UiSettings.dockWidth`/`dockCollapsed`, clamped to `DOCK_WIDTH`; the two
+  splitters each reserve the other panel's width.
+- **The status bar** is the grid's third row, never an overlay: the selection
+  (a block in two areas counted once), the schematic's size and blocks, its
+  container and version, and the MCP state, which is the one thing in it you
+  can press.
+- **The start screen steps aside for the dialogs it opens**, and since the
+  dialogs became one component it is a tier of its own as well, `--z-screen`,
+  just under `--z-modal` (`Screen.svelte`). It comes later in the document than every dialog, so
+  on the same tier it painted over New's and Convert's -- and over Settings
+  opened with Ctrl+, while it was up, which the step-aside list did not name.
+- **The compass moved to the top-right corner**, where a 3D editor keeps its
+  navigation gizmo: with a panel's width gone from the viewport, the centred
+  hotbar met it in the bottom-left. The frame counter sits under it.
+- **The tools' panel is never narrower than its three tabs.** `DOCK_WIDTH.min`
+  is 280: at 260 "Selection", "Inspector" and "Terrain" did not fit on the
+  strip in the pixel face, and the collapse chevron fell off its end.
+
+**The chat is the right-hand docked panel, and it wears the left one's
+strip.** `.panel-head` and `.panel-tab` in `app.css` are both panels' header
+and tabs; the conversation picker's button is the chat's one tab, so the name
+of the conversation is the name of the panel. It is a tab to look at and a
+button to a screen reader, because what it opens is a list.
+
+- **A turn is a name in the pixel face behind a square of its colour**, as the
+  game prints a player in chat: gold you, emerald the model, redstone a
+  failure, the quiet colour a stopped run. The square of a turn still being
+  written blinks. Going back to a checkpoint is an icon on the name's line,
+  shown on hover: hidden in a row of its own, it left a blank line under every
+  message that had one.
+- **Emerald as text is `--accent-text`, not `--accent`.** The accent is
+  4.3:1 on the light theme's stone, under the 4.5 a line of text needs, so
+  words take a deeper green there and fills keep the bright one. `tests/ui.ts`
+  holds it to 4.5 on the slab and in a field. Older components still write
+  `--accent` as text and move over as their sub-phase comes.
+- **What the model did is a well, `.sunken`**: field-coloured, with the inset
+  bevel. `.inset` is slot-dark in every theme, which is right under an icon and
+  wrong under a paragraph on the light theme. The trace, the composer and a
+  code block are wells.
+- **An opened trace step goes under its heading**, the width of the well. The
+  step was `.row`, and `app.css` had a global `.row` laying out columns of
+  160px that no component used -- every one that says `.row` lays it out
+  itself -- so once the chat was wide enough for two columns the thinking and
+  a tool's arguments opened *beside* their heading, squeezed against the right
+  edge. The global is gone and the step is `.step`; a generic class name in
+  `app.css` is a layout imposed on every component that happens to say it.
+- **What changed is the blocks, in slots**: the receipt asks
+  `requestBlockIcons` for each tally shown and draws the count beside the
+  slot in figures, with the id in the hover. Air has no picture and is
+  never asked for; its slot stays empty.
+- **The two popovers keep their Escape.** The window's own drops the
+  selection, so the conversation list and the model picker stop it, from the
+  button as well as from inside, because a click leaves the focus on the
+  button. The list takes the focus after a `tick`: the effect that focused it
+  woke on the same `placement` the popover's `style` is written from and ran
+  first, so the focus landed on a popover still `visibility: hidden`, which the
+  browser refuses without a word.
+
+**The tools' panel is the inventory too.** Its three tabs and the creative
+options' floating window draw from the scales alone -- `tests/ui.ts` walks
+fifteen components for a corner, a colour, a size or a stacking level of
+their own, and for the accent written as text.
+
+- **A block is shown as a block wherever a panel names one**: in a slot,
+  slot-dark in every theme with `.inset`'s bevel -- the materials, a field's
+  chips, the inspector's heading, a block's hover. The inspector and the hover
+  put the readable name (`blockLabel`) over the id in the mono face.
+- **A slot's count is the game's**: `.figures` (below), `--slot-text` with
+  `--slot-text-shadow`. They are tokens restated in all three palettes with
+  the same values, because the slot under them is dark in every theme, and
+  the contrast check holds the pair to 4.5:1 there.
+- **A choice of a few is `.segmented` in `app.css`**: slabs in a sunken
+  well, the chosen one pressed in and lit (`.active` or `aria-pressed`).
+  The camera switch, a creative tool's options, the terrain's footprint and a
+  map's plane had four looks; none keeps one of its own.
+- **A field holding blocks rings as a whole**, like the composer, and the
+  selector needs `:global`: the caret's input is `BlockPicker`'s, and
+  Svelte scopes the inside of `:has()` too -- `:where(.svelte-x):focus-visible`
+  -- so a scoped `.chips:has(:focus-visible)` asks for a focused element of
+  `BlockMixField` and never finds one. It compiles, and draws nothing.
+- **The floating options window is on `--z-window`**, over the hotbar and the
+  viewport's bars, which are `--z-overlay`, the tier under it.
+
+**Every dialog is `Modal.svelte`.** There were ten copies of the skeleton and
+they had drifted: three ways of handling Escape, the pointer-lock release in
+six of the ten, a close button in the header's flow in some and pinned to a
+corner in others, two with no close button at all, and a backdrop that closed
+on any click in some. What a dialog looks like was already `.modal` in
+`app.css`; what it does is this component, once:
+
+- **the scrim is `--z-modal`**, and the pointer lock goes on open;
+- **the keyboard is the dialog's.** Every keydown stops at the scrim, so the
+  window's single-key shortcuts -- Delete empties the selection, E opens the
+  inventory, Escape drops the selection -- never fire from inside a dialog.
+  Escape closes it **unless something inside already took it**
+  (`defaultPrevented`): a block list open in a field closes first, which is why
+  `BlockPicker` now `preventDefault`s the Escape it uses. Tab goes round
+  inside, and the control that opened the dialog gets the focus back;
+- **the backdrop closes it only for a press that began there.** A drag that
+  starts on a slider and is let go past the edge ends in a click on the scrim;
+- `width`, `height` and `flush` (no padding, no scroll: the dialog lays out
+  its own regions, as NBT and Settings do). The actions are a `footer`
+  snippet, declared inside `<Modal>` -- a snippet that is a direct child of a
+  component is passed to it as a prop, so the rows Settings renders are
+  declared *outside* it for the same reason.
+
+`tests/ui.ts` refuses a dialog with a scrim, an Escape or a pointer-lock
+release of its own, and any component with a local `.primary`, which painted
+the accent flat over `app.css`'s bevelled one in five dialogs. The block-state
+editor is not a dialog: it is anchored to a chip, on `--z-popover`. The
+command palette keeps its own frame -- a search at the top, no title -- and
+wears `.modal`. The creative inventory is a `Modal` too, with its search
+in the header (`head`) and focused after a `tick`, because the dialog puts
+the focus on itself in the same flush.
+
+`.callout` in `app.css` is what a dialog says before an act: a field-coloured
+well with an emerald edge to explain, gold to warn (`.warn`), redstone to
+refuse (`.bad`). It replaced five local spellings of the same box.
+
+**A block field in a dialog chooses on a pick, never on a keystroke.**
+`BlockPicker` calls `onchange` for every character typed and `onpick` for a
+row chosen or Enter, and the Empty space dialog wired its choice to the first:
+typing "stone" made the empty space `s`, then `st`, then `sto` -- three
+requests to main, each a block that does not exist, and the last one stayed.
+It keeps what is typed as a draft now and chooses on `onpick`.
+
+**What the window shows with no document is `Screen.svelte`**: the start
+screen, and the recovery question in its place when an earlier session left
+work unsaved. A sibling of `Modal`, not a use of it, and the difference is the
+keyboard. A dialog stops every key; this is the window's resting state, and the
+app's commands -- Ctrl+K, Ctrl+, -- have to work from it. So **a Ctrl chord goes
+through to the window and a plain key stays on the screen**: with nothing open
+the single-key shortcuts have nothing to act on, and with a schematic opened
+behind the recovery question by an MCP client, E would open the inventory over
+a question about lost work. The rest is a dialog's: `.modal`, the pointer lock
+let go, the focus in and Tab kept inside (`focus_trap.ts`, which `Modal`
+shares), and a backdrop press that keeps the focus in the card. It hands no
+focus back on the way out, because what opened it was the launch.
+
+- **`--z-screen`**, just under `--z-modal`: a dialog opened from it, or Settings
+  from Ctrl+, lands on top.
+- **No `ondismiss`, no way out but the answers**: no close button, and Escape
+  and the backdrop do nothing. That is the recovery question, which used to be
+  a card in the middle of the viewport with the bar, the chat and the gear all
+  live around it. While it is up the bar does not offer Start either:
+  `startvisible` is `startVisible || recovery !== null`.
+- **The loading screen wears the same header** -- the app's mark beside its
+  name in the pixel face -- on `--z-top`, with the game's loading bar in the
+  inventory's material.
+- **The command palette gives the focus back** to what had it, unless something
+  has taken it since: Ctrl+K and Escape over the start screen left it on the
+  page, and the screen's keys with it.
+
+**What the viewport draws over the scene is the inventory's material too.**
+The overlays were the last surfaces deciding their own corners, colours and
+stacking levels -- 4, 5, 100 and 101, written in four files, with blurred
+translucent plates and a toast that sat under the start screen and every
+dialog.
+
+- **Three tiers of their own, by name.** `--z-overlay` (10) is the hotbar and
+  the two bars over it, under every window. `--z-beside-modal` (110) is the
+  hotbar while the creative inventory is open, over the dialog's scrim -- the
+  game draws its hotbar inside its inventory, and a tile is dragged down onto
+  a slot. A notification is `--z-toast`: an open that failed was pressed on
+  the start screen, and its answer used to land behind it.
+- **The hotbar is the game's**: nine slots sunk into a slab, the one in hand
+  framed with a `box-shadow` (the outline is the keyboard's focus ring), and
+  over it the name of what is held, slot-dark with the game's white words so
+  it reads over any sky in either theme. The names used to sit under every
+  slot at nine pixels; each slot still says its own in `aria-label` and its
+  hover. `--hotbar-height` is what its rules add up to, and `tests/ui.ts`
+  does the sum: a slot made bigger with the token left alone fails by name.
+  Only the slab takes the pointer, so a click beside the name is a click on
+  the build.
+- **The bars are slabs, and a choice of one is `.segmented`**: the gizmo's
+  four modes and the creative tools. Copy, paste and the rest are
+  `button.icon`; a toggle that is on is pressed in and lit, as a segmented
+  control's chosen one is. The axis letters are in the body face, bold: in the
+  pixel face a Z reads as a 2.
+- **What the buttons do is said in the status bar** (`viewportHint` in
+  `App.svelte`, `hint` on `StatusBar`), as a 3D editor's status bar says
+  it. It was a plate in the viewport's top-left corner, under every
+  notification; it is the reading that gives way first when the window is
+  narrow.
+- **A notification is a slab with an edge in its tone**, `.callout`'s rule,
+  centred at the top and clear of the compass on both sides -- `2 * 128px`,
+  which is `COMPASS_MARGIN` + `COMPASS_PX` + a gap, and `tests/ui.ts`
+  holds the two to each other. The frame counter stands under the compass
+  from the same two numbers, which the viewer hands to CSS as
+  `--compass-margin` and `--compass-size`.
+- **The drop target is one element**, an edge and a tint with what a drop
+  does in the middle, on `--z-screen` and after the start screen in the
+  document: that screen says to drop a file anywhere on it, and covered the
+  answer.
+- **Nothing over the scene is blurred.** A blur was a second pass over the
+  scene for a caption.
+
+**The last pass was accessibility and copy, and each rule in it is checked
+in `tests/ui.ts` ("accessibility and copy").**
+
+- **A number on a slot is figures, not pixels.** `.figures` in `app.css`:
+  the body face in bold, tabular. In Pixelify Sans at 11 and 12px a 5 is an
+  S and a 2 a Z, measured on the hotbar's fifth slot; the hotbar's keys, the
+  materials' counts, the inventory's `ID:DATA` and a receipt's counts are
+  figures. Words on a slot (the held name, `mix`) stay in the pixel face.
+- **A slider's value is beside its name, never inside it.** `.slider-head`:
+  the label, then an `<output for>` at the trailing edge, and the input
+  carries `aria-valuetext`. "Render scale — 1.0" was one label that changed
+  under the pointer and was read as one sentence. The units are `unit.*`.
+- **Less motion means less motion.** The global rule runs every animation
+  once (shortened alone, an infinite one flickers at the display's rate), and
+  a compass flight is an arrival (`flightDuration`, asked per flight).
+- **A notification is spoken from a region that is always there.** Two
+  `.sr-only` regions in `App.svelte`, polite and `role="alert"` for a
+  failure, whose words change; the toast is created already full, and a live
+  region born full is one most readers never announce.
+- **Every component picks from the scales**, not only the surfaces each
+  sub-phase walked. That walk found the dirty marker, the panel toggles and
+  the update button writing `--accent` as text, a 12px font and two radii.
+- **One line of help per control.** No message past 200 characters, no hint
+  past 170, and none of the renderer's words (mesh, atlas, multisampled) in
+  them. What is worth more than a line is behind a `details.more`: the
+  materials' shortcuts (a `dl.keys`), the anchor's three paragraphs.
+- **A provider is shown by its name** (`providerLabel`): the stored values
+  are what `settings.json` holds and cannot be reworded, so "OpenCode"
+  is shown as OpenCode Zen through the catalogue.
+
+**The settings are ten panes in four groups**, each pane in sections: App
+(General, Updates), Viewport (Scene, Lighting, Textures & colours), Performance
+(Graphics, Level of detail, Diagnostics), Connections (AI providers, MCP
+server). They were ten panes in a flat list, in the order they were written,
+with ambient occlusion in two of them, the floor under "Sky & light", the frame
+counter among the GPU costs, and a hint pointing at panes called Viewport and
+Quality that no longer held what it said.
+
+- **What rebuilds the preview says so beside its name**, with a gold badge, and
+  the list is `App.svelte`'s: `tests/ui.ts` reads `patchPreview`'s `rebuilds`
+  and requires a badge on every field in it but the levels of detail, which
+  build beside the mesh and re-mesh nothing.
+- **The level-of-detail legend is painted from `LOD_TINT` in `lod.ts`**, which
+  the viewer reads too. It was three `rgb()` literals beside a comment saying
+  they had to match the viewer.
+- **"Game version" is the version for new schematics** -- what New starts on and
+  what a build from the chat is made for -- and is shown by its label, 26.2, not
+  the table's key. The open schematic's own version is the Document menu's.
+- `startOn` names a pane by id; the MCP indicator and the update indicator open
+  `mcp` and `updates`.
 
 **A floating panel is resizable, and its size is two settings per window.**
 `ToolWindow` was `width: 232px` in CSS with no size props at all — the number
@@ -1682,6 +2452,133 @@ past 64 distinct states that sentence *understated* the palette, which is worse
 than either cap alone. Both are gone, and the cost was already paid:
 `paletteHistogram` walks every voxel on every state push either way, so dropping
 the `.slice` adds payload, not work.
+
+**And it is the selection's palette, laid out as an inventory.** Beside tools
+that act on the selection, the whole document's list offered blocks the
+selection did not hold. `selectionPalette` in `session.ts` counts the union of
+the areas, overlaps once, through `forEachUnionCell`, the walk the fill takes.
+It is **asked for, not pushed**: the selection is the renderer's, so
+`App.svelte` asks once the selection has held still for 120 ms, one request in
+flight through `coalesce`. A 256x64x256 selection is about 35 ms in main.
+Only while the list is on screen, which is the Selection tab of the docked
+panel. **With nothing selected it is the whole schematic's** (`regions:
+null`), which is how the one stray block is found: a docked panel is always
+there, where the floating window a selection summoned was not. An answer is
+tagged with whose materials it counted, so the schematic's are never drawn as
+the selection's in the moment between the two.
+
+**A bed is one bed.** The
+list counted a bed as two -- a foot and a head, which is true of the file and
+false of the build -- and the same for a door, a two-tall plant and an extended
+piston with its `piston_head`. `countMaterials` in `domain/materials.ts` leaves
+a far half out when its near half is one step back (`nearOf` and `nearKey` in
+`shared/two_part.ts`), is the same block facing the same way, and **is inside
+the cells being counted**: a selection holding a head and not its foot holds
+half a bed, and is told so. The near half's row carries the far one as
+`PaletteCount.pair`, and Shift+click puts both in Replace, or replacing the
+beds would leave their heads.
+
+The whole document -- `get_palette`, `regions: null` -- is not counted by
+walking its box, which is 52 ms on a 256x96x256. Whether an entry is a far half is decided once
+per palette entry; with none present the answer is `doc.counts` as it stands,
+and otherwise one pass reads a byte per cell. `DocumentState.palette` still
+counts states as the file holds them, because it runs on every edit.
+
+`TWO_PART` moved to `shared/two_part.ts` for the third reader: **icons draw
+the whole block**. `iconCells` in `services/block_icons.ts` reads it the way
+placement does -- a bare bed or a foot is both halves, a head on its own is a
+head -- and `BlockIcon.size` says how many cells, which `paint()` shrinks
+until their box covers no more of the picture than a cube's (`viewExtent`:
+0.74 for a bed, 0.65 for a door; half left both lost in their slots). It
+frames the cells and never the geometry, so a torch or a slab is drawn
+exactly as before. `prime` decodes both halves, or the head's
+textures would arrive mid-batch and move the atlas under the icons.
+
+Two rules in it are easy to undo by tidying:
+
+- **A cell outside the document is `outside`, not air.** A selection may reach
+  past the box, and a replace of air never reaches those cells, so counting
+  them as air would offer a replace that finds fewer than the slot says.
+- **The corner count is truncated, never rounded.** Rounding sends 99,960 to
+  `100.0k`, the wrong unit and more than there is. `formatCount` in
+  `renderer/lib/materials.ts`, with the exact number in the hover.
+
+What a click on a slot means is `materialAction` in the same module: plain
+lights the block up in the viewport (below), Ctrl lights several, Shift is
+Replace, the right button pins the slot's reading open (`BlockTooltip`'s
+`pinned`: id, states, count and share, the pair, and Copy id). A plain click
+used to put the block in With; With and Replace are filled by dragging now,
+which is the gesture that says which field, and editing a state is the With
+chip's right-click. The pinned reading takes Escape on the way down, because
+the window's own Escape drops the selection and the list with it. **A plain
+click on air fills Replace**, because air cannot be held and every empty
+cell glowing would be the outline of everything else; Ctrl adds air to With,
+since a slot of it cannot be dragged. A slot carries the exact state, so a
+replace of it finds exactly the cells the slot counted. **With nothing
+selected there are no fields** (`materialAction(…, fields: false)`): Replace
+and With wait for a selection, so Shift is a plain click and air does
+nothing, rather than writing into a field nobody can see.
+
+**A click on a slot lights the block up, through walls.** The game's Glowing
+effect is the model: an outline round the thing wherever it is, because
+"where are the diamonds" is asked about blocks inside the build. The viewport
+has no blocks, so main finds them -- `findBlocks` in `domain/find_blocks.ts`,
+`matchesBlockPattern`'s rule, a bed's `pair` sent beside it -- and sends the
+**shell**: one face per side of a matching cell that touches no other, four
+integers each (`IPC.docFindBlocks`), in content coordinates so it stands
+where `placeChunks` stands the chunks. Asked, like the materials: on the
+glow, the revision and the areas, 120 ms, through `coalesce`.
+
+`Viewer.svelte` draws it in two passes and only while something glows. A
+mask -- the faces in white, no depth test, into a target with no depth and no
+samples -- before the scene's target is bound, so the frame still binds that
+target once; then a fullscreen quad on the **canvas**, the outline where the
+mask is empty within two pixels of it and a fifth of the colour inside, after
+the anti-aliased copy (or the scene pass without one) and under the compass.
+Never a render into the multisampled target, which would be a second resolve.
+`glowScene` is its own scene, so no raycast, light or shadow reaches it.
+`--glow` is the colour, warm so it is never read as the selection.
+
+Past `MAX_GLOW_FACES` (300,000, 4.8 MB) the shell is built again in cells of
+two blocks, then four, up to `MAX_GLOW_SCALE`, and `scale` says which. It was
+cut off at the cap at first, and a field of scattered stone lit its first
+third and left the rest dark, which reads as a fault rather than a limit.
+
+Plain lights one slot and puts it out when it was the only one lit; Ctrl adds
+or takes out (`nextGlow`). Escape puts the glow out before it drops the
+selection, and a glow lit from the list goes when the list changes whose
+materials it shows: the selection's with the selection, the schematic's
+(`scope: "document"`, the whole schematic) when a selection appears. Over MCP
+`highlight_blocks` (`mcp/lifecycle.ts`, beside `capture_viewport`, because it
+reaches the window) lights blocks in a box or the whole schematic and stays
+until put out; it tells the window *what* to light (`IPC.glowBlocks`) and the
+window asks for the shell itself. `find_blocks` is in `TOOL_SPECS`: a count,
+the box and the first positions, the whole schematic by default, because
+"where is it" answered about a selection somewhere else reads as "nowhere".
+
+**A slot is also dragged, onto a field or the hotbar.** It carries
+`DraggedBlock` -- the block and its pair -- under `BLOCK_MIME`, and the
+target decides what it takes, through the same `onMaterial` a click goes
+through: With takes the foot alone, because placing a foot places the bed,
+Replace both halves, a hotbar slot the block alone. A field adds the block to
+its list and never replaces it, so several materials are gathered one drop at
+a time; a block already there is not added twice.
+A field takes the drop only with `ondropblock`, and stops it there, or the
+text box under the pointer would type what it was handed. Air is not
+dragged. The creative inventory's tiles drag too, and the hotbar rises over
+its scrim while it is open (`raised`, `--z-beside-modal` over `--z-modal`):
+the game draws the hotbar inside its inventory for the same reason.
+
+**A bar over the slots searches, orders and merges states**, and the rules
+are `materialRows` in the same module. Merged, a block is one slot under its
+bare id (`unifyStates` in `shared/material_list.ts`, which `get_palette`'s
+`unify` also calls), and a bare id is a pattern, so a replace of the slot
+still finds exactly what it counted; a pair whose other half is another
+block, a piston's head, keeps its exact spellings. **Air stays last whatever
+the order**, because it is the leftover rather than a material. The search
+is `blockQuery`'s reading and matches the states too. The merge and the order
+are `UiSettings` (`materialsUnify`, `materialsSort`); the search is not saved,
+because it is what you are looking for now rather than how you read the list.
 
 **A Svelte prop may not be called `state`.** A local binding of that name makes
 every `$state(...)` in the same component parse as a store subscription to it
@@ -1744,6 +2641,23 @@ carries what the window already holds. Four things about it are load-bearing:
   scene with nothing to update; refusing to be incremental there means the
   renderer never has to reason about that case.
 
+**And one request is in flight at a time, because a delta cannot help a
+burst.** Each call to `refreshDocument` used to send its own request. A
+colour picker dragged fires one `input` per movement, and each of those
+rebuilds the atlas. So about fifty requests left in the same instant, every one
+carrying the atlas version the window held *before* any of them. Main therefore
+answered each with a full rebuild and all 27 MB of atlas, one after another,
+and the window applied every answer, stale or not.
+
+The second stutter report measured it: spikes of 400–800 ms for thirty seconds
+after the drag, answers arriving up to 29.6 s late, and `at - ms` the same
+instant for all of them. That last number is the tell.
+
+`coalesce.ts` is the fix. A call during a run asks for one more run, which
+reads the state as it is then, and any number of calls in that window collapse
+into it. Each caller's promise still settles after a run that began after its
+call, which is what `await refreshDocument()` promises its twenty callers.
+
 **And the shipping was fixed while the *building* went on doing the same work
 twice.** That earlier fix made the payload a delta and said, correctly, that
 none of the stutter was the meshing. It was not the meshing then and it is not
@@ -1788,13 +2702,63 @@ to be the thing being edited. Same reason the edit list writes into a chunk
 that **already has geometry**: an edit into an empty chunk creates it, and a
 chunk with no old box has no stale box to keep.
 
-**`paletteTally` is one walk where there were two.** `documentState` wants the
-materials list and the block count, and asked for them separately — two passes
-over every cell on every mutating handler, which a selection-face drag reaches
-many times a second. 12.1 ms became 5.6 ms on the same document. `blocks` is
-derived as `cells - counts[0]` rather than by filtering names, because that is
-`countBlocks`' answer *exactly*: index 0 is always air and is the only thing it
-excludes, so a `cave_air` interned at some other index counts as a block to it.
+**`paletteTally` walks nothing: the document keeps its counts.** It was two
+walks, then one -- 12.1 ms became 5.6 ms -- and is now `doc.counts`, one number
+per palette entry kept by every write. `blocks` is derived as
+`cells - counts[0]`, because that is `countBlocks`' answer *exactly*: index 0
+is always air and is the only thing it excludes, so a `cave_air` interned at
+some other index counts as a block to it.
+
+**One placed block costs what the block costs, and on a big document it cost
+what the document costs.** `npm run bench:edit` (`scripts/bench-edit.ts`)
+places, breaks, lights and grows on three documents and prints main's steps.
+Before and after, one block placed:
+
+| | in the middle | past the edge (growing) | a texture nobody drew before |
+|---|---|---|---|
+| dense 128x32x128 | 187 ms → 60 ms | 5.0 s → 36 ms | |
+| terrain 256x96x256 | 400 ms + 60 ms of state → 25 ms | 5.6 s → 58 ms | 5.8 s → 30 ms |
+| statues 64x16x64 | 3.4 s → 0.75 s | 17 s → 250 ms | |
+
+Opening the statue field went from 17 s to 4 s, the dense document from 4.8 s
+to 1.8 s. Where the time had gone, in that order of size:
+
+- **every texture that arrived repacked the atlas**, which moved every UV, so
+  the whole document was meshed again and 27 MB resent. The atlas keeps a
+  reserve now (`packAtlas`) and a new tile goes there without moving another;
+  the renderer is sent the tile (`AtlasPatch`). See "The atlas grows" below.
+- **a resize threw the chunk cache away.** Chunks are meshed in content
+  coordinates (`doc.frame`, the sum of every resize's shift), which growth does
+  not move; the viewport places them at `MeshPayload.frame`. New cells are air,
+  and air with no block light and full sky is, to the mesher, exactly what
+  "outside the grid" is -- so the old snapshot is carried into the new grid
+  with new cells set to that, and only what really changed across the old face
+  is re-meshed (`chunked_mesh.ts`).
+- **two `new Set(voxels)`, the light flood and a full-grid compare** ran on
+  every edit regardless of its size. Presence comes from `doc.counts`; the
+  document records the cells it writes (`doc.changes`, see `writeVoxel` and
+  `takeVoxelChanges`); `relight` floods only the columns within `LIGHT_REACH`
+  of them and starts from values outside the box, which do not change.
+- **meshing allocated per face**: forty small arrays and closures per face in
+  the shading, three per face in `buildMesh`. 790 ms became 185 ms for a chunk
+  of statues.
+
+`tests/document.ts` walks `src/main` and refuses a write to a document's
+`voxels` outside `writeVoxel` and the three bulk rewrites, because the counts
+and the change list are only as true as that list. `tests/chunks.ts` walks
+seventy random edits, growths on every side and shrinks, and requires the
+incremental mesh to equal a rebuild -- **light in every vertex included** --
+and the incremental light grid to equal a full flood. That comparison found
+two faults that predated all of this: chunks diagonal to an edited cell were
+never re-meshed although their corner shading reads it (`markDirty` marks all
+26 neighbours now), and the sky flood seeded only beside solid blocks, which
+left the space under every overhang lit from the floor up.
+
+**A click in creative mode is never dropped.** Hand placement went through
+`runDocument`, which holds `busy` until the new mesh arrives, and `onBuild`
+returned while `busy` was set -- so every click during that round trip was
+lost. `queueBuild` runs the clicks in order and waits only for the edit; the
+redraw is asked for and not awaited.
 
 **The viewport receives geometry, not a container format.** `docMesh` hands over
 per-chunk `Float32Array`/`Uint32Array` attributes plus the atlas as raw RGBA
@@ -2113,11 +3077,41 @@ push — the caller already has the value, and a selection-face drag sends an ed
 many times a second. `announceDocument` is the unasked case. Folding them into
 one function with a flag would put that decision at twenty-one call sites.
 
-**`capture_viewport` photographs the window, and cannot aim the camera.** Main
-cannot work out where the canvas is — the layout is CSS — and cannot *ask* the
-renderer anything, only be told; so the renderer reports its rect from `resize`.
-Aiming would need a request from main to the renderer and a reply channel, which
-does not exist.
+**`capture_viewport` can aim the camera, and that is main's first question to
+the renderer.** Main cannot work out where the canvas is — the layout is CSS —
+so the renderer still reports its rect from `resize`. Aiming is different: a
+picture taken before the new view is drawn is a picture of the old one, so main
+has to *ask* and wait. `IPC.cameraAim` goes out as an event with an `id`,
+`IPC.cameraAimed` comes back as one (`ipcMain.on`), and
+`services/renderer_request.ts` matches them, times out, and refuses a late
+answer rather than letting it settle the next request. Electron-free, so
+`tests/services.ts` drives it.
+
+Three things about it are load-bearing:
+
+- **the arithmetic is main's, in `shared/camera_aim.ts`.** A compass side, an
+  elevation and a distance are resolved against the document into a position
+  and a target before the renderer hears of it, so `tests/mcp.ts` states every
+  number and every refusal; the renderer only applies. `documentFraming` lives
+  there now, re-exported by `framing.ts`, because `camera: {}` is the R key's
+  shot and two copies would disagree. A distance behind the draw distance is
+  brought in and *says so* in the answer;
+- **the reply is sent after a frame is drawn**, and not only by the display.
+  `renderFrame()` is the loop's body pulled out, so `aimCamera` draws at once
+  and then waits for a frame or 250 ms, whichever comes first: a window behind
+  the terminal an agent runs in is throttled, and waiting on
+  `requestAnimationFrame` alone would photograph the old view. `aimCamera` waits
+  a `tick` first, because App leaves flight in the same breath and the
+  camera-mode effect puts the orbit target 24 blocks ahead;
+- **the camera stays where the agent put it**, which was the user's choice: the
+  person watching sees what the model looked at, and R brings the shot back. The
+  tool stays `readOnly` -- the flag is about the schematic, the undo stack and
+  the clipboard, and a permission prompt per look would make it useless.
+
+With no camera asked for, a window that does not answer is still photographed,
+as it always was; with one, not answering is a refusal. The answer carries where
+the camera stood, and `pictureContent` in `mcp/policy.ts` sends it as text
+beside the image block, which used to be sent alone.
 
 **One IPC channel per verb, all declared in `src/shared/ipc.ts`.** No generic
 dispatcher. Everything crossing must be structured-clone-safe — binary payloads
@@ -2554,6 +3548,14 @@ decorative the moment the shell refused: deleting it would silently make the
 one row in the app that exists to be pasted into a bug report unselectable, so
 it is checked too.
 
+**And the opt-ins are exactly why the gate has to decline the browser as
+well.** The chat log selects, so in flight Ctrl+A -- Chromium's select-all,
+untouched by a bare `return` -- highlighted the whole conversation on every
+strafe left under sprint. Reported from creative mode. The gate calls
+`preventDefault` before it returns: that stops the default action and nothing
+else, so the viewer and the hotbar still see the keydown, and none of them asks
+`defaultPrevented`.
+
 
 **Enablement is decided from main's own state**, not reported back by the
 renderer: `currentSession() !== null` plus the recents list main already owns.
@@ -2647,7 +3649,51 @@ looks. As a plain `$effect` the two race and the viewport trails by one change.
 rebuilt rather than recoloured.
 
 `BrowserWindow`'s `backgroundColor` in `main/index.ts` is outside all of this on
-purpose — it is painted before there is a renderer to ask.
+purpose — it is painted before there is a renderer to ask. It is the dark
+theme's `--bg` and has to be moved with it.
+
+**The look is the game's inventory, and `app.css` is the whole design system.**
+Chosen by the user from three directions in the UX audit: the workbench's
+structure (panels docked to the edges, the settings-like windows floating) in
+the inventory's material -- slabs raised with a light edge up and to the left,
+slots and fields sunk into them, titles in a pixel face.
+Deepslate and polished stone, an emerald accent, gold for what glows, redstone
+for what destroys.
+
+- **The bevel is a 2px border, never a box-shadow**, so a control is the same
+  size pressed and unpressed. `--bevel-hi`/`--bevel-lo` swap on `:active`.
+- **The scales are tokens**: `--space-1..8`, `--text-xs..2xl`, `--radius` (0:
+  stone has corners), `--control-h` (28px, over WCAG 2.2's 24px), the stacking
+  tiers `--z-overlay`/`--z-window`/`--z-popover`/`--z-screen`/`--z-modal`/
+  `--z-beside-modal`/`--z-toast`/`--z-top`, three
+  shadows and the motion. The audit counted 24 spacings, 16 radii and 11
+  z-indexes decided again per file; a value outside the scales should come
+  with its reason.
+- **Every dialog's look is `.modal` in `app.css`**: the components keep their
+  sizes and layouts and draw no border, radius, background or shadow of their
+  own. `tests/ui.ts` walks `lib/` and refuses one that does -- it found
+  `BlockStateModal` on its first run. What a dialog *does* is `Modal.svelte`.
+- **Contrast is computed, not claimed.** `tests/ui.ts` parses both palettes and
+  holds text pairs to 4.5:1 and field edges and the focus ring to 3:1 (WCAG
+  1.4.3, 1.4.11), and requires the system light block to equal the explicit
+  one value for value. The white count on a slot is checked against `--slot`,
+  which is dark in every theme for exactly that reason.
+- **Two faces ship with the app**, OFL, from `@fontsource` (devDependencies,
+  bundled by vite like `marked`): Atkinson Hyperlegible for everything read,
+  Pixelify Sans for panel titles and the words on slots only. **A font is never
+  inlined**: vite turns assets under 4 kB into `data:` URLs, the CSP has no
+  `font-src`, and `default-src 'self'` refuses them in silence --
+  `assetsInlineLimit` in `electron.vite.config.ts` says no for font files.
+- **One focus ring**: `:focus-visible`, 2px of `--accent`. Chromium's own was
+  orange and 2.4:1 on the old light theme.
+- **A button that draws itself has to say so twice.** app.css's
+  `button:hover:not(:disabled)` is (0,2,1) and a single class, once Svelte has
+  scoped it, is (0,2,0): a transparent hit area, a red dot or a slot was
+  painted `--bg-hover` under the pointer -- a grey disc over the compass -- and
+  a `height` under the control height was overruled by the global
+  `min-height`. Such a rule restates its background on `:hover` and sets
+  `min-height`; `tests/ui.ts` walks every component for both. `button.icon` is
+  exempt, because its global rules own both.
 
 **The left mouse button pans, so anything else that drags must take it.** The
 viewer maps `LEFT` to `THREE.MOUSE.PAN`. A selection-face drag therefore sets
@@ -2757,7 +3803,8 @@ notifications.** `.status` and the bar had byte-identical positioning —
 the controls somebody was reaching for. It clears the hotbar now, from
 `--hotbar-inset` and `--hotbar-height` in `app.css`: a pair, because the second
 is measured off `Hotbar.svelte`'s own rules and changing the slot moves it.
-That failure is two bars overlapping, which is visible, rather than silent.
+That failure is two bars overlapping, which is visible, rather than silent --
+and `tests/ui.ts` adds the rules up, so it is a failing check as well.
 
 Glyphs rather than words, with the name, the sentence and the key on `title`
 and the name on `aria-label` — not optional for a button with no text in it.
@@ -2820,6 +3867,19 @@ The same fix carries the void block: `cutSelection` and `moveRegion` each wrote
 `RegionEditOptions.voidBlock` is `EditOptions.voidBlock`'s spelling for its
 reason -- a string the caller already holds, parsed once here.
 
+**And when the caller says nothing, the session answers.** As an option only,
+the fix reached only the callers that remembered to pass it. The window's cut
+did not, and neither did any MCP verb (cut, paste, move), so all of them went
+on leaving air. That is the rule this file keeps recording, about discipline at
+several call sites. `emptyEntry` in `session.ts` now falls back to
+`session.voidBlock`, which is the document's empty space and the same answer
+`emptySpaceFor` gives the connection pass. A caller passes `voidBlock` only
+when it means something else. `tests/session.ts` calls cut, move and turn with
+no options at all, and they fail if the fallback goes back to air.
+
+Delete is the window's other way to empty cells, and it wrote the word air too.
+It fills with `docState.voidBlock` now, exactly as a break does.
+
 **A copy leaves a ghost behind, and pasting became a gesture rather than a
 coordinate.** Ctrl+C used to be invisible: the status line said how many
 blocks, and nothing on screen said what was held or where it would land — so
@@ -2865,6 +3925,23 @@ seven are documents opening, closing and being restored, and every one of them
 had already forgotten the pivot. So it is an effect on `selection === null`
 rather than an eighth line: this file's own rule about discipline at N call
 sites, applied to the one place where it had already failed at seven.
+
+**A move ghost lives as long as its drag, and it used to live until a
+commit.** `moving` was cleared by `commitMove` alone, and drawn as `moving ??
+stamp` at the corner of whatever was selected. Two ways it was never cleared,
+and both depend on timing, which is why the report called it hard to
+reproduce: press an arrow and let go without moving a whole block (no move, so
+no commit), or let go before the region's mesh arrived (the commit cleared
+it, then the late answer wrote it back). That second one was guarded, but
+with `!selection`, and a move takes the selection along with it. The ghost
+then stood over every later selection and covered a copy's stamp. Escape and
+opening another document did not clear it, only a restart did.
+
+`ghost_request.ts` gives each press a token, and a mesh is accepted only for
+the current one. `endGizmoDrag` sends `ongizmorelease` on **every** path,
+after the commit has been dispatched, so `commitMove` still reads its region
+first. The `selection === null` effect clears `moving` as well, as a safety
+net in case something else ever forgets to release it.
 
 **And a paste grows, which is `moveRegion`'s rule one verb further on.**
 `pasteClipboard` clips by letting `tx.setBlock` return `false`, so a paste over
@@ -2944,13 +4021,29 @@ gesture rather than after it, which is the difference between a warning and a
 report; the refusal itself stays main's, because the renderer holds no schematic
 and a viewport that decided this would be a second opinion.
 
-**Ctrl+Z reaches the selection, and `undoDepth` is what makes that answerable.**
-The block edits live in main and the selection lives in the renderer;
-interleaving two stacks needs a shared ordering, and that field — main's undo
-stack depth — is it. The rule is one sentence: **a selection is undone only while
-no block edit has landed on top of it.** `selection_history.ts` holds it. A drag
-is one step rather than one per frame, which is why `Viewer.svelte` reports
-gesture boundaries at all: only it knows where the press was.
+**Ctrl+Z reaches the selection, and `undoTransactionId` is what makes that
+answerable.** The block edits live in main and the selection lives in the
+renderer; interleaving two stacks needs a shared ordering, and that field — the
+id of the transaction on top of main's undo stack, 0 when empty — is it. The
+rule is one sentence: **a selection is undone only while no block edit has
+landed on top of it.** `selection_history.ts` holds it. A drag is one step
+rather than one per frame, which is why `Viewer.svelte` reports gesture
+boundaries at all: only it knows where the press was.
+
+**The ordering was the stack's length, `undoDepth`, and the stack is capped at
+200.** `createHistory(limit = 200)` drops the oldest transaction past the cap,
+so from the 201st on the length stayed at 200 whatever was done. Every
+selection step then compared equal to the document, and `undoTarget` sent every
+press to the selections, walking back through all of them without reaching a
+block. `adoptEditedSelection` stopped pairing (`depth > depthBefore` never
+true), and the watcher that notices an edit stopped firing. In creative mode
+every placed block is a transaction, so the cap is an ordinary session, and it
+was reported as undo moving selections back and not blocks. A transaction id
+has what the ordering needs and no ceiling: never reused, higher for every new
+edit, and an undo or a redo lands back on exactly the id that was on top.
+`historyPosition()` in `App.svelte` is the one reading. `undoDepth` stays on
+`DocumentState` as a count. `tests/ui.ts` refuses any `undoDepth` left in
+`App.svelte`, with comments stripped.
 
 **A gesture that moved the blocks *and* the box is one press, and was two.**
 The gizmo's commits write `selection` only after awaiting the edit, so by then
@@ -3148,7 +4241,7 @@ decided by the neighbours, which is a question about the document and not about
 the click" — and that was right about where it belongs, not about whether it
 gets an answer. Fences, walls, panes and bars, a gate's `in_wall`, stairs
 corners, rail shapes, double chests, redstone wire, chorus plant, vine, mushroom
-blocks and `snowy` all now get one.
+blocks, `snowy` and pointed dripstone's `thickness` all now get one.
 
 The rules are pure and know nothing about documents; `main/domain/connect.ts` is
 the other half — which cells to ask. Four things about it are load-bearing:
@@ -3179,6 +4272,70 @@ walks three tables, and it cannot differ between two cells holding the same
 entry. A 100-block fence line is **3 ms**. There is deliberately no size cap: a
 threshold would be a second answer to the same question, which is the fault this
 pass exists to remove.
+
+**A pointed dripstone's `thickness` is a window of three cells, not a chain.**
+Vanilla's `calculateDripstoneThickness` asks about the block in front and,
+through that block's own thickness, about the one in front of that — so
+transcribed as written it needs the neighbour corrected first, and this pass is
+**one sweep, not a fixed point**: a column two long would come out right and one
+three long would not. The block in front is a tip exactly when the block two in
+front is not dripstone pointing the same way, so `dripstoneThickness` reads
+behind, in front and two in front and gets the settled answer directly.
+
+Two in front is two cells up or down, past a face, so `Neighbours` grew `up_up`
+and `down_down` and `connect.ts`'s `AROUND` grew `(0, ±2, 0)` — in the **same
+list**, the redstone diagonals' rule, because a tip added to the end of a column
+moves the block two up it from `frustum` to `base`. `tests/session.ts` builds
+that column for real; without the two offsets the top stays `frustum` and every
+block-level check still passes. What they cost is not measurable: on the
+120x20x120 fence fill, the worst case this pass has, four runs averaged 1.10 s
+with them and 1.13 s without, which is the noise between runs.
+
+`tip_merge` keeps vanilla's merge flag: two tips pointing at each other merge
+when either already says `tip_merge`. A block placed by hand is born with it —
+vanilla's `merge = !isSecondaryUseActive()` — and the pass turns it into `tip`
+at once unless a tip is waiting for it. A build script or an agent tool writes
+the registry's `tip`, and two of those meeting stay two tips, as `/setblock`
+leaves them in the game.
+
+**Copper chests pair with their own stage, waxing ignored.** The game pairs any
+two and gives the pair the least oxidised stage, which rewrites one half into a
+different block; this pass changes properties and never an id, so it pairs only
+the ones that already agree. `chestKind` strips `waxed_`, because waxing changes
+no texture. Two stages side by side stay two single chests rather than a double
+one drawn in two colours — chosen by the user with the game's answer in front of
+them. `COPPER_CHESTS` is one list for this and for the placement.
+
+**A rail climbs to a rail one block up, and it never did.** `railShape` was
+written when `Neighbours` was the six faces, and said so: a climb is towards a
+rail up *and over*, a diagonal, so it was left out on purpose. Redstone then
+gave `Neighbours` the eight diagonals and `connect.ts` started filling them for
+every cell and revisiting them after an edit, and nobody went back. A track up a
+hillside came out as flat rails with a ledge at every step, and a legacy
+`.schematic` that arrived climbing was flattened by the first edit beside it.
+
+It is `RailState.place` now, read as the answer it settles on (the
+`mc-vanilla-rules` skill is how it was looked up). A side has a rail if one is
+beside it, one up or one down; a straight answer then climbs towards the one
+up, asking north then south and east then west, so a valley ascends south or
+west. A rail one down is a flat link, because the lower one is the one that
+climbs, and a curve never climbs. A junction takes the south-east rule in its
+unpowered order, since power is not simulated. A rail with nothing beside it
+keeps the shape it has, which is vanilla's fallback and is what lets
+`orientPlacement` lay one along the look.
+
+**What it does not do is remember**, and that is the deviation. Vanilla's rail
+keeps a list of what it is joined to, and one joined at both ends ignores a
+third built beside it later. This pass knows only who is next door, so a rail
+laid against a finished line turns the line into a junction. That was already
+true on one level; reading up and down widens it to a rail on a ledge beside the
+track.
+
+`tests/session.ts` builds a real two-step climb in a 1.12.2 document, saves it
+as MCEdit and reads the bytes back: `66:2` and `27:2` up the step, `:1` at the
+top. That is the check that sees `connect.ts` revisit the lower rail when the
+upper one goes down. Walking `OFFSETS` instead of `AROUND` fails it, and so does
+reading the side cells alone.
 
 **`EditRequest.setState` is the one caller that derives nothing, and without it
 the feature would not exist.** The inspector sends its block-state edit down the
@@ -3220,6 +4377,18 @@ state is legal in a schematic — the game fills the rest in from its own defaul
 the same reasoning that keeps `waterlogged` out of what a placed block is born
 with. Removing something that was not there costs nothing, because
 `runTransaction` pushes no undo step for a recorder with no commands.
+
+**A true-or-false state is a checkbox, and it has three states, not two.**
+`PropertyRow.kind` is `boolean` exactly when the legal values are `true` and
+`false`, so it is read off the registry rather than kept as a list of names.
+Unset is the checkbox's `indeterminate` state (`lib/indeterminate.ts`, because
+that is a DOM property with no HTML attribute). Drawing it as an unticked box
+would claim `false` about a property the block does not carry and the game
+fills in itself. A value from a file that is neither word keeps its text field
+(`showsAsCheckbox`), or the first click would overwrite something nobody chose.
+In `BlockStateModal` the box shows the *effective* value, dimmed when it is the
+default, with a button that takes the property back off. That is what the
+other rows' "default (…)" option means.
 
 One consequence worth knowing before it is reported as a bug: the pass
 **normalises**, so a lone staircase carrying `shape=inner_left` becomes
@@ -3263,6 +4432,14 @@ nothing. What opens is `open` minus `barrel`, whose `open` means a container is
 being looked into. An **iron** door opens here, which in game it does not
 without redstone — deliberate, because this is an editor and refusing would be
 faithful and useless.
+
+**A copper golem statue takes its next pose**, the game's other right-click on
+a block: `CopperGolemStatueBlock.useItemOn` calls `getNextPose()` and places
+nothing. The order, standing, sitting, running, star and round again, is read
+from the registry's `copper_golem_pose` values, which list it that way, and
+`tests/session.ts` pins it. The statue has a block entity and `setBlock` drops
+it with every write, so `useTarget` puts it back by hand, `connect.ts`'s trap
+for `connect.ts`'s reason.
 
 **A hotbar belongs to a schematic, not to the window.** It lived in
 `UiSettings`, written with `patchUi`: one bar for the whole app, so opening the
@@ -3352,6 +4529,21 @@ opened upwards or downwards according to where you had dragged its window.
 Below still falls back to above when it does not fit, and the clamp is still
 the only part that is a guarantee.
 
+**An icon is drawn, never typed.** `lib/icons.ts` is the set: shapes on a
+24-unit square, stroked in `currentColor`. `Icon.svelte` is the only thing that
+draws one. Every button used to carry a Unicode glyph (`⊞ × ⚙ ⇅ ⤓ 🎲`), and
+that was reported as the browse button's icon sitting off to the right of its
+box. Two faults, both the glyph's:
+- a character's box is the font's, not the drawing's, so no CSS centres the ink;
+- the fixed-width button kept the global `button { padding: 8px 14px }`, which
+  left it a content box narrower than nothing.
+
+`button.icon` now zeroes the padding and centres with `place-items: center`.
+`tests/ui.ts` refuses any button whose label is a symbol character, an emoji or
+a character entity, and proves it can fail on the reported button. Text that
+merely contains one, such as `64×64` in a size option, is not an icon and is
+left alone.
+
 **A popover is positioned against the window, not against its control.**
 Everything from `.controls` down is `overflow: hidden`, and the controls that
 open popovers sit at the trailing edge of a right-hand panel — so a popover laid
@@ -3387,6 +4579,14 @@ asks for, because a catalogue rots from both ends.
 Main-process wording — every `Failure.message` — is **not** translated. It
 arrives already phrased and is shown as it came; translating it would mean
 replacing those messages with error codes, which is a different job.
+
+**A number is written in the language of the sentence around it, never the
+system's.** `tn` and `formatNumber` in `i18n.svelte.ts` pass the current
+locale to `toLocaleString`; a bare `toLocaleString()` asks the operating
+system, and on an Italian machine the status bar read "2.056 blocks" -- a
+decimal point to an English reader. `tests/ui.ts` refuses a bare one on
+anything that is not a `Date`. Dates keep the system's format on purpose
+(`age_label.ts`).
 
 Two traps, both already paid for:
 
@@ -3661,15 +4861,25 @@ inverse for the four horizontal ones, so `tests/blocks.ts` requires the pair to
 round-trip, which is what catches the only mistake a table of six unit vectors
 ever makes: a transposed sign.
 
-**The compass is drawn in a third pass over the same renderer, and clicked
-through an element on top of it.** Both halves are the design.
+**The compass is drawn by the same renderer into a square of its own, and
+clicked through an element on top of it.** Both halves are the design.
 
-A pass rather than a second `WebGLRenderer`, because a browser gives a page on
-the order of sixteen live contexts before it silently drops the oldest —
-already the reason `block_icons.svelte.ts` shares one, and spending a context on
-an ornament would be the worst possible use of it. The depth buffer is cleared
-first so the build cannot occlude an overlay that is not in the world, and the
-scissor is what stops the pass clearing or drawing into the rest of the frame.
+The same renderer rather than a second `WebGLRenderer`, because a browser gives
+a page on the order of sixteen live contexts before it silently drops the
+oldest — already the reason `block_icons.svelte.ts` shares one, and spending a
+context on an ornament would be the worst possible use of it.
+
+**With anti-aliasing on it has a multisampled target of its own**, the size of
+the square, and the copy lays it on the canvas (`compositeCompass`). It used to
+be a third pass into the scene's target, and three resolves a multisampled
+target at the end of *every* `render()` into it: the 104-pixel gizmo cost a
+full-screen blit of colour and depth, which is the 225 ms the third stutter
+report blamed on "compass". Its target is cleared to transparent black, so what
+lands in it is premultiplied, and the copy uses `One, OneMinusSrcAlpha` by hand:
+three's own `premultipliedAlpha` multiplies by alpha in the shader and would do
+it a second time, darkening every edge. Without anti-aliasing it is a scissored
+pass straight onto the canvas, with the depth buffer cleared first so the build
+cannot occlude an overlay that is not in the world.
 
 An element rather than a branch in the canvas's pointer handling, because the
 left button in that canvas is `THREE.MOUSE.PAN`: *every* gesture there has to be
@@ -4197,11 +5407,23 @@ answer; building twice from one object proves nothing, because `Object.keys` and
 rule at all.
 
 The atlas goes from 20.8 MB to 27.6 MB over the whole 920-block set, and packs
-in the same ~130 ms. It is sent only when its version moves — `MeshPayload`
-carries `atlas: MeshAtlas | null` and the renderer hands back the version it
-holds — so that is a cost per atlas, not per edit. `MAX_TILE` caps one texture
+in the same ~130 ms. It is sent only when its layout moves — `MeshPayload`
+carries `atlas: MeshAtlas | null` and the renderer hands back the version and
+layout it holds — so that is a cost per atlas, not per edit. `MAX_TILE` caps one texture
 at 256: the ender dragon's sheet is 1024×1024, and a dragon head is one small
 block.
+
+**The atlas grows into a reserve, and only a full reserve repacks it.** The
+sheet is packed with empty rows kept at the bottom (`ATLAS_RESERVE`, a sixth);
+a texture that arrives later -- a lit furnace, a sign's letters, a banner's
+design -- is put there by `appendTiles` and no other tile moves. So the
+version (the texture count) and the **layout** are two numbers now: UVs are
+valid across every version of one layout, the chunk cache and the icon cache
+key on the layout, and the renderer is sent an `AtlasPatch` with the new tiles
+when it holds an older version of the same layout. Only when the reserve is
+full is the sheet packed again, as a new layout, which is what every arrival
+used to cost: a whole re-mesh and 27 MB. `atlasBuildCount` counts packings
+only, and a warm-up still makes exactly one.
 
 **The atlas grows as blocks are meshed, and its version *is* the texture count.**
 That is the fault behind "the icons are wrong until I scroll", and it was in
@@ -4266,8 +5488,9 @@ invisible to a *player* and placed on purpose — a barrier keeps people out of
 somewhere, and a shell of them is a decision somebody has to be able to review.
 Drawing nothing meant a build could be full of them and look empty. So the
 default is deliberately *not* the game's own view, and `preview.showMarkers`
-turns them back into air for anyone who wants it. `light` stays invisible: it
-has no in-game appearance to reproduce and nothing structural to review.
+turns them back into air for anyone who wants it. `light` joined them later,
+for the same reason: it is placed on purpose and is invisible in game, so it
+is drawn from its item icon, which shows its level, and hides with them.
 
 Two things make drawing them safe, and both are load-bearing. They are in
 `isSeeThrough`, so they never cull — a barrier that deleted the face of the wall
@@ -4718,12 +5941,23 @@ knowing:
   which is `signal_fire`'s answer: what they change is behaviour and particles,
   and this file may not invent geometry for either.
 
-  Two things are deliberately left. **The connections are not derived**, so a
-  placed wire is unconnected and lies north-south, which is what the game draws
-  for an isolated one; `block_connections.ts` dispatches on fence, wall and
-  pane and has never had a wire arm. And `tripwire_hook` is still
-  `againstWall(e, 3)`, which is the lever's fault on the block that pulls this
-  one taut.
+  **The connections are derived now**, by vanilla's `shouldConnectTo`: a side
+  connects to another wire or to a hook pointing back at this one. **A wire
+  with nothing beside it keeps the run it was laid along, and that is a
+  deviation.** Vanilla's isolated wire is all `false` and lies north-south
+  whichever way the player faced, and the first wire of a run is always
+  isolated. So `orientPlacement` lays a wire along the look, east-west as
+  `east=true,west=true`, and `connectedState` keeps that pair when no side
+  connects. North-south stays all `false`, which draws the same and is what the
+  game writes. `attached` is still not derived.
+- **A tripwire hook was the ladder's plate three units thick**, wearing a sheet
+  that is mostly a hole, so it drew almost nothing and took the face off the
+  wall. It is the four `tripwire_hook*` models now: a plank plate, a stick and
+  a ring, turned by `facing` from north, where the plate is on the *south*
+  wall. `powered` tilts the stick down; `attached` lowers the ring and adds the
+  string, written already rescaled because vanilla tilts it with `rescale`.
+  `facing` is the clicked face (`WALL_MOUNTED`, as vanilla's
+  `TripWireHookBlock` places it). Legacy `131` already carries `facing`.
 - **A small dripleaf was a placeholder, and the walk that exists to catch that
   could not see it.** The pack ships `small_dripleaf_top`, `_side`, `_stem_top`
   and `_stem_bottom` and no `small_dripleaf.png` at all. At `half=lower` —
@@ -4767,14 +6001,8 @@ knowing:
   *«the opposite from the direction the player faces while placing the small
   dripleaf»*.
 
-  **What is deliberately left is that placing one places a single half.** In
-  the game a dripleaf, a tall fern, a sunflower and tall seagrass are all
-  `DoublePlantBlock` and go in as two cells; `TWO_PART` in `services/session.ts`
-  knows only `_bed` and `_door`, both by suffix. The membership is derivable —
-  a `half` whose legal values are `lower|upper` rather than `top|bottom` is
-  exactly that family, doors included — so it is a real piece of work in
-  `session.ts` rather than a line here, and it is a family of ten rather than
-  this one block.
+  **Placing one places both halves**, which is the double-plant row of
+  `TWO_PART` (see "A bed is two blocks" above).
 - **Seagrass is four planes in a hash, and tall seagrass was a solid cube.**
   `template_seagrass` states two planes across the north-south axis at `z = 4`
   and `z = 12` and two across the east-west at `x = 4` and `x = 12`, each
@@ -4801,6 +6029,161 @@ knowing:
   be a copy of the coordinates to keep correct. `half` splits the texture and
   not one coordinate, and `plainCandidates` has read that property since the
   two-tall flowers needed it.
+- **A pitcher crop is a pod with leaves, and was a cube with `age` read
+  nowhere.** Every stage came out as the same solid block wearing
+  `pitcher_crop_bottom` — `_top` on the upper half — on all six faces.
+  `pitcherCrop` transcribes the ten models: a pod sunk one unit into the block
+  under it, `[5,-1,5]..[11,3,11]` at stage 0 and `[3,-1,3]..[13,5,13]` after,
+  and from stage 1 two 16-wide planes turned 45 degrees **without** `rescale`,
+  so unlike `block/cross` they stop short of the corners. At stages 1 and 2 they
+  stand on the pod and reach `y = 21`, five units into the cell above.
+
+  The windows are vanilla's and are not optional: a box starting at `y = -1` and
+  a plane ending at `y = 21` both derive UVs off their tile. The upper half at
+  stages 0 to 2 has no elements in vanilla and is `boxes()` here — a state the
+  game never produces, since the upper half exists from stage 3, so it is
+  reachable only from the inspector, and a cell holding it draws nothing and
+  cannot be clicked. Placing one is a single cell: the crop is a seed, and it is
+  the one block with a `lower|upper` `half` that the double-plant row of
+  `TWO_PART` leaves out by name.
+- **Pointed dripstone is `block/cross`, and was a 6x16x6 column wearing the
+  upward tip in every state.** `pointed_dripstone.json` states the two rescaled
+  planes of `cross.json` exactly; the ten states differ only in the texture,
+  `pointed_dripstone_<up|down>_<thickness>`, and the `down` files are drawn
+  pointing down, so nothing turns. `candidatesForName` builds the name from the
+  state and falls back to the birth state for a value no file has.
+- **A shelf was hollow, and hung on a wall it was a window into the wall.**
+  `template_shelf_body` states no face on the inside of its panel; the
+  blockstate is a multipart and every state adds a second model, one plane at
+  `z = 13`, `y 4..12`, north face only. Without it there was nothing between
+  the lips, and the wall's face towards the panel is rightly culled, so what
+  showed through was the inside of the block behind. `powered` and
+  `side_chain` choose that plane's window on the sheet and move no coordinate.
+  `side_chain` is read, not derived: pairing shelves is a neighbour rule and
+  is not done.
+- **A composter was the cauldron's fault in wood.** It was left a cube on
+  purpose, "its outer shell really is 16x16x16", and that was the fault: a
+  cube has no inside, so from above the rim there was a lid where vanilla
+  shows a bin, and `level` had nowhere to be drawn. `composter.json` is a
+  two-unit floor and four two-unit walls; the multipart adds one surface per
+  level at `1 + 2 * level`, and `level=8` is the same height as 7 wearing
+  `composter_ready`. As boxes it no longer counts as solid, which is the
+  cauldron's arrangement too: light reaches in through the open top.
+- **A chiseled bookshelf's front is six planes, and it was a cube wearing its
+  side on all four sides.** No texture is named after the front, so
+  `facing` and the six `slot_<n>_occupied` were read nowhere. The multipart
+  is a full box with no `north` face, applied with `uvlock`, plus one plane
+  per slot cut from `_occupied` or `_empty`. The body is deliberately not
+  turned: its geometry is the whole cell, so turning it would only turn the
+  picture on its top, and `uvlock` says it stays put. It is the one member of
+  `SOLID_BOXES`, because being drawn as boxes would otherwise stop it
+  blocking light and taking a fence; covering all six faces does not decide
+  that, and the beacon -- glass, covering all six -- is why. It also turns
+  its front to the player now, like a furnace.
+- **A sunflower's upper half is a cross with a flower on it, and it was only
+  the cross.** `sunflower_bottom.json` really is `block/cross`;
+  `sunflower_top.json` is two crossed planes eight units tall reading the
+  lower half of `sunflower_top`, plus a head at `x = 9.6` tilted 22.5 degrees
+  about z, `sunflower_front` on its east face and `sunflower_back` on its
+  west. As a plain cross the head did not exist. All three carry `rescale`,
+  so they are written already rescaled.
+
+  **And in a legacy file the top half did not even say it was a sunflower.**
+  Pre-Flattening, `double_plant` (175) keeps the type in the bottom half's
+  `0..5`; the top half stores `0x8` and a direction nothing reads, which the
+  wiki lists as `8..11`. `legacy_blocks.json` reads those low bits as a type
+  anyway, so `175:10` is `tall_grass[half=upper]` and a sunflower, lilac,
+  rose bush or peony could come back wearing a tuft of grass. The table is
+  generated and stays as it is: `doublePlantTopKey` in `loader_formats.ts`
+  takes the type from the cell below, which the YZX walk has already
+  decoded. A top with no bottom under it keeps the table's answer. Writing
+  needs nothing: the game reads a top half's type from below as well.
+- **A decorated pot has no block model, and it was a crate.** It was a
+  14x16x14 box with the whole base sheet squeezed onto its lid and floor and
+  no neck. `DecoratedPotRenderer` draws two `ModelPart` layers: a neck turned
+  over by `xRot = pi` so the 8x3x8 cube sits on a 6x1x6 collar, a 14x14 plane
+  at the top and at the bottom, and four 14x16 sides that carry only their
+  outward face. The windows were read off an emulation of those cubes, their
+  poses and `ModelPart.Cube`'s unwrap rather than worked out by hand, because
+  the flip swaps the neck's patches. That is exactly what a transcription gets
+  backwards, and `tests/blocks.ts` checks that swap by name.
+
+  The model is `facing=north`, where the renderer's `180 - toYRot` is zero, so
+  the front is on the south. Placing one sets `facing` to where you look, not
+  to its opposite (`AWAY_FROM_PLAYER`), and that is what turns the front
+  towards you. `cracked` moves nothing: it decides what breaking the pot drops.
+  The sherds are not drawn. They are the block entity's `sherds` list, a
+  function of the position like a sign's text, so every pot wears the plain
+  side.
+- **A copper golem statue has no block model, and it was one 8x14x8 box.** Its
+  blockstate names a model holding a particle; the statue is drawn by a block
+  entity renderer with the golem's **entity model**, one layer per
+  `copper_golem_pose`. `COPPER_GOLEM_POSES` transcribes `CopperGolemModel`'s
+  four layers from a decompiled 1.21.11 client, identical number for number in
+  26.2. Bedrock ships the same four poses as `.geo.json` and they are a
+  different model, the running pose most of all, so they are not the source.
+
+  **A `ModelPart` tree is not a list of boxes.** Every part turns its children,
+  on any axis and by any angle, so `ShapeBox.chain` carries the turns:
+  `modelPartBoxes` places each cube at rest, at its coordinates plus every
+  offset down to it, and takes each part's `rotationZYX` about the running sum
+  of the offsets down to that part, innermost first. The root is the statue
+  model's `setupAnim`: the opposite of `facing`, then half a turn about z,
+  which stands up a model written with y pointing down. The windows are
+  `ModelPart.Cube`'s rectangles with some axes reversed for `boxFaces`. The
+  check does not trust any of that: `tests/blocks.ts` rebuilds Java's matrices,
+  cubes and polygons and holds every vertex's place, normal and UV to them in
+  all sixteen states.
+
+  Standing, it is 24 units tall, and the antenna's knob reaches half a block
+  into the cell above, as in the game. A click on that half picks the empty
+  cell, a banner's cloth one block along, so a right-click there places rather
+  than turns. It is placed facing the player (`FRONT_TO_PLAYER_SUFFIXES`).
+- **An open fence gate was two posts and nothing else**, on the reasoning
+  that that "reads as open". Vanilla's `template_fence_gate_open.json` swings
+  each leaf a quarter turn onto the side the gate faces: an upright at
+  `z 13..15` and two bars back to the post. `in_wall` was read nowhere, and the
+  two `_wall` models are the same elements three units lower, which is what
+  lines a gate up with a wall's lower top. `powered` moves nothing.
+  `bamboo_fence_gate` is still the ordinary template, not its own custom one.
+- **A carved pumpkin's front texture is its bare name**, which the `facing`
+  derivation cannot find: it offers `<name>_front`. So `carved_pumpkin` was
+  the only name that resolved on any face and all six wore the carved face.
+  `SpecialFaceRule.front` is for that, with `pumpkin_side` round the sides and
+  `pumpkin_top` on both ends (`orientable`). The jack o'lantern is the same.
+  A bare one is drawn facing north, the registry's default. Legacy `86` and
+  `91` already arrive with `facing` from `legacy_blocks.json`.
+- **A spore blossom was a cube wearing its petal sprite.** Vanilla is a base
+  plane at `y = 15.9` and four petals hinged at the middle and drooping 22.5
+  degrees. The windows are vanilla's. The quarter-turns on the two petals
+  tilted about z are not: copied as written, they put the sprite's yellow base
+  on the tip. This was reported against a screenshot of the game, so they are
+  swapped, and a texel check pins it. This app's quarter-turn on a flat face
+  may run the opposite way to vanilla's. The other `up`/`down` quarter-turns
+  in `block_shapes.ts` have not been checked against a picture.
+- **Bamboo was one 3x3 column in every state.** `age` picks a 2x2 or a 3x3
+  stalk and `leaves` adds two crossed planes of small or large leaves. Vanilla
+  picks one of four stalk models at random per position, and they differ only
+  in the column of `bamboo_stalk` their sides read. A shape is baked per
+  state, so this always uses the first, with no random offset. `stage` is in no
+  `when` and moves nothing.
+- **A heavy core is an 8x8x8 cube on the floor, and it was a full one.**
+  `heavy_core.png` is a sheet — lid, underside and side in three quarters of
+  it — so the full cube wore the whole sheet squeezed onto every face, and
+  sealed its cell besides. `models/block/heavy_core.json`'s one element and
+  its three windows are transcribed as written.
+- **The nether's vines were full opaque cubes.** `weeping_vines`,
+  `twisting_vines` and both `_plant` stems are `block/cross` wearing their own
+  name, which resolved all along — the texture was right, and the shape put it
+  on six faces of a solid block that sealed its cell and let a fence connect to
+  it. They are in `CROSS_BLOCKS` beside `cave_vines`.
+- **An attached stem bends towards its fruit, and it was a cross.**
+  `attached_pumpkin_stem` and `attached_melon_stem` sat in `CROSS_BLOCKS`, so
+  `facing` changed nothing on screen. `stem_fruit.json` is the stem's lower
+  half as two crossed planes, rescaled and reaching a unit below the cell, plus
+  one plane of `attached_<fruit>_stem` from the middle of the cell outwards.
+  The blockstate gives `facing=west` no `y`, so it is **west-authored**, and
+  `attachedStem` turns it by `facingSteps + 2`.
 - **A bamboo fence is not a fence, it is a `custom_fence`, and that family has
   one member.** Every other fence in the game parents `block/fence_post` and
   `block/fence_side` and paints them with a plank tile, so its UVs derive
@@ -4925,11 +6308,95 @@ knowing:
   back of every banner in the build. What omitting it costs is the couple of
   units below the cloth's hem, seen from due south. The bar's south face is
   *entirely* behind the cloth, so that one is free.
-- **The patterns are still not composed, and a plain banner is not a
-  stand-in for one.** They are a stack of layers in the block entity's NBT
-  and that is a different job; what changed is that the base colour is no
-  longer a lump of wool. Shulker boxes keep the wool, because their sheet is
-  still laid out for an animated lid.
+- **The cloth wore its back, upside down, and nothing could see it.** Its
+  windows were `unwrapCube`'s, which reads a strip bottom-up and puts the first
+  side window on the model's north face -- right for a chest. The flag is a
+  `ModelPart` cube scaled by `(2/3, -2/3, -2/3)`: model `y` runs down the world
+  and `z` is turned round, so its north window (`u 1..21, v 1..41`) is the side
+  facing away from the pole, the right way up, with `u 1` on the west.
+  Invisible while the cloth was one colour; `stripe_left` came out on the right
+  at the bottom. `BANNER_CLOTH_UV` is vanilla's now, and `tests/blocks.ts`
+  states it in pixels on the front of both a standing and a wall banner.
+- **The patterns are composed, into one tile per look.** `BannerRenderer`
+  draws the tinted `entity/banner/base`, then up to sixteen
+  `entity/banner/<id>` layers tinted by their dyes with alpha blending.
+  `ModelBaker.bannerCloth` does that once into pixels rather than as coplanar
+  quads, under a key built from everything that went in -- so two banners
+  that look alike share a tile. It is a **per-position overlay**, the signs'
+  arrangement for the signs' reasons: `preview.ts`'s `bannersIn` reads the
+  block entities and composes **before the atlas is packed** (a tile made
+  during meshing is one the mesh cannot find, and `buildMesh` drops the face),
+  `culledFaces` swaps the key on faces wearing `entity/banner/base`, and
+  `chunked_mesh.ts` diffs the keys and redraws only the banner's chunk. The
+  pattern sheets are kept out of `textureCache`, which is what the atlas
+  packs: forty masks at 256 pixels would be megabytes nothing addresses.
+
+  A legacy banner is always `white_banner` in the palette and keeps its
+  colour in `Base`, so it is put in the overlay even with no layers -- before
+  this every 1.12 banner drew white. Shulker boxes keep the wool, because
+  their sheet is still laid out for an animated lid. Hotbar icons stay the
+  plain banner: a composed tile per slot would move the atlas every icon
+  addresses.
+- **Three spellings, from the game's own datafixers.** 1.8 to 1.12.2 store
+  `Patterns:[{Pattern:"moj",Color:14}]` with the colour **inverted** and a
+  `Base`; 1.13 to 1.20.4 the same list with the dye's number
+  (`BlockEntityBannerColorFix`, schema 1451); 1.20.5 on
+  `patterns:[{pattern:"minecraft:mojang",color:"orange"}]`
+  (`BannerPatternFormatFix`, schema 3818). `pipeline/banner_nbt.ts` reads all
+  three whatever the file claims and writes the one the document's version
+  reads, keeping every other key and removing the other spellings. A legacy
+  banner with no `Base` is black in the game, so one is always written, and
+  the legacy block entity id is `Banner` (MCEdit drops the namespace).
+
+  Text somebody wrote is read strictly -- an unknown design or colour is
+  refused by name -- and NBT out of a file leniently, skipping a layer it
+  cannot read (a datapack's design) and drawing the rest.
+- **A banner is named with its design, everywhere a block is named.**
+  `shared/block_input.ts`'s `splitBlockInput` takes
+  `magenta_banner[rotation=4,banner_patterns=[...]]` apart, and a whole
+  `/give @p ... 1` with it, because that is what the Planet Minecraft banner
+  editor hands out; `/setblock`'s `{patterns:[...]}` and a pre-1.20.5 `/give`'s
+  `{BlockEntityTag:{Patterns:[...]}}` are read too. It scans with a depth
+  counter, because the list is full of the commas the state splitter cuts on,
+  and **refuses** any other component or NBT key rather than dropping it.
+  `App.svelte`'s `parseBlock`, the agent tools, the build script and the block
+  icons all call it first. `BlockSpec.bannerPatterns` carries the list raw to
+  main, which checks it against the version (`checkBannerPatterns`) before any
+  growth and writes it after the block in the same transaction
+  (`stampBanner`), because `setBlock` drops the block entity it displaces. A
+  fill stamps every banner in the box; a replace only the cells it matched.
+
+  Over MCP, `list_banner_patterns` gives every design with where it sits *as
+  seen from the front*, `set_banner_patterns` repaints one already placed, and
+  `inspect_block` hands back `blockData`, a spelling `set_block` places again.
+- **A design is edited in the inspector, on the banner.** That is the answer
+  to "how do I put a design on a banner already in the document", which had
+  none: the NBT rows read `patterns[3].pattern` a leaf at a time, cannot add,
+  remove or reorder a layer, and show nothing on a banner with no block entity.
+  `BlockInspection.banner` is present on **every** banner, with no layers when
+  it carries none, and `BannerPatternEditor` is a numbered list with the sixteen
+  dyes as swatches (`DYE_HEX`, the table the cloth is tinted with, moved to
+  `shared/` so the renderer can read it) and a paste field that takes only the
+  design out of a `/give`. Every change sends the whole list through the
+  inspector's own `setState`, with `bannerPatterns` beside the state: one undo
+  step, checked against the version, written in the document's spelling. The
+  hint beside the block field sends a person there rather than telling them to
+  paste into the field, which still works and is no longer what the screen
+  teaches.
+
+  **`setState` keeps the block entity while the name is unchanged, and it did
+  not.** `setBlock` drops the record of any cell it writes, so turning a
+  patterned banner in the inspector erased its design -- and editing a chest's
+  `facing` there emptied it. A different name still takes the record away.
+
+  **A turn starts from what is drawn.** A banner placed by a fill carries no
+  `rotation`, and `transformProperties` rewrites only what an entry carries, so
+  the gizmo turned it into itself. `drawnOrientation` in `transform.ts` writes
+  the baker's own fallback first -- `rotation=0`, and `facing=east` on a wall
+  banner -- and deliberately not the 26.2 registry default of 8, which would
+  spin it half round before the turn. And the middle button picks a banner up
+  **with** its design, from `banner.layers` rather than `blockData`, which on a
+  legacy document renames a white banner after its `Base`.
 - **Redstone dust was three faults in one block, and each hid the others.**
   Vanilla ships the texture **greyscale** -- the shipped pack's palette is
   three greys and transparency, none darker than 217 -- and multiplies it by
@@ -5608,6 +7075,41 @@ mid-air beside whatever it was meant to feed. `facing` is the clicked face
 reversed, with the one exception the game states outright: there is no
 upward-facing hopper, so a click on a floor gives `down`.
 
+**An anvil is laid across the look.** `AnvilBlock.getStateForPlacement` is
+`getHorizontalDirection().getClockWise()`, and the model's long axis is on `z`
+at `facing=south`, so looking north gives `facing=east` and the horn to one
+side. It was left out of `orientPlacement` on purpose, as a guess that would
+look deliberate -- and every anvil therefore landed on `facing=north`, which is
+one of the four guesses. `CLOCKWISE_FROM_LOOK` is the table, and `tests/blocks.ts`
+checks the baked top as well as the property, because a table one quarter out
+still names four directions.
+
+**A bell hangs from what it was clicked onto, and it was in no table.** So
+every one of them landed on the registry's `attachment=floor`,
+`facing=north`, whichever way the camera pointed and whatever it was hung
+from. `BellBlock.getStateForPlacement` is two branches on the clicked face: a
+top face gives `floor` and an underside `ceiling`, both with `facing` from the
+look, and a side gives `single_wall` with `facing` the **opposite** of the
+clicked face -- a bell points *into* its wall where a wall torch points out of
+it, which is why `WALL_MOUNTED` is one value short of being the rule.
+`double_wall` is deliberately absent, for `hinge`'s reason: vanilla picks it
+from the block on the far side, which is a question about the document rather
+than about the click.
+
+**Pointed dripstone points away from where you look, vertically.** Its placement
+is vanilla's `getNearestLookingVerticalDirection()` reversed: look up at a
+ceiling and it hangs as a stalactite, look down — or straight ahead — and it
+stands as a stalagmite. It is the camera, not the clicked face, so looking up at
+the side of a block hangs one off it. Vanilla then flips it when the side it
+would grow from has nothing to hold it; that half is deliberately not here,
+because this app does not redirect a placement on physical grounds.
+`VERTICAL_FROM_LOOK` is the table.
+
+**The copper chests turn their front to you, and all eight used to face
+north.** They were in no placement table. `FRONT_TO_PLAYER` spreads
+`COPPER_CHESTS` from `block_connections.ts` rather than listing eight names a
+second time.
+
 **A trapdoor is the wall-mounted rule with a second property, and answered
 neither half of it.** `orientPlacement` returned `half` alone, so every
 trapdoor ever placed by hand landed on `facing=north` -- right a quarter of
@@ -5839,7 +7341,7 @@ of the cell, but the two faces that would claim it are the degenerate ones
 `boxFaces` already drops. The guard is what will be right the day somebody
 transcribes a leaning box flush to a wall.
 
-**Four graphics settings, and every one of them is the viewer's.** Nothing
+**Five graphics settings, and every one of them is the viewer's.** Nothing
 here reaches the mesher, so none of them rebuilds a mesh -- which is the whole
 reason they could be added at all without touching the chunk cache. Two are
 not numbers or booleans, so both are read *totally*, `projection`'s rule for
@@ -5865,8 +7367,18 @@ is *on*: three applies tone mapping only when it is drawing to the canvas, so
 with a target bound the scene pass emits linear colour and the copy is where
 the curve belongs. Either way it happens exactly once, which is the property
 that has to hold -- turning anti-aliasing on must not change how the picture
-is graded. **The compass is drawn before the copy**, so it is inside the
-multisampled picture rather than the one unaliased thing on screen.
+is graded. **The compass is anti-aliased too**, in its own small target laid on
+by the copy, rather than the one unaliased thing on screen.
+
+**And there is one resolve per frame.** three resolves a multisampled target
+at the end of every `render()` into it, so the frame is *one* render into
+`aaTarget` -- the world with its sky -- and the compass resolves only its
+square. Both targets say `resolveDepthBuffer: false`, because nothing reads the
+depth after the frame. Measured on the RTX with the scene drawing every frame,
+the three resolves were about 39% GPU and 16.5 W, and one is about 33% and
+15.4 W. The targets are reallocated 120 ms after the last resize rather than on
+every `ResizeObserver` callback, which was 148 ms of the same report; meanwhile
+the copy stretches the old picture.
 
 The default is **4**, not 0. The context used to be created with `antialias:
 true` and no way to say otherwise, so off has to be a choice somebody makes
@@ -5899,8 +7411,262 @@ assigned at 60Hz would run Svelte's effects at 60Hz to move a number nobody
 can read that fast. It carries the triangles and the draw calls beside the
 rate, which is free and is what makes it a diagnosis rather than a number --
 and `renderer.info.autoReset` goes **off**, because `info` resets itself at
-the start of every render and a frame here is three or four of them: left
-alone it would report the compass.
+the start of every render and a frame here is up to four of them: left
+alone it would report the compass. Once nothing has been drawn for half a
+second it says **idle** instead of a rate, with the last frame's counts: a still
+scene is not a slow one, and a rate averaged over the idle stretch would read
+like the stutter it is not.
+
+**The viewport draws on demand.** The loop still wakes on every refresh, and
+`render_demand.ts` decides whether that refresh draws. A still scene used to
+draw sixty identical frames a second, which on a laptop iGPU is the whole
+budget; measured on the RTX with two blocks on screen, drawing every frame was
+33% GPU and 15.4 W, and on demand it is 0% and 9.2 W. Four things ask for a
+frame:
+
+- **activity** -- `invalidate()` -- after which the loop draws for
+  `SETTLE_MS`. Input events on the canvas and the window call it, and so does
+  one `$effect` that reads **every prop that is not a callback**, plus the
+  state the hover writes. `tests/ui.ts` compares that list with the props, so
+  a prop added and left out fails a check instead of leaving a stale picture.
+  The settle window is what lets the throttled parts of the loop (hover,
+  outline, build grid: 50 ms) catch up, and lets a state change a frame made
+  reach the scene through an effect a microtask later;
+- **the camera**, compared rather than announced (`ViewWatch`): damping,
+  flight and a compass flight all move it from inside the loop;
+- **an animated texture** that uploaded a frame;
+- **work left over**, such as an environment map held back by its one-second
+  floor.
+
+The profiler's interval closes **before** the decision, so an idle refresh is a
+short interval of its own rather than part of one long one that would read as
+a stutter. `preview.alwaysDraw` is the old behaviour, under the diagnostics,
+for telling a missed invalidation from anything else. `aimCamera` still draws
+at once.
+
+**The light's direction is kept, not read back from the light.** `placeShadow`
+moves `sun.position` to fit the shadow camera round the document, and it used
+to take the direction from that same position -- which, fitted round the box's
+centre, points slightly elsewhere. So every `placeShadow` without an `applySky`
+before it turned the sun a little. It is `lightDirection` now, set where the
+hour or the sliders set the light. Found by comparing an incremental frame with
+a rebuilt one: the meshes were identical and the shadows were not.
+
+**The shadow map is drawn on request.** `shadowMap.autoUpdate` is off, and
+`shadowsStale()` is the one place that sets `needsUpdate`: aiming the light
+(`placeShadow`, which the sun's movement goes through), every payload, and the
+shadow settings. Anything else that casts a shadow and moves has to call it,
+or its shadow stays behind. The map is reallocated only for a new resolution:
+the effect used to dispose of it on every run, and through `placeShadow` it ran
+on every `documentSize`, which is every edit.
+
+**`documentSize` is one array while its numbers hold.** The app hands down a
+fresh one with every `DocumentState`, and every effect reading it ran again:
+the grid and the cage rebuilt, the sky re-applied (with global illumination,
+the environment map rebuilt). The Viewer's own `documentSize` is a `$derived`
+over the prop that keeps the old array when the numbers match.
+
+**The pixel ratio follows the display.** `window.devicePixelRatio` is not
+reactive, so a window moved from a 1.5 panel to a 1.0 monitor kept drawing
+2.25 times the pixels anyone could see. A `(resolution: Xdppx)` media query on
+the current value fires when it stops being true.
+
+**The frame rate cap skips frames and keeps `requestAnimationFrame`.** The loop
+still wakes on every refresh and `frameDue` in `shader_modes.ts` decides whether
+to draw, so a frame is still presented in step with the display and only fewer
+of them are drawn. A `setTimeout` loop would draw between refreshes and tear
+or stutter for the same GPU cost. Two things about it matter. The anchor moves
+forward by one interval per drawn frame instead of jumping to `now`, so a 60
+cap on 144Hz draws 60 and not the ~48 that anchoring on each late tick gives.
+And the early return comes **before** `clock.getDelta()`: the delta then covers
+the skipped refreshes, so flight keeps its speed at any cap. Returning after it
+would make the camera slow down with the cap and fail nothing else, which is
+why `tests/ui.ts` checks the order in the source. `renderFrame` called on
+request (`aimCamera`) is not throttled, because a capture has to draw now.
+`maxFps` reads totally through `fpsCap`, `antialiasSamples`'s rule, and the
+default is no cap.
+
+**A stutter is measured before it is fixed, and `frame_profiler.ts` is the
+instrument.** The counter averages over half a second, so one 300 ms frame
+reads as a small dip and says nothing about its cause. With
+`preview.frameDiagnostics` on, the profiler records every interval between
+two drawn frames: its `gap`, the loop's own `work` split into phases, and
+`outside = gap - work`. The unit is the interval and not the loop body,
+because most of what can stall this window happens outside the loop: an
+effect applying a mesh payload, a structured clone, a garbage collection.
+The gap is the only way the loop can know that happened.
+
+What names a cause outside the loop is the browser's **Long Animation
+Frame** entries, which attribute time to scripts by function. They arrive
+after the frame they describe, so `addLongFrame` attaches them to earlier
+spikes as they land. When time was spent outside and no script ran long,
+`readingOf` says so: WebGL calls return before the GPU has done the work, so
+a GPU-bound frame shows up as the next frame arriving late with nothing to
+blame. That inference is worth more than any guess.
+
+Three rules keep it honest:
+
+- **It costs nothing when off.** Every hook in `Viewer.svelte` goes through
+  `stamp`, `lap` and `note`, each a null check first, and `tests/ui.ts` reads
+  them back from the source. A hook written around them would measure whether
+  anybody asked or not.
+- **A spike is relative and absolute.** It must exceed 3× the median gap, or a
+  30 FPS cap would be one long stream of spikes. It must also exceed 50 ms, or
+  a steady 144 Hz display would report every hiccup. A gap over 2 s is a
+  window coming back from the background, not a stutter.
+- **The report is copied, not uploaded.** The settings pane asks the viewer
+  for it through `stutterReport()` and copies it with the existing clipboard
+  channel. Help → Toggle Developer Tools (`role: "toggleDevTools"`, the one
+  Help row with a key, released in flight like the rest) opens the timeline,
+  where every phase shows up as a `viewer:*` measure.
+
+**The GPU preference applies at the next launch, and it cannot do better.**
+Chromium picks the adapter when its GPU process starts, and the levers are
+switches appended before `app.whenReady`. The settings store is async and not
+ready then, so `index.ts` reads `settings.json` synchronously, where anything
+unreadable means `auto`: startup is the least deserving place to fail. The
+WebGL context asks for the same `powerPreference`, once, when it is made. The
+pane offers a restart only when the choice differs from what main says the
+process *started* with (`GpuStatus.launch`). The restart asks about unsaved
+work before `app.relaunch()`, because a relaunch is scheduled for whenever the
+process next exits: a declined close prompt would otherwise restart the app at
+some unrelated quit later. In development `app.relaunch()` is useless: electron-vite exits when its
+electron does and takes the dev server with it, so the new process opened a
+grey window. `relaunch.ts` therefore spawns the new process itself under
+`ELECTRON_RENDERER_URL`, destroys its own window and stays alive until the
+child exits, after stopping the MCP server so the child can bind the port.
+
+**Where the cards can be chosen, the select lists the cards** and only
+Automatic beside them: the two presets would name one of them twice. A preset
+stored earlier is shown as the card it lands on.
+
+**For weeks the preference was never applied, and every screen said it
+was.** `gpu_preference.ts` parsed the file itself and looked for `preview` at
+the top. The store writes it under `settings`. So every launch read `auto`
+and appended nothing, and a laptop set to high performance drew with its AMD
+iGPU while the pane showed the choice saved. The check written for it built
+`{"preview": ...}` by hand: it agreed with the parser instead of with the
+file, so it passed. Both readers now go through `settings_file.ts`. The test
+writes a `PersistedFile` and requires the store's `load` to call
+`parsePersistedFile`. Reading `preview` from the top again fails three checks.
+
+It surfaced as a stutter report naming the AMD with `gpuPreference:
+high-performance` in its settings. That field is the choice on screen, which
+cannot tell "not restarted yet" from "asked for and ignored". A copied report
+therefore now carries `gpuLaunch` (what main asked for), `gpuActive` (what
+Chromium draws with) and `gpuHonoured`. Report 1, on the same machine, had
+shown the RTX: the window was on the external monitor, which the dGPU drives.
+
+**One card is chosen by LUID, and a LUID is not a name.**
+`--use-adapter-luid=<high>,<low>` is the only lever that names the third of
+three cards. It is in Electron 33's binary, `ui/gl/gl_display.cc` parses it
+(high part signed, low part unsigned), and it was verified on this app's own
+Electron: the RTX drew with it, and a LUID that names nothing fell back to the
+default adapter with WebGL still on. That last fact is what makes a stale
+LUID harmless.
+
+But Windows assigns LUIDs at boot, and Electron exposes none.
+`app.getGPUInfo` enumerates vendor, device, revision, subsystem, `active`
+(false for every device, measured) and a power preference. So:
+- the setting stores a stable key, `vendor:device:subsys:rev#n`;
+- `services/gpu_adapters.ts` reads the LUIDs from DXGI, through PowerShell
+  and some C# compiled at run time;
+- the list is cached per boot in `userData/gpu-adapters.json`.
+
+The enumeration costs about a second, paid only at the first launch of a boot
+with a card chosen. No native dependency.
+
+A preference stays on Chromium's own switch. Measured, `force_high_performance_gpu`
+does move this laptop to its RTX, and it costs no enumeration.
+
+**What draws is checked, not assumed.**
+`app.getGPUInfo("complete").auxAttributes.glRenderer` is the same ANGLE string
+WebGL reports, device id included (`(0x0000249C)`). So `gpu_runtime.ts` tells
+main which card draws without asking the window.
+- A LUID that was passed and did not take goes into the cache's `badLuids`,
+  and the next launch reads the list again.
+- The list is refreshed in the background after every start.
+- The pane says which card draws, and warns when the choice was not honoured.
+- Where DXGI does not exist (Linux), the cards Chromium saw are listed as
+  information, and only a preference can be chosen.
+
+**Levels of detail draw a heavy build lighter at a distance, and nothing
+changes up close.** Four levels: the full chunks; level 1 per chunk, every block
+with more than `LOD_FACE_BUDGET` faces drawn by a hand-written stand-in from
+`LOD_SHAPES` (statues, cauldrons, lit candles, a fence joined on four sides);
+and levels 2 and 3 per 64-block region, in cells two and four blocks wide
+(`coarse_mesh.ts`). `renderer/lib/lod.ts` chooses: a level is shown where what
+it leaves out, measured in blocks by main and projected at the nearest point of
+what it covers, is smaller on screen than `preview.lodPixels` (2 by default).
+Settings → Level of detail holds the mode (Off, Automatic, Always), the pixels,
+the automatic threshold (1 M triangles of full mesh, so a small build never gets
+any), the two kinds apart, and a tint per level for seeing where each is shown.
+
+**The first version broke the app, and the rule it broke is the one to keep:
+the window asks, main builds.** Main shipped the levels by default while the
+viewer had no code to choose between them, and `groupFor` put every layer that
+was not `void` into `solid` -- all four drawn at once at every distance, the
+coarse shell hiding the build and taking its clicks. A 21x24x22 pavilion came
+out in four-block cubes. Main now builds a level only when `request.settings`
+asks for one (`DocumentPreviewOptions.lod`), and a feature stays off until both
+of its halves exist: the dev instance runs the working tree and reloads on
+every edit, so every intermediate state is on somebody's screen.
+
+**Errors are measured, not guessed.** Level 1's is `lodShapeError`, a Hausdorff
+distance between the block and its stand-in as solids, sampled on the surfaces
+that can be seen: statues 0.09-0.28 blocks, candles 0.25, cauldrons 0.19, fences
+0.09. Measuring found the statue's own: the antenna, left out, was 0.50 blocks
+in every pose, four times anything else, so it keeps a box. The coarse levels
+err by the **cell's whole width** (`COARSE_ERROR`, 2 and 4), not by the
+`factor - 1` their surface can stray: a cell is one cube wearing one texture,
+and on rolling grass at a block and a half per pixel level 2 at "one block" came
+out greener than the ground in a third of the pixels.
+
+**A change of level is crossed in time, with two complementary dithers.** For
+`FADE_MS` both levels draw, each discarding pixels against a 4x4 Bayer threshold
+and the *same* `t` -- the finer keeps `>= t`, the coarser `< t` -- so the
+crossing has no holes and draws no pixel twice; a region crossing to level 2
+hands its `t` to every chunk in it. In time and not in distance, and that was
+measured: with a band of distance where both draw, a still camera with a row of
+statue chunks in it drew 8.2 M triangles where the full mesh is 7.47 M.
+`HYSTERESIS` stops a camera resting at a threshold from crossing back and forth.
+A fading mesh needs its own fade, and three uploads uniforms per object only for
+a `ShaderMaterial`, so it borrows a material copy from a pool (`lodVariant`);
+every other mesh keeps the shared material, with no `discard` in its shader.
+
+**Clicks and shadows always use the full chunks.** A level lives in
+`lodLoaded`, which no raycast names; the chunk it stands in for stays in
+`loaded`, hidden, and three's raycaster ignores `visible`, so a click at any
+distance lands on the block that is really there. The shadow map is drawn from
+the full chunks by a render of nothing (`shadowsFromFullDetail`: a camera with
+the same layers pointed away from the world, into a 1x1 target), because three
+culls shadow casters by the light's frustum and not the camera's -- a coarse
+shell in the shadow map would darken the full chunks the moment they came back.
+A delta that brings only levels leaves the shadow map alone (`touchesFullMesh`):
+redrawing it there was a full extra pass per slice of the queue.
+
+**Never in an edit's own build.** Main meshes the full chunks and nothing else.
+Level 1 of a chunk it touched goes down in the same payload -- the full mesh
+shows there, which is always right -- and is queued; a region it touched is
+queued and **keeps its old meshes on screen** until rebuilt, because at a coarse
+level an edit is below a pixel and taking the region down would show two changes
+for one nobody can see. The window asks again 400 ms after the last edit and
+every 50 ms while `MeshPayload.lod.state` is `pending`; each answer spends at
+most `LOD_SLICE_MS` (40) on the queue, regions first, then one level 1 at a
+time. The options are not part of the full mesh's cache key, so changing them
+re-meshes no chunk.
+
+Measured with `npm run bench:edit -- --lod` (statues 64x16x64, terrain
+256x96x256): an edit costs what it did without levels -- breaking a statue
+983 → 1013 ms, terrain 23-46 ms either way -- and the queue drains at rest,
+~40 ms on terrain, ~1.4 s in five slices of up to ~370 ms for statue chunks.
+In the app the statue field framed by R draws 3.93 M triangles instead of
+7.47 M, all at level 1: 1.2% brighter, and a fifth of its pixels changed by
+more than 10/255 -- the full mesh's moiré gone, not a change of shape. The
+terrain at the level-2 distance draws 105 k triangles in 35 draw calls instead
+of 416 k in ~690; at level 3, 27 k. The full mesh itself is byte for byte what
+it was: every offered block baked in all 20,040 states hashes the same as
+before levels existed.
 
 **A shader mode is a preset, and `vanilla` is the identity.** There are no
 shader packs and there must not appear to be: the renderer opens no connection
@@ -6061,8 +7827,13 @@ Two things about the flood fill, both measured:
   Every open cell in an unroofed column is already at 15, which on an open build
   is most of the volume — half a million cells, each dequeued, decomposed into
   coordinates and asked about six neighbours only to find them all already at 15.
-  That was **223 ms an edit**; seeding from cells that touch something solid is
-  **16 ms**.
+  That was **223 ms an edit**; seeding only from cells beside something dimmer
+  is **16 ms**. "Dimmer" means an open neighbour below 15. It was read as "a
+  solid neighbour", which is the same set where the sky meets the ground and a
+  different one under an overhang: the open column beside a roof lit nothing,
+  so the space under it was lit from the floor up. `relight` is what showed it,
+  because a partial flood cannot reproduce a rule that depends on more than the
+  light.
 - **`spread` writes its six neighbours out longhand.** A closure allocated per
   dequeue was most of the rest.
 
@@ -6072,6 +7843,13 @@ packed to a byte per cell and compared exactly as the voxels are. Same rule as
 ever: dirtiness is *observed*, not announced — a caller that had to remember to
 say "and the light reached this far" would forget, and the chunk that stayed
 dark would be a bug nobody could reproduce.
+
+**After an ordinary edit the observing is done by the writes, not by a compare.**
+`doc.changes` lists the cells written since the cache last took the list, and
+`relight` lists the cells whose light it changed; `ChunkHint.changed` is the
+union, and with it no cell outside it is looked at. Both lists are exact, and
+`null` -- compare everything -- is always allowed, which is what a load, a
+compact, a shrink or a fill past `MAX_TRACKED_CHANGES` falls back to.
 
 **Animated textures are blitted into the atlas, not packed into it.** Water is
 32 frames, lava 38, fire 32; a square tile holding all of them would either grow
@@ -6104,6 +7882,26 @@ Four things about it are load-bearing:
   the single source of colour, so frames that arrived untinted would show the
   biome's water for one instant and grey for every frame after. That is exactly
   what the position check caught.
+
+**Only the tiles the mesh draws are played, and the first stutter report is
+why.** The atlas is shared by everything the process ever meshed, and the
+block-icon warm-up decodes every block in the game. So its animation list is
+every animated texture there is, and `playAnimations` uploaded all 34 of them
+per tick for an 11×12×11 document that used none. The report measured frames
+of 85–443 ms, all 50 spikes inside those uploads, with every other phase under
+2 ms. `animationsUsed` in `atlas_animation.ts` reads which tiles each chunk
+samples (one vertex per quad, from its own UVs, cached per mesh against the
+atlas version), and `refreshAnimated` marks the union after every payload,
+including the one that empties the scene.
+
+**The time was almost certainly not the uploads' own cost.** Writing into a
+texture the GPU is still drawing with makes the driver wait for it, and that
+wait lands on the first upload of the frame. The report was taken with the
+window on an external monitor of a hybrid-GPU laptop. It was smooth on the
+laptop panel, at the same scale and the same settings. So the profiler now
+times `texture animations: first upload` apart from `: uploads`, and records
+the `display` and the `gpuLoad`. The next spike in the first phase will be
+read as the GPU falling behind rather than as this code.
 
 **The sun and the moon come out of the resource pack, as pixels.** They live
 at `textures/environment/`, nowhere near the block textures and never asked for
@@ -6139,22 +7937,31 @@ the texel grid rotates with it. It would have been complexity that reads as a
 fix. If the box ever starts following the camera rather than the document, it is
 the first thing to add back.
 
-**The sky is drawn in a pass of its own, and both halves of that are a fix.**
-It was a sphere of radius 3000 in the main scene while `maxDrawDistance` — and
-so `camera.far` — defaults to **512**: every vertex outside the frustum, clipped,
-nothing drawn, and the viewport showing the renderer's clear colour. Black, with
-no sky in it. `skyDistance` therefore derives the dome's radius from the near and
-far planes and **clamps** — the clamp is the guarantee, and `tests/ui.ts` fails
-three checks without it.
+**The sky is sized to the frustum and drawn on the far plane.** It was a
+sphere of radius 3000 while `maxDrawDistance` — and so `camera.far` — defaults
+to **512**: every vertex outside the frustum, clipped, nothing drawn, and the
+viewport showing the renderer's clear colour. Black, with no sky in it.
+`skyDistance` therefore derives the dome's radius from the near and far planes
+and **clamps** — the clamp is the guarantee, and `tests/ui.ts` fails three
+checks without it.
 
-The separate pass is the other half. The sun and the moon are transparent, and
-three.js draws transparent objects *after* every opaque one, so in a single
-scene they would have painted over the schematic however their depth test was
-set. Sky, then `clearDepth()`, then the world: nothing in the sky can occlude
-anything, whatever its distance. The dome rides with the camera, which is also
-what stops it being a sphere you can fly out of.
+It was then a pass of its own, for a reason that still holds: the sun, the moon
+and the stars are transparent, and three draws transparent objects *after*
+every opaque one, so in one scene with no depth test they paint over the
+schematic. But a pass of its own into a multisampled target is a second
+`render()`, and three resolves the target at the end of each one. So the sky is
+in the world's scene now, and kept behind it by **depth**: `atFarPlane` sets
+`gl_Position.z = gl_Position.w` in each body's vertex shader, which puts it
+exactly where the cleared depth buffer is, and with three's `LessEqual` test a
+body is drawn only where nothing in the world has been. Checked in this app's
+Chromium on ANGLE with 4x MSAA: a box in front of a full-screen "sun" stays red
+with the trick and turns yellow without it. The dome is opaque, first by its
+`renderOrder`, and tests no depth. `skyScene` survives only because the
+environment map is built from the sky alone: the group is lent to it for the
+cube render and handed back. The dome rides with the camera, which is also what
+stops it being a sphere you can fly out of.
 
-With the sky off there is no second pass and `scene.background` is the theme
+With the sky off nothing of it is drawn and `scene.background` is the theme
 colour again, exactly as before any of this.
 
 **The virtual floor is not a block.** A plane at y=0, twenty thousand across,
@@ -6184,13 +7991,35 @@ a surface turns edge-on. It applies to filled polygons only, and that is what
 makes it exact here: the floor is the only polygon of the three, so pushing it
 one step away wins the argument for both sets of lines at every distance. Pushing
 the base rather than pulling the decals is safe because nothing is behind the
-floor — the sky is a separate pass that clears the depth buffer first.
+floor but the sky, which sits on the far plane (`atFarPlane`).
 
 `depth.ts` holds the arithmetic and `tests/ui.ts` states it from both ends: an
 epsilon is resolvable at 16 blocks and gone by 64, at every draw distance the
 slider offers. It also greps `Viewer.svelte` for a `position.y` assignment near
 zero, because the epsilons are easy to reintroduce, they look like care, and
 nothing else in the app would notice.
+
+**And the floor fades into the horizon before the far plane cuts it.** It is
+twenty thousand blocks across and the far plane a few hundred, so it always
+ended in a straight edge with the dome showing below the horizon behind it: at
+eight in the morning a pale band under a night-coloured floor, reported in the
+UX audit as a banner or a drawing fault. `fadeIntoHorizon` mixes the floor
+towards `skyHorizon` -- the uniform the dome draws with -- from 30% of the far
+plane to 95% of it, so where it is cut there is nothing left to see. Two
+details are the whole of it:
+
+- **it is mixed after `dithering_fragment`, the last thing the shader does.**
+  The dome is a raw `ShaderMaterial` with neither tone mapping nor a
+  colour-space conversion, so it writes `uHorizon` as it is, into the canvas
+  and into the multisampled target alike; mixed any earlier, the two agree in
+  one of those paths and not the other;
+- **the distance is measured per fragment**, from an interpolated world
+  position. The floor is one quad, and a distance interpolated from its four
+  corners is ten thousand blocks everywhere: the first version faded the whole
+  floor into the sky.
+
+Under the sky only. Without it the background is the theme's flat colour, which
+the floor already sits a shade off.
 
 **The sky is the viewer's alone, and `sky.ts` is the part that is testable.**
 The dome, the two squares and the stars are geometry with no relationship to the

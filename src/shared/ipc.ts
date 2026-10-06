@@ -7,7 +7,12 @@
  */
 
 import type { SchematicFormat } from "./schematic.js";
-import type { Hotbar } from "./settings.js";
+import type { GpuPreference, Hotbar } from "./settings.js";
+import type { CameraPlacement, Vec3 } from "./camera_aim.js";
+import type { DyeName } from "./banner_patterns.js";
+import type { ShapeMode, ShapeSpec } from "./shapes.js";
+import type { ErosionRule, Footprint, HeightField, TerrainMode } from "./terrain.js";
+import { DEFAULT_DISTRIBUTION, type Distribution } from "./block_mix.js";
 import { SCHEMATIC_FORMAT_LABEL, SCHEMATIC_FORMATS } from "./schematic.js";
 import type {
   ExportType,
@@ -207,6 +212,10 @@ export const IPC = {
   docRegionMesh: "bgpt:doc:region:mesh",
   /** The clipboard's contents as standalone geometry, for the paste ghost. */
   docClipboardMesh: "bgpt:doc:clipboard:mesh",
+  /** What the selected areas are made of, for the materials inventory. */
+  docSelectionPalette: "bgpt:doc:selection:palette",
+  /** Where some blocks are, as the shell the viewport glows. */
+  docFindBlocks: "bgpt:doc:find",
   /**
    * renderer → main: where the 3D canvas sits in the window.
    *
@@ -230,6 +239,32 @@ export const IPC = {
    * and has no way to ask, so the renderer says so when it changes.
    */
   pointerLock: "bgpt:viewport:pointerLock",
+  /**
+   * main → renderer: put the camera here, draw, and say where it ended up.
+   *
+   * The first request main makes *of* the renderer rather than an event it
+   * sends and forgets. `viewportRect` and `pointerLock` are the other shape --
+   * the renderer reporting what main cannot work out -- and they were written
+   * that way because main had no means of asking. `capture_viewport` needs one:
+   * a picture taken before the new view was drawn is a picture of the old view,
+   * and the model would describe the wrong side of its own build.
+   *
+   * So it is a pair of events joined by an `id`, and not an `invoke`, which
+   * only runs the other way. `services/renderer_request.ts` holds the pending
+   * ids and the timeout; `cameraAimed` is the reply.
+   */
+  cameraAim: "bgpt:viewport:camera:aim",
+  /** renderer → main: the answer to `cameraAim`, after the frame was drawn. */
+  cameraAimed: "bgpt:viewport:camera:aimed",
+  /**
+   * main → renderer: light these blocks up, or put the glow out.
+   *
+   * What `highlight_blocks` sends, so a model can point at something in the
+   * build the user is looking at. Fire and forget: the tool answers with its
+   * own count, found in main, and the window asks for the shell itself
+   * through `docFindBlocks` exactly as a click in the materials list does.
+   */
+  glowBlocks: "bgpt:viewport:glow",
   /**
    * The renderer telling main it has just thrown something it did not catch.
    *
@@ -311,6 +346,8 @@ export const IPC = {
   menuSave: "bgpt:menu:save",
   menuSaveAs: "bgpt:menu:saveAs",
   menuClose: "bgpt:menu:close",
+  /** File → Convert…: one schematic file into another, without opening it. */
+  menuConvert: "bgpt:menu:convert",
   menuUndo: "bgpt:menu:undo",
   menuRedo: "bgpt:menu:redo",
   /**
@@ -330,6 +367,8 @@ export const IPC = {
 
   /** What the app is: name, version, and the runtime under it. */
   appInfo: "bgpt:app:info",
+  /** The graphics adapters, the one launched with, and the one drawing. */
+  gpuStatus: "bgpt:gpu:status",
 
   /**
    * Whether a newer build exists, and the two things to do about it.
@@ -345,6 +384,8 @@ export const IPC = {
   updateCheck: "bgpt:update:check",
   updateDownload: "bgpt:update:download",
   updateInstall: "bgpt:update:install",
+  /** Restart the app, for a setting that only applies at launch. */
+  relaunchApp: "bgpt:app:relaunch",
 
   /** main → renderer: one tool call the agent just made. */
   agentStep: "bgpt:agent:step",
@@ -398,6 +439,65 @@ export interface AppInfo {
   node: string;
   /** `process.platform`, as-is. */
   platform: string;
+}
+
+// ---------------------------------------------------------------------------
+// Which GPU draws
+// ---------------------------------------------------------------------------
+
+/**
+ * What this process asked Chromium for at launch. The setting may have moved
+ * since; it applies at the next launch.
+ */
+export interface GpuLaunch {
+  preference: GpuPreference;
+  /** The adapter key that was asked for, or `null`. */
+  adapter: string | null;
+  /**
+   * How it was asked: `luid` names one adapter (`--use-adapter-luid`),
+   * `switch` asks by power (`force_*_gpu`), `default` asks nothing.
+   */
+  method: "default" | "switch" | "luid";
+  /** The LUID passed, for this boot only. */
+  luid: string | null;
+  adapterName: string | null;
+  /**
+   * Why an adapter that was asked for is not what was launched with:
+   * gone from the machine, the list could not be read, or not Windows.
+   */
+  note: "adapter-missing" | "enumeration-failed" | "unsupported-platform" | null;
+}
+
+/** One adapter, as the pane lists it. */
+export interface GpuAdapterInfo {
+  key: string;
+  name: string;
+  vendorId: number;
+  deviceId: number;
+  /** Bytes of its own memory, `0` when unknown. */
+  dedicatedMemory: number;
+}
+
+/** Everything the pane and the stutter report say about the GPU. */
+export interface GpuStatus {
+  /** The adapters, or `null` while they are still being read. */
+  adapters: GpuAdapterInfo[] | null;
+  /** Whether one adapter can be chosen here (Windows) or only a preference. */
+  choosable: boolean;
+  /** The adapter each preference lands on, when the system says. */
+  highPerformance: string | null;
+  lowPower: string | null;
+  launch: GpuLaunch;
+  /**
+   * What Chromium reports drawing with: the ANGLE renderer string, and the
+   * adapter it matches. `null` until the GPU process has answered.
+   */
+  active: { renderer: string; adapter: string | null } | null;
+  /**
+   * `false` when a particular adapter was asked for and another one draws.
+   * `null` when nothing particular was asked, or it cannot be told.
+   */
+  honoured: boolean | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -593,18 +693,32 @@ export interface BlockIconsRequest {
    * request says "I have version N" and gets geometry alone.
    */
   atlasVersion?: number | null;
+  /** ...and the layout of it; see `MeshAtlas.layout`. */
+  atlasLayout?: number | null;
 }
 
 export interface BlockIcon {
   block: string;
   /** `null` when the block meshed to nothing — air, or a shape not drawn. */
   geometry: ChunkGeometry | null;
+  /**
+   * The cells the picture is of, `[width, height, length]`: `[1, 1, 1]` for
+   * a block, two along one axis for a bed, a door, a two-tall plant or an
+   * extended piston, which are drawn whole. The renderer frames this box
+   * rather than the geometry, so a torch or a slab is framed as it was.
+   */
+  size: [number, number, number];
 }
 
 export interface BlockIconsSuccess {
   icons: BlockIcon[];
   atlas: MeshAtlas | null;
   atlasVersion: number;
+  /**
+   * Icons drawn against an earlier version of the same layout are still
+   * right; only a new layout makes them wrong. See `MeshAtlas.layout`.
+   */
+  atlasLayout: number;
 }
 
 export type BlockIconsResponse = Result<BlockIconsSuccess>;
@@ -659,7 +773,7 @@ export interface PickFileResponse {
  * every other `Failure.message`, and the renderer does not have to keep three
  * near-identical strings in step with a dialog it cannot see.
  */
-export type DiscardIntent = "new" | "open" | "close" | "update";
+export type DiscardIntent = "new" | "open" | "close" | "update" | "restart" | "restore";
 
 export interface ConfirmDiscardRequest {
   intent: DiscardIntent;
@@ -748,8 +862,15 @@ export interface PreviewRequest {
  * a setting -- and, because that makes it a separate object, never hands to
  * the raycaster. That is the whole of what the split buys: a click passes
  * through the void exactly as it passes through air.
+ *
+ * The other three are the levels of detail, drawn in place of `"solid"` at a
+ * distance and never raycast either: `"lod1"` is one chunk with every block
+ * that has a stand-in drawn by it, keyed like the chunk; `"lod2"` and
+ * `"lod3"` are a whole 64-block region in cells two and four blocks wide,
+ * keyed by the region's coordinates in the same packing. See
+ * `renderer/lib/lod.ts` for which is shown when.
  */
-export type ChunkLayer = "solid" | "void";
+export type ChunkLayer = "solid" | "void" | "lod1" | "lod2" | "lod3";
 
 /** One chunk of one layer, which is what the renderer keeps a mesh for. */
 export interface ChunkRef {
@@ -799,6 +920,35 @@ export interface ChunkGeometry {
    * silently replace its solid one.
    */
   layer: ChunkLayer;
+  /**
+   * For a level of detail, how far its surface may stray from the full
+   * mesh's, in blocks; absent on `"solid"` and `"void"`.
+   *
+   * Measured in main, where the shapes are: the viewer turns it into pixels
+   * at the camera's distance and shows the level only where those stay under
+   * the setting. A number the viewer guessed would be wrong per block, and
+   * would be wrong in the direction that shows.
+   */
+  lodError?: number;
+}
+
+/**
+ * Where the levels of detail stand for the document on screen.
+ *
+ * - `off`: the window did not ask for any;
+ * - `below`: asked for in `auto`, but the full mesh is under the threshold,
+ *   so there is nothing a simpler version would save;
+ * - `pending`: some are still to be built -- the viewer shows the full mesh
+ *   there meanwhile, which is always right, and asks again shortly;
+ * - `ready`: every level asked for is built.
+ */
+export type LodState = "off" | "below" | "pending" | "ready";
+
+/** What the settings pane says about the open document's levels of detail. */
+export interface MeshLod {
+  state: LodState;
+  /** The full mesh's triangles, which is what `auto` measures. */
+  triangles: number;
 }
 
 /**
@@ -821,6 +971,12 @@ export interface MeshAtlas {
    */
   version: number;
   /**
+   * Which packing of the sheet this is. Tiles added since keep every UV of
+   * this layout valid and arrive as an `AtlasPatch`; a new layout means every
+   * UV moved and the sheet is sent whole. See `packAtlas`.
+   */
+  layout: number;
+  /**
    * The textures that move, and their frames.
    *
    * The atlas itself holds frame 0 and always will: packing 32 frames of water
@@ -832,6 +988,25 @@ export interface MeshAtlas {
    * They travel with the atlas and are therefore bound to its version, which is
    * what keeps this off the per-edit path: an edit re-sends neither.
    */
+  animations: AtlasAnimation[];
+}
+
+/**
+ * Tiles added to an atlas the renderer already holds, without moving any
+ * other.
+ *
+ * What a texture nobody had drawn before costs now: its tile, a few kilobytes,
+ * copied into the texture the renderer has. It used to cost the whole sheet --
+ * 27 MB -- and a re-mesh of the document, because every UV moved.
+ */
+export interface AtlasPatch {
+  /** The layout these tiles belong to; see `MeshAtlas.layout`. */
+  layout: number;
+  /** The version the atlas is at once they are in. */
+  version: number;
+  /** Each tile's padded square, at its place in the sheet. */
+  tiles: Array<{ x: number; y: number; width: number; height: number; pixels: Uint8Array }>;
+  /** The moving textures among them, to play alongside the ones already held. */
   animations: AtlasAnimation[];
 }
 
@@ -889,6 +1064,29 @@ export interface MeshPayload {
   /** Omitted when `atlasVersion` matches what the renderer already holds. */
   atlas: MeshAtlas | null;
   atlasVersion: number;
+  /** See `MeshAtlas.layout`. */
+  atlasLayout: number;
+  /**
+   * The tiles added since the version the renderer said it holds, when it
+   * holds this layout. `atlas` and this are never both set.
+   */
+  atlasPatch: AtlasPatch | null;
+  /**
+   * Where the chunks go: their positions are in content coordinates, and a
+   * document cell is its content cell plus this.
+   *
+   * Main meshes in content coordinates so that a resize which moves the
+   * content -- growing the box below the origin -- leaves every chunk it
+   * already built where it was, and the viewport moves them all at once by
+   * placing their group here. Zero until something grows below the origin.
+   */
+  frame: [number, number, number];
+  /**
+   * The levels of detail: whether any are built, still coming, or not
+   * wanted. Required rather than optional, so a payload cannot leave the
+   * viewer guessing whether more is on the way.
+   */
+  lod: MeshLod;
 }
 
 /**
@@ -897,9 +1095,14 @@ export interface MeshPayload {
  * Both fields are "I hold this", never "send me this": main decides what to
  * send, and an unrecognised token or version simply means everything.
  */
-/** Pick this region up and put its corner down at `to`. */
+/**
+ * Pick these areas up and put the corner of their bounds down at `to`.
+ *
+ * Several areas move together and keep their places relative to each other;
+ * the gap between them stays where it is. One area is a list of one.
+ */
 export interface MoveRegionRequest {
-  region: RegionSpec;
+  regions: RegionSpec[];
   to: { x: number; y: number; z: number };
 }
 
@@ -943,6 +1146,8 @@ export interface DocumentMeshRequest {
   haveMesh: string | null;
   /** The atlas version it is drawing with, if any. */
   haveAtlas: number | null;
+  /** ...and the layout of it; see `MeshAtlas.layout`. */
+  haveAtlasLayout: number | null;
 }
 
 export interface PreviewSuccess {
@@ -970,6 +1175,15 @@ export type PreviewResponse = Result<PreviewSuccess>;
 export interface BlockSpec {
   namespacedName: string;
   properties?: Record<string, string>;
+  /**
+   * A banner's pattern layers, as the text that was typed or pasted --
+   * `[{pattern:"mojang",color:"orange"}, ...]`, out of `splitBlockInput`.
+   *
+   * Carried raw and read in main, which is where it is checked against the
+   * schematic's version and written in its spelling. Absent for every block
+   * that is not a patterned banner, which is every block but one.
+   */
+  bannerPatterns?: string;
 }
 
 /** Inclusive on both corners; the main process sorts and clips it. */
@@ -986,6 +1200,84 @@ export interface PaletteCount {
   /** `minecraft:oak_stairs[facing=north]`. */
   block: string;
   count: number;
+  /**
+   * The far halves counted into this one, by exact spelling: a bed's head
+   * beside the foot that is `block`, a door's upper half, an extended
+   * piston's head. Absent for every other block.
+   *
+   * A slot that stands for a whole bed has to reach both of its cells, so a
+   * replace or a highlight of it names these as well as `block`. Only from
+   * `selectionPalette`: `DocumentState.palette` counts states as they are.
+   */
+  pair?: string[];
+}
+
+/**
+ * The areas whose contents to count, as one set of cells -- or `null` for
+ * the whole document, which is counted from what the document already keeps
+ * rather than by walking its box.
+ */
+export interface SelectionPaletteRequest {
+  regions: RegionSpec[] | null;
+}
+
+/**
+ * What a set of areas is made of, the overlaps counted once.
+ *
+ * `palette` is `DocumentState.palette`'s shape and rule -- most common first,
+ * air left out -- over the cells of the areas instead of the whole document.
+ * Air is `air` instead, because the inventory shows it as a slot of its own,
+ * last. A cell of an area that lies outside the document holds nothing, not
+ * air -- a replace never reaches it -- so it is `outside` and nothing else.
+ * `cells` is every cell of the union, inside or out.
+ */
+export interface SelectionPaletteSuccess {
+  palette: PaletteCount[];
+  air: number;
+  outside: number;
+  cells: number;
+}
+
+export type SelectionPaletteResponse = Result<SelectionPaletteSuccess>;
+
+/**
+ * Some blocks to find, in the areas or -- `null` -- the whole document.
+ *
+ * A pattern is a palette spelling, matched the way a replace matches `from`:
+ * a bare id is the block in any state. A slot that stands for a bed sends its
+ * `pair` too, or the glow would light the foot and not the head.
+ */
+export interface FindBlocksRequest {
+  regions: RegionSpec[] | null;
+  patterns: string[];
+}
+
+/**
+ * The shell of the cells found: four integers a face -- the cell, in
+ * content coordinates (minus `frame`), and the side, in
+ * `FACE_STEPS`' order. See `domain/find_blocks.ts`.
+ */
+export interface FindBlocksSuccess {
+  /** How many cells matched. */
+  total: number;
+  faces: Int32Array;
+  /**
+   * How many blocks a side a face's cell is: 1, or more when there were too
+   * many faces to outline one block at a time.
+   */
+  scale: number;
+  /** Faces were left out even at the coarsest cells; `total` counts every cell. */
+  capped: boolean;
+  /** The document's frame when this was found, where the chunks stand. */
+  frame: [number, number, number];
+}
+
+export type FindBlocksResponse = Result<FindBlocksSuccess>;
+
+/** `IPC.glowBlocks`: what to light, and where. No patterns puts it out. */
+export interface GlowRequest {
+  patterns: string[];
+  regions: RegionSpec[] | null;
 }
 
 /**
@@ -1056,6 +1348,16 @@ export interface DocumentState {
    * renderer can have it right the instant a different schematic opens.
    */
   voidBlock: string;
+  /**
+   * Where the content sits in the grid since the document was opened: the sum
+   * of every growth below the origin (`SchematicDocument.frame`).
+   *
+   * The terrain tools read their noise at a column's place in the content,
+   * `x - frame[0]`, so a landscape painted on both sides of such a growth is
+   * one landscape; the panel and the brush's ghost need it to draw the same
+   * heights the edit will write.
+   */
+  frame: [number, number, number];
   /** Monotonic; the renderer uses it to tell whether its mesh is stale. */
   revision: number;
 }
@@ -1131,8 +1433,96 @@ export type EditRequest =
       block: BlockSpec;
       against?: "up" | "down" | "north" | "south" | "east" | "west";
     }
-  | { kind: "fill"; region: RegionSpec; block: BlockSpec }
-  | { kind: "replace"; region: RegionSpec; from: BlockSpec; to: BlockSpec };
+  /**
+   * Write a mix into every cell of the regions.
+   *
+   * `regions` because a selection may be several boxes; they are one set of
+   * cells, so an overlap is written once. A plain block is a mix of one --
+   * `singleMix` -- which is what Delete sends with air.
+   */
+  | { kind: "fill"; regions: RegionSpec[]; mix: MixSpec }
+  /**
+   * Rewrite the cells holding any of `from` with the mix.
+   *
+   * `from` is a list of **patterns**, each matched the way `replace` always
+   * matched one -- a bare name is the block in any state -- and a cell is
+   * replaced if it matches any of them.
+   */
+  | { kind: "replace"; regions: RegionSpec[]; from: BlockSpec[]; to: MixSpec }
+  /**
+   * Write a mix into the cells of a shape: a sphere, a cylinder, a pyramid, a
+   * box or its walls (`shared/shapes.ts`).
+   *
+   * Grows the document like a fill, unless `mode` is `filled`: that writes
+   * only over blocks already there, and there are none outside the box --
+   * `replace`'s reason for never growing.
+   *
+   * `stroke` names the brush stroke this is a touch of. Touches with the same
+   * stroke are one undo step (`TransactionOptions.mergeKey`), so a stroke is
+   * taken back by one Ctrl+Z however many touches it took.
+   */
+  | { kind: "shape"; shape: ShapeSpec; mix: MixSpec; mode?: ShapeMode; stroke?: string }
+  /**
+   * Terrain from a noise, in three layers, over an area (`shared/terrain.ts`).
+   *
+   * Over a selection it grows the document like a fill, except where it only
+   * takes away (`dig`, `replace`'s reason). A brush touch is the columns
+   * under its footprint, from the floor -- or the base, when that is lower --
+   * to the top of the schematic or of the terrain, whichever is higher.
+   */
+  | { kind: "terrain"; area: ToolArea; terrain: TerrainRequest; stroke?: string }
+  /**
+   * WorldEdit's `//smooth`: the ground's heights through a Gaussian,
+   * `iterations` times, each column stretched to its new height. Over every
+   * selected area in turn, or a brush touch, which is `SmoothBrush`'s box --
+   * the radius round the cell aimed at, ten blocks more above -- written only
+   * in the footprint's columns. Never grows the document.
+   */
+  | { kind: "smooth"; area: ToolArea; iterations: number; stroke?: string }
+  /**
+   * VoxelSniper's erosion (`shared/terrain.ts`' `ErosionRule`) over the
+   * selection's cells, or a brush touch, which is VoxelSniper's sphere round
+   * the cell aimed at. Never grows the document.
+   */
+  | { kind: "erode"; area: ToolArea; rule: ErosionRule; stroke?: string };
+
+/**
+ * Where a terrain tool works: the selection's areas, or a brush touch.
+ *
+ * A touch is the cell aimed at and a radius. A terrain takes the columns
+ * under the footprint around it, whatever their height.
+ */
+export type ToolArea =
+  | { kind: "regions"; regions: RegionSpec[] }
+  | { kind: "brush"; x: number; y: number; z: number; radius: number; footprint: Footprint };
+
+/** What a terrain is made of, and how it meets what is there. */
+export interface TerrainRequest {
+  field: HeightField;
+  surface: MixSpec;
+  subsoil: MixSpec;
+  rock: MixSpec;
+  subsoilDepth: number;
+  mode: TerrainMode;
+}
+
+/**
+ * Several blocks with weights, and the rule for which cell gets which.
+ *
+ * `shared/block_mix.ts`'s `BlockMix` with each block already parsed, which is
+ * the renderer's job for the same reason it is for a single block: `35:14` and
+ * a pasted `/give` become blocks there. The distribution travels as it is,
+ * because main is where the cells are and so where it is evaluated.
+ */
+export interface MixSpec {
+  entries: { block: BlockSpec; weight: number }[];
+  distribution: Distribution;
+}
+
+/** A single block as a mix: what every edit that writes one block sends. */
+export function singleMix(block: BlockSpec): MixSpec {
+  return { entries: [{ block, weight: 1 }], distribution: DEFAULT_DISTRIBUTION };
+}
 
 /**
  * A size typed into the dimensions panel.
@@ -1154,6 +1544,33 @@ export type EditRequest =
  * is already failing, so anything that had to be serialised from a live object
  * is one more thing that can throw inside the error handler.
  */
+/**
+ * `IPC.cameraAim`: where to put the camera, or `null` to leave it and only
+ * report where it is.
+ *
+ * Resolved already -- a position and a point to look at. What was *asked* for
+ * (a compass side, an elevation) is main's to turn into this, in
+ * `shared/camera_aim.ts`, so the renderer has nothing to decide.
+ */
+export interface CameraAimRequest {
+  id: number;
+  camera: CameraPlacement | null;
+}
+
+/** Where the camera stands once the frame has been drawn. */
+export interface CameraState {
+  position: Vec3;
+  target: Vec3;
+  projection: "perspective" | "orthographic";
+}
+
+/** `IPC.cameraAimed`: the answer, matched to its request by `id`. */
+export interface CameraAimReply {
+  id: number;
+  /** `null` when there is no viewport to aim, which main reports by name. */
+  camera: CameraState | null;
+}
+
 export interface RendererFailure {
   message: string;
   /** A stack when there was one; `""` rather than absent, for the same reason. */
@@ -1278,6 +1695,12 @@ export interface DocumentMesh {
   cached: boolean;
   sunAzimuth: number;
   sunElevation: number;
+  /**
+   * Where main spent the time, in milliseconds by step, for the stutter
+   * report: a slow answer is the same length whether main was relighting,
+   * meshing or busy with something else, and only main can say which.
+   */
+  timings: Record<string, number>;
 }
 
 /**
@@ -1302,6 +1725,20 @@ export interface BlockInspection {
   properties: Record<string, string>;
   /** `nbt` is JSON for display; `fields` is the same tree flattened for editing. */
   blockEntity: { id: string; nbt: string; fields: NbtFieldView[] } | null;
+  /**
+   * A patterned banner, spelled the way that places it again --
+   * `minecraft:magenta_banner[rotation=4,banner_patterns=[...]]`. Present only
+   * for a banner whose block entity says how it looks, so a model can copy the
+   * one it is looking at with `set_block`.
+   */
+  blockData?: string;
+  /**
+   * The design on a banner, bottom layer first. Present for **every** banner
+   * block, with no layers when it carries none -- including one with no block
+   * entity at all -- because the inspector's pattern editor is how a design
+   * gets onto a banner already in the document, and it needs somewhere to start.
+   */
+  banner?: { layers: { pattern: string; color: DyeName }[] };
 }
 
 /**
@@ -1318,7 +1755,8 @@ export interface BlockInspection {
  * and `attachment` and touches none of the horizontal properties.
  */
 export interface TransformRequest {
-  region: RegionSpec;
+  /** The areas, turned rigidly together; `to` is the corner of their bounds. */
+  regions: RegionSpec[];
   transform:
     | { kind: "rotate"; steps: 0 | 1 | 2 | 3 }
     | { kind: "mirror"; axis: "x" | "y" | "z" };
@@ -1333,7 +1771,8 @@ export interface TransformRequest {
  * low corner of each group and says in `notes` how many it threw away.
  */
 export interface ScaleRequest {
-  region: RegionSpec;
+  /** The areas, scaled together about one point; `to` is the corner of their bounds. */
+  regions: RegionSpec[];
   spec: { kind: "multiply"; factor: number } | { kind: "divide"; factor: number };
   to?: { x: number; y: number; z: number } | null;
 }
@@ -1590,8 +2029,16 @@ export type TraceEvent =
 export interface AgentRequestPayload {
   requestId: string;
   prompt: string;
-  /** The user's selection, which the agent's tools default to. */
+  /** The user's selection -- its active area -- which the agent's tools default to. */
   selection: RegionSpec | null;
+  /**
+   * The other areas selected beside it, if any.
+   *
+   * Described to the model so "these two towers" means something, but not
+   * what a tool acts on by default: that stays one box, because every tool
+   * takes one box and a model has to be able to say which.
+   */
+  otherAreas?: RegionSpec[];
 }
 
 /**
@@ -1931,6 +2378,12 @@ export interface BgptApi {
   reportViewportRect(rect: { x: number; y: number; width: number; height: number }): Promise<void>;
   /** Whether the keyboard is flying the camera. See `IPC.pointerLock`. */
   reportPointerLock(locked: boolean): Promise<void>;
+  /** Main asking for a camera. See `IPC.cameraAim`. */
+  onCameraAim(listener: (request: CameraAimRequest) => void): () => void;
+  /** The answer, once the frame is drawn. Fire and forget, like the request. */
+  reportCameraAimed(reply: CameraAimReply): void;
+  /** Main asking for blocks to glow. See `IPC.glowBlocks`. */
+  onGlow(listener: (request: GlowRequest) => void): () => void;
   /** Put text on the system clipboard. Main's, because the preload is sandboxed. */
   copyToClipboard(text: string): Promise<void>;
   getDefaultOutputDir(): Promise<string>;
@@ -1980,7 +2433,8 @@ export interface BgptApi {
   getDocumentState(): Promise<DocumentStateResponse>;
   getDocumentMesh(request: DocumentMeshRequest): Promise<DocumentMeshResponse>;
   moveRegion(request: MoveRegionRequest): Promise<EditResponse>;
-  regionMesh(region: RegionSpec): Promise<RegionMeshResponse>;
+  /** The areas' contents as geometry, from the corner of their bounds. */
+  regionMesh(regions: RegionSpec[]): Promise<RegionMeshResponse>;
   /**
    * The clipboard's contents as geometry, for the ghost a copy leaves behind.
    *
@@ -1989,6 +2443,10 @@ export interface BgptApi {
    * away from the blocks -- which is the whole gesture this draws.
    */
   clipboardMesh(): Promise<RegionMeshResponse>;
+  /** What the selected areas are made of, for the materials inventory. */
+  selectionPalette(request: SelectionPaletteRequest): Promise<SelectionPaletteResponse>;
+  /** Where some blocks are, as the shell the glow is drawn from. */
+  findBlocks(request: FindBlocksRequest): Promise<FindBlocksResponse>;
   getSkyTextures(): Promise<SkyTextures>;
   applyEdit(request: EditRequest): Promise<EditResponse>;
   /** Set the schematic's size. Refuses a lossy shrink without `confirmLoss`. */
@@ -2028,9 +2486,10 @@ export interface BgptApi {
   /**
    * Copy the selection out, or cut it. The clipboard lives in main and
    * deliberately outlives the open document, so it can carry between two.
+   * Several areas are copied as one clipboard, keeping their arrangement.
    */
-  copyRegion(region: RegionSpec): Promise<ClipboardResponse>;
-  cutRegion(region: RegionSpec): Promise<ClipboardResponse>;
+  copyRegion(regions: RegionSpec[]): Promise<ClipboardResponse>;
+  cutRegion(regions: RegionSpec[]): Promise<ClipboardResponse>;
   /** Write the clipboard in. Undoable as one step. */
   pasteClipboard(request: PasteRequest): Promise<EditResponse>;
   saveDocument(request: SaveRequest): Promise<SaveResponse>;
@@ -2147,6 +2606,7 @@ export interface BgptApi {
   onMenuSave(listener: () => void): () => void;
   onMenuSaveAs(listener: () => void): () => void;
   onMenuClose(listener: () => void): () => void;
+  onMenuConvert(listener: () => void): () => void;
   onMenuUndo(listener: () => void): () => void;
   onMenuRedo(listener: () => void): () => void;
   onMenuAbout(listener: () => void): () => void;
@@ -2154,6 +2614,8 @@ export interface BgptApi {
 
   /** Name, version and runtime. Asked once, when the About box is opened. */
   getAppInfo(): Promise<AppInfo>;
+  /** The adapters and which one draws. The first call may read the list. */
+  getGpuStatus(): Promise<GpuStatus>;
 
   /** What the updater knows right now. Never a network request. */
   getUpdateStatus(): Promise<UpdateStatus>;
@@ -2169,5 +2631,10 @@ export interface BgptApi {
    * nothing was ready, or the unsaved-work prompt was declined.
    */
   installUpdate(): Promise<boolean>;
+  /**
+   * Restarts the app so a launch-time setting (the GPU choice) applies.
+   * `false` when the unsaved-work prompt was declined.
+   */
+  relaunchApp(): Promise<boolean>;
   onUpdateStatusChanged(listener: (status: UpdateStatus) => void): () => void;
 }

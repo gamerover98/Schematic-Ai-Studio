@@ -29,7 +29,7 @@ import {
   resolveBlockInput,
   type LegacyIndex,
 } from "../../../shared/legacy_ids.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
 
   interface Props {
     id?: string;
@@ -53,6 +53,16 @@ import {
      */
     legacy?: LegacyIndex | null;
     onchange: (block: string) => void;
+    /**
+     * Where a *chosen* block goes, when that is not the same as the text.
+     *
+     * The chip field types into this picker and adds a chip on a choice, so
+     * the keystrokes and the choice have to arrive at different places. Enter
+     * with no row to take commits what was typed -- `35:14`, or a pasted
+     * `/give` -- which is not in any list. Absent, a choice is just text, as
+     * it always was.
+     */
+    onpick?: (block: string) => void;
   }
 
   const {
@@ -63,6 +73,7 @@ import {
     placeable = null,
     legacy = null,
     onchange,
+    onpick,
   }: Props = $props();
 
 /**
@@ -187,11 +198,17 @@ const ROW_LIMIT = 120;
   });
 
   function choose(block: string): void {
-    onchange(block);
+    if (onpick) onpick(block);
+    else onchange(block);
     open = false;
   }
 
   function onKeydown(event: KeyboardEvent): void {
+    if (onpick && event.key === "Enter" && (!open || !shown[highlighted]) && value.trim() !== "") {
+      event.preventDefault();
+      choose(value.trim());
+      return;
+    }
     if (!open) {
       if (event.key === "ArrowDown") open = true;
       return;
@@ -207,7 +224,9 @@ const ROW_LIMIT = 120;
         event.preventDefault();
         choose(shown[highlighted]);
       }
-    } else if (event.key === "Escape") {
+    } else if (event.key === "Escape" && open) {
+      // Taken, so a dialog around the field closes the list and not itself.
+      event.preventDefault();
       open = false;
     }
   }
@@ -254,7 +273,7 @@ const ROW_LIMIT = 120;
         {#if shown.length < matches.length}
           {t("blocks.capped", { shown: shown.length, count: matches.length })}
         {:else if matches.length === offered.length}
-          {t("blocks.all", { count: offered.length })}
+          {tn("blocks.all", offered.length)}
         {:else}
           {t("blocks.matches", { count: matches.length, total: offered.length })}
         {/if}
@@ -301,9 +320,9 @@ const ROW_LIMIT = 120;
   li button .legacy {
     flex: none;
     margin-left: auto;
-    padding-left: 10px;
+    padding-left: var(--space-3);
     font-variant-numeric: tabular-nums;
-    opacity: 0.6;
+    color: var(--text-dim);
   }
 
   .picker {
@@ -312,38 +331,37 @@ const ROW_LIMIT = 120;
 
   input {
     width: 100%;
-    box-sizing: border-box;
   }
 
   /*
    * Positioned against the window by `placePopover`, not against the field.
    *
    * `ModelPicker`'s rule and its reason, which applies harder here: this field
-   * lives inside a `ToolWindow`, whose `.body` is `overflow-y: auto` and whose
-   * frame is `overflow: hidden` — so laid out from the field, a list of blocks
-   * is cut off by a panel a few rows tall, and its own margin box drives that
+   * lives inside a scrolling panel, so laid out from the field a list of
+   * blocks would be cut off by it, and its own margin box would drive that
    * scroller's overflow. `fixed` escapes both: nothing to clip it, and nothing
-   * it can resize. No ancestor here has a transform or a filter, which are what
-   * would make it a containing block again.
+   * it can resize. No ancestor here has a transform or a filter, which are
+   * what would make it a containing block again.
    *
    * It stays a DOM child of the picker, so dismiss-on-outside-click remains a
-   * plain `root.contains()` test and needs no portal.
+   * plain `root.contains()` test and needs no portal. A slab on the popover
+   * tier, as the chat's two popovers are.
    */
   .dropdown {
     position: fixed;
-    z-index: 20;
+    z-index: var(--z-popover);
     width: min(320px, calc(100vw - 16px));
-    padding: 4px;
+    padding: var(--space-2);
     background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    box-shadow: 0 4px 12px var(--shadow);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+    box-shadow: var(--shadow-float);
   }
 
   .count {
-    margin: 0 0 4px;
-    padding: 0 6px;
-    font-size: 11px;
+    margin: 0 0 var(--space-2);
+    padding: 0 var(--space-2);
+    font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
@@ -364,18 +382,16 @@ const ROW_LIMIT = 120;
    */
   .dropdown button {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     width: 100%;
-    box-sizing: border-box;
+    min-height: 24px;
     text-align: left;
-    padding: 4px 6px;
+    padding: 0 var(--space-2);
     background: none;
     border: none;
-    border-radius: 3px;
     color: inherit;
     font: inherit;
-    font-size: 12px;
-    cursor: pointer;
+    font-size: var(--text-sm);
     overflow: hidden;
   }
 

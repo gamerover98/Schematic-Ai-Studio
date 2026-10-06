@@ -19,14 +19,20 @@
  *
  * ## Why offering a reload is safe to offer
  *
- * Autosave lives in **main**, on a 20-second timer, and main is the half that
- * is still working. So the snapshot is current to within that interval however
- * long the window has been dead, and the sentence can say so rather than
- * leaving the user to weigh a reload against an unknown.
+ * The document lives in **main**, and main is the half that is still working.
+ * A reload is `webContents.reload()`, so the session, its unsaved changes and
+ * its undo stack are all still there afterwards, and the new window asks for
+ * them before it shows anything (`adoptWhatMainHolds` in `App.svelte`).
+ * Autosave is main's too, on a 20-second timer, and that is said as well: it
+ * is the net under the case where the reload does not help.
  *
- * What a reload does cost is the undo history and anything typed since the last
- * save, and that is said too. A dialog that only advertises the upside is one
- * people learn to dismiss.
+ * This sentence used to say a reload cost up to twenty seconds of editing and
+ * the undo history. That was true of what was on screen, because the new
+ * window never asked what main had open and showed "Nothing open" over it.
+ *
+ * What a reload does cost is the window's own state -- the selection, the
+ * camera, a message half typed -- and that is said too. A dialog that only
+ * advertises the upside is one people learn to dismiss.
  */
 
 export interface FailurePrompt {
@@ -76,9 +82,12 @@ export function failurePrompt(summary: string, repeats = 0): FailurePrompt {
     detail:
       "Something failed in a way the interface could not recover from. The 3D " +
       "view still draws and the menus still open, but nothing else will " +
-      "respond.\n\nReloading fixes it. Your schematic is saved automatically " +
-      "every 20 seconds by the part of the app that is still working, so at " +
-      "most that much editing is lost — along with the undo history.\n\n" +
+      "respond.\n\nReloading fixes it. Your schematic is held by the part of " +
+      "the app that is still working, so it comes back as it was, with its " +
+      "unsaved changes and its undo history, and that part also saves it " +
+      "automatically every 20 seconds. A reload loses only what the window " +
+      "itself held: the selection, the camera, and anything typed and not yet " +
+      "sent.\n\n" +
       "Copying the details puts the whole report on your clipboard and opens a " +
       "pre-filled issue in your browser. It publishes nothing: the Submit is " +
       "yours." +

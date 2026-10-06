@@ -24,6 +24,8 @@ import {
   type Artifact,
   type BlockIconsResponse,
   type BgptApi,
+  type CameraAimReply,
+  type CameraAimRequest,
   type DocumentMeshResponse,
   type DocumentState,
   type DocumentStateResponse,
@@ -57,6 +59,11 @@ import {
   type PasteRequest,
   type MoveRegionRequest,
   type RegionMeshResponse,
+  type SelectionPaletteRequest,
+  type FindBlocksRequest,
+  type FindBlocksResponse,
+  type GlowRequest,
+  type SelectionPaletteResponse,
   type SkyTextures,
   type ApplyNbtRequest,
   type PackTexture,
@@ -89,6 +96,19 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.viewportRect, rect) as Promise<void>,
   reportPointerLock: (locked: boolean) =>
     ipcRenderer.invoke(IPC.pointerLock, locked) as Promise<void>,
+  onCameraAim(listener) {
+    const wrapped = (_event: unknown, payload: CameraAimRequest) => listener(payload);
+    ipcRenderer.on(IPC.cameraAim, wrapped);
+    return () => ipcRenderer.removeListener(IPC.cameraAim, wrapped);
+  },
+  // `send`, because the request came as an event too: `invoke` only runs from
+  // the renderer to main, and this is the other half of a question main asked.
+  reportCameraAimed: (reply: CameraAimReply) => ipcRenderer.send(IPC.cameraAimed, reply),
+  onGlow(listener) {
+    const wrapped = (_event: unknown, payload: GlowRequest) => listener(payload);
+    ipcRenderer.on(IPC.glowBlocks, wrapped);
+    return () => ipcRenderer.removeListener(IPC.glowBlocks, wrapped);
+  },
   copyToClipboard: (text: string) =>
     ipcRenderer.invoke(IPC.clipboardWrite, text) as Promise<void>,
   getDefaultOutputDir: () => ipcRenderer.invoke(IPC.defaultOutputDir) as Promise<string>,
@@ -153,14 +173,18 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.docScale, request) as Promise<EditResponse>,
   transformRegion: (request: TransformRequest) =>
     ipcRenderer.invoke(IPC.docTransform, request) as Promise<EditResponse>,
-  copyRegion: (region) => ipcRenderer.invoke(IPC.docCopy, region) as Promise<ClipboardResponse>,
-  cutRegion: (region) => ipcRenderer.invoke(IPC.docCut, region) as Promise<ClipboardResponse>,
+  copyRegion: (regions) => ipcRenderer.invoke(IPC.docCopy, regions) as Promise<ClipboardResponse>,
+  cutRegion: (regions) => ipcRenderer.invoke(IPC.docCut, regions) as Promise<ClipboardResponse>,
   pasteClipboard: (request: PasteRequest) =>
     ipcRenderer.invoke(IPC.docPaste, request) as Promise<EditResponse>,
   moveRegion: (request: MoveRegionRequest) =>
     ipcRenderer.invoke(IPC.docMove, request) as Promise<EditResponse>,
-  regionMesh: (region) => ipcRenderer.invoke(IPC.docRegionMesh, region) as Promise<RegionMeshResponse>,
+  regionMesh: (regions) => ipcRenderer.invoke(IPC.docRegionMesh, regions) as Promise<RegionMeshResponse>,
   clipboardMesh: () => ipcRenderer.invoke(IPC.docClipboardMesh) as Promise<RegionMeshResponse>,
+  selectionPalette: (request: SelectionPaletteRequest) =>
+    ipcRenderer.invoke(IPC.docSelectionPalette, request) as Promise<SelectionPaletteResponse>,
+  findBlocks: (request: FindBlocksRequest) =>
+    ipcRenderer.invoke(IPC.docFindBlocks, request) as Promise<FindBlocksResponse>,
   getSkyTextures: () => ipcRenderer.invoke(IPC.skyTextures) as Promise<SkyTextures>,
   getAnchorTexture: () => ipcRenderer.invoke(IPC.anchorTexture) as Promise<PackTexture | null>,
   setWorldEditAnchor: (anchor: [number, number, number] | null) =>
@@ -265,17 +289,20 @@ const api: BgptApi = {
   onMenuSave: (listener) => subscribe(IPC.menuSave, listener),
   onMenuSaveAs: (listener) => subscribe(IPC.menuSaveAs, listener),
   onMenuClose: (listener) => subscribe(IPC.menuClose, listener),
+  onMenuConvert: (listener) => subscribe(IPC.menuConvert, listener),
   onMenuUndo: (listener) => subscribe(IPC.menuUndo, listener),
   onMenuRedo: (listener) => subscribe(IPC.menuRedo, listener),
   onMenuAbout: (listener) => subscribe(IPC.menuAbout, listener),
   onMenuCheckUpdates: (listener) => subscribe(IPC.menuCheckUpdates, listener),
 
   getAppInfo: () => ipcRenderer.invoke(IPC.appInfo),
+  getGpuStatus: () => ipcRenderer.invoke(IPC.gpuStatus),
 
   getUpdateStatus: () => ipcRenderer.invoke(IPC.updateStatus) as Promise<UpdateStatus>,
   checkForUpdates: () => ipcRenderer.invoke(IPC.updateCheck) as Promise<UpdateStatus>,
   downloadUpdate: () => ipcRenderer.invoke(IPC.updateDownload) as Promise<UpdateStatus>,
   installUpdate: () => ipcRenderer.invoke(IPC.updateInstall) as Promise<boolean>,
+  relaunchApp: () => ipcRenderer.invoke(IPC.relaunchApp) as Promise<boolean>,
 
   onUpdateStatusChanged(listener) {
     const wrapped = (_event: unknown, payload: UpdateStatus) => listener(payload);

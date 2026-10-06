@@ -11,12 +11,16 @@
    *
    * Here rather than inside `Viewer.svelte`, and that is not arbitrary: the
    * viewer receives geometry and has no business knowing what a recent document
-   * is. It is a sibling laid over the same canvas.
+   * is. It is a sibling laid over the same canvas, and `Screen.svelte` is how it
+   * covers the window.
    *
-   * It also names the other way in. With nothing open, a message typed into the
-   * chat goes to the *generator* and builds the schematic the rest of the
-   * conversation then edits — a real capability that is completely invisible
-   * until someone tries it by accident.
+   * **Four ways in, as four tiles**, each with a line saying what it takes:
+   * New, Open, Convert -- and the chat. With nothing open, a message typed into
+   * the chat goes to the *generator* and builds the schematic the rest of the
+   * conversation then edits, a real capability that is completely invisible
+   * until someone tries it by accident. It was a sentence at the foot of this
+   * card asking the reader to close it and go and type; it is a tile now, and
+   * pressing it does both.
    *
    * It blocks the window while it is up, which it did not: it was a card over a
    * live viewport, with the camera buttons, the gear and the whole sidebar
@@ -26,8 +30,12 @@
    * put away would not be polish, it would delete the feature it advertises.
    */
   import type { Artifact, RecentDocument } from "../../../shared/ipc.js";
+  import logo from "../assets/logo.png";
   import { ageLabel } from "./age_label.js";
   import { t } from "./i18n.svelte.js";
+  import { providerLabel } from "./provider_label.js";
+  import Icon from "./Icon.svelte";
+  import Screen from "./Screen.svelte";
 
   interface Props {
     /** Dismissing it reveals the app in the state it has always had. */
@@ -45,6 +53,13 @@
     busy: boolean;
     onnew: () => void;
     onopen: () => void;
+    /**
+     * Converting a file someone sent you is a thing to do before there is
+     * anything open at all, and this is what the window shows then.
+     */
+    onconvert: () => void;
+    /** Put this away and the caret in the chat, where a message builds a schematic. */
+    ondescribe: () => void;
     onopenrecent: (filePath: string) => void;
     onopenartifact: (artifact: Artifact) => void;
     onrevealartifact: (artifact: Artifact) => void;
@@ -69,6 +84,8 @@
     busy,
     onnew,
     onopen,
+    onconvert,
+    ondescribe,
     onopenrecent,
     onopenartifact,
     onrevealartifact,
@@ -92,15 +109,6 @@
       .slice(0, 4),
   );
 
-  let dialog = $state<HTMLDivElement | null>(null);
-
-  // Focus so Escape reaches the wrapper, and release the pointer lock: this
-  // can appear over a canvas that was still flying when the document closed.
-  $effect(() => {
-    document.exitPointerLock();
-    dialog?.focus();
-  });
-
   function fileName(filePath: string): string {
     return filePath.split(/[\\/]/).pop() ?? filePath;
   }
@@ -113,235 +121,209 @@
 </script>
 
 <!--
-  A scrim, not an overlay. Escape and a backdrop click dismiss it, like every
-  other modal here; unlike them it is what the window shows when there is
-  nothing to show, so it comes back from the document bar and from Ctrl+K.
+  Escape and a backdrop click put it away, like every other modal here; unlike
+  them it is what the window shows when there is nothing to show, so it comes
+  back from the document bar and from Ctrl+K.
 -->
-<div
-  class="start"
-  role="presentation"
-  onkeydown={(event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      ondismiss();
-    }
-  }}
-  onclick={(event) => {
-    if (event.target === event.currentTarget) ondismiss();
-  }}
->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div
-    class="card"
-    role="dialog"
-    aria-modal="true"
-    aria-label={t("start.title")}
-    tabindex="-1"
-    bind:this={dialog}
-  >
-    <button class="icon close" onclick={ondismiss} aria-label={t("common.close")}>&#x00d7;</button>
-    <h2>{t("start.title")}</h2>
-    <p class="lead">{t("start.lead")}</p>
+<Screen title={t("app.title")} lead={t("start.lead")} mark={logo} {ondismiss} width={560}>
+  {#if legacyProfile}
+    <!-- A warning that is still prose: the button in it is the one useful verb. -->
+    <p class="callout warn legacy">
+      {t("start.legacyProfile", { providers: legacyProfile.providers.map(providerLabel).join(", ") })}
+      <button class="link" onclick={() => onrevealpath(legacyProfile?.path ?? "")}>
+        {t("provider.legacyProfileReveal")}
+      </button>
+    </p>
+  {/if}
 
-    {#if legacyProfile}
-      <p class="lead warn">
-        {t("start.legacyProfile", { providers: legacyProfile.providers.join(", ") })}
-        <button class="link" onclick={() => onrevealpath(legacyProfile?.path ?? "")}>
-          {t("provider.legacyProfileReveal")}
-        </button>
-      </p>
-    {/if}
-
-    <div class="actions">
-      <button class="primary" onclick={onnew} disabled={busy}>{t("doc.new")}</button>
-      <button onclick={onopen} disabled={busy}>{t("doc.open")}</button>
-    </div>
-
-    {#if shown.length > 0}
-      <h3>{t("doc.recent")}</h3>
-      <ul class="recent">
-        {#each shown as entry (entry.filePath)}
-          <li>
-            <button
-              class="row"
-              onclick={() => onopenrecent(entry.filePath)}
-              disabled={busy}
-              title={entry.filePath}
-            >
-              <span class="name">{fileName(entry.filePath)}</span>
-              <span class="where">{folder(entry.filePath)}</span>
-              <span class="when">{ageLabel(entry.openedAt)}</span>
-            </button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
-    {#if generated.length > 0}
-      <h3>{t("start.generated")}</h3>
-      <ul class="recent">
-        {#each generated as artifact (artifact.path)}
-          <li class="generated">
-            <!--
-              Only a `.schem` opens. An `.mcfunction` is a list of commands and
-              nothing in this app reads one back, so its row reveals instead --
-              a button whose only outcome is an error would be worse than one
-              that does the single thing the file supports, and a disabled row
-              worse still, since nothing on it would say why.
-            -->
-            <button
-              class="row"
-              onclick={() =>
-                artifact.type === "schem" ? onopenartifact(artifact) : onrevealartifact(artifact)}
-              disabled={busy}
-              title={artifact.path}
-            >
-              <span class="name">{artifact.name}</span>
-              <span class="where">.{artifact.type}</span>
-              <span class="when">{ageLabel(Date.parse(artifact.createdAt))}</span>
-            </button>
-            <button
-              class="reveal"
-              onclick={() => onrevealartifact(artifact)}
-              title={t("start.reveal")}
-              aria-label={t("start.reveal")}>&#x2026;</button
-            >
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
-    <p class="aside">{t("start.dropHint")}</p>
-    <p class="aside">{t("start.chatHint")}</p>
+  <!--
+    The ways in, as the game's own menu has them: slabs to press, the first one
+    lit. Each icon sits in a slot, as a block does everywhere else here.
+  -->
+  <div class="actions">
+    <button class="action primary" onclick={onnew} disabled={busy}>
+      <span class="slot"><Icon name="plus" size={20} /></span>
+      <span class="words"><span class="what">{t("doc.new")}</span><span class="why">{t("start.newHint")}</span></span>
+    </button>
+    <button class="action" onclick={onopen} disabled={busy}>
+      <span class="slot"><Icon name="folder" size={20} /></span>
+      <span class="words"><span class="what">{t("doc.open")}</span><span class="why">{t("start.openHint")}</span></span>
+    </button>
+    <!-- Never disabled: converting needs nothing open, and nothing to wait for. -->
+    <button class="action" onclick={onconvert}>
+      <span class="slot"><Icon name="swapHorizontal" size={20} /></span>
+      <span class="words"
+        ><span class="what">{t("start.convert")}</span><span class="why">{t("start.convertHint")}</span></span
+      >
+    </button>
+    <button class="action" onclick={ondescribe}>
+      <span class="slot"><Icon name="chat" size={20} /></span>
+      <span class="words"
+        ><span class="what">{t("start.describe")}</span><span class="why">{t("start.describeHint")}</span></span
+      >
+    </button>
   </div>
-</div>
+
+  {#if shown.length > 0}
+    <h3 class="list-title">{t("doc.recent")}</h3>
+    <ul class="list sunken">
+      {#each shown as entry (entry.filePath)}
+        <li>
+          <button
+            class="entry"
+            onclick={() => onopenrecent(entry.filePath)}
+            disabled={busy}
+            title={entry.filePath}
+          >
+            <span class="name">{fileName(entry.filePath)}</span>
+            <span class="where">{folder(entry.filePath)}</span>
+            <span class="when">{ageLabel(entry.openedAt)}</span>
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+
+  {#if generated.length > 0}
+    <h3 class="list-title">{t("start.generated")}</h3>
+    <ul class="list sunken">
+      {#each generated as artifact (artifact.path)}
+        <li class="generated">
+          <!--
+            Only a `.schem` opens. An `.mcfunction` is a list of commands and
+            nothing in this app reads one back, so its row reveals instead --
+            a button whose only outcome is an error would be worse than one
+            that does the single thing the file supports, and a disabled row
+            worse still, since nothing on it would say why.
+          -->
+          <button
+            class="entry"
+            onclick={() =>
+              artifact.type === "schem" ? onopenartifact(artifact) : onrevealartifact(artifact)}
+            disabled={busy}
+            title={artifact.path}
+          >
+            <span class="name">{artifact.name}</span>
+            <span class="where">.{artifact.type}</span>
+            <span class="when">{ageLabel(Date.parse(artifact.createdAt))}</span>
+          </button>
+          <button
+            class="icon"
+            onclick={() => onrevealartifact(artifact)}
+            title={t("start.reveal")}
+            aria-label={t("start.reveal")}><Icon name="folder" size={16} /></button
+          >
+        </li>
+      {/each}
+    </ul>
+  {/if}
+
+  {#snippet footer()}
+    <p class="drop">{t("start.dropHint")}</p>
+  {/snippet}
+</Screen>
 
 <style>
-  /* A warning that is still prose: the line reads as a sentence, and the
-     button in it is the one useful verb rather than a second paragraph. */
-  .lead.warn {
-    color: var(--warn);
+  .legacy {
+    margin-bottom: var(--space-4);
   }
 
-  .lead.warn .link {
-    background: none;
-    border: 0;
-    padding: 0;
-    color: inherit;
-    font: inherit;
-    text-decoration: underline;
-    cursor: pointer;
-  }
-
-  /*
-   * `fixed`, so it covers the window rather than the viewport section it is
-   * mounted in: the camera buttons, the gear and the sidebar all acted on a
-   * document that was not there.
-   *
-   * Dropping a file still works, and that is worth stating because it is the
-   * thing a full-bleed cover here is supposed to break. The handlers are on
-   * `section.preview`, this stays a DOM child of it whatever `fixed` does to
-   * its painting, and drag events bubble — and `App.svelte` counts enters
-   * against leaves precisely because children fire them, so one more child
-   * changes nothing.
-   *
-   * `z-index: 100` is the modal tier, shared with every other scrim.
-   */
-  .start {
-    position: fixed;
-    inset: 0;
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-    background: var(--scrim);
-    backdrop-filter: blur(2px);
-  }
-
-  .card {
-    position: relative;
-    outline: none;
-    width: min(420px, 100%);
-    max-height: 100%;
-    overflow-y: auto;
-    padding: 22px 24px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
-  }
-
-  .close {
-    position: absolute;
-    top: 10px;
-    right: 12px;
-  }
-
-  h2 {
-    margin: 0 0 4px;
-    font-size: 17px;
-  }
-
-  h3 {
-    margin: 20px 0 6px;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-  }
-
-  .lead {
-    margin: 0;
-    font-size: 12px;
-    line-height: 1.5;
-    color: var(--text-dim);
-  }
-
+  /* Two by two, one above the other when the window is narrow. */
   .actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--space-3);
   }
 
-  .recent {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
-  .row {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    width: 100%;
-    padding: 5px 6px;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    background: none;
-    color: var(--text);
-    cursor: pointer;
-    font: inherit;
-    font-size: 12px;
+  /* A tile: the icon's slot, then what it is and what it takes. */
+  .action {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-4);
+    min-height: calc(2 * var(--control-h));
+    padding: var(--space-3);
     text-align: left;
   }
 
-  .row:hover:not(:disabled) {
-    border-color: var(--border);
-    background: var(--bg-input);
+  .slot {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
+    color: var(--slot-text);
   }
 
-  .row:disabled {
-    cursor: default;
-    opacity: 0.6;
+  .words {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .what {
+    font-weight: 700;
+  }
+
+  .why {
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    font-weight: 400;
+    line-height: 1.35;
+  }
+
+  /* On the lit tile both lines are the accent's own text colour. */
+  .action.primary .why {
+    color: inherit;
+  }
+
+  .list-title {
+    margin: var(--space-5) 0 var(--space-2);
+  }
+
+  .list {
+    list-style: none;
+    margin: 0;
+    padding: var(--space-1);
+  }
+
+  /*
+   * A row draws itself on the well, so it says so under the pointer too. It
+   * is picked out as a world is in the game's list: an outline, not a fill.
+   */
+  .entry {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    min-width: 0;
+    min-height: var(--control-h);
+    padding: 0 var(--space-3);
+    border: var(--bevel) solid transparent;
+    background: none;
+    text-align: left;
+  }
+
+  .entry:hover:not(:disabled) {
+    border-color: var(--field-edge);
+    background: none;
+  }
+
+  .entry:focus-visible {
+    outline: none;
+    border-color: var(--accent);
   }
 
   .name {
-    flex: none;
-    max-width: 55%;
+    flex: 0 1 auto;
+    max-width: 60%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: 700;
   }
 
   /* The folder gives way first: it is the disambiguator, not the identity. */
@@ -352,41 +334,30 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
   .when {
     flex: none;
     color: var(--text-dim);
+    font-size: var(--text-sm);
     font-variant-numeric: tabular-nums;
-    font-size: 11px;
   }
 
   .generated {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: var(--space-1);
   }
 
-  /* The one thing an `.mcfunction` can do, since nothing opens it. */
-  .reveal {
-    flex: none;
-    padding: 2px 7px;
-    border: 1px solid transparent;
-    background: none;
+  .generated .entry {
+    flex: 1 1 auto;
+  }
+
+  .drop {
+    flex: 1 1 auto;
+    margin: 0;
     color: var(--text-dim);
-    font-size: 12px;
-  }
-
-  .reveal:hover {
-    border-color: var(--border);
-    color: var(--text);
-  }
-
-  .aside {
-    margin: 12px 0 0;
-    font-size: 11px;
-    line-height: 1.5;
-    color: var(--text-dim);
+    font-size: var(--text-sm);
   }
 </style>

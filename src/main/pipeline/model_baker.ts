@@ -32,7 +32,13 @@ import { PNG } from "pngjs";
 
 import { defaultStateFor } from "../../shared/block_states.js";
 import { DEFAULT_BIOME_COLOR, DEFAULT_WATER_COLOR } from "../../shared/settings.js";
-import { shapeFor, type BlockShape, type BoxRotation, type UvWindow } from "./block_shapes.js";
+import {
+  lodShapeFor,
+  shapeFor,
+  type BlockShape,
+  type BoxRotation,
+  type UvWindow,
+} from "./block_shapes.js";
 import type { BakedFace, CellFace, PaletteEntry, RgbaImage } from "./types.js";
 import { paletteEntryCacheKey } from "./types.js";
 
@@ -98,6 +104,18 @@ export interface SpecialFaceRule {
    * campfire's lesson one table along.
    */
   readonly vertical?: readonly string[];
+  /**
+   * The face the block points at, for a block whose front texture is its
+   * **bare name** rather than `<name>_front`.
+   *
+   * The carved pumpkin and the jack o'lantern are the two: `carved_pumpkin.json`
+   * is `orientable` with `front: block/carved_pumpkin`, `side:
+   * block/pumpkin_side` and `top: block/pumpkin_top`. Without a row the bare
+   * name was the only candidate that resolved on any face, so all six wore the
+   * carved face. With `side` and `top` alone the front would take `side` too,
+   * because the `facing` arm falls through to this table -- hence the field.
+   */
+  readonly front?: readonly string[];
 }
 
 /**
@@ -377,6 +395,21 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
   // Ice that is melting is four textures; a schematic captures one moment and
   // frame 0 is the one that still looks like ice.
   frosted_ice: { top: ["frosted_ice_0"], side: ["frosted_ice_0"], bottom: ["frosted_ice_0"] },
+  // `orientable`: the carved face on `facing`, the plain pumpkin everywhere
+  // else, and the lid on the floor too. Pre-Flattening `86` and `91` arrive
+  // already holding `facing` through `legacy_blocks.json`.
+  carved_pumpkin: {
+    front: ["carved_pumpkin"],
+    top: ["pumpkin_top"],
+    side: ["pumpkin_side"],
+    bottom: ["pumpkin_top"],
+  },
+  jack_o_lantern: {
+    front: ["jack_o_lantern"],
+    top: ["pumpkin_top"],
+    side: ["pumpkin_side"],
+    bottom: ["pumpkin_top"],
+  },
   bamboo: { top: ["bamboo_stalk"], side: ["bamboo_stalk"], bottom: ["bamboo_stalk"] },
   bamboo_sapling: { top: ["bamboo_stage0"], side: ["bamboo_stage0"], bottom: ["bamboo_stage0"] },
   // The brushable blocks: `_0` is undisturbed, which is how a schematic holds
@@ -391,11 +424,6 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
     side: ["suspicious_gravel_0"],
     bottom: ["suspicious_gravel_0"],
   },
-  pointed_dripstone: {
-    top: ["pointed_dripstone_up_tip"],
-    side: ["pointed_dripstone_up_tip"],
-    bottom: ["pointed_dripstone_up_tip"],
-  },
   sniffer_egg: {
     top: ["sniffer_egg_not_cracked_top"],
     side: ["sniffer_egg_not_cracked_north"],
@@ -404,9 +432,9 @@ export const SPECIAL_FACE_RULES: Record<string, SpecialFaceRule> = {
 
   /*
    * Blocks drawn from `textures/entity/`, like the beds and chests above but
-   * without a sheet layout worth unwrapping. A decorated pot's patterns are a
-   * stack of layers this code cannot compose, so it wears its plain side; a
-   * skull is drawn from the mob's own texture, which is what vanilla does.
+   * without a sheet layout worth unwrapping. A decorated pot's boxes name their
+   * own sheets in `block_shapes.ts`, so its row is only the fallback; a skull
+   * is drawn from the mob's own texture, which is what vanilla does.
    */
   decorated_pot: {
     top: ["entity/decorated_pot/decorated_pot_base"],
@@ -1210,6 +1238,8 @@ export class ResourcePackTextures {
 export class ModelBaker {
   // RULEBOOK §1 Record-over-Map row: both caches below.
   private readonly cache: Record<string, BakedBlock> = {};
+  /** `bakeLod`'s, keyed the same way; `null` is "drawn the same at a distance". */
+  private readonly lodCache = new Map<string, BakedBlock | null>();
   private readonly textureCache: Record<string, RgbaImage> = {};
   /** Cut glyphs, and the ones known to have nothing to draw. */
   private readonly glyphCache = new Map<string, { key: string | null; advance: number } | null>();
@@ -1386,6 +1416,80 @@ export class ModelBaker {
     return answer;
   }
 
+  /**
+   * A banner's cloth with its patterns painted on, under a key of its own.
+   *
+   * `BannerRenderer` draws the flag, then `entity/banner/base` tinted by the
+   * banner's colour, then each layer's `entity/banner/<id>` tinted by its dye
+   * with ordinary alpha blending, at most sixteen. The same thing is done here
+   * once, into pixels, rather than as sixteen coplanar quads: coplanar is
+   * unresolvable at any distance (`depth.ts`), and a stack of them would
+   * z-fight over every banner in the build.
+   *
+   * The key is a function of everything that went in, so two banners that look
+   * alike share one tile and the atlas does not grow per banner. It is primed
+   * before the atlas is packed, in `preview.ts`, for the glyphs' reason.
+   *
+   * Every pattern sheet has the base's layout -- the flag's unwrap at the same
+   * place -- so the result is addressed by the very windows the plain cloth
+   * uses, and the mesher only has to swap the key. A sheet of a different
+   * resolution is sampled to the base's; a pack missing one design draws the
+   * rest and says so once, rather than drawing a blank banner.
+   *
+   * `null` when the pack has no base at all, which leaves the plain cloth.
+   */
+  async bannerCloth(
+    baseHex: string,
+    layers: readonly { readonly pattern: string; readonly hex: string }[],
+  ): Promise<string | null> {
+    const baseKey = "minecraft:entity/banner/base";
+    const key = `${baseKey}#${baseHex}|${layers.map((layer) => `${layer.pattern}:${layer.hex}`).join("|")}`;
+    if (key in this.textureCache) return key;
+    if (!(await this.ensureTextureCached(baseKey))) return null;
+    const out = applyTint(this.textureCache[baseKey], parseHexColor(baseHex));
+    const { width, height, data } = out;
+    for (const layer of layers) {
+      const layerKey = `minecraft:entity/banner/${layer.pattern}`;
+      /*
+       * Not through `ensureTextureCached`: everything in `textureCache` is
+       * packed into the atlas, and a mask is never drawn on its own -- forty
+       * of them at 256 pixels would be megabytes of tiles nothing addresses.
+       */
+      if (!this.bannerMasks.has(layerKey)) {
+        this.bannerMasks.set(layerKey, await this.textureSource.loadTexture(layerKey));
+      }
+      const mask = this.bannerMasks.get(layerKey) ?? null;
+      if (mask === null) {
+        if (!this.missingBannerLayers.has(layer.pattern)) {
+          this.missingBannerLayers.add(layer.pattern);
+          console.warn(`[banner] the resource pack has no ${layerKey}; that layer is not drawn`);
+        }
+        continue;
+      }
+      const [r, g, b] = parseHexColor(layer.hex);
+      for (let y = 0; y < height; y += 1) {
+        const my = Math.min(mask.height - 1, Math.floor((y * mask.height) / height));
+        for (let x = 0; x < width; x += 1) {
+          const mx = Math.min(mask.width - 1, Math.floor((x * mask.width) / width));
+          const from = (my * mask.width + mx) * 4;
+          const alpha = mask.data[from + 3] / 255;
+          if (alpha === 0) continue;
+          const to = (y * width + x) * 4;
+          data[to] = ((mask.data[from] * r) / 255) * alpha + data[to] * (1 - alpha);
+          data[to + 1] = ((mask.data[from + 1] * g) / 255) * alpha + data[to + 1] * (1 - alpha);
+          data[to + 2] = ((mask.data[from + 2] * b) / 255) * alpha + data[to + 2] * (1 - alpha);
+        }
+      }
+    }
+    this.textureCache[key] = out;
+    return key;
+  }
+
+  /** Designs a pack was found to lack, so each is reported once. */
+  private readonly missingBannerLayers = new Set<string>();
+  /** The pattern sheets, decoded once and kept out of the atlas. */
+  private readonly bannerMasks = new Map<string, RgbaImage | null>();
+
   /** The ASCII font page, loaded once. `null` once it is known to be absent. */
   private async fontPage(): Promise<RgbaImage | null> {
     if (this.fontSheet === undefined) {
@@ -1438,6 +1542,41 @@ export class ModelBaker {
     // straight to the fallback baker.
     const baked = await this.bakeFallback(entry);
     this.cache[cacheKey] = baked;
+    return baked;
+  }
+
+  /**
+   * The block's simpler stand-in for the middle distance, or `null` when it
+   * is drawn the same there -- anything within `LOD_FACE_BUDGET`, and anything
+   * whose textures resolve nothing, which the hashed-colour cube already
+   * draws in six faces. See `lodShapeFor`.
+   *
+   * Textured exactly as the full block is, from the same `cubeFaceTextures`,
+   * so the stand-in wears the textures the full shape resolved and the
+   * chunk's two meshes cannot disagree about what the block is made of.
+   */
+  async bakeLod(entry: PaletteEntry): Promise<BakedBlock | null> {
+    const cacheKey = paletteEntryCacheKey(entry);
+    const known = this.lodCache.get(cacheKey);
+    if (known !== undefined) return known;
+    let baked: BakedBlock | null = null;
+    const shape = lodShapeFor(entry);
+    if (shape !== null) {
+      const texturedFaces = await this.cubeFaceTextures(entry);
+      const primaryKey =
+        texturedFaces === null
+          ? undefined
+          : (texturedFaces.north ??
+            texturedFaces.east ??
+            texturedFaces.west ??
+            texturedFaces.south ??
+            texturedFaces.up ??
+            texturedFaces.down);
+      if (texturedFaces !== null && primaryKey) {
+        baked = await this.bakeShape(shape, primaryKey, texturedFaces);
+      }
+    }
+    this.lodCache.set(cacheKey, baked);
     return baked;
   }
 
@@ -1536,7 +1675,7 @@ export class ModelBaker {
     }
 
     if (shape.kind !== "boxes") {
-      // `invisible` is handled before textures are ever resolved; reaching
+      // Unreachable while the union is `cube`, `cross` and `boxes`; reaching
       // here would mean a new shape kind was added without a branch.
       return { faces: {}, extraFaces: [], textureKey: primaryKey, isFullCube: false };
     }
@@ -1583,7 +1722,7 @@ export class ModelBaker {
        * 22.5 degrees off the wall, so none of its faces is on any plane, and
        * asking whether it is *nearly* there is a question with no right answer.
        */
-      if (part.rotation === undefined) {
+      if (part.rotation === undefined && part.chain === undefined) {
         for (const [name, face] of Object.entries(all)) {
           const at = CULL_BOUNDARY[name as CellFace];
           if (at !== undefined && scaled[at[0]] === at[1]) {
@@ -1591,10 +1730,10 @@ export class ModelBaker {
           }
         }
       }
-      const built = Object.values(all);
-      extraFaces.push(
-        ...(part.rotation ? built.map((face) => tiltFace(face, part.rotation!)) : built),
-      );
+      let built = Object.values(all);
+      if (part.rotation) built = built.map((face) => tiltFace(face, part.rotation!));
+      for (const tilt of part.chain ?? []) built = built.map((face) => tiltFace(face, tilt));
+      extraFaces.push(...built);
     }
     return { faces: {}, extraFaces, textureKey: primaryKey, isFullCube: false };
   }
@@ -2006,6 +2145,26 @@ export class ModelBaker {
     }
 
     /*
+     * Pointed dripstone wears one texture per state, and all ten are files.
+     *
+     * The model is `block/cross` for every one of them, so the whole visible
+     * difference between a stalactite's tip and a stalagmite's base is which of
+     * `pointed_dripstone_<up|down>_<tip|tip_merge|frustum|middle|base>` it
+     * wears -- and the `down` ones are drawn pointing down, which is why nothing
+     * here turns. It wore `pointed_dripstone_up_tip` whatever its state said.
+     *
+     * A value the registry does not have falls back to the birth state rather
+     * than composing a name no file has, which would reach the hashed cube.
+     */
+    if (normalized === "pointed_dripstone") {
+      const direction = entry.properties.vertical_direction === "down" ? "down" : "up";
+      const stated = entry.properties.thickness ?? "tip";
+      const legal = ["tip_merge", "tip", "frustum", "middle", "base"];
+      const thickness = legal.includes(stated) ? stated : "tip";
+      return [`pointed_dripstone_${direction}_${thickness}`];
+    }
+
+    /*
      * `lit` before `facing`, and **the order changes nothing today** -- which
      * is worth writing down rather than leaving to be rediscovered, because
      * the argument for putting it here is a good one and is not load-bearing.
@@ -2078,7 +2237,10 @@ export class ModelBaker {
      * a dropper's sides are. Falling through costs nothing anywhere else: what
      * follows offers `_side` and the bare name in the same order these did.
      */
-    const facing = entry.properties.facing;
+    // A bare carved pumpkin is the registry's `facing=north`, and still has a
+    // face: without the default it would be a plain pumpkin.
+    const facing =
+      entry.properties.facing ?? (SPECIAL_FACE_RULES[normalized]?.front !== undefined ? "north" : undefined);
     if (facing !== undefined) {
       const lit = entry.properties.lit === "true";
       const vertical = facing === "up" || facing === "down";
@@ -2093,6 +2255,7 @@ export class ModelBaker {
            * for everything else this candidate simply misses.
            */
           ...(vertical ? [`${normalized}_front_vertical`] : []),
+          ...(SPECIAL_FACE_RULES[normalized]?.front ?? []),
           `${normalized}_front`,
           ...ModelBaker.plainCandidates(entry, normalized, face),
         ];

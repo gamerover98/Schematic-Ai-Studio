@@ -151,7 +151,22 @@ function warm(): void {
  */
 let ready = $state(false);
 
+/**
+ * Bumped whenever an atlas replaces the one the icons were drawn against.
+ *
+ * The warm-up settles the atlas, and then something moves it anyway: a sign's
+ * letters or a banner's composed cloth is a texture of its own, cut into the
+ * same baker, and the next icon request comes back with a bigger atlas.
+ * `adoptAtlas` rightly throws away every icon drawn against the old one -- and
+ * then only the blocks in *that* request were drawn again, so picking up a
+ * patterned banner blanked the other eight hotbar slots until something
+ * changed them. Read through `iconsReady`, so every effect that asks for icons
+ * asks again.
+ */
+let generation = $state(0);
+
 export function iconsReady(): boolean {
+  void generation;
   return ready;
 }
 
@@ -160,6 +175,7 @@ let scene: THREE.Scene | undefined;
 let camera: THREE.OrthographicCamera | undefined;
 let atlasTexture: THREE.DataTexture | undefined;
 let atlasVersion: number | null = null;
+let atlasLayout: number | null = null;
 
 /**
  * The tail of the request chain.
@@ -199,8 +215,8 @@ function ensureRenderer(): void {
   // No lights: the material is unlit and the shading is in the geometry.
 }
 
-function adoptAtlas(atlas: MeshAtlas | null, nextVersion: number): void {
-  if (atlas === null || atlasVersion === nextVersion) return;
+function adoptAtlas(atlas: MeshAtlas | null, nextVersion: number, nextLayout: number): void {
+  if (atlas === null || (atlasVersion === nextVersion && atlasLayout === nextLayout)) return;
   atlasTexture?.dispose();
   atlasTexture = new THREE.DataTexture(
     new Uint8Array(atlas.pixels),
@@ -223,10 +239,22 @@ function adoptAtlas(atlas: MeshAtlas | null, nextVersion: number): void {
   // the first few icons of a batch rendered before the upload completed.
   gl?.initTexture(atlasTexture);
 
+  /*
+   * A newer version of the same layout only *added* tiles: every icon already
+   * drawn addresses a tile that is where it was, so they all stay. Only a new
+   * layout moves UVs, and then everything drawn is wrong and is asked for
+   * again -- which used to happen whenever a document so much as lit a
+   * furnace, and was nine hundred icons re-meshed for one new texture.
+   */
+  const replacing = atlasLayout !== null && atlasLayout !== nextLayout;
   atlasVersion = nextVersion;
+  atlasLayout = nextLayout;
+  if (!replacing) return;
   // Anything drawn against the old atlas is now wrong.
   painted = new Map();
   requested = new Set();
+  // ...and has to be asked for again by whoever was showing it.
+  generation += 1;
 }
 
 /** Shade every vertex by the way its face points, as the game does. */
@@ -241,6 +269,26 @@ function shadeGeometry(geometry: THREE.BufferGeometry, normals: Float32Array): v
   geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 }
 
+/**
+ * How far from the middle of the picture a box centred on the origin reaches,
+ * on whichever of the two screen axes it reaches furthest.
+ */
+function viewExtent(width: number, height: number, length: number): number {
+  if (!camera) return 1;
+  camera.updateMatrixWorld();
+  let extent = 0;
+  const corner = new THREE.Vector3();
+  for (const x of [-width / 2, width / 2]) {
+    for (const y of [-height / 2, height / 2]) {
+      for (const z of [-length / 2, length / 2]) {
+        corner.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+        extent = Math.max(extent, Math.abs(corner.x), Math.abs(corner.y));
+      }
+    }
+  }
+  return extent;
+}
+
 /** Renders one block and returns its `data:` URL, or `null` if it drew nothing. */
 function paint(icon: BlockIcon): string | null {
   if (!gl || !scene || !camera || icon.geometry === null || !atlasTexture) return null;
@@ -251,8 +299,21 @@ function paint(icon: BlockIcon): string | null {
   geometry.setAttribute("uv", new THREE.BufferAttribute(icon.geometry.uvs, 2));
   geometry.setIndex(new THREE.BufferAttribute(icon.geometry.indices, 1));
   shadeGeometry(geometry, icon.geometry.normals);
-  // The block sits at 0..1; centring it is what puts it in the frame.
-  geometry.translate(-0.5, -0.5, -0.5);
+  /*
+   * The cells sit at 0..size; centring them is what puts them in the frame,
+   * and a block of two -- a bed, a door -- is shrunk until its box covers no
+   * more of the picture than a cube's does, which is 0.74 for a bed and 0.65
+   * for a door. Half, which is the obvious number, left both looking lost in
+   * their slots.
+   *
+   * The box framed is the cells main reports, never the geometry's own: a
+   * torch, a slab or a model that hangs over its cell is framed exactly as it
+   * always was, because its cell is still 1x1x1.
+   */
+  const [width, height, length] = icon.size;
+  geometry.translate(-width / 2, -height / 2, -length / 2);
+  const scale = viewExtent(1, 1, 1) / viewExtent(width, height, length);
+  geometry.scale(scale, scale, scale);
 
   const material = new THREE.MeshBasicMaterial({
     map: atlasTexture,
@@ -290,7 +351,7 @@ export function requestBlockIcons(blocks: readonly string[]): void {
   queue = queue.then(async () => {
     let response;
     try {
-      response = await api().getBlockIcons({ blocks: wanted, atlasVersion });
+      response = await api().getBlockIcons({ blocks: wanted, atlasVersion, atlasLayout });
     } catch {
       for (const block of wanted) requested.delete(block);
       return;
@@ -304,7 +365,7 @@ export function requestBlockIcons(blocks: readonly string[]): void {
     }
 
     ensureRenderer();
-    adoptAtlas(response.atlas, response.atlasVersion);
+    adoptAtlas(response.atlas, response.atlasVersion, response.atlasLayout);
 
     /*
      * Painted in slices, yielding between them.

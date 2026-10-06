@@ -65,6 +65,8 @@ const READ_ONLY = new Set([
   "get_schematic_info",
   "get_palette",
   "get_region",
+  // Where blocks are; the same question as get_palette with positions.
+  "find_blocks",
   // Answers what this schematic may hold. It needs the document -- the
   // pre-Flattening set is a few hundred names rather than nine hundred -- and
   // changes nothing about it.
@@ -73,6 +75,8 @@ const READ_ONLY = new Set([
   // Minecraft. It still belongs here rather than in a table of its own,
   // because "does this write" is the only question this set asks.
   "describe_block",
+  // The same kind of question, about banners.
+  "list_banner_patterns",
 ]);
 
 /**
@@ -89,7 +93,7 @@ const READ_ONLY = new Set([
  * connected to this app usually has one open — which is exactly the kind of
  * wrongness that survives.
  */
-const NO_DOCUMENT = new Set(["describe_block", "convert_schematic"]);
+const NO_DOCUMENT = new Set(["describe_block", "convert_schematic", "list_banner_patterns"]);
 
 /**
  * The tools a careful client should confirm before running.

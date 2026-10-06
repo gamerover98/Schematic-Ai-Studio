@@ -55,7 +55,13 @@ import {
   isWildcardAddress,
   type McpSettings,
 } from "../../shared/settings.js";
-import { acceptsRequest, chooseToken, routeRequest, startupRefusal } from "./policy.js";
+import {
+  acceptsRequest,
+  chooseToken,
+  pictureContent,
+  routeRequest,
+  startupRefusal,
+} from "./policy.js";
 import { callTool, describeTools } from "./tools.js";
 import { app, shell } from "electron";
 
@@ -77,10 +83,9 @@ import {
   getMcpToken,
   getRecentDocuments,
   getSettings,
-  rememberRecentDocument,
   setMcpToken,
 } from "../services/settings-store.js";
-import { rememberInOsRecents } from "../menu.js";
+import { rememberDocument } from "../menu.js";
 import { type Lifecycle } from "./lifecycle.js";
 
 /** How many calls the activity log remembers. */
@@ -95,8 +100,13 @@ export interface McpHost {
   defaultRoot(): Promise<string>;
   /** Where `mcp-bridge.mjs` ended up, which differs between dev and installed. */
   bridgeFile: string;
-  /** A PNG of the 3D viewport, base64-encoded, or `null` if there is no window. */
-  capture(): Promise<{ data: string; width: number; height: number } | null>;
+  /**
+   * A PNG of the 3D viewport, base64-encoded, or `null` if there is no window.
+   * `camera` is where to put the camera first; see `Lifecycle.capture`.
+   */
+  capture: Lifecycle["capture"];
+  /** Lights blocks up in the window; see `Lifecycle.glow`. */
+  glow: Lifecycle["glow"];
   /** Called whenever the status moves, so the window can be told. */
   onStatus(status: McpStatus): void;
 }
@@ -251,8 +261,7 @@ function lifecycleHost(): Lifecycle {
       // over MCP that skipped them would be missing from the recents and would
       // arrive without its conversation -- "recovering is opening", and so is
       // this.
-      await rememberRecentDocument(filePath);
-      rememberInOsRecents(filePath);
+      await rememberDocument(filePath);
       await adoptSubject(filePath);
       return session;
     },
@@ -281,6 +290,10 @@ function lifecycleHost(): Lifecycle {
         legacyBlocksPath: legacyBlocksPath(),
       });
       await adoptSubject(result.filePath);
+      // `create_document` then `save_document_as` is how a client makes a
+      // schematic, and a file it made was never opened: without this it never
+      // reached the recents. The window's own Save does the same.
+      await rememberDocument(result.filePath);
       return result;
     },
     close: closeDocument,
@@ -299,7 +312,9 @@ function lifecycleHost(): Lifecycle {
     allowDelete: async () => (await getSettings()).mcp.allowDelete,
     refusalFor: (format, version) => refusalFor(format, version ?? ""),
     announce: announceDocument,
-    capture: async () => await requireHost().capture(),
+    capture: async (camera) => await requireHost().capture(camera),
+    glow: (request) => requireHost().glow(request),
+    drawDistance: async () => (await getSettings()).preview.maxDrawDistance,
     versions: async () => {
       const session = currentSession();
       if (session === null) return [];
@@ -390,12 +405,8 @@ function buildMcpServer(): Server {
        * model an image; the same bytes inside a `text` block are a wall of
        * base64 that costs the tokens and conveys nothing.
        */
-      const shot = outcome.result as { data?: unknown; width?: unknown };
-      if (typeof shot?.data === "string" && typeof shot.width === "number") {
-        return {
-          content: [{ type: "image" as const, data: shot.data, mimeType: "image/png" }],
-        };
-      }
+      const picture = pictureContent(outcome.result);
+      if (picture !== null) return { content: picture };
       return {
         content: [{ type: "text" as const, text: JSON.stringify(outcome.result, null, 2) }],
         structuredContent: outcome.result as Record<string, unknown>,

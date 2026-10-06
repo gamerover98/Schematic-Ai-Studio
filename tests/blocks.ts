@@ -24,11 +24,22 @@ import {
   placementState,
   type PlacementLook,
 } from "../src/shared/block_orientation.js";
+import { BANNER_PATTERNS } from "../src/shared/banner_patterns.js";
 import {
+  COPPER_GOLEM_POSES,
+  DYE_COLOURS,
   coversFace,
+  hasHandWrittenLod,
+  LOD_FACE_BUDGET,
+  lodShapeError,
+  lodShapeFor,
   occludesFace,
   occludesNeighbours,
+  placedExtent,
+  shapeCoversFace,
+  shapeFaceCount,
   shapeFor,
+  type ModelPartDef,
 } from "../src/main/pipeline/block_shapes.js";
 import {
   ModelBaker,
@@ -44,10 +55,11 @@ import {
   type SignText,
 } from "../src/main/pipeline/sign_text.js";
 import { buildAtlas } from "../src/main/pipeline/atlas.js";
-import { atlasAnimations } from "../src/main/services/preview.js";
+import { atlasAnimations, buildDocumentPreview } from "../src/main/services/preview.js";
+import { createDocument, setBlock, setBlockEntity } from "../src/main/domain/document.js";
 import type { BakedFace, PaletteEntry, StructureData } from "../src/main/pipeline/types.js";
 import { paletteEntryCacheKey, paletteEntryIsAir } from "../src/main/pipeline/types.js";
-import { connectedState } from "../src/shared/block_connections.js";
+import { connectedState, COPPER_CHESTS, HORIZONTAL_FACES } from "../src/shared/block_connections.js";
 import {
   describeProperty,
   documentedProperties,
@@ -769,8 +781,143 @@ console.log("\n--- shapes ---");
       Math.min(...eastVerts.map((v) => v[0])) === 7 / 16,
   );
 
-  const open = await baker.bakeBlockstate(block("oak_fence_gate", { facing: "south", open: "true" }));
-  check("an open gate drops its bars", open.extraFaces.length < gate.extraFaces.length);
+  /*
+   * An open gate was the two posts and nothing else. Vanilla swings each leaf
+   * onto the side the gate faces, so the model reaches from the posts' line
+   * (7..9) out to 15 on that side, and still spans the whole opening.
+   */
+  const openFaults: string[] = [];
+  const reach: Record<string, (v: [number, number, number][]) => boolean> = {
+    south: (v) => Math.min(...v.map((p) => p[2])) === 7 / 16 && Math.max(...v.map((p) => p[2])) === 15 / 16,
+    north: (v) => Math.min(...v.map((p) => p[2])) === 1 / 16 && Math.max(...v.map((p) => p[2])) === 9 / 16,
+    east: (v) => Math.min(...v.map((p) => p[0])) === 7 / 16 && Math.max(...v.map((p) => p[0])) === 15 / 16,
+    west: (v) => Math.min(...v.map((p) => p[0])) === 1 / 16 && Math.max(...v.map((p) => p[0])) === 9 / 16,
+  };
+  for (const facing of ["south", "north", "east", "west"]) {
+    const opened = await baker.bakeBlockstate(block("oak_fence_gate", { facing, open: "true" }));
+    const v = allVertices(opened);
+    // The arms' outer uprights: 9 units tall, standing 13..15 out from the posts.
+    const uprights = opened.extraFaces.filter((f) => {
+      const ys = [1, 4, 7, 10].map((i) => f.positions[i]);
+      return Math.min(...ys) === 6 / 16 && Math.max(...ys) === 15 / 16;
+    });
+    if (!reach[facing](v) || uprights.length === 0) openFaults.push(facing);
+  }
+  equal("an open gate swings both leaves out on the side it faces", openFaults, []);
+
+  const heights = async (props: Record<string, string>) => {
+    const ys = allVertices(await baker.bakeBlockstate(block("oak_fence_gate", { facing: "south", ...props }))).map(
+      (v) => Math.round(v[1] * 16),
+    );
+    return [Math.min(...ys), Math.max(...ys)];
+  };
+  equal("a gate stands 5..16", await heights({ open: "false" }), [5, 16]);
+  equal("...and three lower in a wall, open or shut", [
+    await heights({ open: "false", in_wall: "true" }),
+    await heights({ open: "true", in_wall: "true" }),
+  ], [[2, 13], [2, 13]]);
+}
+
+{
+  /*
+   * A carved pumpkin wore its carved face on all six sides: the bare name was
+   * the only candidate that resolved. `orientable` puts the face on `facing`
+   * alone, `pumpkin_side` round the rest and `pumpkin_top` on both ends.
+   */
+  const faults: string[] = [];
+  for (const name of ["carved_pumpkin", "jack_o_lantern"]) {
+    for (const facing of ["north", "south", "east", "west"]) {
+      const baked = await baker.bakeBlockstate(block(name, { facing }));
+      for (const [dir, face] of Object.entries(baked.faces)) {
+        const want =
+          dir === facing ? `minecraft:block/${name}` : dir === "up" || dir === "down" ? "minecraft:block/pumpkin_top" : "minecraft:block/pumpkin_side";
+        if (face.textureKey !== want) faults.push(`${name}[facing=${facing}] ${dir}: ${face.textureKey}`);
+      }
+    }
+    const bare = await baker.bakeBlockstate(block(name));
+    if (bare.faces.north?.textureKey !== `minecraft:block/${name}`) faults.push(`bare ${name} has no face on north`);
+  }
+  equal("a carved pumpkin has one carved face, on the side it faces", faults, []);
+}
+
+{
+  /*
+   * A spore blossom was a cube wearing its petal sprite on six faces. Vanilla
+   * hangs a base plane from the ceiling and droops four petals from it.
+   */
+  const blossom = await baker.bakeBlockstate(block("spore_blossom"));
+  const ys = allVertices(blossom).map((v) => v[1]);
+  check("a spore blossom is not a cube", !blossom.isFullCube);
+  check("...it hangs from the top of its cell", Math.max(...ys) <= 1 + 1e-6 && Math.min(...ys) > 0.5);
+  check(
+    "...with its petals drooping below the base",
+    Math.min(...ys) < 10 / 16,
+  );
+  equal(
+    "...a base and four petals, each drawn from both sides",
+    [
+      blossom.extraFaces.filter((f) => f.textureKey === "minecraft:block/spore_blossom_base").length,
+      blossom.extraFaces.filter((f) => f.textureKey === "minecraft:block/spore_blossom").length,
+    ],
+    [2, 8],
+  );
+
+  /*
+   * And each petal wears the sprite with its yellow base at the hinge, in the
+   * middle of the flower, and its transparent tip at the far end. The two
+   * petals tilted about z came out a half turn round with every geometric check
+   * passing, which is what a picture check is for.
+   */
+  const petalFaults: string[] = [];
+  for (const face of blossom.extraFaces.filter((f) => f.textureKey === "minecraft:block/spore_blossom")) {
+    const verts = [0, 1, 2, 3].map((i): [number, number, number] => [
+      face.positions[i * 3],
+      face.positions[i * 3 + 1],
+      face.positions[i * 3 + 2],
+    ]);
+    const byHeight = [...verts].sort((a, b) => b[1] - a[1]);
+    const mid = (a: number[], b: number[]) => [0, 1, 2].map((k) => (a[k] + b[k]) / 2);
+    const hinge = mid(byHeight[0], byHeight[1]);
+    const tip = mid(byHeight[2], byHeight[3]);
+    const along = (t: number) => [0, 1, 2].map((k) => hinge[k] + (tip[k] - hinge[k]) * t) as [number, number, number];
+    const base = texelOn(face, along(0.5 / 16));
+    const end = texelOn(face, along(15.5 / 16));
+    const [r, g, b] = base.rgba.split(",").map(Number);
+    const yellow = base.alpha > 128 && r > 150 && g > 120 && b < 130;
+    if (!yellow || end.alpha > 128) {
+      petalFaults.push(`normal ${face.normal.map((n) => n.toFixed(2))}: base ${base.rgba}, tip ${end.rgba}`);
+    }
+  }
+  equal("...each petal's yellow base is at the middle of the flower", petalFaults, []);
+}
+
+{
+  /*
+   * Every bamboo was one 3x3 column whatever its state. `age` thickens the
+   * stalk from 2x2 to 3x3, `leaves` adds two crossed planes of small or large
+   * leaves, and `stage` moves nothing in vanilla's blockstate.
+   */
+  const bake = (props: Record<string, string>) => baker.bakeBlockstate(block("bamboo", props));
+  const width = async (props: Record<string, string>) => {
+    const stalk = (await bake(props)).extraFaces.filter((f) => f.textureKey === "minecraft:block/bamboo_stalk");
+    const xs = stalk.flatMap((f) => [0, 3, 6, 9].map((i) => f.positions[i]));
+    return Math.round((Math.max(...xs) - Math.min(...xs)) * 32);
+  };
+  equal("a young bamboo stalk is two wide, an old one three (in half units)", [
+    await width({ age: "0", leaves: "none" }),
+    await width({ age: "1", leaves: "none" }),
+  ], [4, 6]);
+  const leafKeys = async (leaves: string) =>
+    (await bake({ age: "1", leaves })).extraFaces.map((f) => f.textureKey).filter((k) => k.includes("leaves"));
+  equal("bamboo with no leaves has none", (await leafKeys("none")).length, 0);
+  equal("small leaves are two planes of small leaves", await leafKeys("small"), Array(4).fill("minecraft:block/bamboo_small_leaves"));
+  equal("large leaves are two planes of large leaves", await leafKeys("large"), Array(4).fill("minecraft:block/bamboo_large_leaves"));
+  const flat = (b: BakedBlock) => b.extraFaces.map((f) => [...f.positions, ...f.uvs, f.textureKey].join()).join("|");
+  equal(
+    "stage moves nothing",
+    flat(await bake({ age: "1", leaves: "large", stage: "1" })),
+    flat(await bake({ age: "1", leaves: "large", stage: "0" })),
+  );
 }
 
 {
@@ -954,6 +1101,18 @@ check("a fence does not occlude", !occludesNeighbours(block("oak_fence")));
 check("a stair does not occlude", !occludesNeighbours(block("oak_stairs")));
 check("glass does not occlude", !occludesNeighbours(block("glass")));
 check("leaves do not occlude", !occludesNeighbours(block("oak_leaves")));
+{
+  // models/block/heavy_core.json (1.21.4): one 8x8x8 box on a sheet of parts.
+  const core = shapeFor(block("heavy_core"));
+  const only = core.kind === "boxes" && core.boxes.length === 1 ? core.boxes[0] : null;
+  const box = only && "box" in only ? only : null;
+  check("a heavy core is vanilla's 8x8x8 box", box !== null && box.box.join() === "4,0,4,12,8,12");
+  check(
+    "a heavy core reads its sheet through vanilla's windows",
+    box?.uv?.north?.join() === "0,8,8,16" && box?.uv?.up?.join() === "0,0,8,8" && box?.uv?.down?.join() === "8,0,16,8",
+  );
+  check("a heavy core does not occlude", !occludesNeighbours(block("heavy_core")));
+}
 
 // The one that was missing, and it cost the whole render: air is in no shape
 // table, so it fell through to CUBE and answered "yes, I cover that face" --
@@ -1099,6 +1258,12 @@ if (pack === null) {
     [block("chest", { facing: "north", type: "left" }), "minecraft:entity/chest/normal_left"],
     [block("chest", { facing: "north", type: "right" }), "minecraft:entity/chest/normal_right"],
     [block("trapped_chest", { type: "single" }), "minecraft:entity/chest/trapped"],
+    // A waxed copper chest wears its stage's sheet, halved like any other.
+    [block("copper_chest", { type: "single" }), "minecraft:entity/chest/copper"],
+    [
+      block("waxed_weathered_copper_chest", { facing: "north", type: "left" }),
+      "minecraft:entity/chest/copper_weathered_left",
+    ],
     [block("oak_wall_sign", { facing: "north" }), "minecraft:block/oak_sign"],
     [block("oak_hanging_sign", {}), "minecraft:block/oak_hanging_sign"],
     // The lit face is a different texture, and nothing used to ask for it: a
@@ -2062,6 +2227,256 @@ if (pack === null) {
   );
 }
 
+// --- a pitcher crop is a pod with leaves, by stage ---------------------------
+console.log("\n--- a pitcher crop is a pod with leaves, by stage ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was a cube with `age` read nowhere, so every stage was the same solid
+   * block. Transcribed from `pitcher_crop_{bottom,top}_stage_{0..4}`: a pod
+   * sunk one unit into the ground, and from stage 1 two planes of leaves that
+   * are 16 wide and turned 45 degrees without `rescale`.
+   */
+  const pitcher = async (props: Record<string, string>): Promise<BakedFace[]> => {
+    const baked = await baker.bakeBlockstate(block("pitcher_crop", props));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const keyOf = (f: BakedFace): string => f.textureKey.replace(/^minecraft:block\//, "");
+  const corner = (f: BakedFace, i: number): number[] =>
+    [0, 1, 2].map((axis) => f.positions[i * 3 + axis] * 16);
+  const extent = (faces: BakedFace[], axis: number): [number, number] => {
+    const all = faces.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3 + axis] * 16));
+    return [+Math.min(...all).toFixed(2), +Math.max(...all).toFixed(2)];
+  };
+
+  const counts: Record<string, number> = {};
+  const keys: Record<string, string[]> = {};
+  const hashedStates: string[] = [];
+  const offTile: string[] = [];
+  const stretched: string[] = [];
+  for (const half of ["lower", "upper"] as const) {
+    for (const age of ["0", "1", "2", "3", "4"]) {
+      const state = `${half}/${age}`;
+      const entry = block("pitcher_crop", { half, age });
+      const baked = await baker.bakeBlockstate(entry);
+      if (baked.textureKey === paletteEntryCacheKey(entry)) hashedStates.push(state);
+      const faces = [...Object.values(baked.faces), ...baked.extraFaces];
+      counts[state] = faces.length;
+      keys[state] = [...new Set(faces.map(keyOf))].sort();
+      for (const f of faces) {
+        if ([...f.uvs].some((u) => u < -1e-6 || u > 1 + 1e-6)) offTile.push(`${state} ${keyOf(f)}`);
+        const edge = (i: number, j: number): number =>
+          Math.hypot(...[0, 1, 2].map((axis) => corner(f, i)[axis] - corner(f, j)[axis]));
+        const window = (i: number, j: number): number =>
+          Math.hypot((f.uvs[i * 2] - f.uvs[j * 2]) * 16, (f.uvs[i * 2 + 1] - f.uvs[j * 2 + 1]) * 16);
+        for (const [i, j] of [[0, 1], [0, 3]] as const) {
+          const density = window(i, j) / Math.max(1e-6, edge(i, j));
+          if (Math.abs(density - 1) > 0.005) stretched.push(`${state} ${keyOf(f)} ${density.toFixed(3)}`);
+        }
+      }
+    }
+  }
+  equal("no state of it is the hashed cube", hashedStates, []);
+  equal("...every window stays inside its tile", offTile, []);
+  equal("...and every face is at one texel per unit", stretched, []);
+
+  /*
+   * A pod of six faces, then two planes of two faces each on top of it; the
+   * upper half is empty until stage 3, because vanilla's model for it has no
+   * elements until the plant is tall enough to have one.
+   */
+  equal("the pod alone, then the pod and a cross of leaves; the top empty until stage 3", counts, {
+    "lower/0": 6,
+    "lower/1": 10,
+    "lower/2": 10,
+    "lower/3": 10,
+    "lower/4": 10,
+    "upper/0": 0,
+    "upper/1": 0,
+    "upper/2": 0,
+    "upper/3": 4,
+    "upper/4": 4,
+  });
+  equal("the pod wears its three textures", keys["lower/0"], [
+    "pitcher_crop_bottom",
+    "pitcher_crop_side",
+    "pitcher_crop_top",
+  ]);
+  equal("...and each stage's leaves their own", keys["lower/2"], [
+    "pitcher_crop_bottom",
+    "pitcher_crop_bottom_stage_2",
+    "pitcher_crop_side",
+    "pitcher_crop_top",
+  ]);
+  equal("...up to the flower on the upper half", keys["upper/4"], ["pitcher_crop_top_stage_4"]);
+
+  equal(
+    "stage 1's pod is sunk one unit and its leaves reach five into the cell above",
+    extent(await pitcher({ half: "lower", age: "1" }), 1),
+    [-1, 21],
+  );
+  equal(
+    "...while stage 3's stop at the top of their own cell",
+    extent(await pitcher({ half: "lower", age: "3" }), 1),
+    [-1, 16],
+  );
+  equal("with no properties it is the seed, the registry's birth state", (await pitcher({})).length, 6);
+  check(
+    "it no longer seals its cell",
+    !occludesNeighbours(block("pitcher_crop", { half: "lower", age: "4" })),
+  );
+}
+
+// --- pointed dripstone is a cross wearing one texture per state --------------
+console.log("\n--- pointed dripstone is a cross wearing one texture per state ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * `pointed_dripstone.json` is `cross.json`'s geometry exactly, and the ten
+   * states differ only in the file. It was a 6x16x6 column wearing
+   * `pointed_dripstone_up_tip` whatever its state said.
+   */
+  const wrong: string[] = [];
+  for (const vertical_direction of ["up", "down"]) {
+    for (const thickness of ["tip_merge", "tip", "frustum", "middle", "base"]) {
+      const entry = block("pointed_dripstone", { vertical_direction, thickness });
+      const key = (await baker.bakeBlockstate(entry)).textureKey;
+      const want = `minecraft:block/pointed_dripstone_${vertical_direction}_${thickness}`;
+      if (key !== want) wrong.push(`${vertical_direction}/${thickness} -> ${key}`);
+      if (shapeFor(entry).kind !== "cross") wrong.push(`${vertical_direction}/${thickness} is not a cross`);
+    }
+  }
+  equal("all ten states wear their own texture on vanilla's cross", wrong, []);
+  equal(
+    "a bare one is the upward tip, the registry's birth state",
+    (await baker.bakeBlockstate(block("pointed_dripstone", {}))).textureKey,
+    "minecraft:block/pointed_dripstone_up_tip",
+  );
+  equal(
+    "...and a thickness no file has falls back to the tip, not the hashed cube",
+    (await baker.bakeBlockstate(block("pointed_dripstone", { vertical_direction: "down", thickness: "huge" })))
+      .textureKey,
+    "minecraft:block/pointed_dripstone_down_tip",
+  );
+  check("it culls nothing", !occludesNeighbours(block("pointed_dripstone", {})));
+}
+
+// --- pointed dripstone points where you look, and its column decides the rest -
+console.log("\n--- pointed dripstone points where you look, and its column decides the rest ---");
+{
+  const look = (
+    x: number,
+    y: number,
+    z: number,
+    against: PlacementLook["against"],
+  ): PlacementLook => ({ direction: { x, y, z }, against, cursorY: 0.5, run: null });
+  const placed = (at: PlacementLook): Record<string, string> =>
+    orientPlacement("minecraft:pointed_dripstone", at);
+
+  equal("looking up at a ceiling hangs it down", placed(look(0, 0.9, -0.4, "down")).vertical_direction, "down");
+  equal("looking down at a floor stands it up", placed(look(0, -0.9, -0.4, "up")).vertical_direction, "up");
+  equal("...and so does looking straight ahead", placed(look(0, 0, -1, "south")).vertical_direction, "up");
+  equal(
+    "it is the camera and not the face: looking up at a wall hangs one off it",
+    placed(look(0, 0.3, -1, "south")).vertical_direction,
+    "down",
+  );
+  equal("a hand-placed one arrives meaning to merge", placed(look(0, -1, 0, "up")).thickness, "tip_merge");
+
+  /*
+   * The thickness is a window of three cells along the column: behind, in
+   * front, and two in front. A stalactite points down, so "in front" is below.
+   */
+  type Drip = { name: string; properties: Record<string, string>; solid: boolean };
+  const drip = (vertical_direction: string, thickness = "tip"): Drip => ({
+    name: "pointed_dripstone",
+    properties: { vertical_direction, thickness },
+    solid: false,
+  });
+  const stone: Drip = { name: "stone", properties: {}, solid: true };
+  const thicknessOf = (self: Drip, around: Parameters<typeof connectedState>[1]): string | undefined =>
+    connectedState(self, around).thickness;
+
+  equal("a lone one is a tip", thicknessOf(drip("down"), { up: stone }), "tip");
+  equal(
+    "the top of a two-long stalactite is its frustum",
+    thicknessOf(drip("down"), { up: stone, down: drip("down") }),
+    "frustum",
+  );
+  equal(
+    "the top of a three-long one is its base",
+    thicknessOf(drip("down"), { up: stone, down: drip("down"), down_down: drip("down") }),
+    "base",
+  );
+  equal(
+    "...and the one under the base is the frustum",
+    thicknessOf(drip("down"), { up: drip("down"), down: drip("down") }),
+    "frustum",
+  );
+  equal(
+    "inside a longer column it is the middle",
+    thicknessOf(drip("down"), { up: drip("down"), down: drip("down"), down_down: drip("down") }),
+    "middle",
+  );
+  equal(
+    "a stalagmite reads the same column the other way up",
+    thicknessOf(drip("up"), { down: stone, up: drip("up"), up_up: drip("up") }),
+    "base",
+  );
+  equal(
+    "two tips that meet stay tips when neither means to merge",
+    thicknessOf(drip("down"), { down: drip("up") }),
+    "tip",
+  );
+  equal(
+    "...and merge when this one does",
+    thicknessOf(drip("down", "tip_merge"), { down: drip("up") }),
+    "tip_merge",
+  );
+  equal(
+    "...or when the one it meets already has",
+    thicknessOf(drip("down"), { down: drip("up", "tip_merge") }),
+    "tip_merge",
+  );
+  equal(
+    "one meaning to merge with nothing to meet is a plain tip",
+    thicknessOf(drip("down", "tip_merge"), { up: stone }),
+    "tip",
+  );
+  equal(
+    "the block over a merged pair is its frustum",
+    thicknessOf(drip("down"), { down: drip("down"), down_down: drip("up") }),
+    "frustum",
+  );
+  equal(
+    "only its own column counts",
+    thicknessOf(drip("down"), { up: stone, north: drip("down"), down_up: drip("down") }),
+    "tip",
+  );
+}
+
+// --- the nether's vines are crosses -------------------------------------------
+console.log("\n--- the nether's vines are crosses ---");
+{
+  /*
+   * Full opaque cubes, which sealed their cell and let a fence connect to
+   * them. All four are `block/cross` wearing their own name.
+   */
+  const vines = ["weeping_vines", "weeping_vines_plant", "twisting_vines", "twisting_vines_plant"];
+  equal("all four are vanilla's cross", vines.filter((n) => shapeFor(block(n, {})).kind !== "cross"), []);
+  equal("...and none of them seals its cell", vines.filter((n) => occludesNeighbours(block(n, {}))), []);
+  if (pack !== null) {
+    const worn: string[] = [];
+    for (const n of vines) {
+      const key = (await baker.bakeBlockstate(block(n, {}))).textureKey;
+      if (key !== `minecraft:block/${n}`) worn.push(`${n} -> ${key}`);
+    }
+    equal("...each wearing its own texture", worn, []);
+  }
+}
+
 console.log("\n--- seagrass is four planes in a hash ---");
 if (pack === null) {
   console.log("  SKIP: no bundled resource pack");
@@ -2634,6 +3049,342 @@ if (pack === null) {
     "...and it covers no face of its cell",
     LEVER_FACES.filter((face) => coversFace(lever, face)),
     [],
+  );
+}
+
+console.log("\n--- a tripwire hook is a plate, a stick and a ring ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * It was `againstWall(e, 3)`: a plate over a whole face of the cell wearing
+   * a sheet that is mostly hole, which drew next to nothing and took the face
+   * off the wall behind it. Transcribed from the four `tripwire_hook*` models.
+   */
+  const HOOK_SIDES = ["north", "south", "west", "east", "up", "down"] as const;
+  const corners = (f: BakedFace): number[][] =>
+    [0, 1, 2, 3].map((i) => [0, 1, 2].map((a) => f.positions[i * 3 + a] * 16));
+  const partsOf = async (properties: Record<string, string>) => {
+    const baked = await baker.bakeBlockstate(block("tripwire_hook", properties));
+    const all = [...Object.values(baked.faces), ...baked.extraFaces];
+    const of = (name: string) => all.filter((f) => f.textureKey.endsWith(`/${name}`));
+    return { all, hook: of("tripwire_hook"), wood: of("oak_planks"), wire: of("tripwire") };
+  };
+
+  // Ring (six faces and four inside planes), stick, plate; `attached` adds the
+  // string's two faces and alone leaves the stick's south face out.
+  const expected: Record<string, [number, number, number]> = {
+    "false/false": [10, 12, 0],
+    "false/true": [10, 12, 0],
+    "true/false": [10, 11, 2],
+    "true/true": [10, 12, 2],
+  };
+  const counts: string[] = [];
+  const offTile: string[] = [];
+  for (const attached of ["false", "true"]) {
+    for (const powered of ["false", "true"]) {
+      for (const facing of ["north", "east", "south", "west"]) {
+        const where = `${attached}/${powered}`;
+        const { all, hook, wood, wire } = await partsOf({ facing, attached, powered });
+        const got = [hook.length, wood.length, wire.length];
+        if (got.join() !== expected[where].join()) counts.push(`${where}/${facing} ${got.join("+")}`);
+        for (const f of all) {
+          if (f.uvs.some((uv) => uv < -1e-6 || uv > 1 + 1e-6)) offTile.push(`${where}/${facing}`);
+        }
+      }
+    }
+  }
+  equal("every state draws its ring, stick, plate and string", counts, []);
+  equal("...with every window inside its tile", offTile, []);
+
+  // The ring hangs off the end of the stick, so the model's rotations landed
+  // where vanilla's do: the stick tilts up and the ring sits at its tip.
+  const upright = await partsOf({ facing: "north", attached: "false", powered: "false" });
+  const top = (faces: BakedFace[]) => Math.max(...faces.flatMap((f) => corners(f).map((p) => p[1])));
+  // The plate stops at y = 9, so anything of wood above it is the stick.
+  check("an idle hook's stick leans up", top(upright.wood) > 9.3);
+  check("...and carries the ring up with it", top(upright.hook) > 9);
+  const taut = await partsOf({ facing: "north", attached: "true", powered: "false" });
+  const low = Math.min(...taut.wire.flatMap((f) => corners(f).map((p) => p[1])));
+  equal("an attached hook's string meets the wire at its height", +low.toFixed(2), 1.5);
+
+  /*
+   * The plate is on the wall the hook was clicked onto. `WALL_MOUNTED`'s rule,
+   * checked through the geometry: the block that was clicked is on the far
+   * side of the clicked face, so the plate has to reach that side of the cell.
+   */
+  const OUT: Record<string, [number, number]> = { north: [2, 16], south: [2, 0], east: [0, 0], west: [0, 16] };
+  for (const clicked of ["north", "south", "east", "west"] as const) {
+    const step = FACE_VECTOR[clicked];
+    const state = placementState("minecraft:tripwire_hook", {
+      direction: { x: -step.x, y: 0, z: -step.z },
+      against: clicked,
+      cursorY: 0.5,
+      run: null,
+    });
+    const { wood } = await partsOf(state);
+    const [axis, boundary] = OUT[clicked];
+    const reaches = wood.some((f) => corners(f).every((p) => Math.abs(p[axis] - boundary) < 1e-3));
+    check(`a hook clicked onto a ${clicked} face is plated to the block behind it`, reaches, `facing=${state.facing}`);
+  }
+
+  const hook = block("tripwire_hook", defaultStateFor("minecraft:tripwire_hook") ?? {});
+  check("a tripwire hook is boxes rather than a cube", shapeFor(hook).kind === "boxes");
+  check("...it does not occlude", !occludesNeighbours(hook));
+  equal("...and covers no face of its cell", HOOK_SIDES.filter((face) => coversFace(hook, face)), []);
+}
+
+/*
+ * A tripwire is laid along the camera. It has no `facing`, so what a placement
+ * says is the run: two arms east-west, or vanilla's own isolated wire, which
+ * lies north-south.
+ */
+console.log("\n--- a tripwire is laid along the look ---");
+{
+  const lay = (x: number, z: number) =>
+    orientPlacement("minecraft:tripwire", { direction: { x, y: -0.3, z }, against: "up", cursorY: 0, run: null });
+  const WIRE = { north: "false", east: "false", south: "false", west: "false" };
+  equal("looking east lays it east-west", lay(1, 0.2), { ...WIRE, east: "true", west: "true" });
+  equal("...and so does looking west", lay(-1, -0.2), { ...WIRE, east: "true", west: "true" });
+  equal("looking north lays it north-south", lay(0.2, -1), WIRE);
+
+  /*
+   * A rail is laid along the look too: `BaseRailBlock.getStateForPlacement`.
+   * Every one used to land north-south, so the first rail of a run laid east
+   * came out across its own track.
+   */
+  const track = (name: string, x: number, z: number) =>
+    orientPlacement(`minecraft:${name}`, { direction: { x, y: -0.3, z }, against: "up", cursorY: 0, run: null });
+  equal("a rail placed looking east runs east-west", track("rail", 1, 0.2), { shape: "east_west" });
+  equal("...and looking west", track("rail", -1, -0.2), { shape: "east_west" });
+  equal("...and looking south runs north-south", track("rail", -0.2, 1), { shape: "north_south" });
+  for (const name of ["powered_rail", "detector_rail", "activator_rail"]) {
+    equal(`the ${name.replace("_", " ")} is laid along the look as well`, track(name, 1, 0), { shape: "east_west" });
+  }
+  if (pack !== null) {
+    const faces = (await baker.bakeBlockstate(block("tripwire", { ...WIRE, east: "true", west: "true" })))
+      .extraFaces;
+    const xs = faces.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3] * 16));
+    const zs = faces.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3 + 2] * 16));
+    check(
+      "...and an east-west wire is drawn running east-west, edge to edge",
+      Math.min(...xs) < 0.01 && Math.max(...xs) > 15.99 && Math.min(...zs) > 7.7 && Math.max(...zs) < 8.3,
+      `x ${Math.min(...xs)}..${Math.max(...xs)} z ${Math.min(...zs)}..${Math.max(...zs)}`,
+    );
+  }
+}
+
+console.log("\n--- a copper golem statue is the golem, in four poses ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  /*
+   * The statue is a block entity drawn with the golem's entity model, so what
+   * is checked here is Java's own drawing of it, rebuilt from scratch: the
+   * renderer's `translate(0.5, 0, 0.5)`, the statue model's root pose, each
+   * part's `translate(offset / 16)` and `rotationZYX`, and `ModelPart.Cube`'s
+   * vertices and `Polygon`'s UVs. It reads the pose tree the shape reads,
+   * so it holds the arithmetic -- pivots, turn order, windows -- rather than
+   * the transcription, which the extents and the nose below speak for.
+   */
+  type M4 = number[];
+  const mul = (a: M4, b: M4): M4 => {
+    const out = new Array<number>(16).fill(0);
+    for (let r = 0; r < 4; r += 1) {
+      for (let c = 0; c < 4; c += 1) {
+        for (let k = 0; k < 4; k += 1) out[r * 4 + c] += a[r * 4 + k] * b[k * 4 + c];
+      }
+    }
+    return out;
+  };
+  const translate = (x: number, y: number, z: number): M4 => [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z, 0, 0, 0, 1];
+  const rotX = (a: number): M4 => [1, 0, 0, 0, 0, Math.cos(a), -Math.sin(a), 0, 0, Math.sin(a), Math.cos(a), 0, 0, 0, 0, 1];
+  const rotY = (a: number): M4 => [Math.cos(a), 0, Math.sin(a), 0, 0, 1, 0, 0, -Math.sin(a), 0, Math.cos(a), 0, 0, 0, 0, 1];
+  const rotZ = (a: number): M4 => [Math.cos(a), -Math.sin(a), 0, 0, Math.sin(a), Math.cos(a), 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const apply = (m: M4, p: number[]): number[] =>
+    [0, 1, 2].map((r) => m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3]);
+
+  interface Quad {
+    positions: number[][];
+    uvs: number[][];
+    normal: number[];
+  }
+  /** `ModelPart.visit` over a part tree, emitting `Cube.compile`'s quads. */
+  const javaQuads = (part: ModelPartDef, parent: M4, out: Quad[]): void => {
+    const [xRot, yRot, zRot] = part.rotation ?? [0, 0, 0];
+    const pose = mul(
+      mul(parent, translate(part.offset[0] / 16, part.offset[1] / 16, part.offset[2] / 16)),
+      mul(rotZ(zRot), mul(rotY(yRot), rotX(xRot))),
+    );
+    for (const cube of part.cubes ?? []) {
+      const g = cube.grow ?? 0;
+      const [w, h, d] = cube.size;
+      const [x0, y0, z0] = [cube.from[0] - g, cube.from[1] - g, cube.from[2] - g];
+      const [x1, y1, z1] = [cube.from[0] + w + g, cube.from[1] + h + g, cube.from[2] + d + g];
+      const t0 = [x0, y0, z0], t1 = [x1, y0, z0], t2 = [x1, y1, z0], t3 = [x0, y1, z0];
+      const l0 = [x0, y0, z1], l1 = [x1, y0, z1], l2 = [x1, y1, z1], l3 = [x0, y1, z1];
+      const [u, v] = cube.tex;
+      const u1 = u + d, u2 = u + d + w, u22 = u + d + 2 * w, u3 = u + 2 * d + w, u4 = u + 2 * d + 2 * w;
+      const v1 = v + d, v2 = v + d + h;
+      const polygons: Array<[number[][], number, number, number, number, number[]]> = [
+        [[l1, l0, t0, t1], u1, v, u2, v1, [0, -1, 0]],
+        [[t2, t3, l3, l2], u2, v1, u22, v, [0, 1, 0]],
+        [[t0, l0, l3, t3], u, v1, u1, v2, [-1, 0, 0]],
+        [[t1, t0, t3, t2], u1, v1, u2, v2, [0, 0, -1]],
+        [[l1, t1, t2, l2], u2, v1, u3, v2, [1, 0, 0]],
+        [[l0, l1, l2, l3], u3, v1, u4, v2, [0, 0, 1]],
+      ];
+      for (const [vertices, pu0, pv0, pu1, pv1, facingOut] of polygons) {
+        const corners = [
+          [pu1, pv0],
+          [pu0, pv0],
+          [pu0, pv1],
+          [pu1, pv1],
+        ];
+        out.push({
+          positions: vertices.map((p) => apply(pose, p.map((n) => n / 16))),
+          uvs: corners.map(([cu, cv]) => [cu / 64, cv / 64]),
+          // `pose.transformNormal`: the rotation alone, which is the matrix
+          // applied to a direction rather than a point.
+          normal: [0, 1, 2].map((r) => pose[r * 4] * facingOut[0] + pose[r * 4 + 1] * facingOut[1] + pose[r * 4 + 2] * facingOut[2]),
+        });
+      }
+    }
+    for (const child of part.children ?? []) javaQuads(child, pose, out);
+  };
+  const TO_Y_ROT: Record<string, number> = { south: 0, west: 90, north: 180, east: 270 };
+  const AWAY: Record<string, string> = { north: "south", south: "north", east: "west", west: "east" };
+  const oracle = (pose: string, facing: string): Quad[] => {
+    const out: Quad[] = [];
+    const root: ModelPartDef = {
+      offset: [0, 0, 0],
+      rotation: [0, (TO_Y_ROT[AWAY[facing]] * Math.PI) / 180, Math.PI],
+      children: COPPER_GOLEM_POSES[pose],
+    };
+    javaQuads(root, translate(0.5, 0, 0.5), out);
+    return out;
+  };
+
+  const POSES = ["standing", "sitting", "running", "star"];
+  const FACINGS = ["north", "east", "south", "west"];
+  const bake = async (name: string, properties: Record<string, string>) => {
+    const baked = await baker.bakeBlockstate(block(name, properties));
+    return [...Object.values(baked.faces), ...baked.extraFaces];
+  };
+  const close = (a: number, b: number) => Math.abs(a - b) < 1e-4;
+
+  const mismatches: string[] = [];
+  const digests = new Set<string>();
+  for (const pose of POSES) {
+    for (const facing of FACINGS) {
+      const where = `${pose}/${facing}`;
+      const faces = await bake("copper_golem_statue", { copper_golem_pose: pose, facing });
+      const quads = oracle(pose, facing);
+      if (faces.length !== quads.length) {
+        mismatches.push(`${where}: ${faces.length} faces, Java draws ${quads.length}`);
+        continue;
+      }
+      const unmatched = [...quads];
+      for (const face of faces) {
+        const corners = [0, 1, 2, 3].map((i) => ({
+          p: [0, 1, 2].map((a) => face.positions[i * 3 + a]),
+          uv: [face.uvs[i * 2], face.uvs[i * 2 + 1]],
+        }));
+        const found = unmatched.findIndex((quad) =>
+          quad.normal.every((n, a) => close(n, face.normal[a])) &&
+          corners.every((corner) =>
+            quad.positions.some(
+              (p, k) =>
+                p.every((n, a) => close(n, corner.p[a])) &&
+                close(quad.uvs[k][0], corner.uv[0]) &&
+                close(quad.uvs[k][1], corner.uv[1]),
+            ),
+          ),
+        );
+        if (found === -1) {
+          mismatches.push(`${where}: a face matches no Java quad in place and UV`);
+          break;
+        }
+        unmatched.splice(found, 1);
+      }
+      if (facing === "north") {
+        digests.add(faces.map((f) => Array.from(f.positions, (n) => n.toFixed(3)).join()).join("|"));
+      }
+    }
+  }
+  equal("every face of every pose and facing is Java's, in place, facing and UV", mismatches, []);
+  // Single-sided, a face wound against its own normal is not drawn at all.
+  const woundBackwards: string[] = [];
+  for (const pose of POSES) {
+    for (const facing of FACINGS) {
+      const faces = await bake("copper_golem_statue", { copper_golem_pose: pose, facing });
+      if (!faces.every(windingAgrees)) woundBackwards.push(`${pose}/${facing}`);
+    }
+  }
+  equal("...and wound the way it faces", woundBackwards, []);
+  equal("...and the four poses are four different shapes", digests.size, 4);
+
+  const texture = (await bake("copper_golem_statue", {}))[0]?.textureKey;
+  equal("a statue wears the golem's entity sheet", texture, "minecraft:entity/copper_golem/copper_golem");
+
+  /*
+   * The face points where `facing` says. The nose is the one 2x3x2 cube, and
+   * its window starts at texel 56 of the sheet -- so a face reading only that
+   * corner of the sheet is the nose, whichever way the shape put it.
+   */
+  const noseWrong: string[] = [];
+  for (const pose of POSES) {
+    for (const facing of FACINGS) {
+      const faces = await bake("copper_golem_statue", { copper_golem_pose: pose, facing });
+      const nose = faces.filter((f) => Array.from(f.uvs).every((n, i) => (i % 2 === 0 ? n >= 55.9 / 64 : n <= 5.1 / 64)));
+      const points = nose.flatMap((f) => [0, 1, 2, 3].map((i) => [f.positions[i * 3], f.positions[i * 3 + 2]]));
+      const cx = points.reduce((s, p) => s + p[0], 0) / Math.max(1, points.length) - 0.5;
+      const cz = points.reduce((s, p) => s + p[1], 0) / Math.max(1, points.length) - 0.5;
+      const step = FACE_VECTOR[facing as "north"];
+      if (nose.length !== 6 || cx * step.x + cz * step.z < 0.25) {
+        noseWrong.push(`${pose}/${facing} (${nose.length} faces, ${cx.toFixed(2)}, ${cz.toFixed(2)})`);
+      }
+    }
+  }
+  equal("the golem's nose points the way the statue faces, in every pose", noseWrong, []);
+
+  const standing = await bake("copper_golem_statue", { copper_golem_pose: "standing", facing: "north" });
+  const heights = standing.flatMap((f) => [0, 1, 2, 3].map((i) => f.positions[i * 3 + 1] * 16));
+  equal(
+    "standing, it stands on the floor and is 24 units tall, antenna and all",
+    [+Math.min(...heights).toFixed(2), +Math.max(...heights).toFixed(2)],
+    [0, 23.99],
+  );
+
+  const statues = [
+    "copper_golem_statue",
+    "exposed_copper_golem_statue",
+    "weathered_copper_golem_statue",
+    "oxidized_copper_golem_statue",
+    "waxed_copper_golem_statue",
+    "waxed_exposed_copper_golem_statue",
+    "waxed_weathered_copper_golem_statue",
+    "waxed_oxidized_copper_golem_statue",
+  ];
+  equal(
+    "no statue occludes or covers a face of its cell",
+    statues.filter((name) => {
+      const entry = block(name, defaultStateFor(`minecraft:${name}`) ?? {});
+      return (
+        occludesNeighbours(entry) ||
+        (["north", "south", "east", "west", "up", "down"] as const).some((face) => coversFace(entry, face))
+      );
+    }),
+    [],
+  );
+
+  const looking = { direction: { x: 1, y: 0, z: 0 }, against: "up" as const, cursorY: 0, run: null };
+  equal(
+    "a statue set down looking east faces west, back at whoever placed it",
+    ["copper_golem_statue", "waxed_oxidized_copper_golem_statue"].map(
+      (name) => orientPlacement(`minecraft:${name}`, looking).facing,
+    ),
+    ["west", "west"],
   );
 }
 
@@ -3617,6 +4368,11 @@ if (pack === null) {
     await waterFaces([block("air"), block("oak_fence", { waterlogged: "true" })], [1], 0),
     6,
   );
+  equal(
+    "...and so is a waterlogged decorated pot",
+    await waterFaces([block("air"), block("decorated_pot", { waterlogged: "true" })], [1], 0),
+    6,
+  );
   /*
    * And it is one body of water, not two blocks of it. Two waterlogged cells
    * side by side do not draw the surface between them, for the same reason an
@@ -4415,6 +5171,179 @@ if (pack === null) {
     standing.some((f) => f.textureKey === "minecraft:entity/banner/banner_base"),
     [...new Set(standing.map((f) => f.textureKey))].join(" "),
   );
+}
+
+// --- a banner wears its design --------------------------------------------------
+//
+// The patterns are layers in the block entity, composed here into one tile per
+// look. Everything below is stated in pixels, because every way this goes wrong
+// -- a layer missing, the layers in the wrong order, the design on the back or
+// upside down -- still produces a plausible banner.
+console.log("\n--- a banner wears its design ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  const WHITE = DYE_COLOURS.white;
+  const BLACK = DYE_COLOURS.black;
+  const cloth = async (layers: Array<[string, string]>) =>
+    await baker.bannerCloth(
+      WHITE,
+      layers.map(([pattern, colour]) => ({ pattern, hex: DYE_COLOURS[colour] })),
+    );
+  /** A texel of a composed tile, by the sheet's own 64-texel coordinates. */
+  const sheetTexel = (key: string, u: number, v: number): [number, number, number] => {
+    const image = baker.textures[key];
+    const x = Math.floor((u / 64) * image.width);
+    const y = Math.floor((v / 64) * image.height);
+    const i = (y * image.width + x) * 4;
+    return [image.data[i], image.data[i + 1], image.data[i + 2]];
+  };
+  const dark = (rgb: readonly number[]) => rgb[0] + rgb[1] + rgb[2] < 150;
+  const light = (rgb: readonly number[]) => rgb[0] + rgb[1] + rgb[2] > 600;
+
+  /*
+   * The table and the pack agree: every design the table names is a texture the
+   * bundled pack draws, and changes the flag. A row whose id was misspelled
+   * would compose to a plain banner and say nothing.
+   */
+  const plain = await cloth([]);
+  const blank: string[] = [];
+  for (const row of BANNER_PATTERNS) {
+    const key = await cloth([[row.id, "black"]]);
+    let differs = false;
+    for (let v = 1; v < 41 && !differs && key !== null && plain !== null; v += 1) {
+      for (let u = 1; u < 21 && !differs; u += 1) {
+        differs = sheetTexel(key, u + 0.5, v + 0.5).join() !== sheetTexel(plain, u + 0.5, v + 0.5).join();
+      }
+    }
+    if (!differs) blank.push(row.id);
+  }
+  equal("every design in the table is drawn by the pack", blank, []);
+  equal("...all forty-three of them", BANNER_PATTERNS.length, 43);
+
+  /*
+   * The codes are the game's, transcribed a second time here from
+   * `BannerPatternFormatFix.PATTERN_ID_MAP` rather than read back out of the
+   * table: a code off by a letter reads an old file's layer as another design.
+   */
+  const DATAFIX: Record<string, string> = {
+    b: "base", bl: "square_bottom_left", br: "square_bottom_right", tl: "square_top_left",
+    tr: "square_top_right", bs: "stripe_bottom", ts: "stripe_top", ls: "stripe_left",
+    rs: "stripe_right", cs: "stripe_center", ms: "stripe_middle", drs: "stripe_downright",
+    dls: "stripe_downleft", ss: "small_stripes", cr: "cross", sc: "straight_cross",
+    bt: "triangle_bottom", tt: "triangle_top", bts: "triangles_bottom", tts: "triangles_top",
+    ld: "diagonal_left", rd: "diagonal_up_right", lud: "diagonal_up_left", rud: "diagonal_right",
+    mc: "circle", mr: "rhombus", vh: "half_vertical", hh: "half_horizontal",
+    vhr: "half_vertical_right", hhb: "half_horizontal_bottom", bo: "border", cbo: "curly_border",
+    gra: "gradient", gru: "gradient_up", bri: "bricks", glb: "globe", cre: "creeper",
+    sku: "skull", flo: "flower", moj: "mojang", pig: "piglin",
+  };
+  equal(
+    "every legacy code names the design the game's datafixer says it does",
+    BANNER_PATTERNS.filter((row) => row.code !== null && DATAFIX[row.code] !== row.id).map((row) => row.id),
+    [],
+  );
+  equal(
+    "...and only flow and guster have none",
+    BANNER_PATTERNS.filter((row) => row.code === null).map((row) => row.id),
+    ["flow", "guster"],
+  );
+
+  // Layers are drawn over what is under them, in order.
+  const stripe = await cloth([["stripe_bottom", "black"]]);
+  if (stripe !== null) {
+    check("a layer takes its colour where its design is", dark(sheetTexel(stripe, 11, 38)));
+    check("...and leaves the banner's colour everywhere else", light(sheetTexel(stripe, 11, 5)));
+  }
+  const brownThenBlack = await cloth([["triangle_bottom", "brown"], ["triangle_bottom", "black"]]);
+  const blackThenBrown = await cloth([["triangle_bottom", "black"], ["triangle_bottom", "brown"]]);
+  if (brownThenBlack !== null && blackThenBrown !== null) {
+    check("the later layer is the one on top", dark(sheetTexel(brownThenBlack, 11, 39)));
+    const brown = sheetTexel(blackThenBrown, 11, 39);
+    check("...so the same two the other way round come out brown", brown[0] > brown[2] + 20 && !dark(brown), brown.join());
+    check("two orders are two tiles", brownThenBlack !== blackThenBrown);
+  }
+  const gradient = await cloth([["gradient", "black"]]);
+  if (gradient !== null) {
+    const middle = sheetTexel(gradient, 11, 21);
+    check(
+      "a gradient blends rather than covers",
+      !dark(middle) && !light(middle),
+      middle.join(),
+    );
+  }
+  equal("the same look is the same tile", await cloth([["stripe_bottom", "black"]]), stripe);
+
+  /*
+   * And it is the **front** that wears it, the right way up.
+   *
+   * The cloth's windows used to be `unwrapCube`'s, which put the design's back
+   * on the front and turned it upside down -- invisible for as long as the
+   * cloth was one flat colour. `stripe_left` is on the left as the banner is
+   * looked at, and `stripe_top` at the top: a banner facing south is looked at
+   * from the south, where left is west.
+   */
+  const frontOf = async (name: string, props: Record<string, string>, key: string) => {
+    const baked = await baker.bakeBlockstate(block(name, props));
+    const face = baked.extraFaces.find((f) => f.textureKey.includes("banner/base") && f.normal[2] > 0.9);
+    return face === undefined ? null : { ...face, textureKey: key };
+  };
+  const left = await cloth([["stripe_left", "black"]]);
+  const top = await cloth([["stripe_top", "black"]]);
+  for (const [name, props] of [
+    ["white_banner", { rotation: "0" }],
+    ["white_wall_banner", { facing: "south" }],
+  ] as const) {
+    if (left === null || top === null) break;
+    const byLeft = await frontOf(name, props, left);
+    const byTop = await frontOf(name, props, top);
+    if (byLeft === null || byTop === null) {
+      check(`${name} has a front`, false);
+      continue;
+    }
+    const z = byLeft.positions[2];
+    const ys = [1, 4, 7, 10].map((i) => byLeft.positions[i]);
+    const [low, high] = [Math.min(...ys), Math.max(...ys)];
+    const at = (x: number, t: number): [number, number, number] => [x, low + (high - low) * t, z];
+    check(`${name}: a left stripe is on the west, the left seen from the south`, texelOn(byLeft, at(0.2, 0.5)).luminance < 60);
+    check(`...and not on the east`, texelOn(byLeft, at(0.8, 0.5)).luminance > 180);
+    check(`${name}: a top stripe is at the top`, texelOn(byTop, at(0.5, 0.9)).luminance < 60);
+    check(`...and not at the bottom`, texelOn(byTop, at(0.5, 0.1)).luminance > 180);
+  }
+
+  /*
+   * The composed cloth is in the atlas before the chunks are meshed.
+   *
+   * The atlas is packed once per preview and the chunks' UVs address it, so a
+   * tile first made *during* meshing is one the mesh cannot find -- and
+   * `buildMesh` drops a face whose texture the atlas does not have. The cloth
+   * would simply be missing, on the first banner of every design. Same number
+   * of triangles as a plain banner is the whole statement.
+   */
+  const triangles = async (patterned: boolean): Promise<number> => {
+    const doc = createDocument({ width: 1, height: 2, length: 1, format: "sponge3", dataVersion: 4189 });
+    setBlock(doc, 0, 0, 0, block("red_banner", { rotation: "0" }));
+    if (patterned) {
+      setBlockEntity(doc, 0, 0, 0, {
+        id: "minecraft:banner",
+        pos: [0, 0, 0],
+        nbt: {
+          patterns: {
+            type: "list",
+            value: {
+              type: "compound",
+              // A design no other check here composes, so the tile is new.
+              value: [{ pattern: { type: "string", value: "minecraft:globe" }, color: { type: "string", value: "lime" } }],
+            },
+          },
+        },
+      });
+    }
+    const preview = await buildDocumentPreview(doc, { resourcePackPath: pack });
+    return preview.mesh.chunks.reduce((total, chunk) => total + chunk.indices.length, 0);
+  };
+  const plainCount = await triangles(false);
+  equal("a patterned banner draws every face a plain one does", await triangles(true), plainCount);
 }
 
 console.log("\n--- what a sign says ---");
@@ -5621,6 +6550,60 @@ console.log("\n--- the state a placed block starts in ---");
   const chest = placementState("minecraft:chest", onFloor(1, 0));
   equal("a chest still turns its front to you", chest.facing, "west");
   equal("...and knows it is not half of a double one", chest.type, "single");
+  // The copper chests are chests, and all eight used to land facing north
+  // whichever way they were placed: they were in no table.
+  equal(
+    "every copper chest turns its front to you as well",
+    COPPER_CHESTS.filter((name) => placementState(`minecraft:${name}`, onFloor(1, 0)).facing !== "west"),
+    [],
+  );
+  // A chiseled bookshelf's slots are on its front, and it landed facing north.
+  equal(
+    "a chiseled bookshelf turns its slots to you",
+    placementState("minecraft:chiseled_bookshelf", onFloor(1, 0)).facing,
+    "west",
+  );
+  // A lantern clicked onto the underside of a block hangs from it.
+  const lanterns = [...parseBlockList(readFileSync("block_id_list.txt", "utf-8"))].filter(
+    (id) => id.endsWith("lantern") && id !== "minecraft:jack_o_lantern" && id !== "minecraft:sea_lantern",
+  );
+  const under: PlacementLook = { direction: { x: 0, y: 1, z: 0 }, against: "down", cursorY: 0, run: null };
+  const side: PlacementLook = { direction: { x: 1, y: 0.1, z: 0 }, against: "west", cursorY: 0.5, run: null };
+  check("the lanterns are all found", lanterns.length === 10, String(lanterns.length));
+  equal(
+    "every lantern placed under a block hangs",
+    lanterns.filter((id) => placementState(id, under).hanging !== "true"),
+    [],
+  );
+  equal(
+    "...and stands on a floor, and against a wall",
+    lanterns.filter(
+      (id) => placementState(id, onFloor(1, 0)).hanging !== "false" || placementState(id, side).hanging !== "false",
+    ),
+    [],
+  );
+  check(
+    "...and neither a jack o'lantern nor a mangrove propagule is given one",
+    !("hanging" in placementState("minecraft:jack_o_lantern", under)) &&
+      placementState("minecraft:mangrove_propagule", under).hanging !== "true",
+  );
+  // Every shelf opens towards you, and all twelve landed facing north.
+  const shelves = [...parseBlockList(readFileSync("block_id_list.txt", "utf-8"))].filter((id) =>
+    id.endsWith("_shelf"),
+  );
+  check("the shelves are all found", shelves.length === 12, String(shelves.length));
+  equal(
+    "every shelf turns its front to you",
+    shelves.filter((id) => placementState(id, onFloor(1, 0)).facing !== "west"),
+    [],
+  );
+  // A decorated pot's `facing` is the look direction itself; the renderer puts
+  // its front on the opposite side, so the front still turns to you.
+  equal(
+    "a decorated pot faces where you look, which puts its front towards you",
+    placementState("minecraft:decorated_pot", onFloor(1, 0)).facing,
+    "east",
+  );
 
   const stairs = placementState("minecraft:oak_stairs", onFloor(1, 0));
   equal("stairs gain their shape", stairs.shape, "straight");
@@ -5745,6 +6728,9 @@ console.log("\n--- nothing is a cube by accident ---");
     "piston_head",
     "cocoa",
     "torchflower_crop",
+    "pitcher_crop",
+    "weeping_vines",
+    "twisting_vines_plant",
     "chain",
     "potted_poppy",
     "white_carpet",
@@ -5885,6 +6871,283 @@ if (pack === null) {
       !coversFace(block("oak_shelf", { facing }), facing),
     );
   }
+
+  /*
+   * And the belly the wall's culled face used to show through. The body model
+   * has no face on the inside of its panel; vanilla's multipart adds one plane
+   * at z = 13, y 4..12, whose window alone depends on `powered`/`side_chain`.
+   * Hung on a wall without it, the shelf was a window into the wall block.
+   */
+  const shelfStates: Array<[string, Record<string, string>, readonly number[]]> = [
+    ["bare", {}, [0, 2, 8, 6]],
+    ["unpowered", { powered: "false", side_chain: "left" }, [0, 2, 8, 6]],
+    ["unconnected", { powered: "true", side_chain: "unconnected" }, [8, 12, 16, 16]],
+    ["left", { powered: "true", side_chain: "left" }, [0, 8, 8, 12]],
+    ["center", { powered: "true", side_chain: "center" }, [0, 12, 8, 16]],
+    ["right", { powered: "true", side_chain: "right" }, [8, 8, 16, 12]],
+  ];
+  const opening: Record<string, [number, number, number]> = {
+    north: [0, 0, -1],
+    south: [0, 0, 1],
+    east: [1, 0, 0],
+    west: [-1, 0, 0],
+  };
+  const bellyFaults: string[] = [];
+  for (const facing of ["north", "south", "east", "west"]) {
+    for (const [label, props, window] of shelfStates) {
+      const baked = await baker.bakeBlockstate(block("oak_shelf", { facing, ...props }));
+      const n = opening[facing];
+      // The plane 3 units in from the back, i.e. 5/16 from the centre towards the back.
+      const bellies = baked.extraFaces.filter((f) => {
+        if (f.normal.some((c, i) => Math.abs(c - n[i]) > 1e-6)) return false;
+        const depth = [0, 3, 6, 9].map(
+          (i) => (f.positions[i] - 0.5) * n[0] + (f.positions[i + 2] - 0.5) * n[2],
+        );
+        const ys = [1, 4, 7, 10].map((i) => f.positions[i] * 16);
+        return (
+          depth.every((d) => Math.abs(d + 5 / 16) < 1e-4) &&
+          Math.abs(Math.min(...ys) - 4) < 1e-4 &&
+          Math.abs(Math.max(...ys) - 12) < 1e-4
+        );
+      });
+      const tag = `${facing} ${label}`;
+      if (bellies.length !== 1) {
+        bellyFaults.push(`${tag}: ${bellies.length} belly faces`);
+        continue;
+      }
+      const f = bellies[0];
+      const us = [0, 2, 4, 6].map((i) => Math.round(f.uvs[i] * 16 * 1000) / 1000);
+      const vs = [1, 3, 5, 7].map((i) => Math.round(f.uvs[i] * 16 * 1000) / 1000);
+      const got = [Math.min(...us), Math.min(...vs), Math.max(...us), Math.max(...vs)];
+      if (got.some((c, i) => Math.abs(c - window[i]) > 1e-3)) {
+        bellyFaults.push(`${tag}: window ${got.join(",")}`);
+      }
+      if (pack !== null && faceOpacity(f) < 1) {
+        bellyFaults.push(`${tag}: ${faceOpacity(f).toFixed(3)} opaque`);
+      }
+    }
+  }
+  equal("every shelf state has one solid belly at the back, in its own window", bellyFaults, []);
+
+  /*
+   * The composter was the cauldron's fault in wood: a cube, so there was no
+   * inside and `level` had nowhere to be. Vanilla is a two-unit floor, four
+   * two-unit walls, and one surface per level at 1 + 2 * level -- 15 and
+   * `composter_ready` at 8.
+   */
+  const span = (f: BakedFace, a: 0 | 1 | 2): [number, number] => {
+    const vs = [0, 3, 6, 9].map((i) => Math.round(f.positions[i + a] * 16 * 1000) / 1000);
+    return [Math.min(...vs), Math.max(...vs)];
+  };
+  const composterFaults: string[] = [];
+  for (let level = 0; level <= 8; level += 1) {
+    const baked = await baker.bakeBlockstate(block("composter", { level: String(level) }));
+    const contents = baked.extraFaces.filter(
+      (f) => f.textureKey === "minecraft:block/composter_compost" || f.textureKey === "minecraft:block/composter_ready",
+    );
+    if (level === 0) {
+      if (contents.length !== 0) composterFaults.push("level 0 has contents");
+      continue;
+    }
+    const expected = level === 8 ? "minecraft:block/composter_ready" : "minecraft:block/composter_compost";
+    const height = Math.min(15, 1 + 2 * level);
+    const ok =
+      contents.length === 1 &&
+      contents[0].textureKey === expected &&
+      contents[0].normal[1] === 1 &&
+      span(contents[0], 1)[0] === height &&
+      JSON.stringify([span(contents[0], 0), span(contents[0], 2)]) === JSON.stringify([[2, 14], [2, 14]]);
+    if (!ok) composterFaults.push(`level ${level}: ${contents.map((f) => `${f.textureKey}@${span(f, 1)}`).join(" ")}`);
+  }
+  equal("a composter's contents stand at vanilla's height for every level", composterFaults, []);
+  const bin = await baker.bakeBlockstate(block("composter", { level: "0" }));
+  check("a composter is not a cube", !bin.isFullCube);
+  check(
+    "...its inside is open: its floor is seen from above at y = 2",
+    bin.extraFaces.some(
+      (f) => f.normal[1] === 1 && f.textureKey === "minecraft:block/composter_bottom" && span(f, 1)[0] === 2,
+    ),
+  );
+  check(
+    "...and nothing closes it at the top between the walls",
+    !bin.extraFaces.some((f) => f.normal[1] === 1 && span(f, 1)[0] === 16 && span(f, 0)[0] < 2 && span(f, 0)[1] > 14),
+  );
+  check(
+    "...while its floor and four walls still cover their sides of the cell",
+    (["down", "north", "south", "east", "west"] as const).every((face) => coversFace(block("composter"), face)) &&
+      !coversFace(block("composter"), "up"),
+  );
+
+  /*
+   * The chiseled bookshelf was a cube wearing its side on all four sides. Its
+   * front is six slot planes, 0..2 along the top and 3..5 along the bottom,
+   * left to right as seen from in front, each cut from the occupied or the
+   * empty sheet.
+   */
+  const bookshelfFaults: string[] = [];
+  // From in front: the viewer's left is the facing turned a quarter clockwise.
+  const leftOf: Record<string, [number, number]> = {
+    north: [1, 0],
+    east: [0, 1],
+    south: [-1, 0],
+    west: [0, -1],
+  };
+  for (const facing of ["north", "east", "south", "west"]) {
+    const n = opening[facing];
+    const empty = await baker.bakeBlockstate(block("chiseled_bookshelf", { facing }));
+    const front = empty.extraFaces.filter((f) => f.normal.every((c, i) => Math.abs(c - n[i]) < 1e-6));
+    if (front.length !== 6 || !front.every((f) => f.textureKey === "minecraft:block/chiseled_bookshelf_empty")) {
+      bookshelfFaults.push(`${facing}: front is ${front.map((f) => f.textureKey).join(",")}`);
+    }
+    const back = empty.extraFaces.filter((f) => f.normal.every((c, i) => Math.abs(c + n[i]) < 1e-6));
+    if (back.length !== 1 || back[0].textureKey !== "minecraft:block/chiseled_bookshelf_side") {
+      bookshelfFaults.push(`${facing}: back is ${back.map((f) => f.textureKey).join(",")}`);
+    }
+    for (let slot = 0; slot < 6; slot += 1) {
+      const baked = await baker.bakeBlockstate(
+        block("chiseled_bookshelf", { facing, [`slot_${slot}_occupied`]: "true" }),
+      );
+      const books = baked.extraFaces.filter((f) => f.textureKey === "minecraft:block/chiseled_bookshelf_occupied");
+      if (books.length !== 1) {
+        bookshelfFaults.push(`${facing} slot ${slot}: ${books.length} occupied faces`);
+        continue;
+      }
+      const f = books[0];
+      const [lx, lz] = leftOf[facing];
+      // How far towards the viewer's left the face's centre is, 0..16.
+      const cx = (span(f, 0)[0] + span(f, 0)[1]) / 2;
+      const cz = (span(f, 2)[0] + span(f, 2)[1]) / 2;
+      const along = lx !== 0 ? (lx > 0 ? cx : 16 - cx) : lz > 0 ? cz : 16 - cz;
+      const column = along > 10 ? 0 : along > 5 ? 1 : 2;
+      const row = span(f, 1)[0] === 8 ? 0 : 1;
+      if (row * 3 + column !== slot || f.normal.some((c, i) => Math.abs(c - n[i]) > 1e-6)) {
+        bookshelfFaults.push(`${facing} slot ${slot}: landed at row ${row} column ${column}`);
+      }
+      if (pack !== null && faceOpacity(f) < 1) bookshelfFaults.push(`${facing} slot ${slot}: holed`);
+    }
+  }
+  equal("every chiseled bookshelf slot is on the front, in its place, per facing", bookshelfFaults, []);
+  const tops = await Promise.all(
+    ["north", "east", "south", "west"].map(async (facing) => {
+      const b = await baker.bakeBlockstate(block("chiseled_bookshelf", { facing }));
+      const up = b.extraFaces.find((f) => f.normal[1] === 1);
+      return up === undefined ? "none" : Array.from(up.uvs).join(",");
+    }),
+  );
+  check("...and its top does not turn with it, which is vanilla's uvlock", new Set(tops).size === 1, tops.join(" | "));
+  check(
+    "...and it is still a solid block for the light and for fences",
+    occludesNeighbours(block("chiseled_bookshelf", { facing: "east" })),
+  );
+  check("...where the beacon, the other box shape covering its whole cell, is not", !occludesNeighbours(block("beacon")));
+
+  /*
+   * A decorated pot was a 14x16x14 crate: the whole base sheet squeezed onto
+   * its lid and floor, and no neck. It is `DecoratedPotRenderer`'s two layers
+   * now -- a neck on a collar, a plane at the top and the bottom, and four
+   * outward-facing sides.
+   */
+  const POT_BASE_KEY = "minecraft:entity/decorated_pot/decorated_pot_base";
+  const POT_SIDE_KEY = "minecraft:entity/decorated_pot/decorated_pot_side";
+  const potFaults: string[] = [];
+  // The texel the lid's north-west corner reads, per facing: the renderer turns
+  // the model by `180 - toYRot`, and east and west are where a turn the wrong
+  // way round shows.
+  const lidCorner: Record<string, [number, number]> = {
+    north: [7, 13.5],
+    east: [7, 6.5],
+    south: [14, 6.5],
+    west: [14, 13.5],
+  };
+  for (const facing of ["north", "east", "south", "west"]) {
+    const pot = await baker.bakeBlockstate(block("decorated_pot", { facing }));
+    const faces = pot.extraFaces;
+    const sides = faces.filter((f) => f.textureKey === POT_SIDE_KEY);
+    const outward = sides.every((f) => {
+      const axis = f.normal[0] !== 0 ? 0 : 2;
+      const at = span(f, axis)[0];
+      return (at === 1 && f.normal[axis] === -1) || (at === 15 && f.normal[axis] === 1);
+    });
+    if (sides.length !== 4 || !outward) potFaults.push(`${facing}: ${sides.length} sides, outward ${outward}`);
+    const neckTop = faces.find((f) => f.normal[1] === 1 && span(f, 1)[0] === 19.9);
+    if (neckTop === undefined || neckTop.textureKey !== POT_BASE_KEY || span(neckTop, 0).join() !== "4.1,11.9") {
+      potFaults.push(`${facing}: no neck on top`);
+    }
+    // The pose turns the neck over, so its top reads the patch `ModelPart.Cube`
+    // unwraps as its *underside*, and the other way round.
+    const uRange = (f: BakedFace | undefined) => {
+      if (f === undefined) return "none";
+      const us = [0, 2, 4, 6].map((i) => f.uvs[i] * 16);
+      return `${Math.min(...us)}..${Math.max(...us)}`;
+    };
+    const neckBottom = faces.find((f) => f.normal[1] === -1 && span(f, 1)[0] === 17.1);
+    if (uRange(neckTop) !== "4..8" || uRange(neckBottom) !== "8..12") {
+      potFaults.push(`${facing}: neck reads ${uRange(neckTop)} on top and ${uRange(neckBottom)} below`);
+    }
+    const lid = faces.find((f) => f.normal[1] === 1 && span(f, 1)[0] === 16);
+    const corner = lid === undefined ? -1 : [0, 1, 2, 3].find((i) => lid.positions[i * 3] * 16 === 1 && Math.round(lid.positions[i * 3 + 2] * 16) === 1);
+    const read = lid === undefined || corner === undefined || corner < 0 ? null : [lid.uvs[corner * 2] * 16, lid.uvs[corner * 2 + 1] * 16];
+    if (read === null || read.some((n, i) => Math.abs(n - lidCorner[facing][i]) > 1e-3)) {
+      potFaults.push(`${facing}: lid corner reads ${read}`);
+    }
+    // The collar's two caps read the corner of the sheet the neck's art leaves
+    // clear, and that is vanilla; everything else is solid terracotta.
+    const holed = faces.filter(
+      (f) => !(f.normal[1] !== 0 && [15.8, 17.2].includes(span(f, 1)[0])) && faceOpacity(f) < 1,
+    );
+    if (pack !== null && holed.length > 0) potFaults.push(`${facing}: ${holed.length} faces with holes`);
+  }
+  equal("a decorated pot is a neck, a collar, a lid, a floor and four sides, turned by facing", potFaults, []);
+  const potUvs = async (props: Record<string, string>) =>
+    (await baker.bakeBlockstate(block("decorated_pot", props))).extraFaces
+      .map((f) => `${Array.from(f.positions).join()}|${Array.from(f.uvs).join()}`)
+      .join(";");
+  equal("...a bare one is the north-facing one", await potUvs({}), await potUvs({ facing: "north" }));
+  equal(
+    "...and cracked moves nothing",
+    await potUvs({ facing: "east", cracked: "true" }),
+    await potUvs({ facing: "east", cracked: "false" }),
+  );
+
+  /*
+   * A sunflower's upper half is a short cross with the flower on top, and it
+   * was only the cross: `sunflower_front` and `sunflower_back` were reachable
+   * from nothing, so the top half showed a stalk and no head.
+   */
+  const sunTop = await baker.bakeBlockstate(block("sunflower", { half: "upper" }));
+  const head = (key: string) => sunTop.extraFaces.filter((f) => f.textureKey === `minecraft:block/${key}`);
+  const front = head("sunflower_front");
+  const back = head("sunflower_back");
+  check(
+    "a sunflower's top half has its head, facing east and tilted up",
+    front.length === 1 && front[0].normal[0] > 0.9 && front[0].normal[1] > 0.3,
+    front.map((f) => f.normal.join(",")).join(" | "),
+  );
+  check(
+    "...with the back of the flower behind it",
+    back.length === 1 && back[0].normal[0] < -0.9 && back[0].normal[1] < -0.3,
+  );
+  check("...and the head is drawn, not a transparent patch", front.every(facePaintsSomething) && back.every(facePaintsSomething));
+  const stalk = head("sunflower_top");
+  check(
+    "...above a stalk of four planes reading the lower half of sunflower_top",
+    stalk.length === 4 &&
+      stalk.every((f) => {
+        const vs = [1, 3, 5, 7].map((i) => f.uvs[i] * 16);
+        return Math.abs(Math.min(...vs) - 8) < 1e-4 && Math.abs(Math.max(...vs) - 16) < 1e-4;
+      }),
+  );
+  const sunBottom = await baker.bakeBlockstate(block("sunflower", { half: "lower" }));
+  check(
+    "...while the lower half is still a plain cross of sunflower_bottom",
+    sunBottom.extraFaces.length === 4 &&
+      sunBottom.extraFaces.every((f) => f.textureKey === "minecraft:block/sunflower_bottom"),
+  );
+  const lilacTop = await baker.bakeBlockstate(block("lilac", { half: "upper" }));
+  check(
+    "...and a lilac, which has no head, is untouched",
+    lilacTop.extraFaces.length === 4 && lilacTop.extraFaces.every((f) => f.textureKey === "minecraft:block/lilac_top"),
+  );
 
   // A cross has no side to cover, and a rotated box is refused outright: a
   // tilted plane can pass through a face without covering it.
@@ -6263,6 +7526,53 @@ if (pack === null) {
   }
 
   /*
+   * An anvil is laid across the look. Vanilla's placement is
+   * `getHorizontalDirection().getClockWise()`, and every anvil placed by hand
+   * used to land on the registry's `facing=north` whichever way it was put down.
+   *
+   * The property alone is not the check: a clockwise and an anticlockwise rule
+   * agree on nothing, but a table typed one quarter out would still name four
+   * directions. So the block is baked too, and the top -- the part with the horn,
+   * sixteen long and ten wide -- has to run across the direction of the look.
+   */
+  {
+    const look = (x: number, z: number): PlacementLook => ({
+      direction: { x, y: -0.4, z },
+      against: "up",
+      cursorY: 0,
+      run: null,
+    });
+    const LOOKS = [
+      ["north", 0, -1, "east"],
+      ["east", 1, 0, "south"],
+      ["south", 0, 1, "west"],
+      ["west", -1, 0, "north"],
+    ] as const;
+    for (const name of ["anvil", "chipped_anvil", "damaged_anvil"]) {
+      equal(
+        `${name} turns clockwise from the look`,
+        LOOKS.map(([, x, z]) => placementState(`minecraft:${name}`, look(x, z)).facing),
+        LOOKS.map(([, , , facing]) => facing),
+      );
+    }
+    for (const [towards, x, z] of LOOKS) {
+      const faces = await facesOf("anvil", placementState("minecraft:anvil", look(x, z)));
+      const top = faces.flatMap((f) => [0, 1, 2, 3].map((i) => [...f.positions.slice(i * 3, i * 3 + 3)]));
+      const onTop = top.filter((p) => p[1] > 10 / 16 + 1e-6);
+      const span = (axis: number) =>
+        Math.max(...onTop.map((p) => p[axis])) - Math.min(...onTop.map((p) => p[axis]));
+      const across = x !== 0 ? span(2) : span(0);
+      const along = x !== 0 ? span(0) : span(2);
+      check(
+        `an anvil placed looking ${towards} lies across the look`,
+        Math.abs(across - 1) < 1e-6 && Math.abs(along - 10 / 16) < 1e-6,
+        `across ${across}, along ${along}`,
+      );
+    }
+    check("the anvils are named for the id-list check", ORIENTED_BLOCK_NAMES.includes("damaged_anvil"));
+  }
+
+  /*
    * A grindstone's wheel has two textures and wore one. `#round` is the narrow
    * face and `#side` is the disc -- the part anybody would point at to say what
    * the block is -- and the whole wheel was drawn in `#round`'s neighbour,
@@ -6303,7 +7613,7 @@ if (pack === null) {
 
   // 5, 6. Blocks the app did not offer at all until the registry generated the
   // list, and the pack was updated to one that has them.
-  check("a shelf is a back panel and two lips", boxCount("oak_shelf", { facing: "north" }) === 3);
+  check("a shelf is a back panel, two lips and the belly between them", boxCount("oak_shelf", { facing: "north" }) === 4);
   equal("...wearing its own texture", await bakedKey("oak_shelf", { facing: "north" }), "minecraft:block/oak_shelf");
   /*
    * `oak_shelf.png` is a *sheet* -- 128x128 where an ordinary block texture is
@@ -6327,11 +7637,12 @@ if (pack === null) {
   // Vanilla draws no face where one part covers another, and says so per face
   // rather than leaving them to z-fight.
   // Three boxes of six faces, less the one each that another part covers: the
-  // panel has no north, and neither lip has a south.
+  // panel has no north, and neither lip has a south. Plus the belly, a plane
+  // with its north face alone: that is the face the panel lacks.
   check(
     "and the covered faces are left out",
-    shelfBlock.extraFaces.length === 15,
-    `${shelfBlock.extraFaces.length} faces, expected 18 less the three vanilla omits`,
+    shelfBlock.extraFaces.length === 16,
+    `${shelfBlock.extraFaces.length} faces, expected 18 less the three vanilla omits, plus the belly`,
   );
   check("an iron chain is two planes", boxCount("iron_chain") === 2);
   check("...and so is a copper one", boxCount("copper_chain") === 2);
@@ -6503,6 +7814,90 @@ console.log("\n--- neighbour-derived state ---");
   });
   const self = (name: string, properties: Record<string, string> = {}) => ({ name, properties });
 
+  // Vines: a side is held up by a wall, or by the vine above having that side.
+  equal(
+    "a vine under a vine keeps the side the one above clings to",
+    connectedState(self("vine"), { up: thin("vine", { north: "true", up: "true" }) }),
+    { north: "true", east: "false", south: "false", west: "false", up: "false" },
+  );
+  equal(
+    "...and clings to a wall beside it as well",
+    connectedState(self("vine"), { up: thin("vine", { north: "true" }), east: solid("stone") }),
+    { north: "true", east: "true", south: "false", west: "false", up: "false" },
+  );
+  equal(
+    "...but hangs from nothing that is not a vine",
+    connectedState(self("vine"), { up: thin("oak_fence", { north: "true" }) }),
+    { north: "false", east: "false", south: "false", west: "false", up: "false" },
+  );
+  /*
+   * What a vine clings to is a whole face of the collision shape, not a full
+   * opaque cube: leaves are not `solid` and carry every face as `sturdy`. The
+   * face asked is the one turned *towards* the vine, which is where a wrong
+   * `OPPOSITE` would hide -- so the leaves offer that face alone.
+   */
+  const leavesFacing = (face: string) => ({
+    name: "oak_leaves",
+    properties: {},
+    solid: false,
+    sturdy: { [face]: true },
+  });
+  equal(
+    "a vine clings to leaves beside it",
+    connectedState(self("vine"), { east: leavesFacing("west") }).east,
+    "true",
+  );
+  equal(
+    "...by the face turned towards it, not the far one",
+    connectedState(self("vine"), { east: leavesFacing("east") }).east,
+    "false",
+  );
+  equal(
+    "a vine under leaves hangs from their underside",
+    connectedState(self("vine"), { up: leavesFacing("down") }).up,
+    "true",
+  );
+  equal(
+    "...and a neighbour with no sturdy map falls back to solid",
+    connectedState(self("vine"), { up: solid("stone") }).up,
+    "true",
+  );
+
+  /*
+   * A tripwire connects to a wire, and to a hook pointing back at it, and to
+   * nothing else. With nothing to connect to it keeps the run it was laid in:
+   * east-west as the two arms, north-south as vanilla's own all-false.
+   */
+  const WIRE = { north: "false", east: "false", south: "false", west: "false" };
+  equal(
+    "a tripwire connects to a tripwire",
+    connectedState(self("tripwire"), { north: thin("tripwire") }),
+    { ...WIRE, north: "true" },
+  );
+  equal(
+    "...and to a hook to its east that points west, back at it",
+    connectedState(self("tripwire"), { east: thin("tripwire_hook", { facing: "west" }) }),
+    { ...WIRE, east: "true" },
+  );
+  equal(
+    "...but not to one pointing away",
+    connectedState(self("tripwire"), {
+      east: thin("tripwire_hook", { facing: "east" }),
+      north: solid("stone"),
+    }),
+    WIRE,
+  );
+  equal(
+    "a lone tripwire laid east-west stays east-west",
+    connectedState(self("tripwire", { ...WIRE, east: "true", west: "true" }), {}),
+    { ...WIRE, east: "true", west: "true" },
+  );
+  equal(
+    "...and one laid north-south is vanilla's isolated wire",
+    connectedState(self("tripwire", { ...WIRE, north: "true", south: "true" }), {}),
+    WIRE,
+  );
+
   // Fences.
   equal(
     "a lone fence connects to nothing",
@@ -6607,7 +8002,25 @@ console.log("\n--- neighbour-derived state ---");
     "single",
   );
 
-  // Rails: flat shapes only, which is the whole visible difference.
+  /*
+   * Copper chests pair with their own stage, waxed or not. The game pairs any
+   * two and rewrites the more oxidised half, and this pass changes no ids --
+   * so two stages side by side stay two single chests rather than one drawn in
+   * two colours.
+   */
+  const pairs = (a: string, b: string): string | undefined =>
+    connectedState(self(a, { facing: "north" }), { east: thin(b, { facing: "north" }) }).type;
+  equal("two copper chests of one stage pair", pairs("exposed_copper_chest", "exposed_copper_chest"), "left");
+  equal(
+    "...and so do a waxed and an unwaxed one of it",
+    pairs("waxed_exposed_copper_chest", "exposed_copper_chest"),
+    "left",
+  );
+  equal("...but not two stages", pairs("copper_chest", "exposed_copper_chest"), "single");
+  equal("...nor a copper chest and a wooden one", pairs("copper_chest", "chest"), "single");
+  equal("...and a trapped chest still pairs with neither", pairs("trapped_chest", "chest"), "single");
+
+  // Rails: straight, curved, and climbing a step.
   equal("a lone rail lies north-south", connectedState(self("rail"), {}).shape, "north_south");
   equal(
     "a rail with a neighbour east lies east-west",
@@ -6626,6 +8039,130 @@ console.log("\n--- neighbour-derived state ---");
       .shape,
     "north_south",
   );
+
+  /*
+   * A rail climbs to a rail one block up, which is `RailState.place`: a side
+   * has a rail if one is beside it, above it or below it, and a straight answer
+   * then ascends towards the one above. Each direction by name, because the
+   * mistake a table of four invites is a swapped pair, and a rail sloping the
+   * wrong way still looks exactly like a rail sloping.
+   */
+  const rail = (props: Record<string, string> = {}) => thin("rail", props);
+  for (const side of ["north", "south", "east", "west"] as const) {
+    equal(
+      `a rail with a rail one up to the ${side} ascends ${side}`,
+      connectedState(self("rail"), { [`${side}_up`]: rail() }).shape,
+      `ascending_${side}`,
+    );
+  }
+  equal(
+    "...and it still does with the run continuing behind it",
+    connectedState(self("rail"), { west: rail(), east_up: rail() }).shape,
+    "ascending_east",
+  );
+  equal(
+    "a rail one down is a flat link: the lower rail is the one that climbs",
+    connectedState(self("rail"), { east_down: rail() }).shape,
+    "east_west",
+  );
+  equal(
+    "...so the top of a step lies flat",
+    connectedState(self("rail"), { west_down: rail(), east: rail() }).shape,
+    "east_west",
+  );
+  equal(
+    "a curve does not climb",
+    connectedState(self("rail"), { north_up: rail(), east: rail() }).shape,
+    "north_east",
+  );
+  // A valley is two climbs at once, which no rail is. Vanilla asks north then
+  // south, east then west, and the second answer stands.
+  equal(
+    "with rails above both ends, it ascends south",
+    connectedState(self("rail"), { north_up: rail(), south_up: rail() }).shape,
+    "ascending_south",
+  );
+  equal(
+    "...or west",
+    connectedState(self("rail"), { east_up: rail(), west_up: rail() }).shape,
+    "ascending_west",
+  );
+  for (const name of ["powered_rail", "detector_rail", "activator_rail"]) {
+    equal(
+      `the ${name.replace("_", " ")} climbs too`,
+      connectedState(self(name, { shape: "north_south", powered: "false" }), { east_up: thin(name) }).shape,
+      "ascending_east",
+    );
+  }
+
+  /*
+   * The south-east rule: a junction cannot be one rail, and an unpowered one
+   * takes south before north and east before west. A straight-only rail keeps
+   * the run it has.
+   */
+  equal(
+    "a T-junction curves south-east",
+    connectedState(self("rail"), { north: rail(), east: rail(), south: rail() }).shape,
+    "south_east",
+  );
+  equal(
+    "...and so does a crossing",
+    connectedState(self("rail"), { north: rail(), east: rail(), south: rail(), west: rail() }).shape,
+    "south_east",
+  );
+  equal(
+    "a T-junction with nothing to the south curves north-east",
+    connectedState(self("rail"), { north: rail(), east: rail(), west: rail() }).shape,
+    "north_east",
+  );
+  equal(
+    "a powered rail at a junction keeps its run",
+    connectedState(self("powered_rail", { shape: "east_west", powered: "false" }), {
+      north: thin("powered_rail"),
+      east: thin("powered_rail"),
+      south: thin("powered_rail"),
+    }).shape,
+    "east_west",
+  );
+
+  // With nothing beside it a rail keeps the shape it has, which is what lets
+  // one placed along the look stay that way. A shape the block cannot hold is
+  // not kept.
+  equal(
+    "a lone rail laid east-west stays east-west",
+    connectedState(self("rail", { shape: "east_west" }), {}).shape,
+    "east_west",
+  );
+  equal(
+    "a lone powered rail out of a file with a corner on it lies north-south",
+    connectedState(self("powered_rail", { shape: "south_east", powered: "false" }), {}).shape,
+    "north_south",
+  );
+
+  /*
+   * Every answer is a value the rail can hold, over every arrangement of the
+   * twelve cells a rail reads and every shape it may already have. The guard
+   * that matters is the straight-only rails: a corner on a powered rail is a
+   * real property with an illegal value, which `hasProperty` cannot see.
+   */
+  {
+    const keys = HORIZONTAL_FACES.flatMap((face) => [face, `${face}_up`, `${face}_down`]);
+    const illegal: string[] = [];
+    for (const name of ["rail", "powered_rail", "detector_rail", "activator_rail"]) {
+      const legal = legalValuesFor(name, "shape") ?? [];
+      for (const own of legal) {
+        for (let mask = 0; mask < 1 << keys.length; mask += 1) {
+          const around: Record<string, ReturnType<typeof thin>> = {};
+          keys.forEach((key, bit) => {
+            if (mask & (1 << bit)) around[key] = rail();
+          });
+          const shape = connectedState(self(name, { shape: own }), around).shape;
+          if (shape === undefined || !legal.includes(shape)) illegal.push(`${name}[${own}] ${mask} -> ${shape}`);
+        }
+      }
+    }
+    equal("no arrangement gives a rail a shape it cannot hold", illegal.slice(0, 5), []);
+  }
 
   // Grass under snow.
   equal(
@@ -7272,6 +8809,17 @@ console.log("\n--- the block picker's search ---");
     searchBlocks(registry, "  stone  ")[0],
     "minecraft:stone",
   );
+
+  /*
+   * **A space is an underscore.** No block name has a space in it, so
+   * `oak slab` found nothing at all while `oak_slab` found the slab: the
+   * spelling a person types first was the one guaranteed to fail.
+   */
+  const slab = searchBlocks(registry, "oak_slab");
+  check("the slab is there to find", slab.includes("minecraft:oak_slab"), slab.join(" "));
+  equal("a space searches as an underscore", searchBlocks(registry, "oak slab"), slab);
+  equal("...a run of them as one", searchBlocks(registry, "  Oak   Slab "), slab);
+  equal("...and after a pasted namespace too", searchBlocks(registry, "minecraft:oak slab"), slab);
 }
 
 // ---------------------------------------------------------------------------
@@ -7620,6 +9168,258 @@ if (pack === null) {
    */
   const wallBoard = parts("wall_sign", { facing: "north" })[0].box;
   check("a north-facing wall sign is against the far wall", wallBoard[2] >= 14, wallBoard.join(","));
+}
+
+/*
+ * An attached stem bends towards its fruit, and it was a cross that looked the
+ * same at every `facing`. The bent plane (`attached_<fruit>_stem`) runs from the
+ * middle of the cell to the side `facing` names: vanilla's `stem_fruit.json` is
+ * west-authored, which is the sign that is easy to get backwards.
+ */
+console.log("\n--- an attached stem bends towards its fruit ---");
+{
+  const expected: Record<string, [number, number, number, number]> = {
+    west: [0, 9, 8, 8],
+    east: [7, 16, 8, 8],
+    north: [8, 8, 0, 9],
+    south: [8, 8, 7, 16],
+  };
+  for (const fruit of ["pumpkin", "melon"]) {
+    for (const [facing, [x0, x1, z0, z1]] of Object.entries(expected)) {
+      const shape = shapeFor({ namespacedName: `minecraft:attached_${fruit}_stem`, properties: { facing } });
+      const bent =
+        shape.kind === "boxes"
+          ? shape.boxes.find((entry) => entry.texture === `attached_${fruit}_stem`)
+          : undefined;
+      const box = bent?.box;
+      equal(
+        `attached_${fruit}_stem facing ${facing} bends that way`,
+        box === undefined
+          ? null
+          : [Math.min(box[0], box[3]), Math.max(box[0], box[3]), Math.min(box[2], box[5]), Math.max(box[2], box[5])],
+        [x0, x1, z0, z1],
+      );
+    }
+  }
+}
+
+/*
+ * A bell takes its stand from the face it was clicked onto and its direction
+ * from the camera, and it was in no placement table at all -- so every one of
+ * them came out standing on the floor facing north.
+ *
+ * `BellBlock.getStateForPlacement` is the source. The wall branch is the half
+ * that reads backwards and is checked by name: `facing` there is the opposite
+ * of the clicked face, where a wall torch's is the face itself.
+ */
+console.log("\n--- a bell hangs from what it was clicked onto ---");
+{
+  const AS_VECTOR: Record<string, readonly [number, number, number]> = {
+    east: [1, 0, 0],
+    west: [-1, 0, 0],
+    south: [0, 0, 1],
+    north: [0, 0, -1],
+  };
+  const aimed = (x: number, z: number, against: PlacementLook["against"]): PlacementLook => ({
+    direction: { x, y: 0, z },
+    against,
+    cursorY: 0.5,
+    run: null,
+  });
+
+  equal(
+    "a bell set on the ground faces the way the camera was looking",
+    orientPlacement("minecraft:bell", aimed(0, -1, "up")),
+    { attachment: "floor", facing: "north" },
+  );
+  equal(
+    "...and looking east it faces east",
+    orientPlacement("minecraft:bell", aimed(1, 0, "up")),
+    { attachment: "floor", facing: "east" },
+  );
+  equal(
+    "a bell clicked onto an underside hangs from the ceiling",
+    orientPlacement("minecraft:bell", aimed(0, 1, "down")),
+    { attachment: "ceiling", facing: "south" },
+  );
+  equal(
+    "...and with no face at all it stands on the floor",
+    orientPlacement("minecraft:bell", aimed(0, 1, null)),
+    { attachment: "floor", facing: "south" },
+  );
+  /*
+   * The wall, on all four sides. `facing` is the opposite of the clicked face
+   * -- a bell points into the wall it hangs on -- which is the one value here
+   * that a `WALL_MOUNTED` reading would get backwards, and a bell turned half
+   * round still hangs.
+   */
+  for (const [clicked, faces] of [
+    ["north", "south"],
+    ["south", "north"],
+    ["east", "west"],
+    ["west", "east"],
+  ] as const) {
+    const face = AS_VECTOR[clicked];
+    equal(
+      `a bell on a wall clicked from the ${clicked} faces ${faces}`,
+      orientPlacement("minecraft:bell", aimed(-face[0], -face[2], clicked)),
+      { attachment: "single_wall", facing: faces },
+    );
+  }
+  /*
+   * And the state reaches the geometry: the three stands are different shapes,
+   * so a bell that claimed `ceiling` while drawing the floor's posts would
+   * pass every check above.
+   */
+  if (pack !== null) {
+    const stand = async (attachment: string): Promise<number> => {
+      const baked = await baker.bakeBlockstate(
+        block("bell", { attachment, facing: "north" }),
+      );
+      return allVertices(baked).filter((vertex) => vertex[1] < 0.2).length;
+    };
+    const floorPosts = await stand("floor");
+    const ceiling = await stand("ceiling");
+    check(
+      "a ceiling bell has no posts standing on the ground",
+      ceiling === 0 && floorPosts > 0,
+      `${ceiling} against ${floorPosts}`,
+    );
+  }
+}
+
+
+// --- levels of detail -------------------------------------------------------
+//
+// Every block with more faces than `LOD_FACE_BUDGET`, in every state the game
+// has, gets a stand-in for the middle distance -- written by hand in
+// `LOD_SHAPES`, or straightened from its own boxes until it is. A stand-in is
+// only allowed to be simpler: fewer faces, inside the block's own box, never
+// tilted off a quarter turn, covering every side the block covers so it hides
+// no less of its neighbours, and drawn the way any block is drawn -- UVs in
+// the tile, something painted, wound the way it faces. And its error is
+// measured, because that is what decides how far away it may be shown.
+console.log("\n--- levels of detail ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  const listPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "block_id_list.txt");
+  const ids = [...parseBlockList(readFileSync(listPath, "utf8"))];
+  const missing: string[] = [];
+  const unasked: string[] = [];
+  const notFewer: string[] = [];
+  const outside: string[] = [];
+  const tilted: string[] = [];
+  const uncovered: string[] = [];
+  const offTile: string[] = [];
+  const blank: string[] = [];
+  const backwards: string[] = [];
+  const straightened = new Set<string>();
+  const errors = new Map<string, number>();
+  const sides = ["north", "south", "east", "west", "up", "down"] as const;
+  let walked = 0;
+  for (const id of ids) {
+    if (paletteEntryIsAir({ namespacedName: id, properties: {} })) continue;
+    // Every combination of the legal values, as the game has them.
+    let states: Record<string, string>[] = [{ ...(defaultStateFor(id) ?? {}) }];
+    for (const property of propertiesOf(id).filter((name) => name !== "waterlogged")) {
+      const values = legalValuesFor(id, property) ?? [];
+      const next: Record<string, string>[] = [];
+      for (const state of states) for (const value of values) next.push({ ...state, [property]: value });
+      if (next.length > 0) states = next.slice(0, 4096);
+    }
+    for (const properties of states) {
+      const entry = { namespacedName: id, properties };
+      const name = `${id.replace("minecraft:", "")}${JSON.stringify(properties)}`;
+      const full = shapeFor(entry);
+      const faces = shapeFaceCount(full);
+      const lod = lodShapeFor(entry);
+      if (faces <= LOD_FACE_BUDGET) {
+        if (lod !== null) unasked.push(name);
+        continue;
+      }
+      walked += 1;
+      if (lod === null || lod.kind !== "boxes" || full.kind !== "boxes") {
+        missing.push(name);
+        continue;
+      }
+      if (!hasHandWrittenLod(entry)) straightened.add(id.replace("minecraft:", ""));
+      if (shapeFaceCount(lod) >= faces) notFewer.push(`${name} ${shapeFaceCount(lod)} >= ${faces}`);
+      const extent = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+      for (const part of full.boxes) {
+        const box = placedExtent(part);
+        for (let axis = 0; axis < 3; axis += 1) {
+          extent[axis] = Math.min(extent[axis], box[axis]);
+          extent[axis + 3] = Math.max(extent[axis + 3], box[axis + 3]);
+        }
+      }
+      for (const part of lod.boxes) {
+        const box = placedExtent(part);
+        const inside = [0, 1, 2].every(
+          (axis) => box[axis] >= extent[axis] - 1e-6 && box[axis + 3] <= extent[axis + 3] + 1e-6,
+        );
+        if (!inside) outside.push(name);
+        const tilts = [...(part.rotation ? [part.rotation] : []), ...(part.chain ?? [])];
+        if (tilts.some((tilt) => Math.abs(tilt.angle) % 90 !== 0)) tilted.push(name);
+      }
+      for (const side of sides) {
+        if (shapeCoversFace(full, side) && !shapeCoversFace(lod, side)) uncovered.push(`${name} ${side}`);
+      }
+      const baked = await baker.bakeLod(entry);
+      if (baked === null) {
+        missing.push(`${name} (bakes to nothing)`);
+        continue;
+      }
+      const drawn = [...Object.values(baked.faces), ...baked.extraFaces];
+      if (drawn.some((face) => [...face.uvs].some((uv) => uv < -1e-6 || uv > 1 + 1e-6))) offTile.push(name);
+      if (!drawn.some(facePaintsSomething)) blank.push(name);
+      if (drawn.some((face) => !windingAgrees(face))) backwards.push(name);
+      const short = id.replace("minecraft:", "");
+      errors.set(short, Math.max(errors.get(short) ?? 0, lodShapeError(entry)));
+    }
+  }
+  check("there are blocks over the budget to walk", walked > 0, `${walked} states`);
+  equal("every shape over the budget has a stand-in", missing, []);
+  equal("...and none within it is given one", unasked, []);
+  equal("every stand-in has fewer faces than its block", notFewer, []);
+  equal("...stays inside its block's own box", outside, []);
+  equal("...is turned only by quarter turns", tilted, []);
+  equal("...covers every side its block covers", uncovered, []);
+  equal("...keeps its UVs inside the tile", offTile, []);
+  equal("...paints something", blank, []);
+  equal("...and is wound the way it faces", backwards, []);
+  console.log(`  INFO: straightened rather than written by hand: ${[...straightened].join(", ") || "none"}`);
+  console.log(
+    `  INFO: measured error in blocks: ${[...errors].map(([id, error]) => `${id} ${error}`).join(", ")}`,
+  );
+  const statueErrors = [...errors].filter(([id]) => id.endsWith("copper_golem_statue")).map(([, error]) => error);
+  check(
+    "a statue's stand-in errs by under a third of a block",
+    statueErrors.length > 0 && statueErrors.every((error) => error < 0.3),
+    statueErrors.join(", "),
+  );
+  check(
+    "every stand-in errs by under half a block",
+    [...errors.values()].every((error) => error > 0 && error < 0.5),
+  );
+
+  // The statues, pose by pose: the antenna keeps a box of its own, the nose goes.
+  const counts: string[] = [];
+  for (const pose of ["standing", "sitting", "running", "star"]) {
+    for (const facing of ["north", "east", "south", "west"]) {
+      const statue = { namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: pose, facing } };
+      const lod = lodShapeFor(statue);
+      counts.push(`${pose}/${facing} ${shapeFaceCount(shapeFor(statue))}->${lod === null ? "none" : shapeFaceCount(lod)}`);
+    }
+  }
+  const stand = lodShapeFor({ namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: "standing", facing: "north" } });
+  const run = lodShapeFor({ namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: "running", facing: "north" } });
+  equal(
+    "a standing statue is four boxes, a running one six",
+    [stand?.kind === "boxes" ? stand.boxes.length : 0, run?.kind === "boxes" ? run.boxes.length : 0],
+    [4, 6],
+  );
+  console.log(`  INFO: statue faces, full->stand-in: ${counts.join(", ")}`);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

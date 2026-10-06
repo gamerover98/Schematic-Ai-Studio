@@ -65,8 +65,8 @@ import {
   type Neighbours,
 } from "../../shared/block_connections.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
-import { occludesNeighbours } from "../pipeline/block_shapes.js";
-import { paletteEntryIsAir, type PaletteEntry } from "../pipeline/types.js";
+import { coversFace, occludesNeighbours } from "../pipeline/block_shapes.js";
+import { matchesBlockPattern, paletteEntryIsAir, type PaletteEntry } from "../pipeline/types.js";
 import { getBlock, getBlockEntity, type SchematicDocument } from "./document.js";
 import type { TransactionScope } from "./history.js";
 
@@ -91,9 +91,9 @@ const OFFSETS: ReadonlyArray<readonly [NeighbourKey, number, number, number]> = 
 /**
  * The eight cells above and below the four horizontal neighbours.
  *
- * Redstone's alone: a wire runs up the side of the block next door and down
- * onto a step, so its answer depends on two cells that are not faces of it.
- * Nothing else here looks past a face.
+ * Redstone's and the rails': a wire runs up the side of the block next door
+ * and down onto a step, and a rail climbs to a rail one block up and over, so
+ * both answers depend on cells that are not faces of the block.
  *
  * They are in the **same list** as the six rather than beside it, and that is
  * the part that matters: phase one uses this array to decide which cells an
@@ -112,7 +112,20 @@ const DIAGONALS: ReadonlyArray<readonly [NeighbourKey, number, number, number]> 
   ];
 });
 
-const AROUND = [...OFFSETS, ...DIAGONALS];
+/**
+ * The cells two above and two below, which are pointed dripstone's.
+ *
+ * Its `thickness` depends on the block two along its column -- a tip added to
+ * the end of a column moves the block two up it from `frustum` to `base` -- so
+ * the pass reads them, and for `DIAGONALS`' reason they are in the same list:
+ * the cells a rule reads are the cells to revisit when one of them moves.
+ */
+const COLUMN: ReadonlyArray<readonly [NeighbourKey, number, number, number]> = [
+  ["up_up", 0, 2, 0],
+  ["down_down", 0, -2, 0],
+];
+
+const AROUND = [...OFFSETS, ...DIAGONALS, ...COLUMN];
 
 function bareName(entry: PaletteEntry): string {
   return entry.namespacedName.replace(/^minecraft:/, "");
@@ -163,8 +176,14 @@ interface PaletteFacts {
   readonly dependent: Uint8Array;
 }
 
-function factsOf(entry: PaletteEntry): NeighbourBlock | null {
+function factsOf(entry: PaletteEntry, empty: PaletteEntry | null): NeighbourBlock | null {
   if (paletteEntryIsAir(entry)) {
+    return null;
+  }
+  // The document's empty space is empty whatever block it is made of: a
+  // vine does not cling to it and a fence does not reach for it. See
+  // `emptySpaceFor`.
+  if (empty !== null && matchesBlockPattern(entry, empty)) {
     return null;
   }
   return {
@@ -173,14 +192,74 @@ function factsOf(entry: PaletteEntry): NeighbourBlock | null {
     // What a fence or a wall attaches to is a full opaque cube, which is the
     // question `occludesNeighbours` already answers for the mesher.
     solid: occludesNeighbours(entry),
+    sturdy: sturdyFaces(entry),
   };
 }
 
-function paletteFacts(doc: SchematicDocument): PaletteFacts {
+/**
+ * Cube-shaped by `shapeFor` and still nothing to hang a vine on: the fluids
+ * have no collision shape, and neither do the two markers that are empty
+ * space by design. A barrier is not here -- it is solid to walk into.
+ */
+const NO_BODY: ReadonlySet<string> = new Set([
+  "water",
+  "lava",
+  "bubble_column",
+  "structure_void",
+  "light",
+]);
+
+const SIX_FACES: readonly Face[] = ["north", "south", "east", "west", "up", "down"];
+
+/** `NeighbourBlock.sturdy`: per face, `coversFace` for a block with a body. */
+function sturdyFaces(entry: PaletteEntry): Partial<Record<Face, boolean>> {
+  const faces: Partial<Record<Face, boolean>> = {};
+  const hasBody = !NO_BODY.has(bareName(entry));
+  for (const face of SIX_FACES) faces[face] = hasBody && coversFace(entry, face);
+  return faces;
+}
+
+/**
+ * What empty space is made of in a document, or `null` for air.
+ *
+ * With `barrier` chosen as the empty space block, every cell that reads as
+ * empty holds a barrier, and a barrier is a full collision cube: asked as a
+ * block, it held up a vine on every side that faced it and took a fence's arm.
+ * Reported as vines hanging off the empty space around a build in creative
+ * mode. It is `emptiness`' rule in `session.ts` -- empty space is empty
+ * whatever block it is made of -- reaching the one pass that did not know it.
+ *
+ * A resolver rather than an argument, because the answer is the *session's*
+ * (`DocumentSession.voidBlock`, deliberately not on the document) and this
+ * pass runs from `runTransaction`, which some twenty call sites reach with a
+ * document and a history. Threading it through each of them is the
+ * discipline-at-N-sites arrangement this file's header refuses; `session.ts`
+ * registers the one answer instead, read live, so a choice made after the
+ * session was built needs no second place to tell. A document no session owns
+ * -- the suites' own fixtures -- gets air, which is what it had before.
+ */
+let emptySpaceFor: (doc: SchematicDocument) => PaletteEntry | null = () => null;
+
+export function resolveEmptySpaceWith(
+  resolver: (doc: SchematicDocument) => PaletteEntry | null,
+): void {
+  emptySpaceFor = resolver;
+}
+
+/**
+ * The block empty space is made of in `doc` besides air, or `null` for air
+ * alone. The same answer this pass reads, for a caller that has a document
+ * and not the session -- an agent tool drawing only into empty space.
+ */
+export function emptySpaceOf(doc: SchematicDocument): PaletteEntry | null {
+  return emptySpaceFor(doc);
+}
+
+function paletteFacts(doc: SchematicDocument, empty: PaletteEntry | null): PaletteFacts {
   const blocks: Array<NeighbourBlock | null> = new Array(doc.palette.length);
   const dependent = new Uint8Array(doc.palette.length);
   for (let i = 0; i < doc.palette.length; i += 1) {
-    const facts = factsOf(doc.palette[i]);
+    const facts = factsOf(doc.palette[i], empty);
     blocks[i] = facts;
     if (facts !== null && isNeighbourDependent(facts.name)) {
       dependent[i] = 1;
@@ -206,7 +285,8 @@ export function deriveConnections(
   tx: TransactionScope,
   indices: Iterable<number>,
 ): void {
-  const { blocks, dependent } = paletteFacts(doc);
+  const empty = emptySpaceFor(doc);
+  const { blocks, dependent } = paletteFacts(doc, empty);
   const { width, height, length } = doc;
   const plane = height * length;
   const voxels = doc.voxels;
@@ -225,7 +305,7 @@ export function deriveConnections(
   /** Memoised per palette index, filling in entries the pass itself interned. */
   const factsAt = (index: number): NeighbourBlock | null => {
     if (index >= blocks.length || blocks[index] === undefined) {
-      blocks[index] = factsOf(doc.palette[index] ?? AIR_ENTRY);
+      blocks[index] = factsOf(doc.palette[index] ?? AIR_ENTRY, empty);
     }
     return blocks[index] ?? null;
   };
@@ -268,13 +348,49 @@ export function deriveConnections(
   const around: Partial<Record<NeighbourKey, NeighbourBlock | null>> = {};
 
   for (const index of work) {
+    if (!rederive(index)) {
+      continue;
+    }
+    /*
+     * **A vine column is corrected all the way down**, which is the one place
+     * this pass is not a single sweep.
+     *
+     * A vine's sides are held up by the vine above it (`connectedState`), so
+     * a change to one vine changes what every vine hanging under it may
+     * keep. Pointed dripstone had the same problem and answered it with a
+     * window of three cells, because its rule looks a bounded distance. A
+     * column of vines has no bound, and `work` is in no particular order
+     * either. So when a vine is rewritten, the vines below it are asked
+     * again, one by one, until one does not move or the column ends. It only
+     * ever walks down and every step is a cell lower, so it ends.
+     */
+    if (factsAt(voxels[index])?.name !== "vine") {
+      continue;
+    }
+    // One step down is one `length` back in x*plane + y*length + z.
+    let y = Math.floor((index % plane) / length);
+    let below = index - length;
+    while (y > 0 && factsAt(voxels[below])?.name === "vine" && rederive(below)) {
+      y -= 1;
+      below -= length;
+    }
+  }
+
+  /**
+   * Derives one cell and writes it if anything moved; whether it did.
+   *
+   * No `isDependent` check here, deliberately: a vine this pass already
+   * rewrote carries a palette index past the end of `dependent`, and the
+   * column walk has to be able to correct it a second time.
+   */
+  function rederive(index: number): boolean {
     const x = Math.floor(index / plane);
     const y = Math.floor((index - x * plane) / length);
     const z = index - x * plane - y * length;
 
     const self = factsAt(voxels[index]);
     if (self === null) {
-      continue;
+      return false;
     }
     for (const [face, dx, dy, dz] of AROUND) {
       around[face] = blockAt(x + dx, y + dy, z + dz);
@@ -289,7 +405,7 @@ export function deriveConnections(
       }
     }
     if (!changed) {
-      continue;
+      return false;
     }
     /*
      * The block entity has to be put back by hand.
@@ -314,5 +430,6 @@ export function deriveConnections(
     if (record !== null) {
       tx.setBlockEntity(x, y, z, record);
     }
+    return true;
   }
 }

@@ -46,6 +46,7 @@ import { deriveConnections } from "./connect.js";
 import {
   posKey,
   resizeDocument,
+  writeVoxel,
   setBlock,
   setBlockEntity,
   type Region,
@@ -144,10 +145,20 @@ export interface History {
   limit: number;
   /** Next transaction id. Never reused, including after a drop off the end. */
   nextId: number;
+  /**
+   * The stroke the top of the stack belongs to, while it may still take more.
+   *
+   * A brush stroke is many edits -- one per touch -- and one Ctrl+Z, so each
+   * touch that carries the same `mergeKey` joins the transaction the first one
+   * pushed instead of pushing its own. This is that transaction and its key.
+   * Not persisted, and closed by anything that is not the next touch of the
+   * same stroke: another edit, an undo, a redo, a save. See `commit`.
+   */
+  open: { key: string; id: number } | null;
 }
 
 export function createHistory(limit = 200): History {
-  return { undoStack: [], redoStack: [], savedDepth: 0, limit, nextId: 1 };
+  return { undoStack: [], redoStack: [], savedDepth: 0, limit, nextId: 1, open: null };
 }
 
 /** True when the document differs from what is on disk. */
@@ -164,6 +175,13 @@ export function isDirty(history: History): boolean {
  */
 export function markHistorySaved(history: History): void {
   history.savedDepth = history.undoStack.length;
+  /*
+   * A save closes the stroke. Merging into the top changes nothing the depth
+   * can see, so a touch after a save would join the saved transaction and the
+   * document would read as clean with an edit on it: no prompt at close, no
+   * autosave.
+   */
+  history.open = null;
 }
 
 export function canUndo(history: History): boolean {
@@ -183,8 +201,21 @@ export function nextRedoLabel(history: History): string | null {
   return history.redoStack[history.redoStack.length - 1]?.label ?? null;
 }
 
+/** Where the stack stood before an edit: the next id, and how long the top was. */
+export interface HistoryMark {
+  readonly nextId: number;
+  readonly topId: number | null;
+  readonly topLength: number;
+}
+
+/** Where the stack stands now, for `contentShiftSince` after an edit. */
+export function historyMark(history: History): HistoryMark {
+  const top = history.undoStack[history.undoStack.length - 1];
+  return { nextId: history.nextId, topId: top?.id ?? null, topLength: top?.commands.length ?? 0 };
+}
+
 /**
- * How far the transactions pushed since `sinceId` moved the document's content.
+ * How far the edits since `since` moved the document's content.
  *
  * The grid has no negative index, so making room *below* the origin can only
  * be done by moving everything that is already there up and out of the way --
@@ -200,21 +231,29 @@ export function nextRedoLabel(history: History): string | null {
  *
  * Derived here rather than returned by the five functions that grow, because
  * `tx.resize` is the one place that knows and every one of them goes through
- * it. Read against an id captured before the call: a body that changed nothing
- * pushes no transaction, and then there is no shift to find rather than a
- * stale one to report.
+ * it. Read against a mark captured before the call: a body that changed
+ * nothing pushes no transaction, and then there is no shift to find rather
+ * than a stale one to report.
  *
  * Summed rather than taken from the newest, because a transaction is a list
  * and nothing says a future one holds only a single resize.
+ *
+ * **Read against a mark, not an id**, because a stroke's touch does not push
+ * a transaction: it appends commands to the one on top (`commit`). An id
+ * alone would miss a resize appended there, and a selection dragged below the
+ * origin by a brush would be left behind; counting the whole top transaction
+ * instead would report every earlier touch's growth again.
  */
 export function contentShiftSince(
   history: History,
-  sinceId: number,
+  since: HistoryMark,
 ): readonly [number, number, number] {
   const total: [number, number, number] = [0, 0, 0];
   for (const transaction of history.undoStack) {
-    if (transaction.id < sinceId) continue;
-    for (const command of transaction.commands) {
+    const from =
+      transaction.id >= since.nextId ? 0 : transaction.id === since.topId ? since.topLength : Infinity;
+    for (let i = from; i < transaction.commands.length; i += 1) {
+      const command = transaction.commands[i];
       if (command.kind !== "resize") continue;
       total[0] += command.shift[0];
       total[1] += command.shift[1];
@@ -621,7 +660,7 @@ class Recorder implements TransactionScope {
 function applyCommand(doc: SchematicDocument, command: Command): void {
   if (command.kind === "blocks") {
     for (const delta of command.blocks) {
-      doc.voxels[delta.index] = delta.after;
+      writeVoxel(doc, delta.index, delta.after);
     }
     for (const delta of command.blockEntities) {
       if (delta.after === null) {
@@ -652,7 +691,7 @@ function applyCommand(doc: SchematicDocument, command: Command): void {
 function revertCommand(doc: SchematicDocument, command: Command): void {
   if (command.kind === "blocks") {
     for (const delta of command.blocks) {
-      doc.voxels[delta.index] = delta.before;
+      writeVoxel(doc, delta.index, delta.before);
     }
     for (const delta of command.blockEntities) {
       if (delta.before === null) {
@@ -679,7 +718,7 @@ function revertCommand(doc: SchematicDocument, command: Command): void {
     [-command.shift[0], -command.shift[1], -command.shift[2]],
   );
   for (const delta of command.dropped) {
-    doc.voxels[delta.index] = delta.before;
+    writeVoxel(doc, delta.index, delta.before);
   }
   for (const record of command.droppedEntities) {
     doc.blockEntities.set(posKey(record.pos[0], record.pos[1], record.pos[2]), record);
@@ -735,6 +774,13 @@ export interface TransactionOptions {
    * slabs about to come off are empty, so the two agree cell for cell.
    */
   readonly after?: (tx: TransactionScope) => void;
+
+  /**
+   * The stroke this edit is a touch of. A touch with the same key as the
+   * transaction on top joins it rather than pushing its own, so a stroke is
+   * one Ctrl+Z however many touches it took. See `commit`.
+   */
+  readonly mergeKey?: string;
 }
 
 /**
@@ -777,7 +823,7 @@ export function runTransaction<T>(
     return result;
   }
 
-  pushTransaction(history, { id: history.nextId, label, commands: recorder.commands });
+  commit(history, label, recorder.commands, options.mergeKey);
   return result;
 }
 
@@ -822,11 +868,48 @@ export async function runTransactionAsync<T>(
   if (recorder.commands.length === 0) {
     return result;
   }
-  pushTransaction(history, { id: history.nextId, label, commands: recorder.commands });
+  commit(history, label, recorder.commands, options.mergeKey);
   return result;
 }
 
-/** Shared by both transaction runners: push, clear redo, honour the limit. */
+/**
+ * Puts a finished transaction on the stack, or onto the one on top when it is
+ * the next touch of the same stroke.
+ *
+ * Joining keeps the top's **id**, and that is the half that matters outside
+ * this module. `undoTransactionId` does not move after the first touch, so the
+ * renderer's selection timeline and its edit watcher see one edit, which is
+ * what the stroke is. A new id per touch would be wrong twice: the renderer
+ * would count each touch as an edit of its own, and a save in the middle of a
+ * stroke followed by a join would leave the depth where the save put it, so
+ * the document would read as clean with the rest of the stroke on it. The
+ * save closes the stroke for that reason (`markHistorySaved`).
+ *
+ * Only while nothing else came between: the top is still the stroke's
+ * transaction and there is nothing to redo. Anything that pushes without the
+ * key -- the inspector, an MCP client, a fill -- closes it, and so do undo and
+ * redo. The limit is untouched by a join, because the depth does not move.
+ */
+function commit(history: History, label: string, commands: readonly Command[], mergeKey: string | undefined): void {
+  const top = history.undoStack[history.undoStack.length - 1];
+  const open = history.open;
+  if (
+    mergeKey !== undefined &&
+    open !== null &&
+    open.key === mergeKey &&
+    top !== undefined &&
+    top.id === open.id &&
+    history.redoStack.length === 0
+  ) {
+    history.undoStack[history.undoStack.length - 1] = { id: top.id, label, commands: [...top.commands, ...commands] };
+    return;
+  }
+  const id = history.nextId;
+  pushTransaction(history, { id, label, commands });
+  history.open = mergeKey === undefined ? null : { key: mergeKey, id };
+}
+
+/** Push, clear redo, honour the limit. */
 function pushTransaction(history: History, transaction: Transaction): void {
   history.undoStack.push(transaction);
   // Bumped whatever happens to the stack below. Ids are never reused, so an id
@@ -929,6 +1012,9 @@ export function undo(doc: SchematicDocument, history: History): Transaction | nu
     revertCommand(doc, transaction.commands[i]);
   }
   history.redoStack.push(transaction);
+  // A touch after an undo starts a new step: joining would put back half of
+  // what was just taken away, under the id the redo stack is holding.
+  history.open = null;
   return transaction;
 }
 
@@ -941,5 +1027,6 @@ export function redo(doc: SchematicDocument, history: History): Transaction | nu
     applyCommand(doc, command);
   }
   history.undoStack.push(transaction);
+  history.open = null;
   return transaction;
 }

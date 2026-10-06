@@ -279,7 +279,9 @@ export function bakedFaceOffset(
   }
   return {
     positions,
-    uvs: face.uvs.slice(),
+    // Shared, not copied: nothing writes a face's UVs after it is baked, and
+    // a copy per face placed was garbage per face. `buildMesh` reads them.
+    uvs: face.uvs,
     normal: face.normal,
     textureKey: face.textureKey,
     shade,

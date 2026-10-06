@@ -124,7 +124,12 @@ export function isAir(block: string): boolean {
   return block.split("[")[0].replace(/^minecraft:/, "") === "air";
 }
 
-/** `minecraft:oak_planks` → `oak planks`, which is what fits under a tile. */
+/**
+ * `minecraft:oak_planks` → `Oak planks`: a name to read, in the sentence case
+ * the rest of the window is written in. The id stays in the tooltip, for the
+ * person who needs to type it.
+ */
 export function blockLabel(id: string): string {
-  return id.replace(/^minecraft:/, "").replace(/\[.*$/, "").replace(/_/g, " ");
+  const words = id.replace(/^minecraft:/, "").replace(/\[.*$/, "").replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }

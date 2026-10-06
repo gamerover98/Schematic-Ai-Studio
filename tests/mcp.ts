@@ -30,6 +30,8 @@ import {
 } from "../src/main/mcp/tools.js";
 import { LIFECYCLE_SPECS, findLifecycle, type Lifecycle } from "../src/main/mcp/lifecycle.js";
 import { DOCUMENT_SPECS, findDocumentTool } from "../src/main/mcp/document_tools.js";
+import { PNG } from "pngjs";
+import { categoryColour } from "../src/shared/distribution_map.js";
 import {
   acceptsRequest,
   chooseToken,
@@ -37,13 +39,15 @@ import {
   isInside,
   mayDelete,
   mayReplaceDocument,
+  pictureContent,
   routeRequest,
   servingChanged,
   samePath,
   startupRefusal,
   withinRoot,
 } from "../src/main/mcp/policy.js";
-import { countBlocks, getBlock } from "../src/main/domain/document.js";
+import { countBlocks, getBlock, setBlock } from "../src/main/domain/document.js";
+import { BANNER_EDITOR_URL, BANNER_PATTERNS } from "../src/shared/banner_patterns.js";
 import {
   MC_VERSION_NAMES,
   dataVersionOf,
@@ -77,6 +81,7 @@ import {
   undoEdit,
 } from "../src/main/services/session.js";
 import type { DocumentSession } from "../src/main/services/session.js";
+import { heightField, normalizeHeightField } from "../src/shared/terrain.js";
 
 let failures = 0;
 
@@ -170,6 +175,11 @@ function fakeLifecycle(over: Partial<Lifecycle> & { log?: string[] } = {}): Life
       log.push("announce");
     },
     capture: async () => null,
+    glow: (request) => {
+      log.push(`glow:${request.patterns.join(",")}${request.regions === null ? "" : `@${request.regions.length}`}`);
+      return true;
+    },
+    drawDistance: async () => 512,
     versions: async () => [{ id: "v1", label: "before the roof", at: 1 }],
     saveVersion: async (label) => {
       log.push(`version:${label}`);
@@ -424,6 +434,8 @@ try {
       // ...and a block list for the one read-only tool that is not about the
       // document at all.
       blocks: ["minecraft:stone"],
+      // ...and a mix for the one that draws a distribution.
+      block: "#perlin{seed=3}1%minecraft:stone,1%minecraft:dirt",
     };
     for (const tool of describeTools().filter((t) => t.annotations.readOnlyHint)) {
       const spy = { changed: 0 };
@@ -436,7 +448,7 @@ try {
         await callTool(
           tool.name,
           region,
-          options(spy, fakeLifecycle({ capture: async () => ({ data: "iVBOR", width: 8, height: 8 }) })),
+          options(spy, fakeLifecycle({ capture: async () => ({ data: "iVBOR", width: 8, height: 8, camera: null }) })),
         );
       } catch (err) {
         raised = err instanceof Error ? err.message : String(err);
@@ -459,6 +471,218 @@ try {
   // bug report: the writers write what they are given, the mesher ignores what
   // it does not recognise, and the game fills in whatever the file left out. It
   // surfaces two steps away, as an inspector with nothing in it.
+  /*
+   * A bed is one bed. `get_palette` listed a foot and a head, which is true
+   * of the file and false of the build -- and a model replacing "the beds"
+   * from that list would name both, or worse, only the foot and leave the
+   * heads standing. One row now, with the other half spelled out under
+   * `pair` for the replace that has to name it.
+   */
+  console.log("\n--- get_palette counts a block of two cells once ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const put = (x: number, z: number, block: string, properties: Record<string, string>): void => {
+      setBlock(session.doc, x, 0, z, { namespacedName: block, properties });
+    };
+    put(0, 1, "minecraft:red_bed", { facing: "north", occupied: "false", part: "foot" });
+    put(0, 0, "minecraft:red_bed", { facing: "north", occupied: "false", part: "head" });
+    put(2, 0, "minecraft:red_bed", { facing: "east", occupied: "false", part: "foot" });
+    put(3, 0, "minecraft:red_bed", { facing: "east", occupied: "false", part: "head" });
+    put(5, 0, "minecraft:piston", { extended: "true", facing: "east" });
+    put(6, 0, "minecraft:piston_head", { facing: "east", short: "false", type: "normal" });
+
+    type Rows = { blocks: { block: string; count: number; pair?: string[] }[] };
+    const exact = (await callTool("get_palette", {}, options(sink))).result as Rows;
+    equal(
+      "each bed is one row, with its head as its pair",
+      exact.blocks
+        .filter((row) => row.block.startsWith("minecraft:red_bed"))
+        .map((row) => [row.block, row.count, row.pair?.length ?? 0].join(" "))
+        .sort(),
+      [
+        "minecraft:red_bed[facing=east,occupied=false,part=foot] 1 1",
+        "minecraft:red_bed[facing=north,occupied=false,part=foot] 1 1",
+      ],
+    );
+    check(
+      "...and no head is listed on its own",
+      exact.blocks.every((row) => !row.block.includes("part=head") && !row.block.startsWith("minecraft:piston_head")),
+    );
+
+    const merged = (await callTool("get_palette", { unify: true }, options(sink))).result as Rows;
+    equal(
+      "unify merges every state into the bare id",
+      merged.blocks.map((row) => [row.block, row.count, (row.pair ?? []).join("+")].join(" ")).sort(),
+      [
+        "minecraft:piston 1 minecraft:piston_head[facing=east,short=false,type=normal]",
+        "minecraft:red_bed 2 ",
+      ],
+    );
+    closeDocument();
+  }
+
+  /*
+   * Where a block is, which get_palette cannot say, and the glow a model
+   * lights to show the user. The count is main's; the window is only told
+   * what to light, and asks main for the shell itself.
+   */
+  console.log("\n--- find_blocks and highlight_blocks ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    setBlock(session.doc, 1, 2, 3, { namespacedName: "minecraft:diamond_ore", properties: {} });
+    setBlock(session.doc, 6, 0, 6, { namespacedName: "minecraft:diamond_ore", properties: {} });
+    setBlock(session.doc, 4, 4, 4, { namespacedName: "minecraft:oak_stairs", properties: { facing: "east" } });
+
+    const found = await attempt("find_blocks", { blocks: "diamond_ore", limit: 1 }, options(sink));
+    equal("find_blocks counts the whole schematic", found.total, 2);
+    equal("...gives the box holding them", found.bounds, { minX: 1, minY: 0, minZ: 3, maxX: 6, maxY: 2, maxZ: 6 });
+    equal("...and as many positions as asked, saying there are more", [(found.positions as unknown[]).length, typeof found.note], [1, "string"]);
+    equal(
+      "...or only a region, when given one",
+      (await attempt("find_blocks", { blocks: "diamond_ore", minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 7, maxZ: 7 }, options(sink))).total,
+      1,
+    );
+    equal(
+      "a bare name finds every state, as replace_blocks matches from",
+      (await attempt("find_blocks", { blocks: "oak_stairs,diamond_ore" }, options(sink))).total,
+      3,
+    );
+
+    const log: string[] = [];
+    const lit = await attempt("highlight_blocks", { blocks: "diamond_ore" }, options(sink, fakeLifecycle({ log })));
+    equal("highlight_blocks says how many it lit", [lit.lit, lit.total], [true, 2]);
+    equal("...and tells the window what, in a spelling main reads back", log, ["glow:minecraft:diamond_ore"]);
+    await attempt(
+      "highlight_blocks",
+      { blocks: "oak_stairs", region: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 } },
+      options(sink, fakeLifecycle({ log })),
+    );
+    equal("...with the box it was given", log[1], "glow:minecraft:oak_stairs@1");
+    const none = await attempt("highlight_blocks", { blocks: "minecraft:gold_block" }, options(sink, fakeLifecycle({ log })));
+    equal("...and says so when there is nothing to light", [none.lit, typeof none.note], [false, "string"]);
+    const out = await attempt("highlight_blocks", {}, options(sink, fakeLifecycle({ log })));
+    equal("no blocks put the glow out", [out.lit, log[3]], [false, "glow:"]);
+    const windowless = await attempt(
+      "highlight_blocks",
+      { blocks: "diamond_ore" },
+      options(sink, fakeLifecycle({ glow: () => false })),
+    );
+    check("with no window it is refused by name", String(windowless.refused ?? "").includes("no window"));
+    equal("none of it touched the schematic", [session.history.undoStack.length, sink.changed], [0, 0]);
+    closeDocument();
+  }
+
+  /*
+   * WorldEdit's shapes from one tool, in the chat and over MCP alike. The
+   * geometry is `tests/session.ts`'s; this is the wire: the region it is
+   * inscribed in, the modes, and what it says when the shape leaves the
+   * schematic.
+   */
+  console.log("\n--- draw_shape ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const ball = await attempt("draw_shape", { shape: "sphere", block: "stone", minX: 0, minY: 0, minZ: 0, maxX: 6, maxY: 6, maxZ: 6 }, options(sink));
+    equal("draw_shape draws //sphere 3 in the box centre ± 3", [ball.changed, ball.cells], [179, 179]);
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...and the window is told the schematic moved", sink.changed > 0);
+
+    const walls = await attempt(
+      "draw_shape",
+      { shape: "walls", block: "oak_planks", mode: "empty", minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 3, maxZ: 7 },
+      options(sink),
+    );
+    equal("walls are the four sides of the region", walls.cells, 28 * 4);
+    check(
+      "...and drawn into empty space only, they leave the stone where it was",
+      (walls.changed as number) < 28 * 4 && getBlock(session.doc, 3, 3, 0)?.namespacedName === "minecraft:stone",
+    );
+
+    const spilled = await attempt("draw_shape", { shape: "sphere", block: "oak_planks", hollow: true, minX: -3, minY: 0, minZ: 0, maxX: 3, maxY: 6, maxZ: 6 }, options(sink));
+    check("a shape past the edge says so", typeof spilled.clamped === "string" && String(spilled.clamped).includes("resize_document"));
+    equal("...and does not grow the schematic", session.doc.width, 8);
+    check("...but draws the half that is inside", (spilled.cells as number) > 0);
+
+    const refused = await attempt("draw_shape", { shape: "cone", block: "stone" }, options(sink));
+    check("a shape that does not exist is refused by name", String(refused.refused ?? "").includes("not a shape"));
+    closeDocument();
+  }
+
+  /*
+   * The terrain the creative brush paints, from one tool. The landscape is
+   * `tests/session.ts`'s; this is the wire: the region, the defaults, and
+   * what it says when the surface does not fit the region.
+   */
+  console.log("\n--- generate_terrain ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const region = { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 };
+    // The defaults are grass, dirt and stone, which the small set above lacks.
+    const lands = { ...options(sink), allowedBlocks: new Set([...ALLOWED, "minecraft:grass_block", "minecraft:dirt"]) };
+    const laid = await attempt(
+      "generate_terrain",
+      { noise: "perlin", seed: 3, params: { frequency: 0.1 }, base: 1, amplitude: 4, ...region },
+      lands,
+    );
+    check("generate_terrain lays a landscape", (laid.changed as number) > 0, JSON.stringify(laid));
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...and the window is told the schematic moved", sink.changed > 0);
+    const surface = laid.surface as { lowest: number; highest: number };
+    check("...and it says where its surface runs", surface.lowest >= 1 && surface.highest <= 5, JSON.stringify(surface));
+    const top = heightField(
+      normalizeHeightField({ noise: { kind: "perlin", seed: 3, params: { frequency: 0.1 } }, base: 1, amplitude: 4 }),
+      session.doc.frame,
+    );
+    let wrong = 0;
+    for (let x = 0; x < 8; x += 1) {
+      for (let z = 0; z < 8; z += 1) {
+        const y = top(x, z);
+        if (getBlock(session.doc, x, y, z)?.namespacedName !== "minecraft:grass_block") wrong += 1;
+        if (getBlock(session.doc, x, y + 1, z)?.namespacedName !== "minecraft:air") wrong += 1;
+        if (getBlock(session.doc, x, y - 1, z)?.namespacedName !== "minecraft:dirt") wrong += 1;
+      }
+    }
+    equal("...grass on dirt by default, on the surface the brush paints for the same settings", wrong, 0);
+    const tall = await attempt("generate_terrain", { noise: "simplex", base: 6, amplitude: 10, ...region }, lands);
+    check("a surface the region cannot hold says where it was cut", typeof tall.cut === "string" && String(tall.cut).includes("y="));
+    equal("...and does not grow the schematic", session.doc.height, 8);
+    const refused = await attempt("generate_terrain", { noise: "gradient" }, options(sink));
+    check("a noise a terrain cannot be made of is refused by name", String(refused.refused ?? "").includes("gradient"));
+    closeDocument();
+  }
+
+  /*
+   * Smoothing and erosion from the tools. The rules are `tests/session.ts`'s,
+   * held to WorldEdit and VoxelSniper; this is the wire.
+   */
+  console.log("\n--- smooth_terrain and erode ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    for (let x = 0; x < 8; x += 1) {
+      for (let z = 0; z < 8; z += 1) {
+        const top = (x * 3 + z * 5) % 6;
+        for (let y = 0; y <= top; y += 1) setBlock(session.doc, x, y, z, { namespacedName: "minecraft:stone", properties: {} });
+      }
+    }
+    const smoothed = await attempt("smooth_terrain", { iterations: 3 }, options(sink));
+    check("smooth_terrain smooths the whole schematic by default", (smoothed.changed as number) > 0, JSON.stringify(smoothed));
+    equal("...as one step, telling the window", [session.history.undoStack.length, sink.changed > 0], [1, true]);
+    equal("...and grows nothing", [session.doc.width, session.doc.height, session.doc.length], [8, 8, 8]);
+    setBlock(session.doc, 4, 7, 4, { namespacedName: "minecraft:stone", properties: {} });
+    const cleaned = await attempt("erode", { preset: "floatclean", minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 }, options(sink));
+    check("erode with floatclean takes away a block floating on its own", getBlock(session.doc, 4, 7, 4)?.namespacedName === "minecraft:air" && (cleaned.changed as number) > 0, JSON.stringify(cleaned));
+    equal("...and says which rule it ran", cleaned.rule, { erosionFaces: 6, erosionRecursion: 1, fillFaces: 6, fillRecursion: 1 });
+    const inverted = await attempt("erode", { preset: "melt", inverse: true, fill_recursion: 2 }, options(sink));
+    equal("inverse swaps erosion and fill, and a number given replaces the preset's", inverted.rule, { erosionFaces: 5, erosionRecursion: 1, fillFaces: 2, fillRecursion: 2 });
+    const refused = await attempt("erode", { preset: "none" }, options(sink));
+    check("VoxelSniper's none is not offered, by name", String(refused.refused ?? "").includes("none"));
+    closeDocument();
+  }
+
   console.log("\n--- a tool places a block in the state the game would give it ---");
   {
     const session = open();
@@ -970,12 +1194,225 @@ try {
     const shot = (await callTool(
       "capture_viewport",
       {},
-      options(sink, fakeLifecycle({ capture: async () => ({ data: "iVBOR", width: 1024, height: 640 }) })),
+      options(sink, fakeLifecycle({ capture: async () => ({ data: "iVBOR", width: 1024, height: 640, camera: null }) })),
     )).result as { data: string; width: number };
     equal("...and otherwise hands back the image", shot.width, 1024);
     // Read-only: photographing the window is not an edit, so nothing queues and
     // the viewport has nothing to redraw.
     equal("...without touching the undo stack", currentSession()?.history.undoStack.length ?? -1, 0);
+
+    /*
+     * Aiming the camera.
+     *
+     * The picture is only as useful as the model's idea of where it was taken
+     * from, so what is checked is what reaches the window: the camera the host
+     * is asked for, resolved from compass words against the open document. The
+     * window itself is Electron's and cannot be reached from here.
+     */
+    {
+      const asked: unknown[] = [];
+      const aiming = (drawDistance = 512) =>
+        fakeLifecycle({
+          drawDistance: async () => drawDistance,
+          capture: async (camera) => {
+            asked.push(camera);
+            return {
+              data: "iVBOR",
+              width: 8,
+              height: 8,
+              camera: camera === null ? null : { ...camera, projection: "perspective" as const },
+            };
+          },
+        });
+      const shoot = async (args: unknown, drawDistance?: number) => {
+        asked.length = 0;
+        const result = await attempt("capture_viewport", args, options(sink, aiming(drawDistance)));
+        return { result, camera: asked[0] as { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } | null | undefined };
+      };
+
+      open(); // 8x8x8, so the middle is (4, 4, 4)
+
+      const plain = await shoot({});
+      equal("no camera leaves the view where the user had it", plain.camera, null);
+
+      const north = await shoot({ camera: { from: "north" } });
+      equal("from north looks at the middle of the schematic", north.camera?.target, { x: 4, y: 4, z: 4 });
+      check(
+        "...standing on the north side, which is -z",
+        north.camera !== undefined && north.camera !== null && north.camera.position.z < 4 && Math.abs(north.camera.position.x - 4) < 1e-9,
+        JSON.stringify(north.camera),
+      );
+      check(
+        "...above the target, at the default elevation",
+        north.camera != null && north.camera.position.y > 4,
+        JSON.stringify(north.camera),
+      );
+      const reach = north.camera == null
+        ? NaN
+        : Math.hypot(north.camera.position.x - 4, north.camera.position.y - 4, north.camera.position.z - 4);
+      check("...far enough out to see all of it by default", Math.abs(reach - 8 * 1.6) < 1e-9, String(reach));
+      check(
+        "...and says where it stood",
+        (north.result.camera as { target?: unknown } | undefined)?.target !== undefined,
+        JSON.stringify(north.result),
+      );
+
+      const east = await shoot({ camera: { from: "east", elevation: 0, distance: 10 } });
+      equal("from east stands on +x, level, at the distance asked", east.camera?.position, { x: 14, y: 4, z: 4 });
+
+      const above = await shoot({ camera: { from: "above", distance: 20 } });
+      check(
+        "from above looks straight down, leaning south so north stays at the top",
+        above.camera != null &&
+          Math.abs(above.camera.position.y - 24) < 1e-9 &&
+          above.camera.position.z > 4 &&
+          above.camera.position.z - 4 < 0.1,
+        JSON.stringify(above.camera),
+      );
+
+      const exact = await shoot({ camera: { position: { x: 1, y: 2, z: 3 }, target: { x: 0, y: 0, z: 0 } } });
+      equal("an exact position is taken as given", exact.camera, {
+        position: { x: 1, y: 2, z: 3 },
+        target: { x: 0, y: 0, z: 0 },
+      });
+
+      const establishing = await shoot({ camera: {} });
+      check(
+        "an empty camera is the establishing shot, off the +x/+z corner",
+        establishing.camera != null &&
+          establishing.camera.position.x > 4 &&
+          establishing.camera.position.z > 4 &&
+          establishing.camera.position.y > 4,
+        JSON.stringify(establishing.camera),
+      );
+
+      /*
+       * Brought in front of the far plane, and said out loud. A camera stood
+       * behind it photographs an empty sky, and moving it silently would leave
+       * the model believing the picture was taken from where it asked.
+       */
+      const far = await shoot({ camera: { from: "south", distance: 1000 } }, 100);
+      const farReach = far.camera == null
+        ? NaN
+        : Math.hypot(far.camera.position.x - 4, far.camera.position.y - 4, far.camera.position.z - 4);
+      check("a camera past the draw distance is brought in front of it", farReach <= 90 + 1e-9, String(farReach));
+      check(
+        "...and the answer says so",
+        typeof far.result.note === "string" && (far.result.note as string).includes("draw"),
+        JSON.stringify(far.result),
+      );
+
+      for (const [label, camera, word] of [
+        ["an unknown side", { from: "up" }, "from"],
+        ["a position and a side at once", { from: "north", position: { x: 0, y: 0, z: 0 } }, "not both"],
+        ["an elevation past the pole", { from: "north", elevation: 95 }, "above"],
+        ["an elevation with no side", { elevation: 10 }, "from"],
+        ["a field that does not exist", { yaw: 90 }, "yaw"],
+        ["a distance of nothing", { from: "west", distance: 0 }, "distance"],
+        ["a position on its own target", { position: { x: 4, y: 4, z: 4 } }, "same point"],
+      ] as const) {
+        const refused = await shoot({ camera });
+        check(
+          `${label} is refused by name, before the window is asked`,
+          typeof refused.result.refused === "string" &&
+            (refused.result.refused as string).includes(word) &&
+            refused.camera === undefined,
+          JSON.stringify(refused.result),
+        );
+      }
+
+      closeDocument();
+      const nothing = await shoot({ camera: { from: "north" } });
+      check(
+        "with nothing open there is nothing to aim at",
+        typeof nothing.result.refused === "string" && (nothing.result.refused as string).includes("open_document"),
+        JSON.stringify(nothing.result),
+      );
+      open();
+    }
+
+    /*
+     * And the picture reaches the client as an image *with* its camera beside
+     * it. It used to be the image alone, which was the whole answer while the
+     * tool could not aim; now the model needs to know which way it was facing.
+     */
+    {
+      const content = pictureContent({
+        data: "iVBOR",
+        width: 8,
+        height: 8,
+        camera: { position: { x: 1, y: 2, z: 3 }, target: { x: 0, y: 0, z: 0 }, projection: "perspective" },
+        note: "Moved in.",
+      });
+      equal("a picture is an image block first", content?.[0], { type: "image", data: "iVBOR", mimeType: "image/png" });
+      const described = content?.[1]?.type === "text" ? JSON.parse(content[1].text) : null;
+      check(
+        "...with the camera and the note beside it, and no pixels in the text",
+        described !== null && described.camera?.position?.y === 2 && described.note === "Moved in." && !("data" in described),
+        JSON.stringify(described),
+      );
+      equal("...and anything else is not a picture", pictureContent({ changed: 1 }), null);
+    }
+
+    /*
+     * What a mix would look like, before anything is filled with it. A
+     * gradient along x is the fixture because its answer can be stated: the
+     * first block on the left half of the region, the last on the right.
+     */
+    {
+      closeDocument();
+      const region = { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 3 };
+      const shown = await attempt(
+        "preview_distribution",
+        { block: "#gradient{axis=x,edge=0}1%minecraft:stone,1%minecraft:dirt", region },
+        options(sink),
+      );
+      check(
+        "a distribution is drawn with nothing open",
+        typeof shown.data === "string" && typeof shown.width === "number",
+        JSON.stringify(shown).slice(0, 300),
+      );
+      equal("...and reaches the client as an image", pictureContent(shown)?.[0]?.type, "image");
+      if (typeof shown.data === "string") {
+        const png = PNG.sync.read(Buffer.from(shown.data, "base64"));
+        // 10 by 4 cells, each 26 pixels square to make 256 across, then a gap.
+        equal("...the values and the blocks side by side", [png.width, png.height], [26 * 10 * 2 + 26, 26 * 4]);
+        const at = (x: number, y: number): number[] => Array.from(png.data.subarray((y * png.width + x) * 4, (y * png.width + x) * 4 + 3));
+        const right = 26 * 10 + 26;
+        equal("...the first block at the low end of the gradient", at(right + 5, 5), [...categoryColour(0)]);
+        equal("...and the last at the high end", at(right + 259, 5), [...categoryColour(1)]);
+        check(
+          "...beside the values in grey, darker where they are lower",
+          at(5, 5)[0] < at(259, 5)[0] && at(5, 5)[0] === at(5, 5)[2],
+          `${at(5, 5)} / ${at(259, 5)}`,
+        );
+      }
+      equal(
+        "the legend names each block's colour and share",
+        (shown.legend as { block: string; colour: string; asked: number; shown: number }[] | undefined)?.map((entry) => [
+          entry.block,
+          entry.colour,
+          entry.asked,
+          entry.shown,
+        ]),
+        [
+          ["minecraft:stone", "#4e79a7", 0.5, 0.5],
+          ["minecraft:dirt", "#f28e2b", 0.5, 0.5],
+        ],
+      );
+      const unknown = await attempt("preview_distribution", { block: "#plasma{}1%stone,1%dirt" }, options(sink));
+      check("a distribution that does not exist is refused by name", String(unknown.refused).includes("plasma"), JSON.stringify(unknown));
+
+      const session = open();
+      const revision = session.doc.revision;
+      const whole = await attempt("preview_distribution", { block: "1%stone,1%dirt" }, options(sink));
+      equal(
+        "with a schematic open, the region is the schematic",
+        whole.region,
+        { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 },
+      );
+      equal("...and the schematic is not touched", session.doc.revision, revision);
+    }
 
     /*
      * Going back to a version that is not there.
@@ -1011,6 +1448,105 @@ try {
       "announce",
     ]);
 
+  }
+
+  // --- a banner's design, over the wire --------------------------------------
+  //
+  // A model designing a banner needs three things this app now has: the names
+  // of the designs with what each looks like, a way to put them on a banner,
+  // and a spelling of a banner it is looking at that places it again.
+  console.log("\n--- a banner's design, over the wire ---");
+  {
+    const sink = { changed: 0 };
+    const banners = {
+      ...options(sink),
+      allowedBlocks: new Set([...ALLOWED, "minecraft:magenta_banner", "minecraft:white_banner"]),
+    };
+
+    closeDocument();
+    const listed = await attempt("list_banner_patterns", {}, banners);
+    const rows = (listed.patterns ?? []) as Array<{ id: string; description: string; since: string }>;
+    equal("every design is listed with nothing open", rows.map((row) => row.id), BANNER_PATTERNS.map((row) => row.id));
+    check("...each with what it looks like", rows.every((row) => row.description.length > 10));
+    check("...and the release it arrived in, by label", rows.find((row) => row.id === "globe")?.since === "1.14");
+    equal("...beside the sixteen colours", (listed.colors as string[] | undefined)?.length, 16);
+    check(
+      "the editor a user designs one on is named, with its address",
+      (listed.editor as { url?: string } | undefined)?.url === BANNER_EDITOR_URL &&
+        (findTool("list_banner_patterns")?.description ?? "").includes(BANNER_EDITOR_URL),
+    );
+    check(
+      "listing them is read-only",
+      describeTools().find((tool) => tool.name === "list_banner_patterns")?.annotations.readOnlyHint === true,
+    );
+
+    open();
+    const given =
+      '/give @p minecraft:magenta_banner[banner_patterns=[{"pattern":"mojang","color":"orange"},{"pattern":"flower","color":"magenta"},{"pattern":"gradient","color":"blue"},{"pattern":"circle","color":"white"},{"pattern":"triangle_bottom","color":"brown"},{"pattern":"triangle_bottom","color":"black"}]] 1';
+    const placed = await attempt("set_block", { x: 1, y: 1, z: 1, block: given }, banners);
+    equal("a whole /give command is placed as a banner", placed.changed, 1);
+    const inspected = await attempt("inspect_block", { x: 1, y: 1, z: 1 }, banners);
+    const spelled = String(inspected.blockData ?? "");
+    check(
+      "inspecting it spells the design, in order",
+      spelled.startsWith("minecraft:magenta_banner[") &&
+        spelled.includes('{pattern:"mojang",color:"orange"}') &&
+        spelled.indexOf('"brown"') < spelled.indexOf('"black"'),
+      spelled,
+    );
+    await attempt("set_block", { x: 2, y: 1, z: 1, block: spelled }, banners);
+    equal(
+      "...and that spelling places the same banner again",
+      (await attempt("inspect_block", { x: 2, y: 1, z: 1 }, banners)).blockData,
+      spelled,
+    );
+
+    const depth = currentSession()?.history.undoStack.length ?? -1;
+    const redesigned = await attempt(
+      "set_banner_patterns",
+      { x: 1, y: 1, z: 1, patterns: [{ pattern: "creeper", color: "black" }] },
+      banners,
+    );
+    equal("a standing banner takes a new design", redesigned.changed, 1);
+    check(
+      "...which replaces the old one",
+      String((await attempt("inspect_block", { x: 1, y: 1, z: 1 }, banners)).blockData).endsWith(
+        'banner_patterns=[{pattern:"creeper",color:"black"}]]',
+      ),
+    );
+    equal("...as one undo step", currentSession()?.history.undoStack.length, depth + 1);
+
+    await attempt("set_block", { x: 3, y: 1, z: 1, block: "minecraft:stone" }, banners);
+    const notBanner = await attempt(
+      "set_banner_patterns",
+      { x: 3, y: 1, z: 1, patterns: [{ pattern: "creeper", color: "black" }] },
+      banners,
+    );
+    check(
+      "a cell that is not a banner is refused by name",
+      String(notBanner.refused ?? "").includes("not a banner"),
+      JSON.stringify(notBanner),
+    );
+    const unknown = await attempt(
+      "set_banner_patterns",
+      { x: 1, y: 1, z: 1, patterns: [{ pattern: "dragon", color: "black" }] },
+      banners,
+    );
+    check(
+      "a design that does not exist is refused by name",
+      String(unknown.refused ?? "").includes("dragon"),
+      JSON.stringify(unknown),
+    );
+    const onStone = await attempt(
+      "set_block",
+      { x: 4, y: 1, z: 1, block: 'minecraft:stone[banner_patterns=[{pattern:"cross",color:"red"}]]' },
+      banners,
+    );
+    check(
+      "set_block refuses patterns on a block that is not a banner",
+      String(onStone.refused ?? "").includes("not a banner"),
+      JSON.stringify(onStone),
+    );
   }
 
   // --- the version is the client's to choose -------------------------------
@@ -1871,6 +2407,14 @@ console.log("\n--- what this schematic may hold ---");
       "a query may still carry the namespace",
       pasted.blocks.includes("minecraft:oak_stairs"),
       pasted.blocks.join(" "),
+    );
+    // ...and a space is the underscore every block name is spelled with.
+    const spaced = (await callTool("list_blocks", { contains: "jungle hanging sign" }, rich()))
+      .result as { blocks: string[] };
+    check(
+      "a space in the query reads as an underscore",
+      spaced.blocks.includes("minecraft:jungle_hanging_sign"),
+      spaced.blocks.join(" "),
     );
 
     /*

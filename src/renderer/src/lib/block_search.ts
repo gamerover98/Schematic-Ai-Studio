@@ -8,6 +8,8 @@
  * and invisible when broken. `tests/blocks.ts` holds them.
  */
 
+import { blockQuery } from "../../../shared/block_query.js";
+
 /**
  * How well a block id answers a query. Lower is better; -1 is no match.
  *
@@ -50,14 +52,15 @@ function rank(block: string, query: string): number {
  * than the plain text field it replaced.
  */
 export function searchBlocks(blocks: readonly string[], query: string): string[] {
-  const typed = query.trim().toLowerCase();
   /*
-   * A pasted `minecraft:sto` is somebody naming the namespace on purpose, and
-   * the only thing it can usefully mean is the name after it. Stripped here
-   * rather than matched in `rank`, so there is one place that decides and the
-   * namespace can never come back as a way of matching everything.
+   * `blockQuery` decides what was typed, and `list_blocks` asks the same
+   * function. A pasted `minecraft:sto` is somebody naming the namespace on
+   * purpose, and the only thing it can usefully mean is the name after it --
+   * stripped there rather than matched in `rank`, so the namespace can never
+   * come back as a way of matching everything. And `oak slab` is `oak_slab`,
+   * because no block name has a space in it.
    */
-  const needle = typed.startsWith("minecraft:") ? typed.slice("minecraft:".length) : typed;
+  const needle = blockQuery(query);
   if (needle === "") return [...blocks];
 
   return blocks

@@ -26,7 +26,8 @@
     mcVersion,
     refusalFor,
   } from "../../../shared/mc_versions.js";
-  import { t } from "./i18n.svelte.js";
+  import { t, tn } from "./i18n.svelte.js";
+  import Modal from "./Modal.svelte";
 
   interface Props {
     open: boolean;
@@ -59,7 +60,6 @@
   let length = $state(16);
   let format = $state<SchematicFormat>("sponge3");
   let version = $state("");
-  let dialog = $state<HTMLDivElement | null>(null);
 
   /**
    * Re-seeded every time it opens, not once at construction.
@@ -76,7 +76,6 @@
     length = initial.length;
     format = initial.format;
     version = initial.version;
-    dialog?.focus();
   });
 
   /** Sizes are typed, so they arrive as anything. */
@@ -119,211 +118,122 @@
   }
 
   function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onclose();
-    }
     // Enter confirms from anywhere but a number field being edited, where it
-    // would fire before the value is committed on some platforms.
-    if (event.key === "Enter" && !(event.target as HTMLElement)?.matches?.("input[type=number]")) {
+    // would fire before the value is committed on some platforms -- and a
+    // button, where Enter is that button's own: Cancel must not create.
+    if (event.key === "Enter" && !(event.target as HTMLElement)?.matches?.("input[type=number], button")) {
       event.preventDefault();
       confirm();
     }
   }
 </script>
 
-{#if open}
-  <div
-    class="scrim"
-    role="presentation"
-    onkeydown={onKeydown}
-    onclick={(event) => {
-      if (event.target === event.currentTarget) onclose();
-    }}
-  >
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <div
-      class="modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label={mode === "new" ? t("doc.newTitle") : t("doc.saveAsTitle")}
-      tabindex="-1"
-      bind:this={dialog}
-    >
-      <h2>{mode === "new" ? t("doc.newTitle") : t("doc.saveAsTitle")}</h2>
-
-      {#if mode === "new"}
-        <fieldset>
-          <legend>{t("doc.size")}</legend>
-          <div class="sizes">
-            <label>
-              <span>{t("doc.width")}</span>
-              <input type="number" min="1" max="2048" bind:value={width} />
-            </label>
-            <label>
-              <span>{t("doc.height")}</span>
-              <input type="number" min="1" max="2048" bind:value={height} />
-            </label>
-            <label>
-              <span>{t("doc.length")}</span>
-              <input type="number" min="1" max="2048" bind:value={length} />
-            </label>
-          </div>
-          <p class="hint">{t("doc.volume", { count: volume.toLocaleString() })}</p>
-        </fieldset>
-      {:else}
-        <p class="hint fact">
-          {t("doc.savingSize", { size: `${initial.width}×${initial.height}×${initial.length}` })}
-        </p>
-      {/if}
-
-      <!--
-        Version above format, in the order the decision is actually made: which
-        Minecraft you are building for, and only then which of the containers
-        that version can live in.
-      -->
-      <label class="row">
-        <span>{t("doc.version")}</span>
-        <select bind:value={version}>
-          {#each MC_VERSIONS as option (option.name)}
-            <option value={option.name}>
-              {option.label}{option.era === "legacy" ? ` — ${t("doc.legacyEra")}` : ""}
-            </option>
-          {/each}
-        </select>
-      </label>
-
-      <label class="row">
-        <span>{t("doc.format")}</span>
-        <select bind:value={format}>
-          {#each formats as option (option)}
-            <option value={option}>{SCHEMATIC_FORMAT_LABEL[option]}</option>
-          {/each}
-        </select>
-      </label>
-
-      {#if refused}
-        <p class="hint warn">{refused}</p>
-      {:else if mcVersion(version)?.era === "legacy"}
-        <p class="hint">{t("doc.legacyNote")}</p>
-      {/if}
-
-      {#if mode === "save-as" && suggestedName}
-        <p class="hint">
-          {t("doc.willBeNamed", { name: `${suggestedName}.${schematicExtension(format)}` })}
-        </p>
-      {/if}
-
-      <div class="buttons">
-        <button onclick={onclose}>{t("common.cancel")}</button>
-        <button class="primary" onclick={confirm}>
-          {mode === "new" ? t("doc.create") : t("doc.chooseLocation")}
-        </button>
+<Modal
+  {open}
+  title={mode === "new" ? t("doc.newTitle") : t("doc.saveAsTitle")}
+  {onclose}
+  width={420}
+  onkeydown={onKeydown}
+>
+  {#if mode === "new"}
+    <fieldset>
+      <legend>{t("doc.size")}</legend>
+      <div class="sizes">
+        <label>
+          <span>{t("doc.width")}</span>
+          <input type="number" min="1" max="2048" bind:value={width} />
+        </label>
+        <label>
+          <span>{t("doc.height")}</span>
+          <input type="number" min="1" max="2048" bind:value={height} />
+        </label>
+        <label>
+          <span>{t("doc.length")}</span>
+          <input type="number" min="1" max="2048" bind:value={length} />
+        </label>
       </div>
-    </div>
-  </div>
-{/if}
+      <p class="hint">{tn("count.blocks", volume)}</p>
+    </fieldset>
+  {:else}
+    <p class="callout fact">
+      {t("doc.savingSize", { size: `${initial.width}×${initial.height}×${initial.length}` })}
+    </p>
+  {/if}
+
+  <!--
+    Version above format, in the order the decision is actually made: which
+    Minecraft you are building for, and only then which of the containers
+    that version can live in.
+  -->
+  <label class="pair">
+    <span>{t("doc.version")}</span>
+    <select bind:value={version}>
+      {#each MC_VERSIONS as option (option.name)}
+        <option value={option.name}>
+          {option.label}{option.era === "legacy" ? ` — ${t("doc.legacyEra")}` : ""}
+        </option>
+      {/each}
+    </select>
+  </label>
+
+  <label class="pair">
+    <span>{t("doc.format")}</span>
+    <select bind:value={format}>
+      {#each formats as option (option)}
+        <option value={option}>{SCHEMATIC_FORMAT_LABEL[option]}</option>
+      {/each}
+    </select>
+  </label>
+
+  {#if refused}
+    <p class="callout warn">{refused}</p>
+  {:else if mcVersion(version)?.era === "legacy"}
+    <p class="hint">{t("doc.legacyNote")}</p>
+  {/if}
+
+  {#if mode === "save-as" && suggestedName}
+    <p class="hint">
+      {t("doc.willBeNamed", { name: `${suggestedName}.${schematicExtension(format)}` })}
+    </p>
+  {/if}
+
+  {#snippet footer()}
+    <button onclick={onclose}>{t("common.cancel")}</button>
+    <button class="primary" onclick={confirm}>
+      {mode === "new" ? t("doc.create") : t("doc.chooseLocation")}
+    </button>
+  {/snippet}
+</Modal>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--scrim);
-    backdrop-filter: blur(2px);
-  }
-
-  .modal {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    width: min(400px, calc(100vw - 48px));
-    padding: 18px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
-    outline: none;
-  }
-
-  h2 {
-    margin: 0;
-    font-size: 15px;
-  }
-
-  fieldset {
-    margin: 0;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-  }
-
-  legend {
-    padding: 0 4px;
-    font-size: 11px;
-    color: var(--text-dim);
+  fieldset,
+  .fact {
+    margin-bottom: var(--space-4);
   }
 
   .sizes {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
+    gap: var(--space-3);
   }
 
   .sizes label {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-
-  .row {
-    display: grid;
-    grid-template-columns: 90px minmax(0, 1fr);
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-  }
-
-  input,
-  select {
-    width: 100%;
-    min-width: 0;
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-input);
-    color: var(--text);
-    font: inherit;
-  }
-
-  .hint {
+    gap: var(--space-1);
     margin: 0;
-    font-size: 11px;
-    color: var(--text-dim);
   }
 
-  .hint.warn {
-    padding: 6px 8px;
-    border-radius: 6px;
-    background: var(--bg-input);
-    color: var(--text);
+  /* The label beside its control. */
+  .pair {
+    display: grid;
+    grid-template-columns: 96px minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-3);
+    margin: 0 0 var(--space-3);
   }
 
-  .hint.fact {
-    padding: 6px 8px;
-    border-radius: 6px;
-    background: var(--bg-input);
-  }
-
-  .buttons {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 2px;
+  .pair ~ p {
+    margin-top: var(--space-3);
   }
 </style>

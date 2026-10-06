@@ -23,14 +23,16 @@
  * Only families this file can state with confidence appear below. A block that
  * is not named keeps its default state, which is exactly what happened before —
  * so an omission costs nothing, while a wrong guess writes a block state that
- * is *worse* than the default because it looks deliberate. `observer` and
- * `anvil` are the two that were left out for that reason, not overlooked.
+ * is *worse* than the default because it looks deliberate. `observer` is left
+ * out for that reason, not overlooked. `anvil` was too, until its rule was read
+ * off vanilla's source instead of guessed -- see `CLOCKWISE_FROM_LOOK`.
  *
  * Stairs' `shape` is also absent, and that one is structural: a corner is
  * decided by what the *neighbours* are, which is a question about the document
  * and not about the click. It belongs to whoever holds the voxels.
  */
 
+import { COPPER_CHESTS, isRail } from "./block_connections.js";
 import { defaultStateFor, hasProperty, legalValuesFor } from "./block_states.js";
 
 /** A face of a cell, named as Minecraft names its directions. */
@@ -157,7 +159,34 @@ const FRONT_TO_PLAYER: ReadonlySet<string> = new Set([
    * placing the small dripleaf"* -- so it is one line and not a branch.
    */
   "small_dripleaf",
+  // Its slots are on the front, and the front faces the player who placed it:
+  // `getHorizontalDirection().getOpposite()`, like a furnace.
+  "chiseled_bookshelf",
+  /*
+   * The copper chests are chests, and turn their front to you as one does. They
+   * were in no table, so all eight landed on the registry's `facing=north`
+   * whichever way they were placed. The list is `block_connections.ts`' own,
+   * which is where they pair.
+   */
+  ...COPPER_CHESTS,
 ]);
+
+/**
+ * The shelves, by suffix: twelve woods, and a list of twelve is how a thirteenth
+ * goes missing. Vanilla's `ShelfBlock` places with
+ * `getHorizontalDirection().getOpposite()`, a furnace's rule -- the camera, not
+ * the clicked face, so a shelf placed against a wall looking at it still opens
+ * towards you. They were in no table and all landed on `facing=north`.
+ *
+ * `chiseled_bookshelf` does not end in `_shelf` ("bookshelf"), so the suffix
+ * cannot reach it by accident.
+ *
+ * **The copper golem statues are the same rule**, all eight by one suffix:
+ * `CopperGolemStatueBlock.getStateForPlacement` is
+ * `getHorizontalDirection().getOpposite()`, so the golem looks back at whoever
+ * set it down. They were in no table and every one of them faced north.
+ */
+const FRONT_TO_PLAYER_SUFFIXES = ["_shelf", "copper_golem_statue"] as const;
 
 /** The same, for the ones whose `facing` also takes `up` and `down`. */
 const FRONT_TO_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set([
@@ -243,6 +272,44 @@ export function rotationSegment(direction: {
 const AWAY_FROM_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set(["piston", "sticky_piston"]);
 
 /**
+ * The same, horizontally: `facing` is `getHorizontalDirection()` itself, not its
+ * opposite. A decorated pot is the case, and its front still turns to the
+ * player -- the renderer draws that front on the side *opposite* `facing`,
+ * which is why it is not in `FRONT_TO_PLAYER`.
+ */
+const AWAY_FROM_PLAYER: ReadonlySet<string> = new Set(["decorated_pot"]);
+
+/**
+ * Blocks whose `facing` is a quarter turn clockwise from the look, seen from
+ * above.
+ *
+ * The anvils are the whole family, and vanilla says it in one line:
+ * `AnvilBlock.getStateForPlacement` is
+ * `getHorizontalDirection().getClockWise()`. The model is authored with its
+ * long axis on `z` at `facing=south`, so the turn is what lays the anvil
+ * *across* the look: put one down facing north and you see it side on, horn
+ * to one side, which is how an anvil is always seen from where it was placed.
+ *
+ * This file's header named `anvil` as left out on purpose, because a wrong
+ * guess looks deliberate. That is an argument for reading the source rather
+ * than for leaving it out: every anvil placed by hand landed on the registry's
+ * `facing=north`, which is one of the four guesses too.
+ */
+const CLOCKWISE_FROM_LOOK: ReadonlySet<string> = new Set([
+  "anvil",
+  "chipped_anvil",
+  "damaged_anvil",
+]);
+
+/** `Direction.getClockWise()` for the four horizontal directions. */
+const CLOCKWISE: Record<HorizontalFacing, HorizontalFacing> = {
+  north: "east",
+  east: "south",
+  south: "west",
+  west: "north",
+};
+
+/**
  * Blocks that stick to whatever they were clicked onto.
  *
  * `facing` here means "the way it looks out of the wall", which is the face
@@ -261,6 +328,10 @@ const AWAY_FROM_PLAYER_ANY_AXIS: ReadonlySet<string> = new Set(["piston", "stick
  */
 const WALL_MOUNTED: ReadonlySet<string> = new Set([
   "ladder",
+  // Vanilla's `TripWireHookBlock` sets `facing` to the opposite of the
+  // horizontal look direction and keeps it where the wall behind can hold it,
+  // which on a side click is the clicked face: this rule exactly.
+  "tripwire_hook",
   // The two pre-Flattening spellings the app still offers; every other member
   // of both families is caught by the suffixes below.
   "wall_torch",
@@ -324,6 +395,22 @@ const GROWS_FROM_CLICKED: ReadonlySet<string> = new Set([
  * of eight is what the `axis` walk found eleven missing names in.
  */
 const GROWS_FROM_CLICKED_SUFFIXES = ["_lightning_rod"] as const;
+
+/**
+ * Blocks that point up or down according to where the camera is looking.
+ *
+ * Pointed dripstone's placement is `getNearestLookingVerticalDirection()`
+ * reversed: look up at a ceiling and it hangs down as a stalactite, look down
+ * at a floor -- or straight ahead -- and it stands up as a stalagmite. It is the
+ * camera and not the clicked face, so it can be hung upside down off the side
+ * of a block by looking up at it.
+ *
+ * Vanilla then flips it when the side it would grow from has nothing to hold
+ * it, and refuses it when neither side does. That half is deliberately not
+ * here: this app does not redirect or refuse a placement on physical grounds,
+ * redstone dust being the one stated exception.
+ */
+const VERTICAL_FROM_LOOK: ReadonlySet<string> = new Set(["pointed_dripstone"]);
 
 /**
  * Blocks carrying `face` (floor/wall/ceiling) alongside a horizontal `facing`.
@@ -438,6 +525,53 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return {};
   }
 
+  /*
+   * A lantern clicked onto the underside of a block hangs from it.
+   *
+   * Vanilla's `LanternBlock` tries the vertical directions nearest the look,
+   * sets `hanging` for up, and keeps the first that can survive. The survival
+   * half needs the document and this file has only the click, so the face
+   * decides: the underside hangs, the top stands. A side click is left at the
+   * registry's `hanging=false` rather than guessed from the look -- at eye
+   * level that look is a hair either way of horizontal, and a lantern hung off
+   * a wall with nothing above it looks deliberate.
+   *
+   * Membership is the registry's `hanging` plus the name, because two other
+   * blocks answer part of it: `jack_o_lantern` ends in `lantern` and has no
+   * `hanging`, and `mangrove_propagule` has `hanging` and is placed standing.
+   */
+  if (name.endsWith("lantern") && hasProperty(name, "hanging")) {
+    if (look.against === "down") return { hanging: "true" };
+    if (look.against === "up") return { hanging: "false" };
+    return {};
+  }
+
+  /*
+   * A tripwire is laid along the look. It has no `facing`: its four
+   * connections are the neighbours', derived in `block_connections.ts`, and
+   * what a placement can say is only which way the run goes when there are
+   * none yet. East-west is the pair of arms; north-south is vanilla's own
+   * isolated wire, all `false`, which already draws that way.
+   */
+  if (name === "tripwire") {
+    const eastWest = FACE_AXIS[horizontalFacing(look.direction)] === "x" ? "true" : "false";
+    return { north: "false", east: eastWest, south: "false", west: eastWest };
+  }
+
+  /*
+   * A rail is laid along the look. `BaseRailBlock.getStateForPlacement` gives
+   * `east_west` to a player facing east or west and `north_south` otherwise,
+   * which the wiki puts as «in Java Edition the new rail orients itself in the
+   * direction the player is facing». Every rail used to land `north_south`, so
+   * the first rail of a run laid east came out across its own track.
+   *
+   * The neighbours have the last word (`railShape`); with none, a rail keeps
+   * the shape it has, which is vanilla's fallback and why this survives.
+   */
+  if (isRail(name) && hasProperty(name, "shape")) {
+    return { shape: FACE_AXIS[horizontalFacing(look.direction)] === "x" ? "east_west" : "north_south" };
+  }
+
   if (name.endsWith("_stairs")) {
     return { facing: horizontalFacing(look.direction), half: upper ? "top" : "bottom" };
   }
@@ -516,6 +650,18 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return { facing: OPPOSITE[nearestFace(look.direction)] };
   }
 
+  if (VERTICAL_FROM_LOOK.has(name)) {
+    /*
+     * `tip_merge` is not a claim about the neighbours, which a placement cannot
+     * see. It is vanilla's `merge = !isSecondaryUseActive()`: the intention a
+     * block placed by hand arrives with. `connectedState` turns it into `tip`
+     * at once unless a tip pointing the other way is waiting for it -- which is
+     * the wiki's "placing a pointed dripstone between a stalagmite and
+     * stalactite without sneaking connects them".
+     */
+    return { vertical_direction: look.direction.y > 0 ? "down" : "up", thickness: "tip_merge" };
+  }
+
   /*
    * Still below the wall-mounted arm, and no longer *because* of it: the
    * registry keeps every wall variant out of here on its own. It stays here
@@ -533,6 +679,41 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return { facing: into === "up" ? "down" : into };
   }
 
+  /*
+   * A bell hangs from what it was clicked onto, and it was in no table at all
+   * -- so every one of them landed on the registry's `attachment=floor`,
+   * `facing=north`, whichever way the camera was pointing and whatever it was
+   * hung from.
+   *
+   * `BellBlock.getStateForPlacement` is two branches on the clicked face, and
+   * both are here:
+   *
+   * - a **vertical** face gives `floor` for a click on a top and `ceiling` for
+   *   one on an underside, with `facing` the direction the camera was looking,
+   *   which is what makes a bell on the ground turn to the player. With no
+   *   face at all -- the build grid, or a cell in mid-air -- the floor is the
+   *   answer, because that is the bell a schematic wants standing there;
+   * - a **side** gives `single_wall`, and `facing` is the **opposite** of the
+   *   clicked face rather than the face itself. That is the one number here
+   *   that reads backwards and it is vanilla's: a bell hung on a wall points
+   *   *into* it, where a wall torch points out of it. `WALL_MOUNTED` is
+   *   therefore not the rule, one value away from looking like it.
+   *
+   * `double_wall` is deliberately absent, for `hinge`'s reason: vanilla picks
+   * it when there is a block on the far side too, which is a question about
+   * the document that a click cannot answer. The inspector can say so, and a
+   * single wall bar is the half of the answer that is never wrong on its own.
+   */
+  if (name === "bell") {
+    if (look.against === null || look.against === "up") {
+      return { attachment: "floor", facing: horizontalFacing(look.direction) };
+    }
+    if (look.against === "down") {
+      return { attachment: "ceiling", facing: horizontalFacing(look.direction) };
+    }
+    return { attachment: "single_wall", facing: OPPOSITE[look.against] };
+  }
+
   if (FACE_AND_FACING.has(name) || FACE_AND_FACING_SUFFIXES.some((s) => name.endsWith(s))) {
     if (look.against === "up") return { face: "floor", facing: horizontalFacing(look.direction) };
     if (look.against === "down") {
@@ -541,7 +722,7 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
     return look.against === null ? {} : { face: "wall", facing: look.against };
   }
 
-  if (FRONT_TO_PLAYER.has(name)) {
+  if (FRONT_TO_PLAYER.has(name) || FRONT_TO_PLAYER_SUFFIXES.some((s) => name.endsWith(s))) {
     return { facing: OPPOSITE[horizontalFacing(look.direction)] };
   }
 
@@ -551,6 +732,14 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
 
   if (AWAY_FROM_PLAYER_ANY_AXIS.has(name)) {
     return { facing: nearestFace(look.direction) };
+  }
+
+  if (AWAY_FROM_PLAYER.has(name)) {
+    return { facing: horizontalFacing(look.direction) };
+  }
+
+  if (CLOCKWISE_FROM_LOOK.has(name)) {
+    return { facing: CLOCKWISE[horizontalFacing(look.direction)] };
   }
 
   return {};
@@ -613,9 +802,12 @@ export const ORIENTED_BLOCK_NAMES: readonly string[] = [
   ...FRONT_TO_PLAYER,
   ...FRONT_TO_PLAYER_ANY_AXIS,
   ...AWAY_FROM_PLAYER_ANY_AXIS,
+  ...AWAY_FROM_PLAYER,
+  ...CLOCKWISE_FROM_LOOK,
   ...WALL_MOUNTED,
   ...FACE_AND_FACING,
   ...POINTS_INTO_CLICKED,
   ...GROWS_FROM_CLICKED,
+  ...VERTICAL_FROM_LOOK,
   ...SPUN_LEGACY,
 ];

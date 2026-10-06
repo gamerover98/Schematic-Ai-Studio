@@ -18,6 +18,7 @@
   } from "../../../shared/schematic.js";
   import { anchorKey, mirrorAnchor } from "./anchor_draft.js";
   import { t } from "./i18n.svelte.js";
+  import Modal from "./Modal.svelte";
 
   interface Props {
     open: boolean;
@@ -66,7 +67,6 @@
     onclose,
   }: Props = $props();
 
-  let dialog = $state<HTMLDivElement | null>(null);
   let draft = $state<[string, string, string]>(["", "", ""]);
 
   /**
@@ -82,15 +82,6 @@
     if (next === null) return;
     mirrored = anchorKey(anchor);
     draft = next;
-  });
-
-  // A typing surface over the viewport: in flight the canvas holds the pointer,
-  // and a camera still turning underneath is the documented failure.
-  $effect(() => {
-    if (open) {
-      document.exitPointerLock();
-      dialog?.focus();
-    }
   });
 
   const complete = $derived(
@@ -123,13 +114,6 @@
         anchor[2] >= size[2]),
   );
 
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onclose();
-    }
-  }
-
   /**
    * `Offset`, `Metadata.WEOffsetX/Y/Z`, … — whichever this file will use, or
    * `null` for a container that has nowhere to keep one.
@@ -151,210 +135,125 @@
   }
 </script>
 
-{#if open}
-  <div
-    class="scrim"
-    role="presentation"
-    onkeydown={onKeydown}
-    onclick={(event) => {
-      if (event.target === event.currentTarget) onclose();
-    }}
-  >
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <div
-      class="modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("anchor.title")}
-      tabindex="-1"
-      bind:this={dialog}
-    >
-      <header>
-        <h2>{t("anchor.title")}</h2>
-        <button class="icon close" onclick={onclose} aria-label={t("common.close")}>&#x00d7;</button>
-      </header>
+<Modal {open} title={t("anchor.title")} {onclose} width={620}>
+  <section class="callout info">
+    <h3>{t("anchor.infoTitle")}</h3>
+    <p>{t("anchor.infoWhat")}</p>
+    <!-- One paragraph to say what it is; the rest a press away. -->
+    <details class="more">
+      <summary>{t("anchor.more")}</summary>
+      <p>{t("anchor.infoExample")}</p>
+      <p>{t("anchor.infoPivot")}</p>
+      <p>{t("anchor.infoStorage")}</p>
+    </details>
+  </section>
 
-      <div class="body">
-        <section class="info">
-          <h3>{t("anchor.infoTitle")}</h3>
-          <p>{t("anchor.infoWhat")}</p>
-          <p>{t("anchor.infoExample")}</p>
-          <p>{t("anchor.infoPivot")}</p>
-          <p class="hint">{t("anchor.infoStorage")}</p>
-        </section>
+  <section>
+    <h3>{t("anchor.positionTitle")}</h3>
+    {#if anchor === null}
+      <p class="hint none">{t("anchor.none")}</p>
+    {/if}
 
-        <section>
-          <h3>{t("anchor.positionTitle")}</h3>
-          {#if anchor === null}
-            <p class="hint">{t("anchor.none")}</p>
-          {/if}
-
-          <div class="fields">
-            {#each ["x", "y", "z"] as axis, index (axis)}
-              <label>
-                <span>{axis.toUpperCase()}</span>
-                <input
-                  type="number"
-                  step="1"
-                  value={draft[index]}
-                  placeholder="0"
-                  disabled={busy}
-                  oninput={(event) => (draft[index] = event.currentTarget.value)}
-                  onkeydown={(event) => {
-                    if (event.key === "Enter" && complete) onset(values);
-                  }}
-                />
-              </label>
-            {/each}
-            <button class="primary" disabled={busy || !complete} onclick={() => onset(values)}>
-              {anchor === null ? t("anchor.create") : t("anchor.move")}
-            </button>
-          </div>
-
-          <div class="presets">
-            <button disabled={busy} onclick={() => preset(centre)}>{t("anchor.atCentre")}</button>
-            <button disabled={busy} onclick={() => preset([0, 0, 0])}>{t("anchor.atCorner")}</button>
-            <button class="danger" disabled={busy || anchor === null} onclick={onclear}>
-              {t("anchor.delete")}
-            </button>
-          </div>
-
-          {#if outside}
-            <p class="hint">{t("anchor.outside")}</p>
-          {/if}
-
-          {#if offset !== null}
-            <p class="hint stored">
-              {#if storedAt === null}
-                {t("anchor.notStored")}
-              {:else}
-                {t("anchor.stored", {
-                  tag: storedAt,
-                  x: offset[0],
-                  y: offset[1],
-                  z: offset[2],
-                })}
-              {/if}
-            </p>
-          {/if}
-
-          {#if error}
-            <p class="error" role="alert">{error}</p>
-          {/if}
-        </section>
-
-        <section>
-          <h3>{t("anchor.viewTitle")}</h3>
-          <label class="toggle">
-            <input
-              type="checkbox"
-              checked={visible}
-              disabled={busy}
-              onchange={(event) => onvisibility(event.currentTarget.checked)}
-            />
-            {t("anchor.showMarker")}
-          </label>
-          <p class="hint">{t("anchor.markerHint")}</p>
-        </section>
-      </div>
+    <div class="fields">
+      {#each ["x", "y", "z"] as axis, index (axis)}
+        <label>
+          <span>{axis.toUpperCase()}</span>
+          <input
+            type="number"
+            step="1"
+            value={draft[index]}
+            placeholder="0"
+            disabled={busy}
+            oninput={(event) => (draft[index] = event.currentTarget.value)}
+            onkeydown={(event) => {
+              if (event.key === "Enter" && complete) onset(values);
+            }}
+          />
+        </label>
+      {/each}
+      <button class="primary" disabled={busy || !complete} onclick={() => onset(values)}>
+        {anchor === null ? t("anchor.create") : t("anchor.move")}
+      </button>
     </div>
-  </div>
-{/if}
+
+    <div class="presets">
+      <button disabled={busy} onclick={() => preset(centre)}>{t("anchor.atCentre")}</button>
+      <button disabled={busy} onclick={() => preset([0, 0, 0])}>{t("anchor.atCorner")}</button>
+      <button class="danger" disabled={busy || anchor === null} onclick={onclear}>
+        {t("anchor.delete")}
+      </button>
+    </div>
+
+    {#if outside}
+      <p class="hint">{t("anchor.outside")}</p>
+    {/if}
+
+    {#if offset !== null}
+      <p class="hint stored">
+        {#if storedAt === null}
+          {t("anchor.notStored")}
+        {:else}
+          {t("anchor.stored", {
+            tag: storedAt,
+            x: offset[0],
+            y: offset[1],
+            z: offset[2],
+          })}
+        {/if}
+      </p>
+    {/if}
+
+    {#if error}
+      <p class="callout bad error" role="alert">{error}</p>
+    {/if}
+  </section>
+
+  <section>
+    <h3>{t("anchor.viewTitle")}</h3>
+    <label class="check">
+      <input
+        type="checkbox"
+        checked={visible}
+        disabled={busy}
+        onchange={(event) => onvisibility(event.currentTarget.checked)}
+      />
+      {t("anchor.showMarker")}
+    </label>
+    <p class="hint">{t("anchor.markerHint")}</p>
+  </section>
+</Modal>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--scrim);
-    backdrop-filter: blur(2px);
-  }
-
-  .modal {
-    position: relative;
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
-    width: min(620px, calc(100vw - 48px));
-    max-height: min(660px, calc(100vh - 64px));
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
-    outline: none;
-    overflow: hidden;
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    padding: 14px 18px 8px;
-  }
-
-  h2 {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-  }
-
-  h3 {
-    margin: 0 0 6px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-dim);
-  }
-
-  .close {
-    position: absolute;
-    top: 10px;
-    right: 12px;
-  }
-
-  /* `min-height: 0` so the body scrolls inside the modal instead of growing it
-     past the viewport — the same grid-child rule the app shell needs. */
-  .body {
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-    padding: 8px 18px 18px;
-    overflow-y: auto;
-  }
-
-  /* The accent bar is the same device the settings modal uses for "read this
-     before you change it", so the two read as one language. */
-  .info {
-    padding: 10px 12px;
-    border-left: 2px solid var(--accent);
-    border-radius: 0 8px 8px 0;
-    background: var(--bg-input);
+  section + section {
+    margin-top: var(--space-5);
   }
 
   .info p {
-    margin: 0 0 8px;
-    font-size: 13px;
-    line-height: 1.5;
+    margin: 0 0 var(--space-3);
+    font-size: var(--text-md);
   }
 
   .info p:last-child {
     margin-bottom: 0;
   }
 
+  .none {
+    margin: 0 0 var(--space-3);
+  }
+
   .fields {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
   }
 
   .fields label {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text-dim);
+    gap: var(--space-2);
+    margin: 0;
   }
 
   .fields input {
@@ -364,22 +263,16 @@
   .presets {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--space-3);
   }
 
-  .primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-contrast);
-  }
-
-  .toggle {
+  .check {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-3);
     margin: 0;
     color: var(--text);
-    font-size: 14px;
+    font-size: var(--text-md);
   }
 
   .stored {
@@ -387,12 +280,6 @@
   }
 
   .error {
-    margin: 8px 0 0;
-    padding: 7px 10px;
-    border-left: 2px solid var(--danger);
-    border-radius: 0 6px 6px 0;
-    background: var(--bg-input);
-    color: var(--text);
-    font-size: 12px;
+    margin-top: var(--space-3);
   }
 </style>

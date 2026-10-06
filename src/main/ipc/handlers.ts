@@ -11,6 +11,8 @@
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
 
+import { relaunchApp } from "../services/relaunch.js";
+import { gpuStatus } from "../services/gpu_runtime.js";
 import {
   IPC,
   NO_SHIFT,
@@ -24,6 +26,9 @@ import {
   type ResizeRequest,
   type VersionRequest,
   type RendererFailure,
+  type CameraAimReply,
+  type CameraAimRequest,
+  type CameraState,
   type VoidBlockRequest,
   type EditResponse,
   type ConvertRequest,
@@ -33,6 +38,7 @@ import {
   type ConversationList,
   type RestoreResponse,
   type AppInfo,
+  type GpuStatus,
   type UpdateStatus,
   type Failure,
   type FailureKind,
@@ -66,6 +72,11 @@ import {
   type DocumentMeshRequest,
   type MoveRegionRequest,
   type RegionMeshResponse,
+  type SelectionPaletteRequest,
+  type FindBlocksRequest,
+  type FindBlocksResponse,
+  type GlowRequest,
+  type SelectionPaletteResponse,
   type ApplyNbtRequest,
   type PackTexture,
   type SchematicNbtResponse,
@@ -74,7 +85,10 @@ import {
   type StartupProgressEvent,
   type TransformRequest,
 } from "../../shared/ipc.js";
-import { contentShiftSince } from "../domain/history.js";
+import { contentShiftSince, historyMark } from "../domain/history.js";
+import { createReplyTable, RendererTimeoutError } from "../services/renderer_request.js";
+import { BannerPatternError } from "../pipeline/banner_nbt.js";
+import type { CameraPlacement } from "../../shared/camera_aim.js";
 import { SCHEMATIC_FORMAT_LABEL, schematicExtension } from "../../shared/schematic.js";
 import {
   dataVersionOf,
@@ -88,6 +102,7 @@ import {
 import {
   normaliseVoidBlock,
   providerRequiresApiKey,
+  lodSettings,
   type Hotbar,
   type KeyStorageStatus,
   type PreviewSettings,
@@ -117,6 +132,8 @@ import {
   moveRegion,
   clipboardMesh,
   regionMesh,
+  selectionPalette,
+  findInDocument,
   editBlockEntityValue,
   EditTooLargeError,
   EmptyClipboardError,
@@ -166,7 +183,13 @@ import {
   saveConversation,
   useConversationDirectory,
 } from "../services/conversation.js";
-import { clearAutosave, readAutosave, restoreAutosave, startAutosave } from "../services/autosave.js";
+import {
+  clearAutosave,
+  readAutosave,
+  restoreAutosave,
+  startAutosave,
+  type AutosaveRecord,
+} from "../services/autosave.js";
 import {
   checkpointExists,
   forgetCheckpointMemo,
@@ -212,7 +235,6 @@ import {
   getKeyStatus,
   getRecentDocuments,
   getSettings,
-  rememberRecentDocument,
   setApiKey,
   setSettings,
 } from "../services/settings-store.js";
@@ -248,7 +270,7 @@ import {
   useHotbarDirectory,
   writeHotbar,
 } from "../services/hotbars.js";
-import { refreshShell, rememberInOsRecents, setKeysToCamera } from "../menu.js";
+import { refreshShell, rememberDocument, setKeysToCamera } from "../menu.js";
 import { shellState, useWindow } from "../services/broadcast.js";
 import {
   mcpActivity,
@@ -330,8 +352,53 @@ let viewportRect: { x: number; y: number; width: number; height: number } | null
  */
 async function captureViewport(
   window: BrowserWindow | null,
-): Promise<{ data: string; width: number; height: number } | null> {
+  camera: CameraPlacement | null,
+): Promise<{ data: string; width: number; height: number; camera: CameraState | null } | null> {
   if (window === null || window.isDestroyed()) return null;
+  /*
+   * Minimised is refused by name rather than photographed. The renderer draws
+   * nothing while the window is minimised, so the aim below would time out --
+   * and a picture of a minimised window is not a picture of anything.
+   */
+  if (window.isMinimized()) {
+    throw new Error(
+      "The Schematic AI Studio window is minimised, so there is nothing to photograph. " +
+        "Ask the user to restore it and try again.",
+    );
+  }
+  /*
+   * Asked before the picture is taken, and awaited, because the answer is the
+   * point: the reply comes back only once the frame from the new camera has
+   * been drawn, so `capturePage` below photographs the view that was asked
+   * for rather than the one before it.
+   *
+   * With no camera asked for, the question is only "where is it", and a window
+   * that does not answer is still worth photographing -- that is what this tool
+   * did before it could aim. With one, not answering means the view never
+   * moved, and a picture of the old view described as the new one is the
+   * failure this whole change exists to prevent.
+   */
+  let state: CameraState | null = null;
+  try {
+    state = await cameraReplies.ask(
+      (id) => window.webContents.send(IPC.cameraAim, { id, camera } satisfies CameraAimRequest),
+      camera === null ? CAMERA_REPORT_MS : CAMERA_AIM_MS,
+    );
+  } catch (err) {
+    if (!(err instanceof RendererTimeoutError)) throw err;
+    if (camera !== null) {
+      throw new Error(
+        "The window did not draw the new view in time, so no picture was taken. It may be " +
+          "hidden or busy; ask the user to bring Schematic AI Studio to the front and try again.",
+      );
+    }
+  }
+  if (camera !== null && state === null) {
+    throw new Error(
+      "The viewport is not showing, so the camera could not be moved. Ask the user to close " +
+        "whatever is covering the 3D view and try again.",
+    );
+  }
   const rect = viewportRect;
   const image =
     rect !== null && rect.width > 0 && rect.height > 0
@@ -345,8 +412,25 @@ async function captureViewport(
   const size = image.getSize();
   const scaled = size.width > 1024 ? image.resize({ width: 1024 }) : image;
   const out = scaled.getSize();
-  return { data: scaled.toPNG().toString("base64"), width: out.width, height: out.height };
+  return {
+    data: scaled.toPNG().toString("base64"),
+    width: out.width,
+    height: out.height,
+    camera: state,
+  };
 }
+
+/**
+ * The camera answers `captureViewport` is waiting on.
+ *
+ * Two deadlines, for the two questions. Aiming has to wait for a frame, and a
+ * window behind others is throttled rather than stopped, so it gets seconds;
+ * merely asking where the camera is must not make a plain screenshot slower
+ * than it was before the question existed.
+ */
+const CAMERA_AIM_MS = 4000;
+const CAMERA_REPORT_MS = 600;
+const cameraReplies = createReplyTable<CameraState | null>(CAMERA_AIM_MS);
 
 function emitProgress(window: BrowserWindow | null, event: ProgressEvent): void {
   if (window && !window.isDestroyed()) {
@@ -362,12 +446,32 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   useUpdateWindow(getWindow);
 
 
+  /*
+   * The work a previous session left behind, read once, here, and kept until
+   * the recovery prompt is answered.
+   *
+   * At launch rather than when the window asks, because a snapshot is a
+   * recovery only until this session writes its own. The window asks after the
+   * startup steps, which take seconds, and an MCP client may have opened and
+   * edited a schematic by then. Asked later, the answer could be that
+   * schematic's snapshot under the old one's name.
+   *
+   * And held, because the prompt stays up while something else is opened --
+   * from the File menu, a drop, or MCP -- and the first snapshot of that would
+   * write over the work the prompt is asking about. So nothing is snapshotted
+   * while the question is unanswered. That leaves the newer work without a net
+   * for as long as the prompt is on screen, and the older work is the work
+   * nobody has seen yet.
+   */
+  let unanswered: Promise<AutosaveRecord | null> = readAutosave(autosaveDir()).catch(() => null);
+
   // Snapshots the open document while it differs from disk. Started here
   // because this is where the app's wiring lives, and left running for the
   // process's lifetime — there is nothing to tear down that outlives it.
   startAutosave({
     dir: autosaveDir(),
     getSession: currentSession,
+    hold: async () => (await unanswered) !== null,
     onError: (err) => console.warn("[autosave] snapshot failed:", err),
   });
 
@@ -392,7 +496,13 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     discoveryFile: mcpDiscoveryFile(),
     defaultRoot: async () => generatedDir(),
     bridgeFile: mcpBridgeFile(),
-    capture: async () => await captureViewport(getWindow()),
+    capture: async (camera) => await captureViewport(getWindow(), camera),
+    glow: (request) => {
+      const window = getWindow();
+      if (window === null || window.isDestroyed()) return false;
+      window.webContents.send(IPC.glowBlocks, request satisfies GlowRequest);
+      return true;
+    },
     onStatus: (status) => {
       const window = getWindow();
       if (window && !window.isDestroyed()) {
@@ -460,6 +570,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       platform: process.platform,
     }),
   );
+  ipcMain.handle(IPC.gpuStatus, async (): Promise<GpuStatus> => await gpuStatus());
 
   /*
    * Updates. Thin like the rest, and with no `Failure` to map: every one of
@@ -471,6 +582,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.updateCheck, async (): Promise<UpdateStatus> => await checkForUpdates());
   ipcMain.handle(IPC.updateDownload, async (): Promise<UpdateStatus> => await downloadUpdate());
   ipcMain.handle(IPC.updateInstall, async (): Promise<boolean> => await installUpdate());
+  ipcMain.handle(IPC.relaunchApp, async (): Promise<boolean> => await relaunchApp(getWindow()));
 
   ipcMain.handle(IPC.settingsGet, async (): Promise<Settings> => await getSettings());
 
@@ -734,6 +846,18 @@ ${report.stack}`),
   );
 
   /*
+   * The renderer's answer to `IPC.cameraAim`.
+   *
+   * `ipcMain.on`, not `handle`: the question went out as an event, so the answer
+   * comes back as one, and `renderer_request.ts` matches the two by id. A reply
+   * nothing is waiting for -- a late one, after its deadline -- is dropped there.
+   */
+  ipcMain.on(IPC.cameraAimed, (_event, reply: CameraAimReply): void => {
+    if (reply === null || typeof reply !== "object" || typeof reply.id !== "number") return;
+    cameraReplies.settle(reply.id, reply.camera ?? null);
+  });
+
+  /*
    * The pointer was locked, or released.
    *
    * Nothing is stored here: the only thing in main that can act on it is the
@@ -806,6 +930,7 @@ ${report.stack}`),
             waterColor: settings.preview.waterColor,
           },
           req.atlasVersion ?? null,
+          req.atlasLayout ?? null,
         );
         return { ok: true, ...result };
       } catch (err) {
@@ -1070,6 +1195,10 @@ ${report.stack}`),
       // Wrapping it would bury the only sentence that helps.
       return { ok: false, kind: "invalid-input", message: err.message };
     }
+    if (err instanceof BannerPatternError) {
+      // Names the design or the colour it could not use, for the same reason.
+      return { ok: false, kind: "invalid-input", message: err.message };
+    }
     if (err instanceof VersionWouldLoseBlocksError) {
       // Its own kind, so the panel can offer to go ahead without reading the
       // sentence. The message already names the count and the blocks.
@@ -1114,10 +1243,7 @@ ${report.stack}`),
       const session = await openDocument(filePath, { legacyBlocksPath: legacyBlocksPath() });
       // Only once it really opened. Recording the attempt would fill the list
       // with paths that fail every time they are clicked.
-      await rememberRecentDocument(filePath);
-      // The OS keeps its own list, and it is the only part of "what was I
-      // working on" that survives the app not being open.
-      rememberInOsRecents(filePath);
+      await rememberDocument(filePath);
       /*
        * Not an unconditional reset. A chat that built this file with nothing
        * open is *about* it, and this is the moment it gets opened -- clearing
@@ -1209,10 +1335,22 @@ ${report.stack}`),
     await refreshShell();
   });
 
+  /*
+   * What is open, for a window that does not know: one that was reloaded --
+   * Ctrl+R, or the crash dialog's Reload -- while this process kept the
+   * session. The notes come with it because they are what the dialogs open on,
+   * and `docOpen` is the only other place that hands them over.
+   */
   ipcMain.handle(IPC.docState, async (): Promise<DocumentStateResponse> => {
     const session = currentSession();
     // Not an error: "nothing is open" is the app's starting state.
-    return { ok: true, state: session === null ? null : documentState(session) };
+    if (session === null) return { ok: true, state: null };
+    const filePath = session.doc.filePath;
+    return {
+      ok: true,
+      state: documentState(session),
+      project: filePath === null ? null : await projectNotes(filePath),
+    };
   });
 
   ipcMain.handle(
@@ -1221,6 +1359,7 @@ ${report.stack}`),
       try {
         const { settings } = request;
         const session = requireSession();
+        const lod = lodSettings(settings);
         const mesh = await documentMesh(
           session,
           {
@@ -1237,10 +1376,21 @@ ${report.stack}`),
             blockLight: settings.blockLight,
             occlusion: settings.ambientOcclusion,
             smoothLighting: settings.smoothLighting,
+            // The viewer chooses between the levels; main only builds them,
+            // and only the ones the window asked for -- a level sent to a
+            // viewer that cannot choose is drawn on top of the full mesh.
+            lod:
+              lod.mode === "off"
+                ? null
+                : {
+                    shapes: lod.shapes,
+                    coarse: lod.coarse,
+                    autoTriangles: lod.mode === "auto" ? lod.autoTriangles : null,
+                  },
           },
           // What the window says it already has. Main decides what to send
           // from it; it is never a request for anything in particular.
-          { mesh: request.haveMesh, atlas: request.haveAtlas },
+          { mesh: request.haveMesh, atlas: request.haveAtlas, atlasLayout: request.haveAtlasLayout },
         );
         const sun = sunAnglesRadians(settings);
         return {
@@ -1259,13 +1409,13 @@ ${report.stack}`),
     try {
       const session = requireSession();
       /*
-       * The id before the edit, so the shift can be read back off what the
-       * transaction recorded. Growing below the origin moves every block that
+       * Where the stack stood before the edit, so the shift can be read back
+       * off what the transaction recorded. Growing below the origin moves every block that
        * was already there, and until now nothing outside main was told --
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
+      const before = historyMark(session.history);
       const changed = applyEdit(session, request, await editOptionsFor(session));
       return {
         ok: true,
@@ -1495,8 +1645,8 @@ ${report.stack}`),
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
-      const result = scaleRegion(session, request.region, request.spec, {
+      const before = historyMark(session.history);
+      const result = scaleRegion(session, request.regions, request.spec, {
         ...options,
         to: request.to ?? null,
       });
@@ -1534,8 +1684,8 @@ ${report.stack}`),
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
-      const changed = moveRegion(session, request.region, request.to, options);
+      const before = historyMark(session.history);
+      const changed = moveRegion(session, request.regions, request.to, options);
       return {
         ok: true,
         changed,
@@ -1549,10 +1699,10 @@ ${report.stack}`),
 
   ipcMain.handle(
     IPC.docRegionMesh,
-    async (_event, region: RegionSpec): Promise<RegionMeshResponse> => {
+    async (_event, regions: RegionSpec[]): Promise<RegionMeshResponse> => {
       try {
         const settings = await getSettings();
-        const result = await regionMesh(requireSession(), region, {
+        const result = await regionMesh(requireSession(), regions, {
           resourcePackPath: null,
           fallbackResourcePackPath: await defaultResourcePackPath(),
           biomeColor: settings.preview.biomeColor,
@@ -1560,6 +1710,38 @@ ${report.stack}`),
           waterColor: settings.preview.waterColor,
         });
         return { ok: true, ...result };
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
+  /*
+   * The glow's shell. Asked, like the materials, because what to light is the
+   * window's: a click in the list, or a model through `highlight_blocks`,
+   * which only tells the window what it asked for.
+   */
+  ipcMain.handle(IPC.docFindBlocks, async (_event, request: FindBlocksRequest): Promise<FindBlocksResponse> => {
+    try {
+      const found = findInDocument(requireSession(), request);
+      return {
+        ok: true,
+        total: found.total,
+        faces: found.faces,
+        scale: found.scale,
+        capped: found.capped,
+        frame: found.frame,
+      };
+    } catch (err) {
+      return failure(err);
+    }
+  });
+
+  ipcMain.handle(
+    IPC.docSelectionPalette,
+    async (_event, request: SelectionPaletteRequest): Promise<SelectionPaletteResponse> => {
+      try {
+        return { ok: true, ...selectionPalette(requireSession(), request.regions) };
       } catch (err) {
         return failure(err);
       }
@@ -1603,8 +1785,8 @@ ${report.stack}`),
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
-      const changed = transformRegion(session, request.region, request.transform, {
+      const before = historyMark(session.history);
+      const changed = transformRegion(session, request.regions, request.transform, {
         ...options,
         to: request.to ?? null,
       });
@@ -1626,19 +1808,19 @@ ${report.stack}`),
     blocks: held.blocks,
   });
 
-  ipcMain.handle(IPC.docCopy, async (_event, region: RegionSpec): Promise<ClipboardResponse> => {
+  ipcMain.handle(IPC.docCopy, async (_event, regions: RegionSpec[]): Promise<ClipboardResponse> => {
     try {
       const session = requireSession();
-      return { ok: true, clipboard: clipboardInfo(copySelection(session, region)), state: shellState(session) };
+      return { ok: true, clipboard: clipboardInfo(copySelection(session, regions)), state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
   });
 
-  ipcMain.handle(IPC.docCut, async (_event, region: RegionSpec): Promise<ClipboardResponse> => {
+  ipcMain.handle(IPC.docCut, async (_event, regions: RegionSpec[]): Promise<ClipboardResponse> => {
     try {
       const session = requireSession();
-      return { ok: true, clipboard: clipboardInfo(cutSelection(session, region)), state: shellState(session) };
+      return { ok: true, clipboard: clipboardInfo(cutSelection(session, regions)), state: shellState(session) };
     } catch (err) {
       return failure(err);
     }
@@ -1656,7 +1838,7 @@ ${report.stack}`),
        * `contentShiftSince` says why the answer is derived rather than passed
        * up through five return types.
        */
-      const before = session.history.nextId;
+      const before = historyMark(session.history);
       const changed = pasteSelection(session, request, {
         ...(await editOptionsFor(session)),
         includeAir: request.includeAir,
@@ -1738,6 +1920,9 @@ ${report.stack}`),
        * document to where the document went.
        */
       await adoptSubject(result.filePath);
+      // A schematic made here and saved was never opened, so without this it
+      // never reached the recents at all.
+      await rememberDocument(result.filePath);
       /*
        * What this file is for, remembered beside the talking about it.
        *
@@ -1837,12 +2022,16 @@ ${report.stack}`),
 
   ipcMain.handle(IPC.docRecoveryPeek, async (): Promise<RecoveryPeekResponse> => {
     try {
-      // Only offered when nothing is open. A snapshot found while the user is
-      // already working belongs to *this* session and is not a recovery.
-      if (currentSession() !== null) {
-        return { ok: true, recovery: null };
-      }
-      return { ok: true, recovery: await readAutosave(autosaveDir()) };
+      /*
+       * What was found at launch, for as long as nobody has answered it.
+       *
+       * It used to read the disk here, and be offered only with nothing open,
+       * because a snapshot written since belongs to *this* session and is not
+       * a recovery. Reading at launch is what guarantees that now, and it does
+       * not depend on what is open: a window reloaded while the prompt was up
+       * has to be asked the same question again, whatever was opened under it.
+       */
+      return { ok: true, recovery: await unanswered };
     } catch (err) {
       return failure(err);
     }
@@ -1854,16 +2043,36 @@ ${report.stack}`),
       try {
         if (!restore) {
           await clearAutosave(autosaveDir());
-          return { ok: true, state: null };
+          unanswered = Promise.resolve(null);
+          /*
+           * Discarding the snapshot closes nothing, so the answer is whatever
+           * is open.
+           *
+           * It was `null`, which was true for as long as the prompt could only
+           * be answered with nothing open. It can be answered with something
+           * open: the prompt stays up while a schematic is opened from the File
+           * menu, a drop or an MCP client. The window took the `null` as the
+           * document having closed and went back to the start screen, with the
+           * schematic still drawn behind it and still open in main.
+           */
+          const open = currentSession();
+          return { ok: true, state: open === null ? null : shellState(open) };
         }
         const session = await restoreAutosave(autosaveDir());
         if (session === null) {
           // The snapshot turned out to be unreadable. Clear it rather than
           // offering it again on every launch.
           await clearAutosave(autosaveDir());
+          unanswered = Promise.resolve(null);
           return { ok: false, kind: "io-error", message: "The recovered file could not be read." };
         }
+        /*
+         * This replaces whatever is open, for the same reason. The window asks
+         * first when that has unsaved changes (`mayDiscard("restore")`), as it
+         * does before opening a file, so by here the answer was yes.
+         */
         adoptDocument(session.doc, session.history);
+        unanswered = Promise.resolve(null);
         /*
          * Recovering is opening, so the conversation follows the file.
          *
@@ -1981,6 +2190,7 @@ ${report.stack}`),
           // shorten what gets stored.
           history: conversationMessages() as Parameters<typeof runAgent>[0]["history"],
           selection: req.selection,
+          otherAreas: req.otherAreas ?? [],
           signal: controller.signal,
           allowedBlocks: await loadAllowedBlocks(resourcesDir()),
           legacyBlocksPath: legacyBlocksPath(),

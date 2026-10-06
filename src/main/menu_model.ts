@@ -29,6 +29,7 @@ export type MenuCommand =
   | "save"
   | "saveAs"
   | "close"
+  | "convert"
   | "undo"
   | "redo"
   | "about"
@@ -48,8 +49,8 @@ export interface MenuItemModel {
   registerAccelerator?: boolean;
   enabled?: boolean;
   separator?: boolean;
-  /** Handed to Electron as-is; the only one used here is `quit`. */
-  role?: "quit";
+  /** Handed to Electron as-is. */
+  role?: "quit" | "toggleDevTools";
   submenu?: MenuItemModel[];
 }
 
@@ -194,6 +195,14 @@ export function menuModel(state: MenuState): MenuItemModel[] {
           enabled: state.hasDocument,
         },
         { separator: true },
+        /*
+         * A verb about files, not about the open document -- it reads one
+         * file and writes another without opening either -- so it belongs
+         * here rather than in the bar beside the document's own settings,
+         * where it sat for a long time. Never disabled, for the same reason.
+         */
+        { command: "convert", label: "Convert…", enabled: true },
+        { separator: true },
         {
           command: "close",
           label: "Close Schematic",
@@ -268,6 +277,24 @@ export function menuModel(state: MenuState): MenuItemModel[] {
        * row -- the one somebody opening Help is looking for.
        */
       { command: "checkUpdates", label: "Check for Updates…", enabled: true },
+      { separator: true },
+      /*
+       * The window's own DevTools, for the Performance panel: the stutter
+       * profiler says which phase was slow, and this is where the whole
+       * timeline of that frame can be read, with the phases on it by name.
+       *
+       * Electron handles the role itself, so no channel is involved. It had to
+       * be written out because this menu replaces the default one, which is
+       * where the item used to come from. Its key is released in flight like
+       * every other: Ctrl+Shift+I is sprint, descend and nothing, which is
+       * three keys a pilot can press together.
+       */
+      {
+        role: "toggleDevTools",
+        label: "Toggle Developer Tools",
+        accelerator: "CmdOrCtrl+Shift+I",
+        enabled: true,
+      },
     ],
   });
 

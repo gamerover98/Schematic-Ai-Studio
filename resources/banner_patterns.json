@@ -1,0 +1,345 @@
+{
+  "_source": {
+    "project": "the game's own code and assets, corroborated by minecraft.wiki",
+    "urls": [
+      "https://raw.githubusercontent.com/rrrRex1024/minecraft-1-21-11-source/main/net/minecraft/world/level/block/entity/BannerPatterns.java",
+      "https://raw.githubusercontent.com/rrrRex1024/minecraft-1-21-11-source/main/net/minecraft/util/datafix/fixes/BannerPatternFormatFix.java",
+      "https://raw.githubusercontent.com/rrrRex1024/minecraft-1-21-11-source/main/net/minecraft/util/datafix/fixes/BlockEntityBannerColorFix.java",
+      "https://raw.githubusercontent.com/rrrRex1024/minecraft-1-21-11-source/main/net/minecraft/util/datafix/ExtraDataFixUtils.java",
+      "https://raw.githubusercontent.com/rrrRex1024/minecraft-1-21-11-source/main/net/minecraft/util/datafix/DataFixers.java",
+      "https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.21.4/assets/minecraft/lang/en_us.json",
+      "https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/<tag>/assets/minecraft/textures/entity/banner/<id>.png",
+      "https://minecraft.wiki/w/Banner",
+      "https://minecraft.wiki/w/Banner_Pattern"
+    ],
+    "checkedAt": "2026-09-17",
+    "license": "CC BY-NC-SA 3.0 (minecraft.wiki); this file holds transcriptions and paraphrases, not copies of the article text or of any game file",
+    "note": "id and order are BannerPatterns.bootstrap. code is BannerPatternFormatFix.PATTERN_ID_MAP, the short string 1.8 to 1.20.4 stored as Pattern; flow and guster arrived after that format ended and have none. name is en_us.json's block.minecraft.banner.<id>.white with the colour taken off. since is the first release a design can be made in without experiments: the wiki's history, corroborated mechanically by whether textures/entity/banner/<id>.png exists in each release's assets (globe first at 1.14, piglin at 1.16, flow and guster at 1.20.5 but behind the update_1_21 experiment until 1.21). description is written looking at each texture's front window (u 1..21, v 1..41 of 64), as the front of the banner shows it.",
+    "formats": "invertedColorsBefore is where BlockEntityBannerColorFix is registered (schema 1451, the Flattening): before it Base and Color are 15 minus the dye id. namedPatternsFrom is where BannerPatternFormatFix is registered (schema 3818): before it a layer is {Pattern:<code>,Color:<int>} in a list called Patterns, from it {pattern:<id>,color:<name>} in one called patterns."
+  },
+  "formats": {
+    "invertedColorsBefore": 1451,
+    "namedPatternsFrom": 3818
+  },
+  "colors": [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black"
+  ],
+  "patterns": [
+    {
+      "id": "base",
+      "code": "b",
+      "since": "1.8.8",
+      "name": "Field",
+      "description": "Covers the whole flag. Used as the first layer, it repaints the banner's own colour for everything above it."
+    },
+    {
+      "id": "square_bottom_left",
+      "code": "bl",
+      "since": "1.8.8",
+      "name": "Base Dexter Canton",
+      "description": "A rectangle in the bottom-left corner: the left half of the bottom third."
+    },
+    {
+      "id": "square_bottom_right",
+      "code": "br",
+      "since": "1.8.8",
+      "name": "Base Sinister Canton",
+      "description": "A rectangle in the bottom-right corner: the right half of the bottom third."
+    },
+    {
+      "id": "square_top_left",
+      "code": "tl",
+      "since": "1.8.8",
+      "name": "Chief Dexter Canton",
+      "description": "A rectangle in the top-left corner: the left half of the top third."
+    },
+    {
+      "id": "square_top_right",
+      "code": "tr",
+      "since": "1.8.8",
+      "name": "Chief Sinister Canton",
+      "description": "A rectangle in the top-right corner: the right half of the top third."
+    },
+    {
+      "id": "stripe_bottom",
+      "code": "bs",
+      "since": "1.8.8",
+      "name": "Base",
+      "description": "A horizontal band across the bottom third of the flag."
+    },
+    {
+      "id": "stripe_top",
+      "code": "ts",
+      "since": "1.8.8",
+      "name": "Chief",
+      "description": "A horizontal band across the top third of the flag."
+    },
+    {
+      "id": "stripe_left",
+      "code": "ls",
+      "since": "1.8.8",
+      "name": "Pale Dexter",
+      "description": "A vertical band down the left third of the flag."
+    },
+    {
+      "id": "stripe_right",
+      "code": "rs",
+      "since": "1.8.8",
+      "name": "Pale Sinister",
+      "description": "A vertical band down the right third of the flag."
+    },
+    {
+      "id": "stripe_center",
+      "code": "cs",
+      "since": "1.8.8",
+      "name": "Pale",
+      "description": "A vertical band down the middle of the flag, about a third of its width."
+    },
+    {
+      "id": "stripe_middle",
+      "code": "ms",
+      "since": "1.8.8",
+      "name": "Fess",
+      "description": "A narrow horizontal band across the middle of the flag, about a fifth of its height."
+    },
+    {
+      "id": "stripe_downright",
+      "code": "drs",
+      "since": "1.8.8",
+      "name": "Bend",
+      "description": "A diagonal band from the top-left corner down to the bottom-right corner."
+    },
+    {
+      "id": "stripe_downleft",
+      "code": "dls",
+      "since": "1.8.8",
+      "name": "Bend Sinister",
+      "description": "A diagonal band from the top-right corner down to the bottom-left corner."
+    },
+    {
+      "id": "small_stripes",
+      "code": "ss",
+      "since": "1.8.8",
+      "name": "Paly",
+      "description": "Four thin vertical stripes running the full height of the flag, evenly spaced."
+    },
+    {
+      "id": "cross",
+      "code": "cr",
+      "since": "1.8.8",
+      "name": "Saltire",
+      "description": "A diagonal cross: two bands from corner to corner, meeting in the centre like an X."
+    },
+    {
+      "id": "straight_cross",
+      "code": "sc",
+      "since": "1.8.8",
+      "name": "Cross",
+      "description": "An upright cross: a vertical band down the middle and a horizontal band across the middle."
+    },
+    {
+      "id": "triangle_bottom",
+      "code": "bt",
+      "since": "1.8.8",
+      "name": "Chevron",
+      "description": "A triangle standing on the whole bottom edge, rising to a point at the centre of the flag."
+    },
+    {
+      "id": "triangle_top",
+      "code": "tt",
+      "since": "1.8.8",
+      "name": "Inverted Chevron",
+      "description": "A triangle hanging from the whole top edge, down to a point at the centre of the flag."
+    },
+    {
+      "id": "triangles_bottom",
+      "code": "bts",
+      "since": "1.8.8",
+      "name": "Base Indented",
+      "description": "Three small saw-teeth standing along the bottom edge."
+    },
+    {
+      "id": "triangles_top",
+      "code": "tts",
+      "since": "1.8.8",
+      "name": "Chief Indented",
+      "description": "Three small saw-teeth hanging along the top edge."
+    },
+    {
+      "id": "diagonal_left",
+      "code": "ld",
+      "since": "1.8.8",
+      "name": "Per Bend Sinister",
+      "description": "The top-left half of the flag, above the diagonal from the bottom-left corner to the top-right corner."
+    },
+    {
+      "id": "diagonal_up_right",
+      "code": "rd",
+      "since": "1.8.8",
+      "name": "Per Bend Sinister Inverted",
+      "description": "The bottom-right half of the flag, below the diagonal from the bottom-left corner to the top-right corner."
+    },
+    {
+      "id": "diagonal_up_left",
+      "code": "lud",
+      "since": "1.8.8",
+      "name": "Per Bend Inverted",
+      "description": "The bottom-left half of the flag, below the diagonal from the top-left corner to the bottom-right corner."
+    },
+    {
+      "id": "diagonal_right",
+      "code": "rud",
+      "since": "1.8.8",
+      "name": "Per Bend",
+      "description": "The top-right half of the flag, above the diagonal from the top-left corner to the bottom-right corner."
+    },
+    {
+      "id": "circle",
+      "code": "mc",
+      "since": "1.8.8",
+      "name": "Roundel",
+      "description": "A disc in the centre of the flag."
+    },
+    {
+      "id": "rhombus",
+      "code": "mr",
+      "since": "1.8.8",
+      "name": "Lozenge",
+      "description": "A large diamond in the centre of the flag, about three fifths of its width and height."
+    },
+    {
+      "id": "half_vertical",
+      "code": "vh",
+      "since": "1.8.8",
+      "name": "Per Pale",
+      "description": "The left half of the flag."
+    },
+    {
+      "id": "half_horizontal",
+      "code": "hh",
+      "since": "1.8.8",
+      "name": "Per Fess",
+      "description": "The top half of the flag."
+    },
+    {
+      "id": "half_vertical_right",
+      "code": "vhr",
+      "since": "1.8.8",
+      "name": "Per Pale Inverted",
+      "description": "The right half of the flag."
+    },
+    {
+      "id": "half_horizontal_bottom",
+      "code": "hhb",
+      "since": "1.8.8",
+      "name": "Per Fess Inverted",
+      "description": "The bottom half of the flag."
+    },
+    {
+      "id": "border",
+      "code": "bo",
+      "since": "1.8.8",
+      "name": "Bordure",
+      "description": "A straight frame around all four edges of the flag."
+    },
+    {
+      "id": "curly_border",
+      "code": "cbo",
+      "since": "1.8.8",
+      "name": "Bordure Indented",
+      "description": "A frame around all four edges whose inner edge is scalloped into rounded notches."
+    },
+    {
+      "id": "gradient",
+      "code": "gra",
+      "since": "1.8.8",
+      "name": "Gradient",
+      "description": "The colour is solid at the top and fades out towards the bottom, where what is underneath shows through."
+    },
+    {
+      "id": "gradient_up",
+      "code": "gru",
+      "since": "1.8.8",
+      "name": "Base Gradient",
+      "description": "The colour is solid at the bottom and fades out towards the top, where what is underneath shows through."
+    },
+    {
+      "id": "bricks",
+      "code": "bri",
+      "since": "1.8.8",
+      "name": "Field Masoned",
+      "description": "Brickwork over the whole flag: the bricks take the colour, and the thin mortar lines between them show what is underneath."
+    },
+    {
+      "id": "globe",
+      "code": "glb",
+      "since": "1.14",
+      "name": "Globe",
+      "description": "A small globe, in the middle of the flag."
+    },
+    {
+      "id": "creeper",
+      "code": "cre",
+      "since": "1.8.8",
+      "name": "Creeper Charge",
+      "description": "A creeper's face in the middle of the flag."
+    },
+    {
+      "id": "skull",
+      "code": "sku",
+      "since": "1.8.8",
+      "name": "Skull Charge",
+      "description": "A skull over crossed bones, in the middle of the flag."
+    },
+    {
+      "id": "flower",
+      "code": "flo",
+      "since": "1.8.8",
+      "name": "Flower Charge",
+      "description": "A round flower with eight petals, in the middle of the flag."
+    },
+    {
+      "id": "mojang",
+      "code": "moj",
+      "since": "1.8.8",
+      "name": "Thing",
+      "description": "The Mojang logo, in the middle of the flag."
+    },
+    {
+      "id": "piglin",
+      "code": "pig",
+      "since": "1.16",
+      "name": "Snout",
+      "description": "A piglin's snout with its two nostrils, in the middle of the flag."
+    },
+    {
+      "id": "flow",
+      "code": null,
+      "since": "1.21",
+      "name": "Flow",
+      "description": "A squared-off spiral, in the middle of the flag."
+    },
+    {
+      "id": "guster",
+      "code": null,
+      "since": "1.21",
+      "name": "Guster",
+      "description": "A breeze, the wind mob of trial chambers, in the middle of the flag."
+    }
+  ]
+}

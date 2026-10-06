@@ -42,7 +42,7 @@
  * wrong state is worse than a default, because it looks deliberate.
  */
 
-import { hasProperty } from "./block_states.js";
+import { hasProperty, legalValuesFor } from "./block_states.js";
 
 export type Face = "up" | "down" | "north" | "south" | "east" | "west";
 
@@ -58,16 +58,36 @@ export interface NeighbourBlock {
    * to. `occludesNeighbours`' answer, computed by main and passed in.
    */
   readonly solid: boolean;
+  /**
+   * Which of its faces something can hang off: the face is whole, and the
+   * block has a body to hang it on. `coversFace` minus the fluids and the
+   * markers with nothing in them, computed by main.
+   *
+   * It is not `solid`, and a vine is why. Vanilla's `MultifaceBlock.canAttachTo`
+   * asks whether the *collision* shape fills the face, so a vine clings to
+   * leaves, glass and the underside of a top slab -- none of which is a full
+   * opaque cube. Asked through `solid`, a jungle canopy held up no vines at
+   * all. Absent means "fall back to `solid`", which is what a caller that
+   * builds a neighbour by hand gets.
+   */
+  readonly sturdy?: Readonly<Partial<Record<Face, boolean>>>;
+}
+
+/** Whether `block` offers a whole face on its side `face`. */
+function sturdyAt(block: NeighbourBlock | null, face: Face): boolean {
+  if (block === null) return false;
+  return block.sturdy?.[face] ?? block.solid;
 }
 
 /**
- * A cell to ask about: one of the six faces, or the cell above or below one
- * of the four horizontal ones.
+ * A cell to ask about: one of the six faces, the cell above or below one of
+ * the four horizontal ones, or the cell two above or two below.
  *
- * The eight diagonals are redstone's alone and are the whole of what lets a
- * wire run up and down a step. Nothing else here looks past a face, and a
- * caller that does not fill them simply gets `undefined`, which reads as air
- * -- the same answer as before they existed.
+ * The eight diagonals are redstone's and are the whole of what lets a wire run
+ * up and down a step; `up_up` and `down_down` are pointed dripstone's, whose
+ * `thickness` depends on the block two along its column. A caller that does
+ * not fill them simply gets `undefined`, which reads as air -- the same answer
+ * as before they existed.
  */
 export type NeighbourKey = Face | `${string}_up` | `${string}_down`;
 
@@ -109,8 +129,31 @@ const isFenceGate = (name: string): boolean => name.endsWith("_fence_gate");
 const isWall = (name: string): boolean => name.endsWith("_wall");
 const isPane = (name: string): boolean => name.endsWith("_pane") || name === "iron_bars";
 const isStairs = (name: string): boolean => name.endsWith("_stairs");
-const isRail = (name: string): boolean => name === "rail" || name.endsWith("_rail");
-const isChest = (name: string): boolean => name === "chest" || name === "trapped_chest";
+/** Exported for `orientPlacement`, which lays a rail along the look. */
+export const isRail = (name: string): boolean => name === "rail" || name.endsWith("_rail");
+/**
+ * The eight copper chests: four oxidation stages and their waxed mirrors.
+ *
+ * Exported because `block_orientation.ts` turns them to face the player from
+ * this same list -- two copies of eight names is how one of them comes to miss
+ * the ninth. They were in neither place, so a copper chest landed facing north
+ * whichever way it was placed and never became half of a double one.
+ */
+export const COPPER_CHESTS: readonly string[] = [
+  "copper_chest",
+  "exposed_copper_chest",
+  "weathered_copper_chest",
+  "oxidized_copper_chest",
+  "waxed_copper_chest",
+  "waxed_exposed_copper_chest",
+  "waxed_weathered_copper_chest",
+  "waxed_oxidized_copper_chest",
+];
+
+const COPPER_CHEST_NAMES: ReadonlySet<string> = new Set(COPPER_CHESTS);
+
+const isChest = (name: string): boolean =>
+  name === "chest" || name === "trapped_chest" || COPPER_CHEST_NAMES.has(name);
 
 /**
  * Whether two fences are the same *kind*.
@@ -236,59 +279,124 @@ function stairsShape(
 }
 
 /**
- * A rail's shape.
+ * A rail's shape: `RailState.place`, read as the answer it settles on.
  *
- * Two of the ten values are straight, four are curves, and four ascend.
- * **Ascending is deliberately not derived**, and the reason is structural
- * rather than an oversight: a rail ascends towards a rail one block *up and
- * over*, which is a diagonal, and `Neighbours` is the six faces. Extending it
- * for one family would put four more lookups on every cell the pass visits.
+ * Two of the ten values are straight, four are curves and four climb. The
+ * climbing ones were never derived, on the reasoning that a rail ascends
+ * towards a rail one block *up and over*, a diagonal, while `Neighbours` was
+ * the six faces. Redstone then made `Neighbours` carry the eight diagonals,
+ * and `connect.ts` fills them for every cell and revisits them after an edit,
+ * so the reason expired. A track laid up a hillside came out as a staircase of
+ * flat rails with a ledge at every step.
  *
- * Flat-correct is still the whole visible difference here: every rail in the
- * game used to be `north_south`, so a line running east lay across its own
- * track and a corner did not turn at all.
+ * Vanilla's rule, in its own order:
  *
- * Only the plain `rail` curves. Powered, detector and activator rails have no
- * curve in their `shape` at all, so offering one would write a value the game
- * refuses -- `hasProperty` would not catch that, because the property is real
- * and only the value is not.
+ * 1. **A side has a rail if one is beside it, one block up or one block
+ *    down.** `hasNeighborRail` asks `getRail`, which tries the cell, the cell
+ *    above and the cell below. The wiki says the same: rails «on its level, or
+ *    one level up or down».
+ * 2. **Straight or curved from the four sides.** Only the plain `rail` has
+ *    curves in its `shape`; powered, detector and activator rails would be
+ *    written a value the game refuses, and `hasProperty` cannot catch that,
+ *    because the property is real and only the value is not.
+ * 3. **A junction takes the south-east rule.** Three or four sides cannot be
+ *    one rail, and vanilla picks the curve by a fixed order: south before
+ *    north, east before west. That is its *unpowered* order -- a junction with
+ *    a redstone signal prefers the other way -- and power is not simulated
+ *    here, so a file keeps what it says until something near it is edited.
+ *    A straight-only rail at a corner or a junction keeps the shape it has:
+ *    that is the `shape` argument `place` falls back on.
+ * 4. **A straight answer climbs towards a rail one block up.** North-south
+ *    asks north and then south, east-west asks east and then west, and the
+ *    second answer wins. So with rails above *both* ends -- a valley, which a
+ *    rail cannot be -- it ascends south or west. A rail one block *down* is a
+ *    flat link: the lower rail is the one that climbs. A curve never climbs,
+ *    because the check runs only on a straight answer.
+ * 5. **A rail with no rail beside it keeps the shape it has.** That is
+ *    vanilla's own fallback rather than a deviation, unlike the tripwire's: a
+ *    rail is placed along the look (`orientPlacement`) and stays that way
+ *    until a neighbour arrives.
+ *
+ * **What this does not do is remember.** Vanilla's rail keeps a list of the
+ * neighbours it is joined to, and one already joined at both ends ignores a
+ * third rail built beside it later (`canConnectTo`). This pass knows only who
+ * is next door, so a rail laid against a finished line turns the line into a
+ * junction. That was already true of a rail on the same level; reading one
+ * block up and down widens it to a rail on a ledge beside the track.
  */
-const RAIL_CURVES: ReadonlyArray<readonly [Face, Face, string]> = [
+const RAIL_CORNERS: ReadonlyArray<readonly [Face, Face, string]> = [
   ["north", "east", "north_east"],
   ["north", "west", "north_west"],
   ["south", "east", "south_east"],
   ["south", "west", "south_west"],
 ];
 
-function railShape(self: string, neighbours: Neighbours): string {
-  const links = HORIZONTAL_FACES.filter((direction) => {
-    const side = neighbours[direction] ?? null;
-    return side !== null && isRail(side.name);
-  });
+/** The south-east rule, unpowered: the last pair present wins. */
+const RAIL_JUNCTION: ReadonlyArray<readonly [Face, Face, string]> = [
+  ["north", "west", "north_west"],
+  ["north", "east", "north_east"],
+  ["south", "west", "south_west"],
+  ["south", "east", "south_east"],
+];
 
-  const straight = (face: Face): string => (axisOf(face) === "x" ? "east_west" : "north_south");
+function railShape(
+  self: { readonly name: string; readonly properties: Readonly<Record<string, string>> },
+  neighbours: Neighbours,
+): string {
+  const railAt = (key: NeighbourKey): boolean => {
+    const block = neighbours[key] ?? null;
+    return block !== null && isRail(block.name);
+  };
+  const linked = (face: Face): boolean =>
+    railAt(face) || railAt(`${face}_up`) || railAt(`${face}_down`);
+  const links = HORIZONTAL_FACES.filter(linked);
+  const curves = self.name === "rail";
+  // What `place` falls back on. A value the block cannot hold -- a corner on a
+  // powered rail, out of somebody else's file -- is not kept.
+  const own = self.properties.shape;
+  const current =
+    own !== undefined && legalValuesFor(self.name, "shape")?.includes(own) === true ? own : "north_south";
 
-  // No neighbour, or one: lie along whatever axis is implied. `north_south` is
-  // the default state and the answer for a lone rail.
-  if (links.length === 0) return "north_south";
-  if (links.length === 1) return straight(links[0]);
-
-  if (links.length === 2) {
-    if (OPPOSITE[links[0]] === links[1]) return straight(links[0]);
-    if (self === "rail") {
-      const curve = RAIL_CURVES.find(
-        ([a, b]) => links.includes(a) && links.includes(b),
-      );
-      if (curve !== undefined) return curve[2];
+  const alongZ = links.includes("north") || links.includes("south");
+  const alongX = links.includes("east") || links.includes("west");
+  let shape: string | null = null;
+  if (alongZ && !alongX) shape = "north_south";
+  if (alongX && !alongZ) shape = "east_west";
+  if (curves && links.length === 2) {
+    shape = RAIL_CORNERS.find(([a, b]) => links.includes(a) && links.includes(b))?.[2] ?? shape;
+  }
+  if (shape === null && alongZ && alongX) {
+    shape = current;
+    if (curves) {
+      for (const [a, b, curve] of RAIL_JUNCTION) {
+        if (links.includes(a) && links.includes(b)) shape = curve;
+      }
     }
-    // A powered rail at a corner cannot turn, so it keeps a straight run.
-    return straight(links[0]);
   }
 
-  // Three or four ways is a junction, which a rail cannot express. Vanilla
-  // keeps a straight run through it; north/south wins because it is the
-  // default and the choice has to be made somewhere.
-  return links.includes("north") || links.includes("south") ? "north_south" : "east_west";
+  if (shape === "north_south") {
+    if (railAt("north_up")) shape = "ascending_north";
+    if (railAt("south_up")) shape = "ascending_south";
+  } else if (shape === "east_west") {
+    if (railAt("east_up")) shape = "ascending_east";
+    if (railAt("west_up")) shape = "ascending_west";
+  }
+  return shape ?? current;
+}
+
+/**
+ * What a chest pairs with: its own kind, where waxing does not count.
+ *
+ * In the game two copper chests pair whatever their stages, and the pair takes
+ * the least oxidised one -- which means rewriting one half into a different
+ * block. This pass changes properties and never an id, so it pairs the ones
+ * that already agree. Waxing changes no texture, so a waxed half beside an
+ * unwaxed one of the same stage is one chest to look at; two different stages
+ * side by side stay two single chests rather than a double one drawn in two
+ * colours.
+ */
+function chestKind(name: string): string {
+  return name.startsWith("waxed_") ? name.slice("waxed_".length) : name;
 }
 
 /**
@@ -318,7 +426,7 @@ function chestType(
     const side = neighbours[face] ?? null;
     return (
       side !== null &&
-      side.name === self.name &&
+      chestKind(side.name) === chestKind(self.name) &&
       (side.properties.facing ?? "north") === facing
     );
   };
@@ -410,6 +518,100 @@ function redstoneSide(neighbours: Neighbours, direction: Face, roofed: boolean):
   return connectsToDust(below, direction) ? "side" : "none";
 }
 
+/**
+ * A pointed dripstone's `thickness`, which is where it stands in its column.
+ *
+ * `PointedDripstoneBlock.calculateDripstoneThickness` asks about the block in
+ * front of it -- the way it points -- and, through that block's own thickness,
+ * about the one in front of that. Transcribed as that chain it needs the
+ * neighbour corrected before this one, and `deriveConnections` is one sweep,
+ * not a fixed point: whichever order it took, a column two long would come out
+ * right and one three long would not.
+ *
+ * So it is read as the answer the chain settles on, which is a window of three
+ * cells and nothing else. The block in front is a *tip* exactly when the block
+ * two in front is not dripstone pointing the same way, so:
+ *
+ * 1. in front, dripstone pointing back at this one: `tip_merge` if either of
+ *    the two already says so, else `tip` -- vanilla's merge flag, kept the way
+ *    its `updateShape` keeps it;
+ * 2. in front, anything but dripstone pointing the same way: `tip`;
+ * 3. two in front, dripstone pointing the same way: `middle` if the block
+ *    behind is too, else `base`;
+ * 4. otherwise `frustum`.
+ *
+ * The cells two above and two below are why `Neighbours` carries `up_up` and
+ * `down_down`, and why `connect.ts` revisits them after an edit: a tip added to
+ * the end of a column moves the block two up it from `frustum` to `base`.
+ */
+function dripstoneThickness(
+  self: { readonly properties: Readonly<Record<string, string>> },
+  neighbours: Neighbours,
+): string {
+  const tip: Face = self.properties.vertical_direction === "down" ? "down" : "up";
+  const back: Face = tip === "down" ? "up" : "down";
+  const pointing = (
+    block: NeighbourBlock | null | undefined,
+    direction: Face,
+  ): block is NeighbourBlock =>
+    block != null &&
+    block.name === "pointed_dripstone" &&
+    (block.properties.vertical_direction === "down" ? "down" : "up") === direction;
+
+  const ahead = neighbours[tip];
+  if (pointing(ahead, back)) {
+    const merged =
+      self.properties.thickness === "tip_merge" || ahead.properties.thickness === "tip_merge";
+    return merged ? "tip_merge" : "tip";
+  }
+  if (!pointing(ahead, tip)) return "tip";
+  if (pointing(neighbours[tip === "down" ? "down_down" : "up_up"], tip)) {
+    return pointing(neighbours[back], tip) ? "middle" : "base";
+  }
+  return "frustum";
+}
+
+/**
+ * A tripwire's four connections: `TripWireBlock.shouldConnectTo`, plus one
+ * deviation for a wire with nothing to connect to.
+ *
+ * A side connects to another wire, or to a hook that points back at this one.
+ * That is vanilla's whole rule, and until it was here nothing derived it, so
+ * every wire ever placed was unconnected and lay north-south.
+ *
+ * **A wire with no neighbour keeps the axis it was laid along**, and that is
+ * the deviation. Vanilla has no answer for it: an isolated wire is all
+ * `false`, which draws north-south, whatever way the player faced. This is an
+ * editor and the first wire of a run is always isolated, so a run laid
+ * east-west came out crossways until its second wire went down.
+ * `orientPlacement` lays a wire along the look, as `east=true,west=true` for
+ * east-west, and this keeps exactly that. North-south stays vanilla's all
+ * `false`, which draws the same, so a lone wire out of a file is not rewritten
+ * into a state the game never writes.
+ */
+function tripwireSides(
+  self: { readonly properties: Readonly<Record<string, string>> },
+  neighbours: Neighbours,
+): Record<string, string> {
+  const sides: Record<string, string> = {};
+  let any = false;
+  for (const face of HORIZONTAL_FACES) {
+    const side = neighbours[face] ?? null;
+    const connects =
+      side !== null &&
+      (side.name === "tripwire" ||
+        (side.name === "tripwire_hook" && (side.properties.facing ?? "north") === OPPOSITE[face]));
+    sides[face] = connects ? "true" : "false";
+    any ||= connects;
+  }
+  if (any) return sides;
+  const p = self.properties;
+  const eastWest =
+    (p.east === "true" || p.west === "true") && p.north !== "true" && p.south !== "true";
+  const arm = eastWest ? "true" : "false";
+  return { north: "false", east: arm, south: "false", west: arm };
+}
+
 const MUSHROOM_BLOCKS: ReadonlySet<string> = new Set([
   "brown_mushroom_block",
   "red_mushroom_block",
@@ -474,7 +676,7 @@ export function connectedState(
   }
 
   if (isRail(name)) {
-    put("shape", railShape(name, neighbours));
+    put("shape", railShape(block, neighbours));
     return out;
   }
 
@@ -507,11 +709,37 @@ export function connectedState(
   }
 
   if (name === "vine") {
-    // A vine clings to what is beside and above it, and has no `down`.
-    for (const face of [...HORIZONTAL_FACES, "up" as Face]) {
+    /*
+     * A vine clings to what is beside and above it, and has no `down`.
+     *
+     * **And a side is held up by the vine above it**, which is what lets a
+     * vine hang. Vanilla's `VineBlock.canSupportAtFace`: a horizontal face is
+     * supported by a full block on that side, or by the block above being a
+     * vine that has that same face. Without the second half a vine under a
+     * vine with no wall of its own came out with every face `false` and drew
+     * as the cross. `up` is not inherited: it is only ever a ceiling.
+     *
+     * A vine left with no support at all stays, as the cross, where vanilla
+     * would drop it. Removing blocks is not this pass's to decide.
+     *
+     * "A full block" is a whole face of the *collision* shape, `sturdy`, and
+     * not `solid`: a vine hangs off leaves and glass, and off the underside of
+     * any of them, which is how a jungle canopy grows its curtains. The
+     * underside is `up`, and placing a vine there is 1.13's (17w47a: "vines
+     * can now be placed on the bottom of blocks").
+     */
+    const above = neighbours.up ?? null;
+    for (const face of HORIZONTAL_FACES) {
       const side = neighbours[face] ?? null;
-      put(face, side !== null && side.solid ? "true" : "false");
+      const hung = above !== null && above.name === "vine" && above.properties[face] === "true";
+      put(face, sturdyAt(side, OPPOSITE[face]) || hung ? "true" : "false");
     }
+    put("up", sturdyAt(above, "down") ? "true" : "false");
+    return out;
+  }
+
+  if (name === "tripwire") {
+    for (const [face, value] of Object.entries(tripwireSides(block, neighbours))) put(face, value);
     return out;
   }
 
@@ -522,6 +750,11 @@ export function connectedState(
       const side = neighbours[face] ?? null;
       put(face, side !== null && MUSHROOM_BLOCKS.has(side.name) ? "false" : "true");
     }
+    return out;
+  }
+
+  if (name === "pointed_dripstone") {
+    put("thickness", dripstoneThickness(block, neighbours));
     return out;
   }
 
@@ -556,6 +789,8 @@ export function isNeighbourDependent(name: string): boolean {
     name === "redstone_wire" ||
     name === "chorus_plant" ||
     name === "vine" ||
+    name === "tripwire" ||
+    name === "pointed_dripstone" ||
     MUSHROOM_BLOCKS.has(name) ||
     hasProperty(name, "snowy")
   );

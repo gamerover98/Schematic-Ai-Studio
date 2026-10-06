@@ -250,8 +250,16 @@ export function plateScale(
  * the click *meant* something, and clicking past the structure is also the most
  * ordinary accident there is while framing a shot — so it stays behind Shift.
  */
-export type ClickIntent = "pick" | "extend" | "clear" | "ignore";
+export type ClickIntent = "pick" | "extend" | "clear" | "ignore" | "add" | "remove";
 
+/*
+ * Alt is the modifier for *which areas*, and it has the same asymmetry. With
+ * Shift it adds: a click inside an area already selected makes that one
+ * active, anywhere else it adds the block as an area of its own. Without
+ * Shift it takes away the area under the click -- and a miss with Alt does
+ * nothing at all rather than clearing, because a selection built up area by
+ * area is the one most expensive to lose to a slipped click.
+ */
 export function clickIntent(gesture: {
   /** Whether the ray found a block at all. */
   readonly hit: boolean;
@@ -259,7 +267,13 @@ export function clickIntent(gesture: {
   readonly shift: boolean;
   /** Ctrl: grow the selection from the anchor, the job Shift gave up. */
   readonly ctrl: boolean;
+  /** Alt: add an area (with Shift) or take one away (without). */
+  readonly alt?: boolean;
 }): ClickIntent {
+  if (gesture.alt === true) {
+    if (!gesture.hit) return "ignore";
+    return gesture.shift ? "add" : "remove";
+  }
   if (!gesture.hit) return gesture.shift ? "clear" : "ignore";
   if (gesture.shift && gesture.ctrl) return "extend";
   return "pick";

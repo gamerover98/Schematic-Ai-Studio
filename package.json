@@ -1,6 +1,6 @@
 {
   "name": "schematic-ai-studio",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Schematic AI Studio — an AI-assisted 3D editor for Minecraft schematics",
   "author": "gamerover98",
@@ -36,7 +36,8 @@
     "smoke:autosave": "tsx tests/autosave.ts",
     "smoke:ui": "tsx tests/ui.ts",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
-    "gen:icons": "node scripts/gen-icons.mjs"
+    "gen:icons": "node scripts/gen-icons.mjs",
+    "bench:edit": "tsx scripts/bench-edit.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.27",
@@ -50,6 +51,8 @@
     "quickjs-emscripten-core": "^0.32.0"
   },
   "devDependencies": {
+    "@fontsource/atkinson-hyperlegible": "^5.3.0",
+    "@fontsource/pixelify-sans": "^5.3.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@types/adm-zip": "^0.5.7",
     "@types/jsdom": "^30.0.0",

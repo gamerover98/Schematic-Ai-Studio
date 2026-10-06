@@ -27,11 +27,20 @@ import {
   DEFAULT_WATER_COLOR,
   type PreviewSettings,
 } from "../../shared/settings.js";
-import { buildAtlas } from "../pipeline/atlas.js";
+import {
+  appendTiles,
+  buildAtlas,
+  packAtlas,
+  tilePixels,
+  type GrowableAtlas,
+} from "../pipeline/atlas.js";
 import type {
   AtlasAnimation,
+  AtlasPatch,
   ChunkGeometry,
   ChunkLayer,
+  MeshAtlas,
+  MeshLod,
   MeshPayload,
 } from "../../shared/ipc.js";
 import { loadStructure } from "../pipeline/loader.js";
@@ -49,15 +58,26 @@ import {
   type StructureData,
 } from "../pipeline/types.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
-import { getBlock, toStructureData, type SchematicDocument } from "../domain/document.js";
+import {
+  getBlock,
+  takeVoxelChanges,
+  toStructureData,
+  type SchematicDocument,
+} from "../domain/document.js";
+import { readBanner } from "../pipeline/banner_nbt.js";
+import { DYE_COLOURS } from "../pipeline/block_shapes.js";
+import { bannerBlockColor, bannerFormat, isBannerBlock } from "../../shared/banner_patterns.js";
+import { documentEra } from "../../shared/mc_versions.js";
 import { breathe } from "./breathing.js";
 import {
   buildChunkedMesh,
   createChunkMeshCache,
   type ChunkMeshCache,
+  type LodPiece,
+  type LodRequest,
   type MeshBounds,
 } from "../pipeline/chunked_mesh.js";
-import { computeLight } from "../pipeline/lighting.js";
+import { carryLight, computeLight, relight, type LightGrid } from "../pipeline/lighting.js";
 
 /** preview.py:66-67 -- "50 MB is generous for a .schem file". */
 export const MAX_SCHEM_BYTES = 50 * 1024 * 1024;
@@ -163,10 +183,12 @@ function extentOf(box: MeshBounds): {
 export function atlasAnimations(
   atlas: ReturnType<typeof buildAtlas>,
   animations: Readonly<Record<string, TextureAnimation>>,
+  only: ReadonlySet<string> | null = null,
 ): AtlasAnimation[] {
   const out: AtlasAnimation[] = [];
   const { width, height } = atlas.image;
   for (const [key, animation] of Object.entries(animations)) {
+    if (only !== null && !only.has(key)) continue;
     const rect = atlas.uvRects[key];
     if (rect === undefined) continue;
     const size = Math.round((rect[2] - rect[0]) * width) + 1;
@@ -186,15 +208,79 @@ export function atlasAnimations(
   return out;
 }
 
-/** Geometry and pixels, in the shape the renderer draws from. */
+/**
+ * An atlas as it stands, and what it has had added since it was packed.
+ *
+ * What `shipMesh` decides from: the whole sheet for a renderer that holds
+ * another layout, the tiles added since its version for one that holds this
+ * one, and nothing for one that is up to date. Built here and sent from
+ * there, because only the session knows what the renderer holds -- and
+ * building the payload's atlas eagerly copied every animation frame on every
+ * mesh request, sent or not.
+ */
+export interface AtlasSource {
+  readonly atlas: GrowableAtlas;
+  /** The texture count: grows with every tile added. */
+  readonly version: number;
+  /** Which packing; see `MeshAtlas.layout`. */
+  readonly layout: number;
+  /** The version the layout was packed at. A renderer behind it needs the sheet. */
+  readonly layoutSince: number;
+  /** Tiles added to this layout after it was packed, and the version each one made. */
+  readonly added: readonly { key: string; at: number }[];
+  readonly animations: Readonly<Record<string, TextureAnimation>>;
+}
+
+/** The whole sheet, for a renderer holding nothing or another layout. */
+export function fullAtlas(source: AtlasSource): MeshAtlas {
+  return {
+    width: source.atlas.image.width,
+    height: source.atlas.image.height,
+    pixels: source.atlas.image.data,
+    version: source.version,
+    layout: source.layout,
+    animations: atlasAnimations(source.atlas, source.animations),
+  };
+}
+
+/**
+ * What to send a renderer that says it holds `version` of `layout`: the sheet,
+ * the tiles added since, or nothing at all.
+ */
+export function atlasFor(
+  source: AtlasSource,
+  held: { version: number | null; layout: number | null },
+): { atlas: MeshAtlas | null; patch: AtlasPatch | null } {
+  if (held.layout !== source.layout || held.version === null || held.version < source.layoutSince) {
+    return { atlas: fullAtlas(source), patch: null };
+  }
+  if (held.version >= source.version) return { atlas: null, patch: null };
+  const keys = source.added.filter((entry) => entry.at > held.version!).map((entry) => entry.key);
+  const tiles = keys.flatMap((key) => {
+    const tile = tilePixels(source.atlas, key);
+    return tile === null ? [] : [tile];
+  });
+  return {
+    atlas: null,
+    patch: {
+      layout: source.layout,
+      version: source.version,
+      tiles,
+      animations: atlasAnimations(source.atlas, source.animations, new Set(keys)),
+    },
+  };
+}
+
+/** Geometry, in the shape the renderer draws from; the atlas is `atlasFor`'s. */
 function toMeshPayload(
   pieces: readonly MeshBuffers[],
   keys: readonly number[],
-  atlas: ReturnType<typeof buildAtlas>,
-  version: number,
-  animations: Readonly<Record<string, TextureAnimation>>,
+  source: AtlasSource,
   voidPieces: readonly MeshBuffers[] = [],
   voidKeys: readonly number[] = [],
+  frame: readonly [number, number, number] = [0, 0, 0],
+  lodPieces: readonly LodPiece[] = [],
+  lod: MeshLod = { state: "off", triangles: 0 },
 ): MeshPayload {
   const geometry = (
     buffers: readonly MeshBuffers[],
@@ -215,20 +301,31 @@ function toMeshPayload(
     chunks: [
       ...geometry(pieces, keys, "solid"),
       ...geometry(voidPieces, voidKeys, "void"),
+      ...lodPieces.map(
+        (piece): ChunkGeometry => ({
+          key: piece.key,
+          layer: piece.layer,
+          positions: piece.buffers.positions,
+          normals: piece.buffers.normals,
+          uvs: piece.buffers.uvs,
+          indices: piece.buffers.indices,
+          light: piece.buffers.light,
+          opaqueIndices: piece.buffers.opaqueIndices,
+          lodError: piece.error,
+        }),
+      ),
     ],
     // A whole payload says what exists by listing it; there is nothing left
     // over to take down, and no token because nothing here is incremental.
     dropped: [],
     partial: false,
     token: "",
-    atlas: {
-      width: atlas.image.width,
-      height: atlas.image.height,
-      pixels: atlas.image.data,
-      version,
-      animations: atlasAnimations(atlas, animations),
-    },
-    atlasVersion: version,
+    atlas: null,
+    atlasVersion: source.version,
+    atlasLayout: source.layout,
+    atlasPatch: null,
+    frame: [frame[0], frame[1], frame[2]],
+    lod,
   };
 }
 
@@ -313,8 +410,12 @@ function cacheKey(
  */
 interface CachedBaker {
   baker: ModelBaker;
-  atlas: ReturnType<typeof buildAtlas> | null;
+  atlas: GrowableAtlas | null;
   atlasTextureCount: number;
+  /** Which packing this is, and the count it was packed at; see `AtlasSource`. */
+  layout: number;
+  layoutSince: number;
+  added: { key: string; at: number }[];
 }
 
 const BAKER_CACHE_LIMIT = 3;
@@ -353,6 +454,9 @@ async function cachedBaker(
     ),
     atlas: null,
     atlasTextureCount: -1,
+    layout: 0,
+    layoutSince: 0,
+    added: [],
   };
   bakers.set(key, entry);
   while (bakers.size > BAKER_CACHE_LIMIT) {
@@ -364,21 +468,56 @@ async function cachedBaker(
 }
 
 /**
- * The atlas for whatever the baker has decoded so far, rebuilt only when that
+ * How much empty sheet a packing keeps for tiles that arrive later.
+ *
+ * Measured against what arrives in practice after the warm-up has decoded
+ * every block's first state: the other states (a lit furnace, an upper half),
+ * the letters on signs, banner designs and tints -- small tiles, and few of
+ * them. A sixth of the sheet is thousands of letters. Past it the sheet is
+ * packed again, which is what every arrival used to cost.
+ */
+const ATLAS_RESERVE = 0.15;
+
+/** Layouts packed in this process, so each one is told apart from the last. */
+let layouts = 0;
+
+/**
+ * The atlas for whatever the baker has decoded so far, grown only when that
  * grew.
  *
- * The texture count doubles as the atlas's version: it changes exactly when
- * the layout does, which is what `chunked_mesh.ts` needs to know to throw away
- * UVs that address the old one.
+ * The texture count is the atlas's version. A new texture goes into the
+ * sheet's reserve and leaves every other tile where it was, so the layout --
+ * which is what `chunked_mesh.ts` keys its UVs on -- does not move; only when
+ * the reserve is full is the sheet packed again, as a new layout.
  */
-function cachedAtlas(entry: CachedBaker): { atlas: ReturnType<typeof buildAtlas>; version: number } {
-  const count = Object.keys(entry.baker.textures).length;
-  if (entry.atlas === null || entry.atlasTextureCount !== count) {
-    entry.atlas = buildAtlas(entry.baker.textures);
+function cachedAtlas(entry: CachedBaker): AtlasSource {
+  const textures = entry.baker.textures;
+  const count = Object.keys(textures).length;
+  if (entry.atlas !== null && entry.atlasTextureCount !== count) {
+    const fresh = Object.keys(textures).filter((key) => !entry.atlas!.layout.placed.has(key));
+    if (appendTiles(entry.atlas, textures, fresh)) {
+      for (const key of fresh.sort()) entry.added.push({ key, at: count });
+      entry.atlasTextureCount = count;
+    } else {
+      entry.atlas = null;
+    }
+  }
+  if (entry.atlas === null) {
+    entry.atlas = packAtlas(textures, undefined, undefined, ATLAS_RESERVE);
     entry.atlasTextureCount = count;
+    entry.layout = ++layouts;
+    entry.layoutSince = count;
+    entry.added = [];
     atlasBuilds += 1;
   }
-  return { atlas: entry.atlas, version: entry.atlasTextureCount };
+  return {
+    atlas: entry.atlas,
+    version: entry.atlasTextureCount,
+    layout: entry.layout,
+    layoutSince: entry.layoutSince,
+    added: entry.added,
+    animations: entry.baker.animations,
+  };
 }
 
 /**
@@ -434,6 +573,24 @@ export interface BuildPreviewOutcome extends PreviewResult {
   unmappedLegacyIds: readonly string[];
 }
 
+/**
+ * Which palette entries some cell holds.
+ *
+ * A document keeps its counts as it is edited (`SchematicDocument.counts`),
+ * so the answer is one array read per entry. A file being previewed has no
+ * counts and is walked once.
+ */
+type Presence = (index: number) => boolean;
+
+function presenceOf(structure: StructureData): Presence {
+  const present = new Set(structure.voxels);
+  return (index) => present.has(index);
+}
+
+function documentPresence(doc: SchematicDocument): Presence {
+  return (index) => (doc.counts[index] ?? 0) > 0;
+}
+
 /** Non-air voxels, used to tell "empty schematic" from "nothing was drawable". */
 function countSolidBlocks(structure: StructureData): number {
   const airIndices = new Set<number>();
@@ -467,11 +624,11 @@ async function warnAboutBlocksWithNoGeometry(
   structure: StructureData,
   baker: ModelBaker,
   atlasUvKeys: ReadonlySet<string>,
+  present: Presence,
 ): Promise<void> {
-  const present = new Set(structure.voxels);
   const silent: string[] = [];
   for (const [index, entry] of structure.palette.entries()) {
-    if (!present.has(index) || paletteEntryIsAir(entry)) {
+    if (!present(index) || paletteEntryIsAir(entry)) {
       continue;
     }
     const baked = await baker.bakeBlockstate(entry);
@@ -545,9 +702,15 @@ export async function buildPreview(options: BuildPreviewOptions): Promise<BuildP
   const faces = await culledFaces(normalized, baker);
   // After culling, not before: `culledFaces` is what asks the baker for each
   // blockstate, so the texture set is only complete once it has run.
-  const { atlas, version } = cachedAtlas(cached);
+  const source = cachedAtlas(cached);
+  const atlas = source.atlas;
   const mesh = buildMesh(faces, atlas.uvRects, (key) => baker.isTextureTranslucent(key));
-  await warnAboutBlocksWithNoGeometry(normalized, baker, new Set(Object.keys(atlas.uvRects)));
+  await warnAboutBlocksWithNoGeometry(
+    normalized,
+    baker,
+    new Set(Object.keys(atlas.uvRects)),
+    presenceOf(normalized),
+  );
   if (mesh.indices.length === 0) {
     // Raised before anything is assembled: a blank result is not worth
     // caching, and the next attempt may use a different resource pack, which
@@ -557,7 +720,9 @@ export async function buildPreview(options: BuildPreviewOptions): Promise<BuildP
   const bounds = boundsOf([mesh]);
 
   const result: CachedPreview = {
-    mesh: toMeshPayload([mesh], [0], atlas, version, baker.animations),
+    // A file preview has no session remembering what the renderer holds, so
+    // it always carries the whole sheet.
+    mesh: { ...toMeshPayload([mesh], [0], source), atlas: fullAtlas(source) },
     center: bounds.center,
     size: bounds.size,
     format: structure.format,
@@ -614,6 +779,18 @@ export interface DocumentPreviewOptions {
    * geometry without moving `doc.revision`, so it is part of the cache key.
    */
   voidBlock?: string;
+  /**
+   * The levels of detail the window asked for, or `null` for none: the
+   * stand-ins of complex blocks (`lod1`) and the coarse regions (`lod2`,
+   * `lod3`). The window asks because only the window can draw them; see
+   * `LodRequest`. Not part of any mesh key: changing it re-meshes no chunk.
+   */
+  lod?: DocumentLodOptions | null;
+  /**
+   * How long this build may spend on queued regions, in milliseconds. Zero --
+   * the default -- is an edit's own build, which must not wait for one.
+   */
+  lodBudgetMs?: number;
 
   /*
    * Both are part of the mesh cache key, for the same reason the two tints
@@ -709,11 +886,27 @@ export function fillVoid(
   return { structure: { ...structure, palette }, voidIndices };
 }
 
+/** `LodRequest` without the budget, which is per build rather than a setting. */
+export type DocumentLodOptions = Omit<LodRequest, "budgetMs">;
+
 export interface DocumentPreviewResult extends PreviewResult {
   /** Hand this back on the next call to re-mesh only what changed. */
   meshCache: ChunkMeshCache;
   rebuiltChunks: number;
   totalChunks: number;
+  /** How many regions' coarse meshes were rebuilt; zero without `lod`. */
+  rebuiltRegions: number;
+  /**
+   * Where the time went, in milliseconds, by step.
+   *
+   * Main's half of the stutter report: the renderer can only see how long it
+   * waited for an answer, and a wait is the same length whether it was spent
+   * relighting the document, repacking the atlas or queued behind something
+   * else. See `MeshPayload.timings`.
+   */
+  timings: Record<string, number>;
+  /** The atlas the UVs address; `atlasFor` decides what of it to send. */
+  atlas: AtlasSource;
 }
 
 /**
@@ -735,6 +928,13 @@ export async function buildDocumentPreview(
   options: DocumentPreviewOptions,
   meshCache?: ChunkMeshCache,
 ): Promise<DocumentPreviewResult> {
+  const timings: Record<string, number> = {};
+  let at = performance.now();
+  const lap = (name: string): void => {
+    const now = performance.now();
+    timings[name] = (timings[name] ?? 0) + (now - at);
+    at = now;
+  };
   const cached = await cachedBaker(
     options.resourcePackPath,
     options.fallbackResourcePackPath ?? null,
@@ -757,8 +957,20 @@ export async function buildDocumentPreview(
    * moved, so the steady-state cost of an edit is the chunks it touched.
    */
   const signs = signsIn(doc);
-  await primeBaker(structure, cached.baker, signs);
-  const { atlas, version } = cachedAtlas(cached);
+  const present = documentPresence(doc);
+  lap("prepare");
+  await primeBaker(structure, cached.baker, signs, present, options.lod?.shapes === true);
+  lap("prime");
+  /*
+   * The banners' composed cloth, for the glyphs' reason: a tile first made
+   * *during* meshing would land in an atlas the chunks already have UVs into,
+   * and the first patterned banner would come out wearing some other tile.
+   */
+  const banners = await bannersIn(doc, cached.baker);
+  lap("banners");
+  const source = cachedAtlas(cached);
+  const atlas = source.atlas;
+  lap("atlas");
 
   /*
    * Light before geometry, and for the whole structure at once.
@@ -779,23 +991,132 @@ export async function buildDocumentPreview(
    * away. The void is a way of seeing the space; it does not get to decide
    * how lit the space is.
    */
+  /*
+   * ...and, after an ordinary edit, only where it can have moved.
+   *
+   * The cells written since the cache was built are the document's own record
+   * (`takeVoxelChanges`), and with them `relight` floods the columns within
+   * `LIGHT_REACH` of the change instead of the document: on a 256x96x256
+   * terrain, ~100 ms became a few. Anything that makes the record or the old
+   * grid untrustworthy -- a resize, a settings change, a cache somebody else
+   * built -- takes the whole flood, which is always right.
+   */
+  const key = [
+    options.showMarkers === false ? "markers-hidden" : "markers-shown",
+    options.blockLight === false ? "flat" : "lit",
+    options.occlusion === false ? "open" : "ao",
+    options.smoothLighting === false ? "flat-light" : "smooth",
+  ].join("|");
+  // Taken even with no cache to compare with: the epoch is recorded on the
+  // cache this build returns, so the next edit can be listed.
+  const taken = takeVoxelChanges(doc, meshCache?.epoch ?? null);
+  const known = meshCache !== undefined && meshCache.width >= 0 && meshCache.key === key;
+  const sameGrid =
+    known &&
+    meshCache.width === doc.width &&
+    meshCache.height === doc.height &&
+    meshCache.length === doc.length &&
+    meshCache.frame[0] === doc.frame[0] &&
+    meshCache.frame[1] === doc.frame[1] &&
+    meshCache.frame[2] === doc.frame[2];
+  const listed = known && taken.cells !== null ? taken.cells : null;
+  /*
+   * The box was resized since the cache was built, and only grown: the cells
+   * it added are air, and are relit from scratch below as though they had been
+   * written. A shrink -- an undo, a peel -- compares everything, which is what
+   * it always did; growing is what building outwards does on every block.
+   */
+  const shift: [number, number, number] = known
+    ? [doc.frame[0] - meshCache.frame[0], doc.frame[1] - meshCache.frame[1], doc.frame[2] - meshCache.frame[2]]
+    : [0, 0, 0];
+  const grown =
+    known &&
+    !sameGrid &&
+    listed !== null &&
+    shift.every((step) => step >= 0) &&
+    meshCache.width + shift[0] <= doc.width &&
+    meshCache.height + shift[1] <= doc.height &&
+    meshCache.length + shift[2] <= doc.length;
+  let light: LightGrid | null = null;
+  let changed: number[] | null = listed !== null && (sameGrid || grown) ? [...listed] : null;
+  if (options.blockLight !== false) {
+    const before = known ? meshCache.lightGrid : null;
+    if (sameGrid && listed !== null && before !== null && listed.size === 0) {
+      light = before;
+    } else if ((sameGrid || grown) && listed !== null && before !== null) {
+      const box = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity };
+      const include = (x0: number, x1: number, z0: number, z1: number): void => {
+        if (x0 < box.minX) box.minX = x0;
+        if (x1 > box.maxX) box.maxX = x1;
+        if (z0 < box.minZ) box.minZ = z0;
+        if (z1 > box.maxZ) box.maxZ = z1;
+      };
+      const plane = doc.height * doc.length;
+      for (const index of listed) {
+        const x = Math.floor(index / plane);
+        const z = index % doc.length;
+        include(x, x, z, z);
+      }
+      let start = before;
+      if (grown) {
+        start = carryLight(before, [doc.width, doc.height, doc.length], shift);
+        // The new cells, as slabs: a slab added on top spans every column.
+        const old = [meshCache!.width, meshCache!.height, meshCache!.length];
+        if (shift[1] > 0 || old[1] + shift[1] < doc.height) include(0, doc.width - 1, 0, doc.length - 1);
+        if (shift[0] > 0) include(0, shift[0] - 1, 0, doc.length - 1);
+        if (old[0] + shift[0] < doc.width) include(old[0] + shift[0], doc.width - 1, 0, doc.length - 1);
+        if (shift[2] > 0) include(0, doc.width - 1, 0, shift[2] - 1);
+        if (old[2] + shift[2] < doc.length) include(0, doc.width - 1, old[2] + shift[2], doc.length - 1);
+      }
+      if (box.minX === Infinity) {
+        light = start;
+      } else {
+        const relit = relight(start, visible, box);
+        light = relit.grid;
+        // A loop, not a spread: a big fill relights tens of thousands of cells.
+        for (const index of relit.changed) changed!.push(index);
+      }
+    } else {
+      light = computeLight(visible);
+      changed = null;
+    }
+  }
   const shading = {
-    light: options.blockLight === false ? null : computeLight(visible),
+    light,
     occlusion: options.occlusion !== false,
     smooth: options.smoothLighting !== false,
   };
+  lap("light");
 
   const chunked = await buildChunkedMesh(
     structure,
     cached.baker,
     atlas.uvRects,
-    version,
+    // The layout, not the version: a tile added to the reserve moves no UV,
+    // so the chunks already meshed against this sheet stay right.
+    source.layout,
     meshCache ?? createChunkMeshCache(),
     shading,
     signs,
     filled.voidIndices,
+    banners,
+    timings,
+    {
+      frame: doc.frame,
+      changed,
+      key,
+      epoch: taken.epoch,
+      lod: options.lod ? { ...options.lod, budgetMs: options.lodBudgetMs ?? 0 } : null,
+    },
   );
-  await warnAboutBlocksWithNoGeometry(structure, cached.baker, new Set(Object.keys(atlas.uvRects)));
+  at = performance.now();
+  await warnAboutBlocksWithNoGeometry(
+    structure,
+    cached.baker,
+    new Set(Object.keys(atlas.uvRects)),
+    present,
+  );
+  lap("silent check");
   /*
    * `pieces` only ever receives chunks that have indices, so this is exactly
    * the question the fused mesh used to be built to answer -- and building it
@@ -803,26 +1124,37 @@ export async function buildDocumentPreview(
    * allocated and copied per placed block. See `concatChunks`.
    */
   if (chunked.pieces.length === 0) {
-    throw new EmptyPreviewError(countSolidBlocks(structure));
+    throw new EmptyPreviewError(doc.voxels.length - (doc.counts[0] ?? 0));
   }
   // Unioned from the chunks' own boxes rather than walked over every vertex,
-  // which was another 39 ms of the same edit.
-  const bounds = extentOf(chunked.bounds);
+  // which was another 39 ms of the same edit. The boxes are in content
+  // coordinates, so the frame goes back on for the caption.
+  const [fx, fy, fz] = doc.frame;
+  const bounds = extentOf({
+    min: [chunked.bounds.min[0] + fx, chunked.bounds.min[1] + fy, chunked.bounds.min[2] + fz],
+    max: [chunked.bounds.max[0] + fx, chunked.bounds.max[1] + fy, chunked.bounds.max[2] + fz],
+  });
+  const mesh = toMeshPayload(
+    chunked.pieces,
+    chunked.pieceKeys,
+    source,
+    chunked.voidPieces,
+    chunked.voidPieceKeys,
+    doc.frame,
+    chunked.lodPieces,
+    chunked.lod,
+  );
+  lap("payload");
   return {
-    mesh: toMeshPayload(
-      chunked.pieces,
-      chunked.pieceKeys,
-      atlas,
-      version,
-      cached.baker.animations,
-      chunked.voidPieces,
-      chunked.voidPieceKeys,
-    ),
+    mesh,
     center: bounds.center,
     size: bounds.size,
     meshCache: chunked.cache,
     rebuiltChunks: chunked.rebuilt,
     totalChunks: chunked.total,
+    rebuiltRegions: chunked.rebuiltRegions,
+    timings,
+    atlas: source,
   };
 }
 
@@ -868,22 +1200,38 @@ export async function warmBaker(
   return cachedAtlas(cached).version;
 }
 
+/** The atlas the cached baker for these options draws with, as it stands now. */
+export async function currentAtlas(options: DocumentPreviewOptions): Promise<AtlasSource> {
+  const cached = await cachedBaker(
+    options.resourcePackPath,
+    options.fallbackResourcePackPath ?? null,
+    options.biomeColor ?? DEFAULT_BIOME_COLOR,
+    options.waterColor ?? DEFAULT_WATER_COLOR,
+  );
+  return cachedAtlas(cached);
+}
+
 /**
  * Makes sure the baker has decoded every block the structure uses.
  *
  * Cheaper than it looks: `bakeBlockstate` is memoised per blockstate, so this
- * is one bake per *distinct* block and a map lookup for the rest, however many
- * voxels there are.
+ * is one bake per *distinct* block, however many voxels there are -- and which
+ * entries are present comes from the document's counts. It came from
+ * `new Set(voxels)`, which on a 256x96x256 was ~95 ms of every edit, and the
+ * same set was built a second time a few lines later for the silent check.
  */
 async function primeBaker(
   structure: StructureData,
   baker: ModelBaker,
   signs: ReadonlyMap<number, SignText>,
+  present: Presence,
+  /** Whether the stand-ins are wanted too: their textures have to be in the atlas as well. */
+  lod = false,
 ): Promise<void> {
-  const present = new Set(structure.voxels);
   for (const [index, entry] of structure.palette.entries()) {
-    if (present.has(index) && !paletteEntryIsAir(entry)) {
+    if (present(index) && !paletteEntryIsAir(entry)) {
       await baker.bakeBlockstate(entry);
+      if (lod) await baker.bakeLod(entry);
     }
   }
   /*
@@ -938,6 +1286,39 @@ function signsIn(doc: SchematicDocument): Map<number, SignText> {
     if (text !== null) signs.set(x * doc.height * doc.length + y * doc.length + z, text);
   }
   return signs;
+}
+
+/**
+ * The composed cloth of every banner whose block entity says how it looks, by
+ * flat voxel index.
+ *
+ * A banner with no design and a flat-era block entity is left out, and keeps
+ * the plain dyed cloth its block state already gives it. A **legacy** banner
+ * with a `Base` is put in even with no layers: every pre-Flattening banner is
+ * `white_banner` in the palette, and `Base` is the only place its colour is --
+ * without this a 1.12 schematic's banners were all white.
+ *
+ * Read here rather than in the pipeline for `signsIn`'s reason: this is the one
+ * place with a document, and a block entity is the document's.
+ */
+async function bannersIn(doc: SchematicDocument, baker: ModelBaker): Promise<Map<number, string>> {
+  const banners = new Map<number, string>();
+  const format = bannerFormat(documentEra(doc.format, doc.dataVersion), doc.dataVersion);
+  for (const record of doc.blockEntities.values()) {
+    const [x, y, z] = record.pos;
+    if (x < 0 || y < 0 || z < 0 || x >= doc.width || y >= doc.height || z >= doc.length) continue;
+    const entry = getBlock(doc, x, y, z);
+    if (!isBannerBlock(entry.namespacedName)) continue;
+    const look = readBanner(record.nbt, format);
+    if (look.layers.length === 0 && look.base === null) continue;
+    const base = look.base ?? bannerBlockColor(entry.namespacedName) ?? "white";
+    const key = await baker.bannerCloth(
+      DYE_COLOURS[base],
+      look.layers.map((layer) => ({ pattern: layer.pattern, hex: DYE_COLOURS[layer.color] })),
+    );
+    if (key !== null) banners.set(x * doc.height * doc.length + y * doc.length + z, key);
+  }
+  return banners;
 }
 
 /**

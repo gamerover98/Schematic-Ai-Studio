@@ -22,7 +22,22 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { loadStructure } from "../src/main/pipeline/loader.js";
+import { gpuSwitchFor, readGpuChoice } from "../src/main/services/gpu_preference.js";
+import {
+  adapterForPreference,
+  bootTime,
+  cacheForBoot,
+  enumerateAdaptersSync,
+  gpuStatusFrom,
+  launchHonoured,
+  parseDxgiOutput,
+  planGpuLaunch,
+  rendererDeviceId,
+  type AdapterList,
+} from "../src/main/services/gpu_adapters.js";
+import { parsePersistedFile, type PersistedFile } from "../src/main/services/settings_file.js";
 import { IPC, openCodeModelRequiresKey } from "../src/shared/ipc.js";
+import { createReplyTable, RendererTimeoutError } from "../src/main/services/renderer_request.js";
 import { rememberedFromIndex } from "../src/main/services/conversation_core.js";
 import {
   adoptSubject,
@@ -79,6 +94,7 @@ import {
   buildPreview,
   clearBakerCache,
   clearPreviewCache,
+  fullAtlas,
   sunAnglesRadians,
 } from "../src/main/services/preview.js";
 import {
@@ -144,6 +160,7 @@ import {
   isLoopbackAddress,
   DEFAULT_SETTINGS,
   DEFAULT_UI_SETTINGS,
+  DOCK_WIDTH,
   SIDEBAR_WIDTH,
   VOID_OPACITY,
   type EditingSettings,
@@ -153,6 +170,12 @@ import {
   DEFAULT_UPDATE_SETTINGS,
   effectiveIncludeDevBuilds,
   type UpdateSettings,
+  gpuAdapterKey,
+  DEFAULT_PREVIEW_SETTINGS,
+  LOD_AUTO_TRIANGLES,
+  lodSettings,
+  type GpuPreference,
+  type PreviewSettings,
 } from "../src/shared/settings.js";
 import { MC_VERSIONS, eraOf, resolveVersionName } from "../src/shared/mc_versions.js";
 import {
@@ -384,7 +407,9 @@ try {
     // `tests/chunks.ts` compares the chunked path against itself.
     check(
       "a single-chunk document renders byte-identically to the file it came from",
-      meshDigest(preview.mesh) === meshDigest(fromDocument.mesh),
+      // The document path leaves the atlas to whoever ships it (`atlasFor`),
+      // so the sheet it addresses is compared as the sheet.
+      meshDigest(preview.mesh) === meshDigest({ ...fromDocument.mesh, atlas: fullAtlas(fromDocument.atlas) }),
     );
     equal("...with the same bounds", fromDocument.size, preview.size);
     equal("...and the whole structure fits in one chunk, as assumed above", fromDocument.totalChunks, 1);
@@ -435,7 +460,12 @@ try {
     const iconOptions = { resourcePackPath: null, fallbackResourcePackPath: bundledPack };
 
     const firstPass = await buildBlockIcons(iconBlocks, iconOptions, null);
-    const secondPass = await buildBlockIcons(iconBlocks, iconOptions, firstPass.atlasVersion);
+    const secondPass = await buildBlockIcons(
+      iconBlocks,
+      iconOptions,
+      firstPass.atlasVersion,
+      firstPass.atlasLayout,
+    );
 
     equal("every block asked for comes back", firstPass.icons.length, iconBlocks.length);
     check("the first batch carries its atlas", firstPass.atlas !== null);
@@ -458,6 +488,64 @@ try {
       "and they are real geometry, not empty",
       firstPass.icons.every((icon) => icon.geometry !== null && icon.geometry.indices.length > 0),
     );
+    check(
+      "a block is a picture of one cell",
+      firstPass.icons.every((icon) => icon.size.join("x") === "1x1x1"),
+    );
+
+    /*
+     * A block that is two cells is drawn whole. A bed's icon was its foot and
+     * a door's its lower half, in the inventory, the hotbar and the materials
+     * list -- half a block, which read as a broken model.
+     *
+     * The reading is placement's: a bare id or the near half is the whole, the
+     * far half on its own is one cell. And the geometry has to reach into the
+     * second cell, or the size is a claim about a picture that was not drawn.
+     */
+    {
+      const wholes = await buildBlockIcons(
+        [
+          "minecraft:red_bed",
+          "minecraft:red_bed[facing=east,part=foot]",
+          "minecraft:red_bed[facing=north,part=head]",
+          "minecraft:oak_door",
+          "minecraft:sunflower[half=upper]",
+          "minecraft:piston[extended=true,facing=up]",
+          "minecraft:piston",
+        ],
+        iconOptions,
+        null,
+      );
+      const sizeOf = (block: string): string =>
+        wholes.icons.find((icon) => icon.block === block)?.size.join("x") ?? "missing";
+      /** How far along each axis the geometry reaches. */
+      const reach = (block: string): string => {
+        const geometry = wholes.icons.find((icon) => icon.block === block)?.geometry;
+        if (!geometry) return "none";
+        const max = [0, 0, 0];
+        for (let i = 0; i < geometry.positions.length; i += 3) {
+          for (let axis = 0; axis < 3; axis += 1) max[axis] = Math.max(max[axis], geometry.positions[i + axis]);
+        }
+        return max.map((value) => Math.ceil(value - 1e-6)).join("x");
+      };
+      equal("a bare bed is a picture of both halves, along its facing", sizeOf("minecraft:red_bed"), "1x1x2");
+      equal("...and its geometry reaches the second cell", reach("minecraft:red_bed"), "1x1x2");
+      equal(
+        "a foot facing east is a bed two cells along x",
+        sizeOf("minecraft:red_bed[facing=east,part=foot]"),
+        "2x1x1",
+      );
+      equal("a head on its own is one cell", sizeOf("minecraft:red_bed[facing=north,part=head]"), "1x1x1");
+      equal("a door is both halves, one above the other", sizeOf("minecraft:oak_door"), "1x2x1");
+      equal("...and its geometry reaches the top one", reach("minecraft:oak_door"), "1x2x1");
+      equal("the top of a sunflower on its own is one cell", sizeOf("minecraft:sunflower[half=upper]"), "1x1x1");
+      equal(
+        "an extended piston is drawn with its head",
+        sizeOf("minecraft:piston[extended=true,facing=up]"),
+        "1x2x1",
+      );
+      equal("a retracted one is one block", sizeOf("minecraft:piston"), "1x1x1");
+    }
 
     /*
      * And the cost of that guarantee, which is the part that was catastrophic
@@ -1043,8 +1131,9 @@ console.log("\n--- discard prompt ---");
   equal("open says what it will do", discardPrompt("open", "a").confirmLabel, "Discard and open");
   equal("close says what it will do", discardPrompt("close", "a").confirmLabel, "Discard and close");
   equal("update says what it will do", discardPrompt("update", "a").confirmLabel, "Discard and update");
+  equal("restore says what it will do", discardPrompt("restore", "a").confirmLabel, "Discard and restore");
 
-  for (const intent of ["new", "open", "close", "update"] as const) {
+  for (const intent of ["new", "open", "close", "update", "restart", "restore"] as const) {
     const prompt = discardPrompt(intent, "a.schem");
     check(
       `${intent}: the button is never a bare OK`,
@@ -1150,6 +1239,15 @@ console.log("\n--- application menu ---");
   equal("New works with nothing open", at(fileMenu(empty), "New…")?.enabled, true);
   equal("Open works with nothing open", at(fileMenu(empty), "Open…")?.enabled, true);
 
+  /*
+   * Convert is about files, not the open document: it reads one and writes
+   * another without opening either, so it is in File beside Open, and never
+   * dark. It sat in the application bar for a long time, beside the
+   * document's own settings, which is the one place it did not belong.
+   */
+  equal("Convert works with nothing open", at(fileMenu(empty), "Convert…")?.enabled, true);
+  equal("...and asks the window for the converter", at(fileMenu(open), "Convert…")?.command, "convert");
+
   for (const label of ["Save", "Save As…", "Close Schematic"]) {
     equal(`${label} is off with nothing open`, at(fileMenu(empty), label)?.enabled, false);
     equal(`${label} is on with a document`, at(fileMenu(open), label)?.enabled, true);
@@ -1199,7 +1297,245 @@ console.log("\n--- application menu ---");
    * cannot be got wrong.
    */
   for (const item of helpMenu(open)) {
+    // The DevTools row is the one exception, and its key is the whole point
+    // of it: Ctrl+Shift+I is what anybody reaches for, and this menu replaced
+    // the default one it used to come from. Released in flight like the rest,
+    // which the walk further down checks for every row at once.
+    if (item.role === "toggleDevTools") continue;
     equal(`${item.label ?? "?"} has no accelerator`, item.accelerator, undefined);
+  }
+
+  /*
+   * DevTools can be opened, which is what the stutter profiler's console
+   * lines and its `viewer:*` measures are for. Electron handles the role, so
+   * the row has to carry it -- a label alone would be a row that does nothing.
+   */
+  const devTools = helpMenu(empty).find((item) => item.role === "toggleDevTools");
+  equal("Help offers the developer tools", devTools?.label, "Toggle Developer Tools");
+  equal("...with nothing open as well", devTools?.enabled, true);
+  equal("...on the key everybody reaches for", devTools?.accelerator, "CmdOrCtrl+Shift+I");
+
+  /*
+   * The GPU preference is a Chromium switch, applied before ready from the
+   * settings file read synchronously -- so a file that cannot be read has to
+   * mean "leave it to the system", never a throw at startup.
+   */
+  equal("auto appends no GPU switch", gpuSwitchFor("auto"), null);
+  equal("high performance forces the dedicated GPU", gpuSwitchFor("high-performance"), "force_high_performance_gpu");
+  equal("low power forces the integrated GPU", gpuSwitchFor("low-power"), "force_low_power_gpu");
+
+  /*
+   * **The file is built the way the store writes it, and that is the check.**
+   * The old reader looked for `preview` at the top while the store writes it
+   * under `settings`, so every launch read "auto" -- and the old checks wrote
+   * `{"preview": ...}` by hand, agreeing with the reader instead of the file.
+   * A laptop set to high performance drew with its integrated GPU while every
+   * check passed. Here the text comes from a `PersistedFile`, and the store's
+   * own reading is required to be the same function.
+   */
+  {
+    const stored = (preview: Record<string, unknown>): string =>
+      JSON.stringify({
+        settings: { ...DEFAULT_SETTINGS, preview: { ...DEFAULT_SETTINGS.preview, ...preview } as PreviewSettings },
+        encryptedKeys: {},
+        recentDocuments: [],
+        mcpToken: null,
+      } satisfies PersistedFile);
+    equal("no settings file reads as auto", readGpuChoice(null), { preference: "auto", adapter: null });
+    equal("malformed JSON reads as auto", readGpuChoice("{"), { preference: "auto", adapter: null });
+    equal(
+      "a stored preference is read back from where the store writes it",
+      readGpuChoice(stored({ gpuPreference: "high-performance" })).preference,
+      "high-performance",
+    );
+    equal(
+      "...and a stored adapter with it",
+      readGpuChoice(stored({ gpuAdapter: "10de:249c:151e1025:a1#0" })).adapter,
+      "10de:249c:151e1025:a1#0",
+    );
+    equal("a junk preference reads as auto", readGpuChoice(stored({ gpuPreference: "fast" })).preference, "auto");
+    equal("a junk adapter reads as none", readGpuChoice(stored({ gpuAdapter: "the big one" })).adapter, null);
+    equal(
+      "a preference at the top of the file is not where the store writes it",
+      readGpuChoice('{"preview":{"gpuPreference":"low-power"}}').preference,
+      "auto",
+    );
+    equal(
+      "a byte-order mark in front of the file is not a corrupt file",
+      readGpuChoice(`\uFEFF${stored({ gpuPreference: "low-power" })}`).preference,
+      "low-power",
+    );
+    equal(
+      "the store and startup read one file one way",
+      parsePersistedFile(stored({ gpuPreference: "low-power" })).settings.preview.gpuPreference,
+      "low-power",
+    );
+    const store = readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "services", "settings-store.ts"),
+      "utf8",
+    );
+    check("the settings store reads its file through parsePersistedFile", /parsePersistedFile\(await readFile/.test(store));
+    check("...and parses nothing of its own", !/JSON\.parse\(/.test(store));
+  }
+
+  /*
+   * The adapter list. The fixture is this machine's own DXGI answer, taken
+   * while the LUID switch was being verified: an AMD iGPU, an RTX 3080 and the
+   * Basic Render Driver, in bus order, and the two power orders.
+   */
+  {
+    const dxgi = JSON.stringify({
+      adapters: [
+        { name: "AMD Radeon(TM) Graphics", vendorId: 4098, deviceId: 5688, subSysId: 354291749, revision: 197, dedicatedMemory: 519847936, luid: "0,72997", flags: 0 },
+        { name: "NVIDIA GeForce RTX 3080 Laptop GPU", vendorId: 4318, deviceId: 9372, subSysId: 354291749, revision: 161, dedicatedMemory: 8405385216, luid: "0,76739", flags: 0 },
+        { name: "Microsoft Basic Render Driver", vendorId: 5140, deviceId: 140, subSysId: 0, revision: 0, dedicatedMemory: 0, luid: "0,76645", flags: 2 },
+      ],
+      highPerformance: ["0,76739", "0,72997", "0,76645"],
+      lowPower: ["0,72997", "0,76739", "0,76645"],
+    });
+    const list = parseDxgiOutput(dxgi);
+    equal("the software adapter is never a choice", list?.adapters.map((adapter) => adapter.name), [
+      "AMD Radeon(TM) Graphics",
+      "NVIDIA GeForce RTX 3080 Laptop GPU",
+    ]);
+    equal("a key is the ids in hex, never the LUID", list?.adapters[1]?.key, "10de:249c:151e1025:a1#0");
+    equal("...and is what the setting accepts", gpuAdapterKey(list?.adapters[1]?.key), list?.adapters[1]?.key);
+    equal("the power orders drop what is not listed", list?.highPerformance, ["0,76739", "0,72997"]);
+    equal(
+      "high performance lands on the RTX",
+      list === null ? null : adapterForPreference(list, "high-performance")?.name,
+      "NVIDIA GeForce RTX 3080 Laptop GPU",
+    );
+    equal(
+      "low power lands on the AMD",
+      list === null ? null : adapterForPreference(list, "low-power")?.name,
+      "AMD Radeon(TM) Graphics",
+    );
+    const twins = parseDxgiOutput(
+      JSON.stringify({
+        adapters: [1, 2, 3].map((n) => ({ name: "Twin", vendorId: 0x10de, deviceId: 1, subSysId: 2, revision: 3, luid: `0,${n}`, flags: 0 })),
+      }),
+    );
+    equal("identical cards are told apart by order", twins?.adapters.map((adapter) => adapter.key), [
+      "10de:1:2:3#0",
+      "10de:1:2:3#1",
+      "10de:1:2:3#2",
+    ]);
+    equal("PowerShell noise is not an adapter list", parseDxgiOutput("Add-Type : boom"), null);
+    equal(
+      "a LUID the switch cannot parse is dropped",
+      parseDxgiOutput(JSON.stringify({ adapters: [{ name: "x", luid: "0;1", flags: 0 }] }))?.adapters.length,
+      0,
+    );
+
+    // The per-boot cache.
+    const boot = bootTime(1_700_000_000_000, 3600);
+    equal("boot time is the clock minus the uptime", boot, 1_700_000_000 - 3600);
+    const cache = JSON.stringify({ boot, list, badLuids: ["0,1"] });
+    equal("a cache from this boot is read back", cacheForBoot(cache, boot + 2)?.list.adapters.length, 2);
+    equal("...with its bad LUIDs", cacheForBoot(cache, boot)?.badLuids, ["0,1"]);
+    equal("a cache from another boot is not", cacheForBoot(cache, boot + 600), null);
+    equal("a corrupt cache is not", cacheForBoot("{", boot), null);
+
+    // The launch plan.
+    let enumerations = 0;
+    const enumerate = (): AdapterList | null => {
+      enumerations += 1;
+      return list;
+    };
+    const plan = (
+      choice: { preference: GpuPreference; adapter: string | null },
+      cachedText: string | null = null,
+      platform = "win32",
+    ) => planGpuLaunch({ choice, platform, boot, cachedText, enumerate });
+    const byKey = plan({ preference: "auto", adapter: "10de:249c:151e1025:a1#0" });
+    equal("a chosen adapter is asked for by its LUID", byKey.switches, [{ name: "use-adapter-luid", value: "0,76739" }]);
+    equal("...recorded as such", [byKey.launch.method, byKey.launch.adapterName], ["luid", "NVIDIA GeForce RTX 3080 Laptop GPU"]);
+    check("...and the list read for it is kept for the boot", byKey.cacheToWrite?.boot === boot && enumerations === 1);
+    const cached = plan({ preference: "auto", adapter: "10de:249c:151e1025:a1#0" }, JSON.stringify(byKey.cacheToWrite));
+    check("a second launch in the same boot reads no list", enumerations === 1 && cached.cacheToWrite === null);
+    equal("...and passes the same LUID", cached.switches[0]?.value, "0,76739");
+    const distrusted = plan(
+      { preference: "auto", adapter: "10de:249c:151e1025:a1#0" },
+      JSON.stringify({ ...byKey.cacheToWrite, badLuids: ["0,76739"] }),
+    );
+    check(
+      "a LUID that did not take sends the next launch back to the list",
+      enumerations === 2 && distrusted.cacheToWrite !== null,
+    );
+    const gone = plan({ preference: "high-performance", adapter: "1:2:3:4#0" });
+    equal("a card no longer there falls back to the preference", gone.switches, [{ name: "force_high_performance_gpu" }]);
+    equal("...and says why", gone.launch.note, "adapter-missing");
+    const broken = planGpuLaunch({
+      choice: { preference: "auto", adapter: "10de:249c:151e1025:a1#0" },
+      platform: "win32",
+      boot,
+      cachedText: null,
+      enumerate: () => null,
+    });
+    equal("a list that cannot be read falls back too", [broken.switches.length, broken.launch.note], [0, "enumeration-failed"]);
+    equal(
+      "outside Windows an adapter cannot be named, so the preference applies",
+      plan({ preference: "low-power", adapter: "10de:249c:151e1025:a1#0" }, null, "linux").switches,
+      [{ name: "force_low_power_gpu" }],
+    );
+    const before = enumerations;
+    const preference = plan({ preference: "high-performance", adapter: null });
+    equal("a preference stays on Chromium's switch", preference.switches, [{ name: "force_high_performance_gpu" }]);
+    check("...and costs no list", enumerations === before);
+
+    // What actually draws.
+    const nvidia = "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Laptop GPU (0x0000249C) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+    const amd = "ANGLE (AMD, AMD Radeon(TM) Graphics (0x00001638) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+    equal("the device id is read out of the ANGLE string", rendererDeviceId(nvidia), 0x249c);
+    equal("...or nothing when it is not there", rendererDeviceId("SwiftShader"), null);
+    const rtx = list?.adapters[1] ?? null;
+    equal("the RTX drawing honours a launch that asked for it", launchHonoured(byKey.launch, rtx, nvidia), true);
+    equal("the AMD drawing does not", launchHonoured(byKey.launch, rtx, amd), false);
+    equal("a launch that named no card cannot be dishonoured", launchHonoured(preference.launch, rtx, amd), null);
+    const windows = gpuStatusFrom({ platform: "win32", launch: byKey.launch, list, devices: [], renderer: amd });
+    equal("the status lists the cards", windows.adapters?.length, 2);
+    equal("...says which one draws", windows.active?.adapter, "1002:1638:151e1025:c5#0");
+    equal("...and that the choice was not honoured", windows.honoured, false);
+    equal("...with the preferences resolved to cards", [windows.highPerformance, windows.lowPower], [
+      "10de:249c:151e1025:a1#0",
+      "1002:1638:151e1025:c5#0",
+    ]);
+    const linux = gpuStatusFrom({
+      platform: "linux",
+      launch: preference.launch,
+      list: null,
+      devices: [
+        { vendorId: 0x8086, deviceId: 0x9a49, gpuPreference: 2 },
+        { vendorId: 0x10de, deviceId: 0x2520, gpuPreference: 3, deviceString: "GeForce RTX 3060" },
+        { vendorId: 0x1414, deviceId: 0x8c },
+      ],
+      renderer: null,
+    });
+    equal("elsewhere the cards come from Chromium, software ones left out", linux.adapters?.map((adapter) => adapter.name), [
+      "Intel 0x9a49",
+      "GeForce RTX 3060",
+    ]);
+    check(
+      "...and only a preference can be chosen",
+      !linux.choosable && linux.highPerformance === (linux.adapters?.[1]?.key ?? "missing"),
+    );
+
+    if (process.platform === "win32") {
+      // The script itself, on the machine running the suite: a typo in the C#
+      // fails here rather than as a silent fallback at somebody's launch.
+      const real = enumerateAdaptersSync(30_000);
+      check("the DXGI script runs and answers on Windows", real !== null, "enumerateAdaptersSync returned null");
+    }
+  }
+  {
+    const entry = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "index.ts"), "utf8");
+    const ready = entry.indexOf("app.whenReady()");
+    const planned = entry.indexOf("planGpuLaunch(");
+    const append = entry.indexOf("app.commandLine.appendSwitch(name");
+    check("the GPU plan is made before the app is ready", planned >= 0 && planned < ready);
+    check("...and its switches appended before it", append >= 0 && append < ready);
+    check("which adapter draws is checked once it is up", entry.indexOf("startGpuCheck()") > ready);
   }
 
   /*
@@ -1683,16 +2019,36 @@ console.log("\n--- settings coercion ---");
     sidebarCollapsed: true,
     theme: "light",
     language: "en",
-    toolWindowX: 240,
-    toolWindowY: 96,
-    // Both above the minimum and neither the default, so a `coerceUi` that
+    // Inside `DOCK_WIDTH` and not the default, so a `coerceUi` that
     // substituted either would not survive the comparison.
-    toolWindowW: 340,
-    toolWindowH: 520,
-    inspectorWindowX: 300,
-    inspectorWindowY: 480,
-    inspectorWindowW: 380,
-    inspectorWindowH: 400,
+    dockWidth: 410,
+    dockCollapsed: true,
+    // Neither the default, for the same reason.
+    materialsUnify: true,
+    materialsSort: "nameDesc",
+    // Every field away from its default, one object down as well.
+    creative: {
+      tool: "walls",
+      brush: { shape: "disc", radius: 7, mode: "empty" },
+      shape: { kind: "pyramid", axis: "x", hollow: true, thickness: 3, height: 12, mode: "filled" },
+      walls: { height: 9, thickness: 2, mode: "empty" },
+      terrain: {
+        radius: 11,
+        footprint: "square",
+        mode: "raise",
+        field: { noise: { kind: "ridged", seed: 42, params: { frequency: 0.02, octaves: 5 } }, base: -8, amplitude: 40 },
+        surface: "70%minecraft:grass_block,30%minecraft:moss_block",
+        subsoil: "minecraft:coarse_dirt",
+        subsoilDepth: 5,
+        rock: "minecraft:deepslate",
+      },
+      smooth: { radius: 9, footprint: "square", iterations: 7 },
+      erode: { radius: 6, preset: "floatclean" },
+    },
+    creativeWindowX: 500,
+    creativeWindowY: 120,
+    creativeWindowW: 300,
+    creativeWindowH: 410,
     /*
      * `hotbar` and `hotbarSlot` were here and belong to a *document* now,
      * keyed on its path, so they are no longer part of the window's state.
@@ -1702,6 +2058,88 @@ console.log("\n--- settings coercion ---");
   } satisfies UiSettings;
 
   equal("every ui field survives a round-trip", coerceUi(ui), ui);
+  // The creative options are label-and-field rows with a noise picker in them,
+  // and at the old 248 the picker read "Perlin nois": a width saved before the
+  // minimum existed comes back at it.
+  equal(
+    "a creative options window narrower than its minimum is widened to it",
+    coerceUi({ ...ui, creativeWindowW: 248 }).creativeWindowW,
+    300,
+  );
+  equal(
+    "an order the materials list does not have falls back to most first",
+    coerceUi({ ...ui, materialsSort: "sideways" }).materialsSort,
+    "countDesc",
+  );
+  /*
+   * The creative tools are read by a gesture in flight, so what is not a
+   * tool, a shape or a mode this build has is the default rather than kept,
+   * and a number is brought inside its range rather than refused.
+   */
+  {
+    const odd = coerceUi({
+      ...ui,
+      creative: {
+        tool: "terraform",
+        brush: { shape: "star", radius: 400, mode: "sideways" },
+        shape: { kind: "walls", axis: "w", hollow: "yes", thickness: 0, height: -3, mode: "all" },
+        walls: { height: "tall" },
+        terrain: {
+          radius: 400,
+          footprint: "hexagon",
+          mode: "flood",
+          field: { noise: { kind: "gradient", seed: 3 }, base: 4, amplitude: 9 },
+          surface: "",
+          subsoil: "0%minecraft:dirt",
+          subsoilDepth: 99,
+          rock: 7,
+        },
+        smooth: { radius: -4, footprint: "star", iterations: 400 },
+        erode: { radius: "big", preset: "none" },
+      },
+    }).creative;
+    equal(
+      "a tool, a shape or a mode this build does not have is the default",
+      [odd.tool, odd.brush.shape, odd.brush.mode, odd.shape.kind, odd.shape.axis],
+      ["place", "sphere", "all", "sphere", "y"],
+    );
+    equal(
+      "...walls are a tool and not something the shape tool draws",
+      odd.shape.kind,
+      DEFAULT_UI_SETTINGS.creative.shape.kind,
+    );
+    equal(
+      "...and numbers are clamped into range, or the default when they are not numbers",
+      [odd.brush.radius, odd.shape.thickness, odd.shape.height, odd.walls.height, odd.shape.hollow],
+      [32, 1, 1, 4, false],
+    );
+    equal(
+      "a terrain's footprint, mode and noise this build does not have are the default",
+      [odd.terrain.footprint, odd.terrain.mode, odd.terrain.field],
+      ["disc", "set", DEFAULT_UI_SETTINGS.creative.terrain.field],
+    );
+    equal(
+      "...a layer that is not a mix is the default, and its numbers are clamped",
+      [odd.terrain.surface, odd.terrain.subsoil, odd.terrain.rock, odd.terrain.radius, odd.terrain.subsoilDepth],
+      ["minecraft:grass_block", "minecraft:dirt", "minecraft:stone", 32, 32],
+    );
+    equal(
+      "the smooth and erode brushes clamp their numbers, and VoxelSniper's none is not a preset here",
+      [odd.smooth.radius, odd.smooth.footprint, odd.smooth.iterations, odd.erode.radius, odd.erode.preset],
+      [0, "disc", 32, DEFAULT_UI_SETTINGS.creative.erode.radius, DEFAULT_UI_SETTINGS.creative.erode.preset],
+    );
+    equal(
+      "...and a base past the range is brought back inside it rather than refused",
+      coerceUi({ ...ui, creative: { ...ui.creative, terrain: { ...ui.creative.terrain, field: { ...ui.creative.terrain.field, base: 99999 } } } })
+        .creative.terrain.field.base,
+      1024,
+    );
+    equal(
+      "a settings file from before the creative tools comes back with all of them",
+      coerceUi({ sidebarWidth: 400 }).creative,
+      DEFAULT_UI_SETTINGS.creative,
+    );
+  }
 
   // Every field the opposite of its default, so a `coerceMcp` that dropped one
   // and substituted the default could not survive the comparison below.
@@ -1885,6 +2323,42 @@ console.log("\n--- settings coercion ---");
   equal("every settings field survives a round-trip", coerceSettings(settings), settings);
 
   /*
+   * The levels of detail, read the way main and the viewer both read them.
+   *
+   * `preview` is spread over the defaults with no validation, so the reader
+   * has to be total: a junk value reads exactly like an absent one, and the
+   * window and main cannot disagree about what a stored value means.
+   */
+  equal(
+    "junk level-of-detail settings read as the defaults",
+    lodSettings({ lodMode: "banana", lodPixels: 3, lodAutoTriangles: "lots", lodShapes: "no", lodTint: 1 }),
+    {
+      mode: DEFAULT_PREVIEW_SETTINGS.lodMode,
+      pixels: DEFAULT_PREVIEW_SETTINGS.lodPixels,
+      autoTriangles: DEFAULT_PREVIEW_SETTINGS.lodAutoTriangles,
+      shapes: true,
+      coarse: true,
+      tint: false,
+    },
+  );
+  equal(
+    "...and a stored choice is kept",
+    lodSettings({ lodMode: "always", lodPixels: 8, lodAutoTriangles: 2_000_000, lodShapes: false, lodCoarse: false, lodTint: true }),
+    { mode: "always", pixels: 8, autoTriangles: 2_000_000, shapes: false, coarse: false, tint: true },
+  );
+  equal(
+    "the automatic threshold is clamped and snapped to its step",
+    [123, 1e12, 1_100_000].map((value) => lodSettings({ lodAutoTriangles: value }).autoTriangles),
+    [LOD_AUTO_TRIANGLES.min, LOD_AUTO_TRIANGLES.max, 1_000_000],
+  );
+  equal(
+    "...and survives the settings file like every preview field",
+    coerceSettings({ ...settings, preview: { ...settings.preview, lodMode: "always", lodAutoTriangles: 4_000_000 } })
+      .preview.lodAutoTriangles,
+    4_000_000,
+  );
+
+  /*
    * The default version is the newest release this build knows.
    *
    * A **decision** rather than a derivation -- a default is a statement to a
@@ -2028,6 +2502,15 @@ console.log("\n--- settings coercion ---");
     "...and a hairline one clamped up",
     coerceUi({ sidebarWidth: 10 }).sidebarWidth,
     SIDEBAR_WIDTH.min,
+  );
+  // The docked tools' panel has bounds of its own, and the same two clamps.
+  equal("an over-wide tools panel is clamped down", coerceUi({ dockWidth: 9999 }).dockWidth, DOCK_WIDTH.max);
+  equal("...a hairline one clamped up", coerceUi({ dockWidth: 10 }).dockWidth, DOCK_WIDTH.min);
+  equal("...and nonsense is the default", coerceUi({ dockWidth: "wide" }).dockWidth, DEFAULT_UI_SETTINGS.dockWidth);
+  // The two floating windows it replaced leave nothing behind on the next write.
+  check(
+    "the tool windows' old places are not kept",
+    !("toolWindowX" in coerceUi({ toolWindowX: 40 })) && !("inspectorWindowW" in coerceUi({ inspectorWindowW: 300 })),
   );
 
   equal("an empty file is the defaults", coerceSettings({}), DEFAULT_SETTINGS);
@@ -2466,6 +2949,47 @@ console.log("\n--- what a trace costs on disk ---");
   check("the original is not modified", long.length === MAX_STORED_TRACE_TEXT * 3);
 }
 
+// --- saving is working on it -------------------------------------------------
+//
+// A schematic created and then saved -- from the window or over MCP -- never
+// reached the recents, because the only way onto that list was Open, and a
+// file you just made is a file you never opened. `rememberDocument` in
+// `menu.ts` is the one call now, and neither module can be imported here.
+console.log("\n--- saving is working on it ---");
+{
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main");
+  const handlers = readFileSync(path.join(root, "ipc", "handlers.ts"), "utf8");
+  const server = readFileSync(path.join(root, "mcp", "server.ts"), "utf8");
+  const between = (source: string, from: string, to: string): string => {
+    const at = source.indexOf(from);
+    if (at === -1) return "";
+    const end = source.indexOf(to, at + from.length);
+    return source.slice(at, end === -1 ? source.length : end);
+  };
+  const windowSave = between(handlers, "IPC.docSave", "ipcMain.handle(");
+  const windowOpen = between(handlers, "IPC.docOpen", "ipcMain.handle(");
+  const mcpSave = between(server, "save: async", "close:");
+  const mcpOpen = between(server, "open: async", "create: async");
+  check(
+    "a save from the window records the file in the recents",
+    windowSave.includes("rememberDocument(result.filePath)"),
+  );
+  check("...and so does a save over MCP", mcpSave.includes("rememberDocument(result.filePath)"));
+  check(
+    "...as opening does, on both roads",
+    windowOpen.includes("rememberDocument(filePath)") && mcpOpen.includes("rememberDocument(filePath)"),
+  );
+  // Half of it is how the two came apart: the app's list without the OS's, or
+  // the other way round. Nothing outside `menu.ts` may call either on its own.
+  const halves = readdirSync(root, { recursive: true, encoding: "utf8" })
+    .filter((file) => file.endsWith(".ts"))
+    .filter((file) => !["menu.ts", "settings-store.ts"].includes(path.basename(file)))
+    .filter((file) =>
+      /rememberRecentDocument\(|addRecentDocument\(/.test(readFileSync(path.join(root, file), "utf8")),
+    );
+  equal("nothing records only half of a recent document", halves, []);
+}
+
 // --- opening a document points the conversation at it -----------------------
 //
 // A conversation is stored under the *file path*, so every way of putting a
@@ -2525,164 +3049,139 @@ console.log("\n--- recovering is opening ---");
       /shift: contentShiftSince\(session\.history, before\)/.test(body),
       `${channel} can grow below the origin and does not say so`,
     );
-    // Read against an id captured *before* the call, or an edit that changed
-    // nothing would report whatever the previous one did.
+    // Read against a mark taken *before* the call, or an edit that changed
+    // nothing would report whatever the previous one did -- and a mark rather
+    // than an id, or a brush touch that joined the stroke on top would report
+    // nothing at all.
     check(
-      `...against an id taken before the edit`,
-      /const before = session\.history\.nextId;/.test(body),
+      `...against a mark taken before the edit`,
+      /const before = historyMark\(session\.history\);/.test(body),
     );
   }
 }
 
-// --- what the window says on its way down -----------------------------------
-/*
- * The failure this wording is for is silent and total: a reactive loop that
- * Svelte or the browser aborts takes every effect in the window with it, while
- * the viewport goes on drawing and main goes on answering. Navigable and
- * completely dead, with a clean console -- reported that way twice before
- * anything was listening for it.
- */
-console.log("\n--- what the window says on its way down ---");
+// --- a recovery answered with something open --------------------------------
+//
+// The recovery prompt stays up while a schematic is opened from the File menu,
+// a drop or an MCP client, and three things went wrong once one was. Discard
+// answered `state: null`, so the window went back to "Nothing open" with the
+// schematic still drawn and still open in main. Restore replaced it without
+// asking. And the first snapshot of it wrote over the work the prompt was
+// asking about. `handlers.ts` and `App.svelte` cannot be loaded here, so the
+// rules are read out of the source -- the weaker kind of check, which proves
+// the rule is still there and not that it is right.
+console.log("\n--- a recovery answered with something open ---");
 {
-  const plain = failurePrompt("");
-  /*
-   * Escape and the window's close button both land on `cancelId`, so the half
-   * that reloads must never be the one they reach. `discard_prompt`'s rule, and
-   * here it matters more: this dialog is raised *by* an error, so it can appear
-   * while somebody is in the middle of something else.
-   *
-   * The indices are literal types, so `tsc` rejects any comparison between them
-   * outright -- which is a stronger statement than a check could make, and is
-   * why there is not one. What no type states is that they are three distinct
-   * buttons with words on them.
-   */
-  check(
-    "three buttons, and they say different things",
-    plain.buttons.length === 3 &&
-      plain.buttons.every((label) => label.trim() !== "") &&
-      new Set(plain.buttons).size === 3,
-    plain.buttons.join(" | "),
-  );
-  check(
-    "it says what a reload costs",
-    plain.detail.includes("undo history"),
-    plain.detail,
-  );
-  /*
-   * And what it does not cost. Autosave lives in main, on a 20-second timer,
-   * and main is the half still working -- so the snapshot is current however
-   * long the window has been dead. A dialog that only warned would leave
-   * somebody weighing a reload against an unknown.
-   */
-  check(
-    "...and what it does not",
-    plain.detail.includes("20 seconds"),
-    plain.detail,
-  );
-
-  const said = failurePrompt("effect_update_depth_exceeded");
-  check(
-    "what the renderer managed to say is carried through",
-    said.detail.includes("effect_update_depth_exceeded"),
-    said.detail,
-  );
-
-  /*
-   * The count, and only when there is one. The renderer reports once, so a
-   * number here means something genuinely kept failing underneath -- worth
-   * knowing before choosing, and misleading shown as a zero.
-   */
-  check("no count when nothing followed", !plain.detail.includes("further"), plain.detail);
-  check(
-    "...and one when something did",
-    failurePrompt("x", 3).detail.includes("3 further errors"),
-  );
-  check(
-    "...counted in the singular when it is one",
-    failurePrompt("x", 1).detail.includes("1 further error since"),
-  );
-
-  /*
-   * The report, which is the thing a person actually pastes. The versions are
-   * in it because an issue asks for them every time, and because main has all
-   * of them without asking the renderer -- which matters when the renderer is
-   * the half that has stopped answering.
-   */
-  const facts = {
-    appName: "Schematic AI Studio",
-    appVersion: "1.0.0",
-    platform: "win32 x64",
-    electron: "33.0.0",
-    chrome: "130.0.0",
-    node: "20.18.0",
-    kind: "error" as const,
-    message: "Cannot read properties of null (reading 'children')",
-    at: "app.js:1:2",
-    stack: "at $effect (BlockPicker.svelte)",
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const handlers = readFileSync(path.join(here, "..", "src", "main", "ipc", "handlers.ts"), "utf8");
+  const app = readFileSync(path.join(here, "..", "src", "renderer", "src", "App.svelte"), "utf8");
+  const between = (source: string, from: string, to: string): string => {
+    const at = source.indexOf(from);
+    if (at === -1) return "";
+    const end = source.indexOf(to, at + from.length);
+    return source.slice(at, end === -1 ? source.length : end);
   };
-  const text = failureReport(facts);
-  for (const wanted of [
-    "1.0.0",
-    "win32 x64",
-    "33.0.0",
-    "Cannot read properties of null",
-    "BlockPicker.svelte",
-  ]) {
-    check(`the report carries ${wanted}`, text.includes(wanted), text);
-  }
 
-  /*
-   * An empty stack or location leaves no ragged blank line behind. It is the
-   * ordinary case for a rejection, not an edge one.
-   */
-  const bare = failureReport({ ...facts, at: "", stack: "" });
+  const resolve = between(handlers, "IPC.docRecoveryResolve", "ipcMain.handle(");
+  const discard = between(resolve, "if (!restore)", "restoreAutosave(");
+  check("the recovery resolve is registered", resolve !== "" && discard !== "");
   check(
-    "...and says nothing where there was nothing to say",
-    !bare.includes("at ") && !/\n\s*\n\s*$/.test(bare),
-    JSON.stringify(bare),
+    "discarding the snapshot answers with whatever is open",
+    /currentSession\(\)/.test(discard) && /shellState\(/.test(discard),
+    "a discard with a schematic open sends the window back to the start screen",
   );
+  check("...and never claims outright that nothing is", !/state:\s*null\b/.test(resolve));
 
-  /*
-   * The issue URL is built from the repository the manifest already names, and
-   * carries an **abridged** body: GitHub takes it as a query parameter, so it
-   * travels in a URL, and a stack clears that ceiling easily. `abridgeTrace`'s
-   * rule -- cap on the way out and say what was dropped. The whole report is on
-   * the clipboard by then, so the sentence is an instruction, not an apology.
-   */
-  const long = failureReport({ ...facts, stack: "at frame\n".repeat(400) });
+  // Read once at launch, before the timer, and released by every answer.
+  const launch = between(handlers, "let unanswered", "startAutosave(");
+  check("the recovery is read at launch, before the timer starts", /readAutosave\(/.test(launch));
   check(
-    "a long report is abridged for the URL",
-    issueBody(long).length < long.length,
-    `${issueBody(long).length} vs ${long.length}`,
+    "the timer is held while it is unanswered",
+    /hold:\s*async \(\) => \(await unanswered\) !== null/.test(between(handlers, "startAutosave(", "});")),
   );
   check(
-    "...and says where the rest of it is",
-    issueBody(long).includes("clipboard"),
+    "the window is told what was read at launch, not what is on disk now",
+    !/readAutosave\(/.test(between(handlers, "IPC.docRecoveryPeek", "ipcMain.handle(")),
   );
-  check(
-    "a short one is carried whole",
-    issueBody(text).includes(facts.message),
+  equal(
+    "every answer releases it: discard, an unreadable snapshot, and a restore",
+    resolve.match(/unanswered = Promise\.resolve\(null\)/g)?.length ?? 0,
+    3,
   );
 
-  const url = issueUrl("https://github.com/gamerover98/Schematic-Ai-Studio", text);
+  // The window's half.
+  const answer = between(app, "async function resolveRecovery", "api().resolveRecovery(");
   check(
-    "the URL points at the repository the manifest names",
-    url.startsWith("https://github.com/gamerover98/Schematic-Ai-Studio/issues/new?"),
-    url,
-  );
-  /*
-   * And it survives the round trip. A body that arrived percent-mangled would
-   * still open a page, which is exactly the kind of wrong that looks right.
-   */
-  const body = new URL(url).searchParams.get("body") ?? "";
-  check(
-    "...and the body decodes back to what was put in it",
-    body === issueBody(text),
+    "restoring over unsaved work asks first",
+    /mayDiscard\("restore"\)/.test(answer),
+    "Restore replaces whatever is open without asking",
   );
   check(
-    "...trailing slash or not",
-    issueUrl("https://example.com/repo/", text).includes("/repo/issues/new?"),
+    "...and asks before the prompt is put away, so a no leaves the question up",
+    answer.indexOf('mayDiscard("restore")') < answer.indexOf("recovery = null"),
   );
+  const startup = between(app, 'step("recent", "done");', "startingUp = false;");
+  check(
+    "the question is asked even when a startup step failed",
+    /\} finally \{[\s\S]*api\(\)\.peekRecovery\(\)/.test(startup),
+    "a recovery never offered would hold autosave for the whole session",
+  );
+}
+
+// --- a reloaded window picks up what main holds -----------------------------
+//
+// Main owns the document and outlives the window. A reload -- Ctrl+R, or the
+// crash dialog's Reload -- started a renderer with nothing open while main kept
+// the session, dirty and autosaving: `getDocumentState` was on the bridge and
+// nothing called it. So the window said "Nothing open", and the next New or
+// Open replaced the work without a question, because `mayDiscard` asks only
+// about a document the window knows of. Read out of the source, for the
+// reason the section above gives.
+console.log("\n--- a reloaded window picks up what main holds ---");
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const handlers = readFileSync(path.join(here, "..", "src", "main", "ipc", "handlers.ts"), "utf8");
+  const app = readFileSync(path.join(here, "..", "src", "renderer", "src", "App.svelte"), "utf8").replace(
+    /\r\n/g,
+    "\n",
+  );
+  const between = (source: string, from: string, to: string): string => {
+    const at = source.indexOf(from);
+    if (at === -1) return "";
+    const end = source.indexOf(to, at + from.length);
+    return source.slice(at, end === -1 ? source.length : end);
+  };
+
+  const served = between(handlers, "ipcMain.handle(IPC.docState,", "ipcMain.handle(");
+  check(
+    "main answers what is open, with the notes the dialogs open on",
+    /documentState\(session\)/.test(served) && /projectNotes\(/.test(served),
+  );
+
+  // The slice ends at `startingUp = false`, so finding it here is finding it
+  // before the startup screen is put away.
+  const startup = between(app, 'step("recent", "done");', "startingUp = false;");
+  check(
+    "the window asks at startup, whatever a step did",
+    /\} finally \{[\s\S]*adoptWhatMainHolds\(\)/.test(startup),
+    "a reload shows Nothing open over a schematic main still holds",
+  );
+
+  const adopt = between(app, "async function adoptWhatMainHolds", "\n  }\n");
+  check(
+    "it takes main's document and frames the camera on it",
+    /api\(\)\.getDocumentState\(\)/.test(adopt) &&
+      /docState = response\.state/.test(adopt) &&
+      /project = response\.project/.test(adopt) &&
+      /framingEpoch \+= 1/.test(adopt) &&
+      /refreshDocument\(\)/.test(adopt),
+  );
+  check(
+    "...and main's conversation, with or without a document",
+    /adoptChat\(await api\(\)\.getChatState\(\)\)/.test(adopt) &&
+      adopt.indexOf("getChatState") < adopt.indexOf("if (docState !== null)"),
+  );
+  check("...and it is not an open: no baseline version is kept", adopt !== "" && !/saveVersion\(/.test(adopt));
 }
 
 // --- what the window says on its way down -----------------------------------
@@ -2715,21 +3214,28 @@ console.log("\n--- what the window says on its way down ---");
     plain.buttons.join(" | "),
   );
   check(
-    "it says what a reload costs",
-    plain.detail.includes("undo history"),
+    "it says what a reload costs: the window's own state",
+    plain.detail.includes("the selection"),
     plain.detail,
   );
   /*
-   * And what it does not cost. Autosave lives in main, on a 20-second timer,
-   * and main is the half still working -- so the snapshot is current however
-   * long the window has been dead. A dialog that only warned would leave
-   * somebody weighing a reload against an unknown.
+   * And what it does not cost. The document is main's, and main is the half
+   * still working: the reloaded window picks it up with its unsaved changes
+   * and its undo stack (`adoptWhatMainHolds`, checked below). This used to say
+   * the undo history was lost, which was true of the screen and not of main.
+   * Autosave is main's as well, and is the net under a reload that does not
+   * help. A dialog that only warned would leave somebody weighing a reload
+   * against an unknown.
    */
   check(
-    "...and what it does not",
-    plain.detail.includes("20 seconds"),
+    "...and what it does not: the schematic, its changes and its undo history",
+    plain.detail.includes("comes back as it was") &&
+      plain.detail.includes("unsaved changes") &&
+      plain.detail.includes("undo history") &&
+      !/lost[^.]*undo history/.test(plain.detail),
     plain.detail,
   );
+  check("...and that it is saved every 20 seconds besides", plain.detail.includes("20 seconds"), plain.detail);
 
   const said = failurePrompt("effect_update_depth_exceeded");
   check(
@@ -3053,6 +3559,60 @@ console.log("\n--- updates ---");
     "...and writes latest.yml for every release, dev or not",
     /^detectUpdateChannel:\s*false\s*$/m.test(builderYml),
   );
+}
+
+/*
+ * A question main asks the window, and the wait for its answer.
+ *
+ * `capture_viewport` moves the camera and must not photograph the view before
+ * the move, so it asks and waits. What can go wrong is all in the matching:
+ * an answer that resolves the wrong question, a window that never answers and
+ * a call that hangs, or a late answer that lands on the next request.
+ */
+console.log("\n--- a question for the renderer ---");
+{
+  const table = createReplyTable<string>(1000);
+  const sent: number[] = [];
+  const first = table.ask((id) => sent.push(id));
+  const second = table.ask((id) => sent.push(id));
+  check("each question goes out with its own id", sent.length === 2 && sent[0] !== sent[1], JSON.stringify(sent));
+  check("an answer nobody asked for is refused", !table.settle(9999, "stray"));
+  // Answered out of order, which is what two MCP calls in quick succession do.
+  check("the second answer settles the second question", table.settle(sent[1], "second"));
+  check("...and the first the first", table.settle(sent[0], "first"));
+  equal("so each question gets its own answer", await Promise.all([first, second]), ["first", "second"]);
+  equal("...and nothing is left waiting", table.pending(), 0);
+  check("an answer given twice is refused the second time", !table.settle(sent[0], "again"));
+
+  let timedOut: unknown = null;
+  let lateId = -1;
+  try {
+    await table.ask((id) => {
+      lateId = id;
+    }, 20);
+  } catch (err) {
+    timedOut = err;
+  }
+  check("a window that never answers is given up on", timedOut instanceof RendererTimeoutError, String(timedOut));
+  equal("...and forgotten", table.pending(), 0);
+  // The failure this matching exists for: a late reply resolving the question
+  // asked after it.
+  const next = table.ask(() => {}, 1000);
+  check("a late answer does not settle the next question", !table.settle(lateId, "late"));
+  equal("...which is still waiting", table.pending(), 1);
+  table.settle(lateId + 1, "on time");
+  equal("...until its own answer arrives", await next, "on time");
+
+  let thrown: unknown = null;
+  try {
+    await table.ask(() => {
+      throw new Error("no window");
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  check("a question that cannot be sent fails at once", thrown instanceof Error && thrown.message === "no window");
+  equal("...and leaves nothing waiting", table.pending(), 0);
 }
 
 console.log("\n--- ipc channels ---");

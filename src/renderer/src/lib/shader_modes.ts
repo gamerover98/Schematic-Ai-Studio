@@ -1,4 +1,9 @@
-import { AA_LEVELS, DEFAULT_PREVIEW_SETTINGS } from "../../../shared/settings.js";
+import {
+  AA_LEVELS,
+  DEFAULT_PREVIEW_SETTINGS,
+  FPS_CAPS,
+  gpuPreference,
+} from "../../../shared/settings.js";
 
 /**
  * What each shader mode does to the renderer and to the two scene lights.
@@ -90,3 +95,63 @@ export function antialiasSamples(value: unknown): number {
  * comes to offer a level the other refuses.
  */
 const ALLOWED: ReadonlySet<number> = new Set(AA_LEVELS);
+
+/**
+ * The frame rate cap for a stored value, snapped to one that is offered.
+ *
+ * Total for the same reason, and the fallback is the default, which is no
+ * cap: a junk value must read exactly like an absent one, or the spread
+ * `coerceSettings` does over `preview` would stop being safe for this field.
+ */
+export function fpsCap(value: unknown): number {
+  return typeof value === "number" && ALLOWED_FPS.has(value)
+    ? value
+    : DEFAULT_PREVIEW_SETTINGS.maxFps;
+}
+
+const ALLOWED_FPS: ReadonlySet<number> = new Set(FPS_CAPS);
+
+/**
+ * How early a frame may arrive and still be drawn, in milliseconds.
+ *
+ * A display's refresh is not a metronome: at 60Hz frames land at 16.7ms give
+ * or take a fraction, and a cap of 60 compared strictly would find every
+ * early one "too soon" and draw at 30. A millisecond covers the jitter and is
+ * far too small to let a second frame through inside one interval.
+ */
+const FRAME_SLACK_MS = 1;
+
+/**
+ * Whether the animation loop should draw at `now`, and the anchor it keeps
+ * for the next decision.
+ *
+ * The anchor advances by exactly one interval per drawn frame rather than
+ * jumping to `now`, so the rate converges on the cap instead of drifting below
+ * it: a 60 cap on a 144Hz display draws on ticks that arrive up to 7ms late,
+ * and anchoring on each of them would lose that much every frame. It is
+ * re-anchored to `now` only once it has fallen a whole interval behind -- after
+ * a stall, or on the first frame -- or it would draw a burst to catch up.
+ */
+export function frameDue(
+  now: number,
+  anchor: number,
+  cap: number,
+): { draw: boolean; anchor: number } {
+  if (cap <= 0) return { draw: true, anchor: now };
+  const interval = 1000 / cap;
+  if (now - anchor < interval - FRAME_SLACK_MS) return { draw: false, anchor };
+  const next = anchor + interval;
+  return { draw: true, anchor: now - next > interval ? now : next };
+}
+
+/**
+ * The WebGL context's `powerPreference` for the stored GPU preference.
+ *
+ * The Chromium switch main applies at launch is what actually picks the
+ * adapter; this makes the context ask for the same one rather than for the
+ * browser's default.
+ */
+export function webglPowerPreference(value: unknown): WebGLPowerPreference {
+  const pref = gpuPreference(value);
+  return pref === "auto" ? "default" : pref;
+}
