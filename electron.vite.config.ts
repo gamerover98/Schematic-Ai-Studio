@@ -67,6 +67,14 @@ export default defineConfig({
     plugins: [svelte(), relaxCspForDevServer()],
     build: {
       outDir: "out/renderer",
+      /*
+       * A font is never inlined. Vite turns any asset under 4 kB into a
+       * `data:` URL, and the CSP has no `font-src`, so fonts fall back to
+       * `default-src 'self'` -- which refuses `data:`. The small subsets
+       * (Pixelify's Cyrillic) would be blocked in silence and drawn in the
+       * fallback face.
+       */
+      assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf)$/.test(file) ? false : undefined),
       rollupOptions: {
         input: resolve(__dirname, "src/renderer/index.html"),
       },

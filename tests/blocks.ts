@@ -29,8 +29,15 @@ import {
   COPPER_GOLEM_POSES,
   DYE_COLOURS,
   coversFace,
+  hasHandWrittenLod,
+  LOD_FACE_BUDGET,
+  lodShapeError,
+  lodShapeFor,
   occludesFace,
   occludesNeighbours,
+  placedExtent,
+  shapeCoversFace,
+  shapeFaceCount,
   shapeFor,
   type ModelPartDef,
 } from "../src/main/pipeline/block_shapes.js";
@@ -52,7 +59,7 @@ import { atlasAnimations, buildDocumentPreview } from "../src/main/services/prev
 import { createDocument, setBlock, setBlockEntity } from "../src/main/domain/document.js";
 import type { BakedFace, PaletteEntry, StructureData } from "../src/main/pipeline/types.js";
 import { paletteEntryCacheKey, paletteEntryIsAir } from "../src/main/pipeline/types.js";
-import { connectedState, COPPER_CHESTS } from "../src/shared/block_connections.js";
+import { connectedState, COPPER_CHESTS, HORIZONTAL_FACES } from "../src/shared/block_connections.js";
 import {
   describeProperty,
   documentedProperties,
@@ -1094,6 +1101,18 @@ check("a fence does not occlude", !occludesNeighbours(block("oak_fence")));
 check("a stair does not occlude", !occludesNeighbours(block("oak_stairs")));
 check("glass does not occlude", !occludesNeighbours(block("glass")));
 check("leaves do not occlude", !occludesNeighbours(block("oak_leaves")));
+{
+  // models/block/heavy_core.json (1.21.4): one 8x8x8 box on a sheet of parts.
+  const core = shapeFor(block("heavy_core"));
+  const only = core.kind === "boxes" && core.boxes.length === 1 ? core.boxes[0] : null;
+  const box = only && "box" in only ? only : null;
+  check("a heavy core is vanilla's 8x8x8 box", box !== null && box.box.join() === "4,0,4,12,8,12");
+  check(
+    "a heavy core reads its sheet through vanilla's windows",
+    box?.uv?.north?.join() === "0,8,8,16" && box?.uv?.up?.join() === "0,0,8,8" && box?.uv?.down?.join() === "8,0,16,8",
+  );
+  check("a heavy core does not occlude", !occludesNeighbours(block("heavy_core")));
+}
 
 // The one that was missing, and it cost the whole render: air is in no shape
 // table, so it fell through to CUBE and answered "yes, I cover that face" --
@@ -3128,6 +3147,20 @@ console.log("\n--- a tripwire is laid along the look ---");
   equal("looking east lays it east-west", lay(1, 0.2), { ...WIRE, east: "true", west: "true" });
   equal("...and so does looking west", lay(-1, -0.2), { ...WIRE, east: "true", west: "true" });
   equal("looking north lays it north-south", lay(0.2, -1), WIRE);
+
+  /*
+   * A rail is laid along the look too: `BaseRailBlock.getStateForPlacement`.
+   * Every one used to land north-south, so the first rail of a run laid east
+   * came out across its own track.
+   */
+  const track = (name: string, x: number, z: number) =>
+    orientPlacement(`minecraft:${name}`, { direction: { x, y: -0.3, z }, against: "up", cursorY: 0, run: null });
+  equal("a rail placed looking east runs east-west", track("rail", 1, 0.2), { shape: "east_west" });
+  equal("...and looking west", track("rail", -1, -0.2), { shape: "east_west" });
+  equal("...and looking south runs north-south", track("rail", -0.2, 1), { shape: "north_south" });
+  for (const name of ["powered_rail", "detector_rail", "activator_rail"]) {
+    equal(`the ${name.replace("_", " ")} is laid along the look as well`, track(name, 1, 0), { shape: "east_west" });
+  }
   if (pack !== null) {
     const faces = (await baker.bakeBlockstate(block("tripwire", { ...WIRE, east: "true", west: "true" })))
       .extraFaces;
@@ -7987,7 +8020,7 @@ console.log("\n--- neighbour-derived state ---");
   equal("...nor a copper chest and a wooden one", pairs("copper_chest", "chest"), "single");
   equal("...and a trapped chest still pairs with neither", pairs("trapped_chest", "chest"), "single");
 
-  // Rails: flat shapes only, which is the whole visible difference.
+  // Rails: straight, curved, and climbing a step.
   equal("a lone rail lies north-south", connectedState(self("rail"), {}).shape, "north_south");
   equal(
     "a rail with a neighbour east lies east-west",
@@ -8006,6 +8039,130 @@ console.log("\n--- neighbour-derived state ---");
       .shape,
     "north_south",
   );
+
+  /*
+   * A rail climbs to a rail one block up, which is `RailState.place`: a side
+   * has a rail if one is beside it, above it or below it, and a straight answer
+   * then ascends towards the one above. Each direction by name, because the
+   * mistake a table of four invites is a swapped pair, and a rail sloping the
+   * wrong way still looks exactly like a rail sloping.
+   */
+  const rail = (props: Record<string, string> = {}) => thin("rail", props);
+  for (const side of ["north", "south", "east", "west"] as const) {
+    equal(
+      `a rail with a rail one up to the ${side} ascends ${side}`,
+      connectedState(self("rail"), { [`${side}_up`]: rail() }).shape,
+      `ascending_${side}`,
+    );
+  }
+  equal(
+    "...and it still does with the run continuing behind it",
+    connectedState(self("rail"), { west: rail(), east_up: rail() }).shape,
+    "ascending_east",
+  );
+  equal(
+    "a rail one down is a flat link: the lower rail is the one that climbs",
+    connectedState(self("rail"), { east_down: rail() }).shape,
+    "east_west",
+  );
+  equal(
+    "...so the top of a step lies flat",
+    connectedState(self("rail"), { west_down: rail(), east: rail() }).shape,
+    "east_west",
+  );
+  equal(
+    "a curve does not climb",
+    connectedState(self("rail"), { north_up: rail(), east: rail() }).shape,
+    "north_east",
+  );
+  // A valley is two climbs at once, which no rail is. Vanilla asks north then
+  // south, east then west, and the second answer stands.
+  equal(
+    "with rails above both ends, it ascends south",
+    connectedState(self("rail"), { north_up: rail(), south_up: rail() }).shape,
+    "ascending_south",
+  );
+  equal(
+    "...or west",
+    connectedState(self("rail"), { east_up: rail(), west_up: rail() }).shape,
+    "ascending_west",
+  );
+  for (const name of ["powered_rail", "detector_rail", "activator_rail"]) {
+    equal(
+      `the ${name.replace("_", " ")} climbs too`,
+      connectedState(self(name, { shape: "north_south", powered: "false" }), { east_up: thin(name) }).shape,
+      "ascending_east",
+    );
+  }
+
+  /*
+   * The south-east rule: a junction cannot be one rail, and an unpowered one
+   * takes south before north and east before west. A straight-only rail keeps
+   * the run it has.
+   */
+  equal(
+    "a T-junction curves south-east",
+    connectedState(self("rail"), { north: rail(), east: rail(), south: rail() }).shape,
+    "south_east",
+  );
+  equal(
+    "...and so does a crossing",
+    connectedState(self("rail"), { north: rail(), east: rail(), south: rail(), west: rail() }).shape,
+    "south_east",
+  );
+  equal(
+    "a T-junction with nothing to the south curves north-east",
+    connectedState(self("rail"), { north: rail(), east: rail(), west: rail() }).shape,
+    "north_east",
+  );
+  equal(
+    "a powered rail at a junction keeps its run",
+    connectedState(self("powered_rail", { shape: "east_west", powered: "false" }), {
+      north: thin("powered_rail"),
+      east: thin("powered_rail"),
+      south: thin("powered_rail"),
+    }).shape,
+    "east_west",
+  );
+
+  // With nothing beside it a rail keeps the shape it has, which is what lets
+  // one placed along the look stay that way. A shape the block cannot hold is
+  // not kept.
+  equal(
+    "a lone rail laid east-west stays east-west",
+    connectedState(self("rail", { shape: "east_west" }), {}).shape,
+    "east_west",
+  );
+  equal(
+    "a lone powered rail out of a file with a corner on it lies north-south",
+    connectedState(self("powered_rail", { shape: "south_east", powered: "false" }), {}).shape,
+    "north_south",
+  );
+
+  /*
+   * Every answer is a value the rail can hold, over every arrangement of the
+   * twelve cells a rail reads and every shape it may already have. The guard
+   * that matters is the straight-only rails: a corner on a powered rail is a
+   * real property with an illegal value, which `hasProperty` cannot see.
+   */
+  {
+    const keys = HORIZONTAL_FACES.flatMap((face) => [face, `${face}_up`, `${face}_down`]);
+    const illegal: string[] = [];
+    for (const name of ["rail", "powered_rail", "detector_rail", "activator_rail"]) {
+      const legal = legalValuesFor(name, "shape") ?? [];
+      for (const own of legal) {
+        for (let mask = 0; mask < 1 << keys.length; mask += 1) {
+          const around: Record<string, ReturnType<typeof thin>> = {};
+          keys.forEach((key, bit) => {
+            if (mask & (1 << bit)) around[key] = rail();
+          });
+          const shape = connectedState(self(name, { shape: own }), around).shape;
+          if (shape === undefined || !legal.includes(shape)) illegal.push(`${name}[${own}] ${mask} -> ${shape}`);
+        }
+      }
+    }
+    equal("no arrangement gives a rail a shape it cannot hold", illegal.slice(0, 5), []);
+  }
 
   // Grass under snow.
   equal(
@@ -9129,6 +9286,140 @@ console.log("\n--- a bell hangs from what it was clicked onto ---");
       `${ceiling} against ${floorPosts}`,
     );
   }
+}
+
+
+// --- levels of detail -------------------------------------------------------
+//
+// Every block with more faces than `LOD_FACE_BUDGET`, in every state the game
+// has, gets a stand-in for the middle distance -- written by hand in
+// `LOD_SHAPES`, or straightened from its own boxes until it is. A stand-in is
+// only allowed to be simpler: fewer faces, inside the block's own box, never
+// tilted off a quarter turn, covering every side the block covers so it hides
+// no less of its neighbours, and drawn the way any block is drawn -- UVs in
+// the tile, something painted, wound the way it faces. And its error is
+// measured, because that is what decides how far away it may be shown.
+console.log("\n--- levels of detail ---");
+if (pack === null) {
+  console.log("  SKIP: no bundled resource pack");
+} else {
+  const listPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "block_id_list.txt");
+  const ids = [...parseBlockList(readFileSync(listPath, "utf8"))];
+  const missing: string[] = [];
+  const unasked: string[] = [];
+  const notFewer: string[] = [];
+  const outside: string[] = [];
+  const tilted: string[] = [];
+  const uncovered: string[] = [];
+  const offTile: string[] = [];
+  const blank: string[] = [];
+  const backwards: string[] = [];
+  const straightened = new Set<string>();
+  const errors = new Map<string, number>();
+  const sides = ["north", "south", "east", "west", "up", "down"] as const;
+  let walked = 0;
+  for (const id of ids) {
+    if (paletteEntryIsAir({ namespacedName: id, properties: {} })) continue;
+    // Every combination of the legal values, as the game has them.
+    let states: Record<string, string>[] = [{ ...(defaultStateFor(id) ?? {}) }];
+    for (const property of propertiesOf(id).filter((name) => name !== "waterlogged")) {
+      const values = legalValuesFor(id, property) ?? [];
+      const next: Record<string, string>[] = [];
+      for (const state of states) for (const value of values) next.push({ ...state, [property]: value });
+      if (next.length > 0) states = next.slice(0, 4096);
+    }
+    for (const properties of states) {
+      const entry = { namespacedName: id, properties };
+      const name = `${id.replace("minecraft:", "")}${JSON.stringify(properties)}`;
+      const full = shapeFor(entry);
+      const faces = shapeFaceCount(full);
+      const lod = lodShapeFor(entry);
+      if (faces <= LOD_FACE_BUDGET) {
+        if (lod !== null) unasked.push(name);
+        continue;
+      }
+      walked += 1;
+      if (lod === null || lod.kind !== "boxes" || full.kind !== "boxes") {
+        missing.push(name);
+        continue;
+      }
+      if (!hasHandWrittenLod(entry)) straightened.add(id.replace("minecraft:", ""));
+      if (shapeFaceCount(lod) >= faces) notFewer.push(`${name} ${shapeFaceCount(lod)} >= ${faces}`);
+      const extent = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+      for (const part of full.boxes) {
+        const box = placedExtent(part);
+        for (let axis = 0; axis < 3; axis += 1) {
+          extent[axis] = Math.min(extent[axis], box[axis]);
+          extent[axis + 3] = Math.max(extent[axis + 3], box[axis + 3]);
+        }
+      }
+      for (const part of lod.boxes) {
+        const box = placedExtent(part);
+        const inside = [0, 1, 2].every(
+          (axis) => box[axis] >= extent[axis] - 1e-6 && box[axis + 3] <= extent[axis + 3] + 1e-6,
+        );
+        if (!inside) outside.push(name);
+        const tilts = [...(part.rotation ? [part.rotation] : []), ...(part.chain ?? [])];
+        if (tilts.some((tilt) => Math.abs(tilt.angle) % 90 !== 0)) tilted.push(name);
+      }
+      for (const side of sides) {
+        if (shapeCoversFace(full, side) && !shapeCoversFace(lod, side)) uncovered.push(`${name} ${side}`);
+      }
+      const baked = await baker.bakeLod(entry);
+      if (baked === null) {
+        missing.push(`${name} (bakes to nothing)`);
+        continue;
+      }
+      const drawn = [...Object.values(baked.faces), ...baked.extraFaces];
+      if (drawn.some((face) => [...face.uvs].some((uv) => uv < -1e-6 || uv > 1 + 1e-6))) offTile.push(name);
+      if (!drawn.some(facePaintsSomething)) blank.push(name);
+      if (drawn.some((face) => !windingAgrees(face))) backwards.push(name);
+      const short = id.replace("minecraft:", "");
+      errors.set(short, Math.max(errors.get(short) ?? 0, lodShapeError(entry)));
+    }
+  }
+  check("there are blocks over the budget to walk", walked > 0, `${walked} states`);
+  equal("every shape over the budget has a stand-in", missing, []);
+  equal("...and none within it is given one", unasked, []);
+  equal("every stand-in has fewer faces than its block", notFewer, []);
+  equal("...stays inside its block's own box", outside, []);
+  equal("...is turned only by quarter turns", tilted, []);
+  equal("...covers every side its block covers", uncovered, []);
+  equal("...keeps its UVs inside the tile", offTile, []);
+  equal("...paints something", blank, []);
+  equal("...and is wound the way it faces", backwards, []);
+  console.log(`  INFO: straightened rather than written by hand: ${[...straightened].join(", ") || "none"}`);
+  console.log(
+    `  INFO: measured error in blocks: ${[...errors].map(([id, error]) => `${id} ${error}`).join(", ")}`,
+  );
+  const statueErrors = [...errors].filter(([id]) => id.endsWith("copper_golem_statue")).map(([, error]) => error);
+  check(
+    "a statue's stand-in errs by under a third of a block",
+    statueErrors.length > 0 && statueErrors.every((error) => error < 0.3),
+    statueErrors.join(", "),
+  );
+  check(
+    "every stand-in errs by under half a block",
+    [...errors.values()].every((error) => error > 0 && error < 0.5),
+  );
+
+  // The statues, pose by pose: the antenna keeps a box of its own, the nose goes.
+  const counts: string[] = [];
+  for (const pose of ["standing", "sitting", "running", "star"]) {
+    for (const facing of ["north", "east", "south", "west"]) {
+      const statue = { namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: pose, facing } };
+      const lod = lodShapeFor(statue);
+      counts.push(`${pose}/${facing} ${shapeFaceCount(shapeFor(statue))}->${lod === null ? "none" : shapeFaceCount(lod)}`);
+    }
+  }
+  const stand = lodShapeFor({ namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: "standing", facing: "north" } });
+  const run = lodShapeFor({ namespacedName: "minecraft:copper_golem_statue", properties: { copper_golem_pose: "running", facing: "north" } });
+  equal(
+    "a standing statue is four boxes, a running one six",
+    [stand?.kind === "boxes" ? stand.boxes.length : 0, run?.kind === "boxes" ? run.boxes.length : 0],
+    [4, 6],
+  );
+  console.log(`  INFO: statue faces, full->stand-in: ${counts.join(", ")}`);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

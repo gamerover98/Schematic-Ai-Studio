@@ -103,7 +103,13 @@ export interface AgentRequest {
    * transcript would lose turns it is meant to be keeping.
    */
   history: ModelMessage[];
+  /** The active area of the user's selection: what tools default to. */
   selection: Region | null;
+  /**
+   * The other areas selected beside it. Described, so "these two towers" has
+   * an answer, and not a default: every tool takes one box.
+   */
+  otherAreas?: readonly Region[];
   allowedBlocks: ReadonlySet<string>;
   /**
    * Where `legacy_blocks.json` is, for `convert_schematic`.
@@ -186,16 +192,22 @@ const SYSTEM_PROMPT = [
   "  set of blocks is much smaller and anything newer is refused by name; the spelling does not",
   "  change, only what exists. describe_block answers that for a specific block.",
   "- When the user has a selection, tools default to it. Do not restate its coordinates unless you",
-  "  mean somewhere else.",
+  "  mean somewhere else. A selection may be several areas: tools default to the active one, and the",
+  "  others are listed with their coordinates, so pass those to act on them.",
   // The old wording was "rather than hundreds of set_block calls", which a
   // model reading it takes as an argument about *cost*: if it is reaching for
   // replace_blocks it concludes the rule does not apply to it. A sloping roof
   // is not hundreds of set_blocks, it is a shape, and shapes are what the
   // script is for.
-  "- A shape is a build script. Anything whose blocks depend on where they are — a roof, an arch,",
-  "  a spiral, anything sloping or tapering — is run_build_script, because it is the only tool that",
-  "  can vary a block by coordinate. fill_region and replace_blocks cannot make a shape: they apply",
-  "  one block to a box, so reaching for them here gives a solid box of that block instead.",
+  // draw_shape takes the shapes WorldEdit has a command for, which are the
+  // ones a model most often got wrong by hand: a sphere is a lot of arithmetic
+  // for a script, and fill_region answers "a round tower" with a square one.
+  "- A sphere, a dome (a hollow sphere cut by the region), a cylinder or tube, a pyramid or hipped",
+  "  roof, a box's shell and four walls are draw_shape. Any other shape is a build script. Anything",
+  "  whose blocks depend on where they are — an arch, a spiral, a gable, anything else sloping or",
+  "  tapering — is run_build_script, because it is the only tool that can vary a block by coordinate.",
+  "  fill_region and replace_blocks cannot make a shape: they apply one block to a box, so reaching",
+  "  for them here gives a solid box of that block instead.",
   "- Coordinates start at 0 and y is up. Everything is inclusive of both ends.",
   // The clamp used to be silent, so a fill above the ceiling landed *at* the
   // ceiling and reported a healthy count. It says so now, and this is the way
@@ -211,8 +223,23 @@ const SYSTEM_PROMPT = [
   "  between; where the two disagree, the summary wins.",
 ].join("\n");
 
+/** One area, by its corners and its size -- see the note on the size below. */
+function describeArea(region: Region): string {
+  const width = region.maxX - region.minX + 1;
+  const height = region.maxY - region.minY + 1;
+  const length = region.maxZ - region.minZ + 1;
+  return (
+    `(${region.minX},${region.minY},${region.minZ}) to (${region.maxX},${region.maxY},${region.maxZ}): ` +
+    `${width} wide x ${height} tall x ${length} long, ${(width * height * length).toLocaleString()} cells`
+  );
+}
+
 /** The context that rides along with the request, resolved rather than dumped. */
-function describeDocument(session: DocumentSession, selection: Region | null): string {
+export function describeDocument(
+  session: DocumentSession,
+  selection: Region | null,
+  otherAreas: readonly Region[] = [],
+): string {
   const { doc } = session;
   const top = [...paletteHistogram(doc).entries()]
     .filter(([block]) => !block.startsWith("minecraft:air"))
@@ -267,16 +294,27 @@ function describeDocument(session: DocumentSession, selection: Region | null): s
       region.maxY - region.minY + 1,
       region.maxZ - region.minZ + 1,
     ] as const;
+    const several = otherAreas.length > 0;
     lines.push(
-      `The user has selected (${region.minX},${region.minY},${region.minZ}) to ` +
-        `(${region.maxX},${region.maxY},${region.maxZ}): ${size[0]} wide x ${size[1]} tall x ${size[2]} long, ` +
-        `${(size[0] * size[1] * size[2]).toLocaleString()} cells. Tools act on this by default.`,
+      `The user has selected ${several ? `${otherAreas.length + 1} areas. The active one is ` : ""}` +
+        `${describeArea(region)}. Tools act on this by default.`,
     );
     if (size[1] === 1) {
       lines.push(
         `That selection is a single flat layer at y=${region.minY}, so nothing with height fits inside it. ` +
           `Build above it, and resize first if y=${region.minY} is already the top.`,
       );
+    }
+    /*
+     * The others by their coordinates, each with its size and a word when it is
+     * flat, for the reason the active one gets them: "build on these" has no
+     * answer inside a plane. Listed rather than unioned, because a tool takes
+     * one box and the model has to be able to name each.
+     */
+    for (const [index, other] of otherAreas.entries()) {
+      const box = normalizeRegion(doc, other);
+      const flat = box.minY === box.maxY ? ` It is a single flat layer at y=${box.minY}.` : "";
+      lines.push(`Also selected, area ${index + 2}: ${describeArea(box)}.${flat}`);
     }
   } else {
     lines.push("The user has selected nothing; tools act on the whole schematic by default.");
@@ -405,6 +443,7 @@ export async function runAgent(request: AgentRequest): Promise<AgentResult> {
         doc: session.doc,
         tx,
         selection: request.selection,
+        otherAreas: request.otherAreas ?? [],
         allowedBlocks: request.allowedBlocks,
         legacyBlocksPath: request.legacyBlocksPath ?? null,
         onStep: (step) => {
@@ -416,7 +455,7 @@ export async function runAgent(request: AgentRequest): Promise<AgentResult> {
 
       // Rebuilt every turn, so the state the model reasons from is the state
       // the document is actually in — see the note at the top.
-      const instructions = `${SYSTEM_PROMPT}\n\n${describeDocument(session, request.selection)}`;
+      const instructions = `${SYSTEM_PROMPT}\n\n${describeDocument(session, request.selection, request.otherAreas ?? [])}`;
       const messages = [...history, asked];
       recorder.start({
         kind: "request",

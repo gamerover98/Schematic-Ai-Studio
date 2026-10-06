@@ -15,24 +15,35 @@
  */
 
 import {
+  countsOf,
   createDocument,
+  resizeDocument,
   setBlock,
   toStructureData,
   type SchematicDocument,
 } from "../src/main/domain/document.js";
-import { buildAtlas } from "../src/main/pipeline/atlas.js";
+import { appendTiles, buildAtlas, packAtlas, tilePixels } from "../src/main/pipeline/atlas.js";
+import { computeLight } from "../src/main/pipeline/lighting.js";
+import { buildDocumentPreview } from "../src/main/services/preview.js";
+import type { RgbaImage } from "../src/main/pipeline/types.js";
 import {
   buildChunkedMesh,
+  chunkKey,
   concatChunks,
   createChunkMeshCache,
   CHUNK_SIZE,
+  type ChunkedMeshResult,
   type ChunkMeshCache,
+  type LodRequest,
 } from "../src/main/pipeline/chunked_mesh.js";
+import { COARSE_ERROR, REGION_CHUNKS, REGION_SIZE } from "../src/main/pipeline/coarse_mesh.js";
+import { lodShapeError } from "../src/main/pipeline/block_shapes.js";
 import { buildMesh, culledFaces } from "../src/main/pipeline/mesher.js";
 import { fillVoid } from "../src/main/services/preview.js";
 import { readSignText, type SignText } from "../src/main/pipeline/sign_text.js";
 import { ModelBaker } from "../src/main/pipeline/model_baker.js";
 import { readFileSync } from "fs";
+import { readdir } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import type { MeshBuffers, PaletteEntry } from "../src/main/pipeline/types.js";
@@ -221,9 +232,16 @@ console.log("\n--- and it skips the untouched chunks ---");
   const boundary = await incremental(doc, one.cache);
   equal("one on an x boundary rebuilds two", boundary.rebuilt, 2);
 
+  /*
+   * Eight, not four: the four were its own chunk and the three across its
+   * faces, and the other four share only an edge or a corner with it -- but
+   * their faces' occlusion and smooth lighting read the cells at their
+   * corners, which this is. Leaving them out kept stale shading at chunk
+   * edges; the random walk below compares light in every vertex and caught it.
+   */
   setBlock(doc, CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE, PLANKS);
   const corner = await incremental(doc, boundary.cache);
-  equal("one on a three-axis corner rebuilds four", corner.rebuilt, 4);
+  equal("one on a three-axis corner rebuilds the eight chunks that meet there", corner.rebuilt, 8);
 
   /*
    * ...and a sign that has been retyped, which is the third thing this cache
@@ -802,6 +820,380 @@ console.log("\n--- the box comes from the chunks ---");
     "...it counts them instead",
     /chunked\.pieces\.length === 0/.test(preview),
   );
+}
+
+// --- incremental edits match a rebuild, through growth and light -------------
+//
+// The edit loop no longer compares the whole grid: it takes the document's own
+// list of written cells, relights only the columns near them, and carries the
+// chunks across a resize in content coordinates. Each of those is a shortcut
+// that is only worth having if it is exact, so every step of a random walk --
+// blocks, torches, glowstone, holes, the box growing on every side and
+// shrinking back -- is meshed incrementally and from scratch, and the two have
+// to be the same geometry, the same light in every vertex, and the same light
+// grid. A shortcut that is merely close fails here.
+console.log("\n--- incremental edits match a rebuild, through growth and light ---");
+{
+  const options = { resourcePackPath: null, fallbackResourcePackPath: null };
+  const TORCH = block("minecraft:torch");
+  const GLOWSTONE = block("minecraft:glowstone");
+  const doc = createDocument({ width: 34, height: 20, length: 30 });
+  for (let x = 0; x < doc.width; x += 1) {
+    for (let z = 0; z < doc.length; z += 1) setBlock(doc, x, 0, z, STONE);
+  }
+  for (let y = 1; y < 12; y += 1) setBlock(doc, 10, y, 10, PLANKS);
+  for (let x = 4; x < 20; x += 1) setBlock(doc, x, 9, 8, STONE);
+
+  /** The same document with no history: what a rebuild from nothing sees. */
+  const copy = (from: SchematicDocument): SchematicDocument => {
+    const clean = createDocument({ width: from.width, height: from.height, length: from.length });
+    clean.voxels.set(from.voxels);
+    clean.palette = [...from.palette];
+    clean.paletteIndex = new Map(from.paletteIndex);
+    clean.counts = countsOf(clean.voxels, clean.palette.length);
+    clean.frame = [from.frame[0], from.frame[1], from.frame[2]];
+    return clean;
+  };
+  /** Geometry *and* light, so a relight that is only close is caught. */
+  const lit = (pieces: readonly MeshBuffers[]): string => {
+    const fused = concatChunks(pieces);
+    let h = 2166136261;
+    for (let i = 0; i < fused.light.length; i += 1) {
+      h ^= Math.round(fused.light[i] * 1000) | 0;
+      h = Math.imul(h, 16777619);
+    }
+    return `${fingerprint(fused)}:${(h >>> 0).toString(16)}`;
+  };
+
+  let seed = 7;
+  const random = (): number => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
+
+  let built = await buildDocumentPreview(doc, options);
+  let mismatches = 0;
+  let lightMismatches = 0;
+  const failed: string[] = [];
+  let what = "";
+  let incremental = 0;
+  let grew = 0;
+  const steps = 70;
+  for (let step = 0; step < steps; step += 1) {
+    const roll = random();
+    if (roll < 0.12) {
+      // Grow on one side, low sides moving the content.
+      const axis = Math.floor(random() * 3);
+      const low = random() < 0.5;
+      const by = 1 + Math.floor(random() * 3);
+      const size = { width: doc.width, height: doc.height, length: doc.length };
+      const shift: [number, number, number] = [0, 0, 0];
+      if (axis === 0) size.width += by;
+      if (axis === 1) size.height += by;
+      if (axis === 2) size.length += by;
+      if (low) shift[axis] = by;
+      resizeDocument(doc, size, shift);
+      grew += 1;
+      what = `grow ${"xyz"[axis]}${low ? "-" : "+"}${by}`;
+    } else if (roll < 0.16 && doc.width > 30) {
+      resizeDocument(doc, { width: doc.width - 2, height: doc.height, length: doc.length });
+      what = "shrink x";
+    } else {
+      const x = Math.floor(random() * doc.width);
+      const y = 1 + Math.floor(random() * (doc.height - 1));
+      const z = Math.floor(random() * doc.length);
+      const placed = pick([STONE, PLANKS, GLASS, TORCH, GLOWSTONE, AIR, AIR]);
+      setBlock(doc, x, y, z, placed);
+      what = `${placed.namespacedName.slice(10)} at ${x},${y},${z}`;
+    }
+    built = await buildDocumentPreview(doc, options, built.meshCache);
+    if (process.env.DEBUG_LIGHT) console.log(`    step ${step}: ${what} -> ${built.rebuiltChunks}/${built.totalChunks} ${doc.width}x${doc.height}x${doc.length} frame ${doc.frame}`);
+    if (built.rebuiltChunks < built.totalChunks) incremental += 1;
+    const reference = await buildDocumentPreview(copy(doc), options);
+    if (lit(built.mesh.chunks) !== lit(reference.mesh.chunks)) {
+      mismatches += 1;
+      if (failed.length < 6) failed.push(`step ${step}: ${what}`);
+    }
+    const truth = computeLight(toStructureData(doc));
+    const held = built.meshCache.lightGrid;
+    if (
+      held === null ||
+      held.block.length !== truth.block.length ||
+      held.block.some((value, i) => value !== truth.block[i]) ||
+      held.sky.some((value, i) => value !== truth.sky[i])
+    ) {
+      lightMismatches += 1;
+      if (failed.length < 6) failed.push(`light at step ${step}: ${what}`);
+      if (process.env.DEBUG_LIGHT && held !== null && lightMismatches === 1) {
+        const plane = doc.height * doc.length;
+        let shown = 0;
+        for (let i = 0; i < truth.block.length && shown < 12; i += 1) {
+          if (held.block[i] !== truth.block[i] || held.sky[i] !== truth.sky[i]) {
+            const x = Math.floor(i / plane);
+            const y = Math.floor((i % plane) / doc.length);
+            const z = i % doc.length;
+            console.log(`    ${x},${y},${z}: held ${held.block[i]}/${held.sky[i]} truth ${truth.block[i]}/${truth.sky[i]}`);
+            shown += 1;
+          }
+        }
+      }
+    }
+  }
+  check("every step meshes the same as a rebuild, light included", mismatches === 0, `${mismatches}; ${failed.join("; ")}`);
+  equal("...and leaves the same light grid as a full flood", lightMismatches, 0);
+  check("the walk grew the box on its way", grew >= 4, `${grew}`);
+  check("...and most steps took the short way", incremental > steps / 2, `${incremental} of ${steps}`);
+
+  /*
+   * And the short way is short: one block placed past the far edge re-meshes
+   * a chunk or two, not the column of chunks along the face it crossed.
+   */
+  const edge = createDocument({ width: 40, height: 16, length: 40 });
+  for (let x = 0; x < 40; x += 1) for (let z = 0; z < 40; z += 1) setBlock(edge, x, 0, z, STONE);
+  let edgeBuilt = await buildDocumentPreview(edge, options);
+  resizeDocument(edge, { width: 41, height: 16, length: 40 });
+  setBlock(edge, 40, 0, 20, STONE);
+  edgeBuilt = await buildDocumentPreview(edge, options, edgeBuilt.meshCache);
+  check("a block past the far edge re-meshes a chunk or two", edgeBuilt.rebuiltChunks <= 3, `${edgeBuilt.rebuiltChunks}`);
+  resizeDocument(edge, { width: 42, height: 16, length: 40 }, [1, 0, 0]);
+  setBlock(edge, 0, 0, 20, STONE);
+  edgeBuilt = await buildDocumentPreview(edge, options, edgeBuilt.meshCache);
+  check("...and past the near edge, where the content moves, too", edgeBuilt.rebuiltChunks <= 3, `${edgeBuilt.rebuiltChunks}`);
+  equal("the payload says where the content went", edgeBuilt.mesh.frame, [1, 0, 0]);
+}
+
+// --- the atlas grows without moving a tile ----------------------------------
+//
+// A texture that arrives after the sheet was packed goes into its reserve. If
+// any tile already placed moved, every chunk meshed against it would be
+// wrong; if the patch did not hold exactly the new tile's pixels, the renderer
+// would draw garbage there.
+console.log("\n--- the atlas grows without moving a tile ---");
+{
+  const tile = (size: number, shade: number): RgbaImage => {
+    const data = new Uint8Array(size * size * 4);
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = shade;
+      data[i + 1] = (i / 4) % 256;
+      data[i + 2] = 255 - shade;
+      data[i + 3] = 255;
+    }
+    return { width: size, height: size, data };
+  };
+  const images: Record<string, RgbaImage> = {};
+  for (let i = 0; i < 20; i += 1) images[`block/t${i}`] = tile(16 << (i % 3), i * 10);
+  const atlas = packAtlas(images, 256, 6, 0.15);
+  const before = JSON.stringify(atlas.uvRects);
+  check("a packing with reserve keeps empty rows below", atlas.image.height > atlas.layout.penY + atlas.layout.shelfHeight);
+  equal("...and is laid out as the plain packing is", JSON.stringify(buildAtlas(images, 256, 6).uvRects).length > 0, true);
+
+  images["block/new"] = tile(32, 99);
+  const fits = appendTiles(atlas, images, ["block/new"]);
+  check("a new texture fits in the reserve", fits);
+  const kept = JSON.parse(before) as Record<string, number[]>;
+  check(
+    "...and no tile already placed moved",
+    Object.entries(kept).every(([key, rect]) => JSON.stringify(atlas.uvRects[key]) === JSON.stringify(rect)),
+  );
+  const patch = tilePixels(atlas, "block/new");
+  const placed = atlas.layout.placed.get("block/new");
+  check("the patch is the new tile's square", patch !== null && placed !== undefined && patch.width === 32 + 12);
+  if (patch !== null) {
+    let same = true;
+    for (let row = 0; row < patch.height && same; row += 1) {
+      for (let col = 0; col < patch.width * 4; col += 1) {
+        if (patch.pixels[row * patch.width * 4 + col] !== atlas.image.data[((patch.y + row) * atlas.image.width + patch.x) * 4 + col]) {
+          same = false;
+          break;
+        }
+      }
+    }
+    check("...holding exactly the sheet's pixels there", same);
+  }
+
+  // Far more than the reserve can take: the caller has to pack again.
+  const flood: string[] = [];
+  for (let i = 0; i < 400; i += 1) {
+    images[`block/flood${i}`] = tile(64, i % 256);
+    flood.push(`block/flood${i}`);
+  }
+  check("more than the reserve holds is refused, so the sheet is packed again", !appendTiles(atlas, images, flood));
+}
+
+
+// --- levels of detail -------------------------------------------------------
+//
+// Built beside the chunks, from main's queue and never from an edit's own
+// build, and only when the window asks for them. The property the suite above
+// rests on holds here too: a queue drained after edits gives exactly the
+// pieces a build from nothing gives.
+console.log("\n--- levels of detail ---");
+{
+  equal("a region is four chunks of sixteen", REGION_SIZE, REGION_CHUNKS * CHUNK_SIZE);
+
+  /*
+   * With the bundled pack, and not the bare baker the rest of this suite
+   * uses: without textures a statue bakes to the hashed-colour cube, which
+   * has six faces and nothing to simplify.
+   */
+  const resources = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "resources");
+  const zips = (await readdir(resources)).filter((name) => name.toLowerCase().endsWith(".zip")).sort();
+  const lodBaker = await ModelBaker.create(null, zips.length > 0 ? path.join(resources, zips[0]) : null);
+
+  const STATUE = block("minecraft:copper_golem_statue", {
+    copper_golem_pose: "running",
+    facing: "north",
+    waterlogged: "false",
+  });
+  /*
+   * A stone floor two blocks thick, a patch of statues in the first chunk and
+   * a wall. Two thick so the floor's top is on a two-block cell's top: a
+   * coarse face reads the corner shading of the fine faces in its own plane.
+   */
+  const lodDoc = (): SchematicDocument => {
+    const doc = createDocument({ width: 40, height: 20, length: 40 });
+    for (let x = 0; x < 40; x += 1) {
+      for (let z = 0; z < 40; z += 1) {
+        setBlock(doc, x, 0, z, STONE);
+        setBlock(doc, x, 1, z, STONE);
+      }
+    }
+    for (let x = 2; x < 8; x += 1) {
+      for (let z = 2; z < 8; z += 1) setBlock(doc, x, 2, z, STATUE);
+    }
+    for (let y = 2; y < 10; y += 1) {
+      for (let z = 20; z < 30; z += 1) setBlock(doc, 24, y, z, STONE);
+    }
+    return doc;
+  };
+  const ask = (budgetMs: number, autoTriangles: number | null = null): LodRequest => ({
+    shapes: true,
+    coarse: true,
+    autoTriangles,
+    budgetMs,
+  });
+  const lodBuild = async (
+    doc: SchematicDocument,
+    cache: ChunkMeshCache,
+    lod: LodRequest | null,
+  ): Promise<ChunkedMeshResult> => {
+    const structure = toStructureData(doc);
+    await culledFaces(structure, lodBaker);
+    for (const entry of structure.palette) await lodBaker.bakeLod(entry);
+    const atlas = buildAtlas(lodBaker.textures);
+    const light = computeLight(structure);
+    return buildChunkedMesh(
+      structure,
+      lodBaker,
+      atlas.uvRects,
+      1,
+      cache,
+      { light, occlusion: true, smooth: true },
+      null,
+      null,
+      null,
+      null,
+      { frame: [0, 0, 0], changed: null, lod },
+    );
+  };
+  /** Builds, then asks again until nothing is queued: what the window does. */
+  const drained = async (doc: SchematicDocument, cache: ChunkMeshCache, lod: LodRequest) => {
+    let result = await lodBuild(doc, cache, lod);
+    let rounds = 0;
+    while (result.lod.state === "pending" && rounds < 1000) {
+      result = await lodBuild(doc, result.cache, { ...lod, budgetMs: 40 });
+      rounds += 1;
+    }
+    return result;
+  };
+  const piecesOf = (result: ChunkedMeshResult) =>
+    new Map(result.lodPieces.map((piece) => [`${piece.layer}:${piece.key}`, piece]));
+  const statueChunk = chunkKey(0, 0, 0);
+  const region = chunkKey(0, 0, 0);
+
+  const off = await lodBuild(lodDoc(), createChunkMeshCache(), null);
+  equal("asked for nothing, nothing is built", off.lodPieces.length, 0);
+  equal("...and says so", off.lod.state, "off");
+
+  const doc = lodDoc();
+  const cold = await lodBuild(doc, createChunkMeshCache(), ask(0));
+  equal("an edit's own build builds no level", cold.lodPieces.length, 0);
+  equal("...and says they are coming", cold.lod.state, "pending");
+  check("...and counts the full mesh", cold.lod.triangles > 0);
+
+  const ready = await drained(doc, cold.cache, ask(0));
+  equal("asking again builds them all", ready.lod.state, "ready");
+  const built = piecesOf(ready);
+  check("the chunk with statues has a level 1", built.has(`lod1:${statueChunk}`));
+  equal(
+    "...whose error is the statues' own, measured",
+    built.get(`lod1:${statueChunk}`)?.error,
+    lodShapeError(STATUE),
+  );
+  check(
+    "no chunk without a complex block has one",
+    [...built.keys()].filter((name) => name.startsWith("lod1:")).length === 1,
+  );
+  check("the region has both coarse levels", built.has(`lod2:${region}`) && built.has(`lod3:${region}`));
+  equal("...erring by a whole cell each", [built.get(`lod2:${region}`)?.error, built.get(`lod3:${region}`)?.error], [
+    COARSE_ERROR.lod2,
+    COARSE_ERROR.lod3,
+  ]);
+
+  // An edit among the statues: level 1 of that chunk goes at once, the
+  // region's coarse meshes stay on screen until their rebuild lands.
+  setBlock(doc, 3, 2, 3, AIR);
+  const edited = await lodBuild(doc, ready.cache, ask(0));
+  const after = piecesOf(edited);
+  check("an edit takes its chunk's level 1 down at once", !after.has(`lod1:${statueChunk}`));
+  check(
+    "...and keeps the stale region on screen meanwhile",
+    after.get(`lod2:${region}`)?.buffers === built.get(`lod2:${region}`)?.buffers,
+  );
+  equal("...and queues both", edited.lod.state, "pending");
+
+  const caught = await drained(doc, edited.cache, ask(0));
+  const fresh = await drained(doc, createChunkMeshCache(), ask(0));
+  const prints = (result: ChunkedMeshResult) =>
+    result.lodPieces.map((piece) => `${piece.layer}:${piece.key}:${fingerprint(piece.buffers)}:${piece.error}`).join("|");
+  equal("a drained queue gives exactly what a build from nothing gives", prints(caught), prints(fresh));
+  check("...and the region was rebuilt, not kept", piecesOf(caught).get(`lod2:${region}`)?.buffers !== built.get(`lod2:${region}`)?.buffers);
+
+  // Asking for levels re-meshes no chunk: they are built beside them.
+  const plain = await lodBuild(doc, createChunkMeshCache(), null);
+  const asked = await drained(doc, plain.cache, ask(0));
+  check(
+    "asking for levels re-meshes no chunk's full mesh",
+    asked.pieces.length === plain.pieces.length && asked.pieces.every((piece, i) => piece === plain.pieces[i]),
+  );
+  const dropped = await lodBuild(doc, asked.cache, null);
+  equal("no longer asking takes every level down", dropped.lodPieces.length, 0);
+
+  // Automatic: only from the threshold.
+  const below = await drained(doc, createChunkMeshCache(), ask(0, 1e9));
+  equal("under the automatic threshold, nothing is built", below.lodPieces.length, 0);
+  equal("...and it says why", below.lod.state, "below");
+  const above = await drained(doc, below.cache, ask(0, 1));
+  check("over it, the levels are built", above.lodPieces.length > 0 && above.lod.state === "ready");
+  const backBelow = await lodBuild(doc, above.cache, ask(0, 1e9));
+  equal("back under it, they go", backBelow.lodPieces.length, 0);
+
+  // A coarse face is as bright as what it stands for: on open flat ground,
+  // full sky and no occlusion; beside the wall, darker at the corner.
+  const level2 = built.get(`lod2:${region}`)!.buffers;
+  let open = false;
+  let shaded = false;
+  for (let v = 0; v < level2.positions.length / 3; v += 1) {
+    const up = level2.normals[v * 3 + 1] > 0.5;
+    if (!up) continue;
+    const sky = level2.light[v * 3 + 1];
+    const occlusion = level2.light[v * 3 + 2];
+    if (sky === 1 && occlusion === 1) open = true;
+    if (occlusion < 1 && occlusion > 0.4) shaded = true;
+  }
+  check("a coarse face on open ground is lit like the ground", open);
+  check("one against the wall carries the corner shading the ground there has", shaded);
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

@@ -30,6 +30,7 @@ import {
   SandboxViolationError,
 } from "../src/main/core.js";
 import { SpongeSchematicWriterFactory } from "../src/main/services/schematic.js";
+import { cellValues, normalizeDistribution } from "../src/shared/block_mix.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -255,6 +256,45 @@ console.log("\n--- bridge argument isolation ---");
     thrown instanceof Error ? thrown.message : undefined,
   );
   check("the placement still resolves", placements.length === 1);
+}
+
+// --- 7. noise(): a number from numbers, and nothing else ------------------
+//
+// The third callback across the bridge, and the first that answers. What it
+// may answer is the point: the value of a distribution at a point, the same
+// one a fill reads, and a refusal by name for a noise that does not exist.
+console.log("\n--- noise() ---");
+{
+  const code = `
+    function buildCreation(x, y, z) {
+      for (var i = 0; i < 16; i++) {
+        var v = noise("simplex", i, 0, 3, { seed: 9, frequency: 0.2 });
+        safeSetBlock(i, Math.round(8 + 8 * v), 0, 'stone', null);
+      }
+      if (typeof noise("perlin", 1, 2, 3) === "number") safeSetBlock(0, 40, 0, 'stone', null);
+    }
+  `;
+  const placements = await run(code, allowed);
+  const field = cellValues(normalizeDistribution({ kind: "simplex", seed: 9, params: { frequency: 0.2 } }));
+  const heights = placements.filter(([, py]) => py !== 40).map(([px, py]) => [px, py]);
+  const wanted = Array.from({ length: 16 }, (_unused, i) => [i, Math.round(8 + 8 * field(i, 0, 3))]);
+  check(
+    "noise() in a script is the field a fill reads, point for point",
+    JSON.stringify(heights) === JSON.stringify(wanted),
+    JSON.stringify(heights),
+  );
+  check("...and it answers a number with no parameters at all", placements.some(([, py]) => py === 40));
+  let thrown: unknown = null;
+  try {
+    await run('function buildCreation(x,y,z){ noise("plasma", 0, 0, 0); }', allowed);
+  } catch (e) {
+    thrown = e;
+  }
+  check(
+    "a noise that does not exist fails the script, by name, as bad generated code",
+    thrown instanceof GeneratedCodeError && String(thrown.message).includes("plasma"),
+    thrown instanceof Error ? `${thrown.name}: ${thrown.message}` : String(thrown),
+  );
 }
 
 // --- a failure carries what the run had done ------------------------------

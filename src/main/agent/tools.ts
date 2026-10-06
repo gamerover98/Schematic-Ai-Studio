@@ -59,11 +59,13 @@ import {
   countBlocks,
   getBlock,
   normalizeRegion,
-  paletteHistogram,
   regionVolume,
   type Region,
   type SchematicDocument,
 } from "../domain/document.js";
+import { countMaterials } from "../domain/materials.js";
+import { findBlocks } from "../domain/find_blocks.js";
+import { unifyStates } from "../../shared/material_list.js";
 import type { TransactionScope } from "../domain/history.js";
 import {
   applyRegionTransform,
@@ -100,8 +102,48 @@ import {
   isBannerBlock,
 } from "../../shared/banner_patterns.js";
 import { checkBannerPatterns, regionCells, stampBanner } from "../domain/banner_place.js";
+import {
+  describeMix,
+  DISTRIBUTION_KINDS,
+  DISTRIBUTION_PARAMS,
+  effectiveShares,
+  parseMix,
+  singleBlockMix,
+  type BlockMix,
+} from "../../shared/block_mix.js";
+import { regionCellSet, shapeCellSet, writeMix } from "../domain/mix.js";
+import { erodeCells, groundFor, isLiquid, smoothHeights, writeTerrain, type LayerMix } from "../domain/terrain.js";
+import {
+  EROSION_PRESET_NAMES,
+  EROSION_RECURSION,
+  erosionRule,
+  heightField,
+  normalizeErosionRule,
+  normalizeHeightField,
+  SMOOTH_ITERATIONS,
+  SUBSOIL_DEPTH,
+  TERRAIN_AMPLITUDE,
+  TERRAIN_MODES,
+  TERRAIN_NOISES,
+  type ErosionPreset,
+  type ErosionRule,
+  type TerrainMode,
+} from "../../shared/terrain.js";
 import { MAX_DOCUMENT_VOLUME, MAX_EDIT_VOLUME } from "../services/session.js";
 import { orderRegion } from "../domain/grow.js";
+import { boxContains, intersectBox, unionVolume } from "../../shared/regions.js";
+import {
+  forEachShapeCell,
+  normalizeShape,
+  SHAPE_AXES,
+  SHAPE_KINDS,
+  SHAPE_MODES,
+  shapeCells,
+  type ShapeAxis,
+  type ShapeKind,
+  type ShapeMode,
+} from "../../shared/shapes.js";
+import { emptySpaceOf } from "../domain/connect.js";
 import {
   defaultStateFor,
   isKnownBlock,
@@ -143,6 +185,10 @@ const MAX_REPORTED_BLOCKS = 2048;
  * is four chances to give up and guess instead.
  */
 const MAX_DESCRIBED_BLOCKS = 16;
+
+/** How many positions `find_blocks` lists by default, and at most. */
+const DEFAULT_FOUND_POSITIONS = 64;
+const MAX_FOUND_POSITIONS = 1024;
 
 const regionSchema = {
   type: "object",
@@ -205,6 +251,20 @@ function toPlacement(
   const entry = toPlacedEntry(block);
   if (layers !== null) checkBannerPatterns(context.doc, entry, layers);
   return { entry, layers };
+}
+
+/**
+ * Every block of a mix as it will be placed, each checked against the
+ * document's version before anything is written: one block the version lacks
+ * refuses the whole edit by name, as a single block always has.
+ */
+async function placeMix(
+  context: ToolContext,
+  mix: BlockMix,
+): Promise<{ entry: PaletteEntry; layers: BannerLayer[] | null }[]> {
+  const placements = mix.entries.map((entry) => toPlacement(context, entry.block));
+  for (const placement of placements) await checkBlockAllowed(context, placement.entry);
+  return placements;
 }
 
 /** A pattern to match, which banner patterns cannot be part of. */
@@ -324,8 +384,14 @@ function toPlacedEntry(block: string): PaletteEntry {
 export interface ToolContext {
   doc: SchematicDocument;
   tx: TransactionScope;
-  /** The user's current selection, when they have one. */
+  /** The user's current selection -- its active area -- when they have one. */
   selection: Region | null;
+  /**
+   * The other areas selected beside it. Not a default for anything; they
+   * count as selected when a tool asks whether it strayed outside the
+   * selection, which is the question they would otherwise get wrong.
+   */
+  otherAreas?: readonly Region[];
   allowedBlocks: ReadonlySet<string>;
   /**
    * Called for each tool invocation, so the UI can narrate progress.
@@ -379,16 +445,6 @@ interface ResolvedRegion {
   outsideSelection?: string;
 }
 
-function overlapVolume(a: Region, b: Region): number {
-  const span = (aMin: number, aMax: number, bMin: number, bMax: number) =>
-    Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin) + 1);
-  return (
-    span(a.minX, a.maxX, b.minX, b.maxX) *
-    span(a.minY, a.maxY, b.minY, b.maxY) *
-    span(a.minZ, a.maxZ, b.minZ, b.maxZ)
-  );
-}
-
 function resolveRegion(context: ToolContext, args: Partial<RegionArgs>): ResolvedRegion {
   const { doc, selection } = context;
   const hasExplicit =
@@ -432,8 +488,13 @@ function resolveRegion(context: ToolContext, args: Partial<RegionArgs>): Resolve
       `${describeRegion(region)}. Use resize_document first if you need the room.`;
   }
   if (selection) {
-    const inSelection = overlapVolume(region, normalizeRegion(doc, selection));
-    const outside = regionVolume(region) - inSelection;
+    // Every selected area counts, overlaps once: an explicit region naming one
+    // of the other areas is inside the user's selection, not outside it.
+    const selected = [selection, ...(context.otherAreas ?? [])].flatMap((area) => {
+      const clipped = intersectBox(region, normalizeRegion(doc, area));
+      return clipped === null ? [] : [clipped];
+    });
+    const outside = regionVolume(region) - unionVolume(selected);
     if (outside > 0) {
       resolved.outsideSelection =
         `${outside.toLocaleString()} of the ${regionVolume(region).toLocaleString()} cells this touched are ` +
@@ -532,8 +593,49 @@ async function checkBlockAllowed(context: ToolContext, entry: PaletteEntry): Pro
   );
 }
 
+/**
+ * Every distribution and what it takes, for the tools' descriptions.
+ *
+ * Derived from `DISTRIBUTION_PARAMS` rather than written out, so a parameter
+ * added there reaches a model with no edit here -- the rule the version enums
+ * follow, for the version enums' reason.
+ */
+function distributionsSentence(): string {
+  return DISTRIBUTION_KINDS.map(
+    (kind) => `#${kind}{${[...DISTRIBUTION_PARAMS[kind].map((spec) => spec.key), "seed"].join(",")}}`,
+  ).join(" ");
+}
+
+const MIX_SPELLING =
+  "A mix is weights and blocks in WorldEdit's spelling, 70%minecraft:stone,30%minecraft:andesite: " +
+  "the weights are shares of their sum, and a fill meets them exactly. A distribution in front " +
+  "decides where each block goes, from the cell's position and a seed: " +
+  "#perlin{frequency=0.08,seed=7}70%minecraft:stone,30%minecraft:andesite. Without one, every " +
+  "cell is on its own (salt and pepper). perlin and simplex give patches, ridged veins, voronoi " +
+  "cobbles (mode=patches), rings (distance) or seams (edges), and gradient puts the first block " +
+  "at the low end of axis and the last at the high end. The same seed is the same picture. " +
+  "Each takes: " +
+  distributionsSentence() +
+  ".";
+
+/**
+ * A block field's text as a mix. One block is a mix of one, and keeps the text
+ * exactly as it was given, so a single block goes through the path it always did.
+ */
+function readMix(text: string): BlockMix {
+  const trimmed = String(text ?? "").trim();
+  // Nothing at all is the single-block path's to refuse, in the words it always has.
+  return trimmed === "" ? singleBlockMix(trimmed) : parseMix(trimmed);
+}
+
 function describeRegion(region: Region): string {
   return `(${region.minX},${region.minY},${region.minZ})-(${region.maxX},${region.maxY},${region.maxZ})`;
+}
+
+function sameBox(a: Region, b: Region): boolean {
+  return (
+    a.minX === b.minX && a.minY === b.minY && a.minZ === b.minZ && a.maxX === b.maxX && a.maxY === b.maxY && a.maxZ === b.maxZ
+  );
 }
 
 /**
@@ -703,6 +805,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         coordinates:
           "x is 0..width-1, y is 0..height-1 (y up), z is 0..length-1. All coordinates are inclusive.",
         selection: selection ? normalizeRegion(doc, selection) : null,
+        otherSelectedAreas: (context.otherAreas ?? []).map((area) => normalizeRegion(doc, area)),
       };
     },
   },
@@ -807,20 +910,87 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "get_palette",
     description:
-      "Which blocks the schematic contains and how many of each. Use this before replacing a block, to find how it is actually spelled.",
+      "Which blocks the schematic contains and how many of each. Use this before replacing a block, to find how it is actually spelled. " +
+      "A block that is two cells -- a bed, a door, a two-tall plant, an extended piston and its head -- is counted once, " +
+      "under its lower or foot half, and `pair` lists the spelling of the other half, which a replace has to name as well. " +
+      "`unify: true` merges every state of a block into one row under its bare id, which a replace matches in any state.",
     schema: {
       type: "object",
-      properties: {},
+      properties: {
+        unify: {
+          type: "boolean",
+          description: "One row per block id, whatever its states. Defaults to false: one row per exact state.",
+        },
+      },
       additionalProperties: false,
     },
-    async run(context, _args: Record<string, never>, id) {
+    async run(context, args: { unify?: boolean }, id) {
       step(context, "get_palette", "listing the materials in use", id);
-      const entries = [...paletteHistogram(context.doc).entries()]
-        .filter(([block]) => !block.startsWith("minecraft:air"))
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 128)
-        .map(([block, count]) => ({ block, count }));
-      return { blocks: entries };
+      const counted = countMaterials(context.doc, null).palette;
+      const rows = args.unify === true ? unifyStates(counted) : counted;
+      return { blocks: rows.slice(0, 128) };
+    },
+  },
+
+  {
+    /*
+     * Where a block is, which `get_palette` cannot say: it counts and stops.
+     * The same search the glow does (`domain/find_blocks.ts`), asked for a
+     * count, a box and the first cells instead of a shell.
+     *
+     * The whole schematic by default, unlike the tools that edit: "where are
+     * the diamonds" is a question about the build, and answering it about the
+     * selection would read as "there are none" whenever the selection is
+     * somewhere else.
+     */
+    name: "find_blocks",
+    description:
+      "Where blocks are in the schematic: how many, the box holding them, and the first positions. " +
+      "`blocks` is one block or several separated by commas, matched as replace_blocks matches `from`: " +
+      "a block named without states is found in every state, and spelling the states out finds only that one. " +
+      "Searches the whole schematic unless a region is given. Changes nothing.",
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        blocks: { type: "string" },
+        limit: {
+          type: "integer",
+          minimum: 0,
+          maximum: MAX_FOUND_POSITIONS,
+          description: `How many positions to list. Default ${DEFAULT_FOUND_POSITIONS}.`,
+        },
+      },
+      required: ["blocks"],
+      additionalProperties: false,
+    },
+    async run(context, args: Partial<RegionArgs> & { blocks: string; limit?: number }, id) {
+      const patterns = readMix(args.blocks).entries.map((entry) => toPattern(entry.block));
+      const explicit = ["minX", "minY", "minZ", "maxX", "maxY", "maxZ"].every(
+        (key) => typeof (args as Record<string, unknown>)[key] === "number",
+      );
+      const resolved = explicit ? resolveRegion(context, args) : null;
+      const limit = Math.max(0, Math.min(MAX_FOUND_POSITIONS, Math.floor(args.limit ?? DEFAULT_FOUND_POSITIONS)));
+      step(
+        context,
+        "find_blocks",
+        `looking for ${patterns.map((pattern) => pattern.namespacedName).join(", ")}` +
+          (resolved === null ? "" : ` in ${describeRegion(resolved.region)}`),
+        id,
+      );
+      const found = findBlocks(context.doc, resolved === null ? null : [resolved.region], patterns, {
+        faces: false,
+        positions: limit,
+      });
+      return {
+        total: found.total,
+        bounds: found.bounds,
+        positions: found.positions.map(([x, y, z]) => ({ x, y, z })),
+        ...(found.positions.length < found.total
+          ? { note: `Listed the first ${found.positions.length} of ${found.total}; narrow the region or raise limit.` }
+          : {}),
+        ...(resolved?.clamped === undefined ? {} : { clamped: resolved.clamped }),
+      };
     },
   },
 
@@ -1134,9 +1304,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "fill_region",
     description:
-      "Fill a region with one block. Defaults to the user's selection. Use minecraft:air to " +
-      "clear. The block has to exist in the schematic's Minecraft version, which " +
-      "get_schematic_info reports. A banner's banner_patterns=[...] go on every banner filled.",
+      "Fill a region with one block, or with a mix of several. Defaults to the user's selection. " +
+      "Use minecraft:air to clear. Every block has to exist in the schematic's Minecraft version, " +
+      "which get_schematic_info reports. A banner's banner_patterns=[...] go on every banner " +
+      "filled. " +
+      MIX_SPELLING,
     schema: {
       type: "object",
       properties: { ...regionSchema.properties, block: { type: "string" } },
@@ -1145,6 +1317,25 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     async run(context, args: Partial<RegionArgs> & { block: string }, id) {
       const { region, ...notes } = resolveRegion(context, args ?? {});
+      const mix = readMix(args.block);
+      if (mix.entries.length > 1) {
+        if (regionVolume(region) > MAX_EDIT_VOLUME) {
+          throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
+        }
+        const placements = await placeMix(context, mix);
+        step(context, "fill_region", `filling ${describeRegion(region)} with ${describeMix(mix)}`, id);
+        const changed = writeMix(
+          context.doc,
+          context.tx,
+          [region],
+          mix.distribution,
+          effectiveShares(mix.entries),
+          placements.map((placement) => placement.entry),
+          placements.map((placement) => placement.layers),
+          null,
+        );
+        return { changed, region, ...notes };
+      }
       const entry = toPlacedEntry(args.block);
       await checkBlockAllowed(context, entry);
       const { layers } = toPlacement(context, args.block);
@@ -1162,10 +1353,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "replace_blocks",
     description:
-      "Replace one block with another inside a region. Defaults to the user's selection. " +
-      "Naming `from` without states matches the block in every state it appears in; " +
+      "Replace blocks with others inside a region. Defaults to the user's selection. " +
+      "`from` is one block or several separated by commas, each matched on its own. " +
+      "Naming a block without states matches it in every state it appears in; " +
       "spell the states out to match only that one. get_palette shows what is there. " +
-      "`to` may be a banner with banner_patterns=[...]; `from` may not.",
+      "`to` is one block or a mix, which is shared out over the cells that matched. " +
+      "`to` may be a banner with banner_patterns=[...]; `from` may not. " +
+      MIX_SPELLING,
     schema: {
       type: "object",
       properties: {
@@ -1178,6 +1372,41 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     async run(context, args: Partial<RegionArgs> & { from: string; to: string }, id) {
       const { region, ...notes } = resolveRegion(context, args ?? {});
+      const sought = readMix(args.from).entries.map((entry) => entry.block);
+      const mix = readMix(args.to);
+      if (sought.length > 1 || mix.entries.length > 1) {
+        // Weights in `from` mean nothing -- it is a list of blocks to look for.
+        const patterns = sought.map(toPattern);
+        const placements = await placeMix(context, mix);
+        const soughtLabel = patterns.map((pattern) => pattern.namespacedName).join(", ");
+        step(
+          context,
+          "replace_blocks",
+          `replacing ${soughtLabel} with ${describeMix(mix)} in ${describeRegion(region)}`,
+          id,
+        );
+        const changed = writeMix(
+          context.doc,
+          context.tx,
+          [region],
+          mix.distribution,
+          effectiveShares(mix.entries),
+          placements.map((placement) => placement.entry),
+          placements.map((placement) => placement.layers),
+          patterns,
+        );
+        return {
+          changed,
+          region,
+          ...notes,
+          note:
+            changed === 0
+              ? `Nothing matched ${patterns.map(paletteEntryCacheKey).join(" or ")}. A name on its own ` +
+                `matches the block in every state, so none of them is in this region at all. ` +
+                `get_palette shows what the schematic actually contains.`
+              : undefined,
+        };
+      }
       // `from` is a pattern and `to` is a placement -- see `toPlacedEntry`.
       const from = toPattern(args.from);
       const to = toPlacedEntry(args.to);
@@ -1220,6 +1449,395 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
               `what the schematic actually contains.`
             : undefined,
       };
+    },
+  },
+
+  {
+    /**
+     * WorldEdit's shapes, one tool. A model asked for a dome or a tower wrote
+     * a build script for it, which is fine for anything clever and a lot of
+     * arithmetic to get wrong for a sphere -- and `fill_region` answers "a
+     * round tower" with a square one.
+     *
+     * The shape is inscribed in the region, and the region is not trimmed
+     * first: a sphere half outside the schematic is half a sphere, not a
+     * smaller sphere. Like every tool here it does not grow the document;
+     * `resize_document` is the one way to make room, for the reason written
+     * on it.
+     */
+    name: "draw_shape",
+    description:
+      "Draw a shape with one block or a mix, inscribed in a region. Defaults to the user's selection. " +
+      "shape: sphere (an ellipsoid when the region is not a cube), cylinder (along axis, y by default), " +
+      "pyramid (steps in one block per layer going up from the region's floor, so a long footprint gives " +
+      "a hipped roof), box, walls (the four sides, no floor or ceiling). These are WorldEdit's: a sphere " +
+      "of radius r centred on (x,y,z) is the region x-r..x+r, y-r..y+r, z-r..z+r, and //pyramid s is " +
+      "2s-1 wide and s tall. hollow keeps a shell thickness blocks thick (default 1): a hollow sphere " +
+      "and box are closed, a hollow cylinder is an open tube, a hollow pyramid has no floor; walls are " +
+      "always hollow. mode: all (default), empty (only where nothing is, so it fills round a build), " +
+      "filled (only over blocks already there, to recolour them). Cells outside the schematic are not " +
+      "drawn; use resize_document first if you need the room. " +
+      MIX_SPELLING,
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        shape: { type: "string", enum: [...SHAPE_KINDS] },
+        block: { type: "string" },
+        axis: { type: "string", enum: [...SHAPE_AXES] },
+        hollow: { type: "boolean" },
+        thickness: { type: "integer", minimum: 1 },
+        mode: { type: "string", enum: [...SHAPE_MODES] },
+      },
+      required: ["shape", "block"],
+      additionalProperties: false,
+    },
+    async run(
+      context,
+      args: Partial<RegionArgs> & {
+        shape: ShapeKind;
+        block: string;
+        axis?: ShapeAxis;
+        hollow?: boolean;
+        thickness?: number;
+        mode?: ShapeMode;
+      },
+      id,
+    ) {
+      const { doc, selection } = context;
+      const given = args ?? ({} as typeof args);
+      const explicit = (["minX", "minY", "minZ", "maxX", "maxY", "maxZ"] as const).every(
+        (key) => typeof given[key] === "number",
+      );
+      const whole = { minX: 0, minY: 0, minZ: 0, maxX: doc.width - 1, maxY: doc.height - 1, maxZ: doc.length - 1 };
+      const box = explicit ? orderRegion(given as RegionArgs) : normalizeRegion(doc, selection ?? whole);
+      const shape = normalizeShape({
+        kind: given.shape,
+        box,
+        axis: given.axis,
+        hollow: given.hollow,
+        thickness: given.thickness,
+      });
+      const mode = given.mode ?? "all";
+      if (!(SHAPE_MODES as readonly string[]).includes(mode)) {
+        throw new Error(`mode must be one of ${SHAPE_MODES.join(", ")}, not "${String(mode)}".`);
+      }
+      const cells = shapeCells(shape, whole);
+      if (cells.count > MAX_EDIT_VOLUME) {
+        throw new Error(`That shape covers ${cells.count} blocks, more than one edit may touch.`);
+      }
+      const mix = readMix(given.block);
+      const placements = await placeMix(context, mix);
+
+      const voidEntry = emptySpaceOf(doc);
+      const isEmpty = (entry: PaletteEntry): boolean =>
+        entry.namespacedName === "minecraft:air" || (voidEntry !== null && matchesBlockPattern(entry, voidEntry));
+      const filter = mode === "empty" ? isEmpty : mode === "filled" ? (entry: PaletteEntry) => !isEmpty(entry) : null;
+
+      step(
+        context,
+        "draw_shape",
+        `drawing a ${shape.hollow && shape.kind !== "walls" ? "hollow " : ""}${shape.kind} in ${describeRegion(shape.box)} with ${describeMix(mix)}`,
+        id,
+      );
+      const changed =
+        cells.count === 0
+          ? 0
+          : writeMix(
+              doc,
+              context.tx,
+              shapeCellSet(cells),
+              mix.distribution,
+              effectiveShares(mix.entries),
+              placements.map((placement) => placement.entry),
+              placements.map((placement) => placement.layers),
+              filter,
+            );
+
+      const notes: { clamped?: string; outsideSelection?: string } = {};
+      if (cells.window === null || !sameBox(cells.window, shape.box)) {
+        notes.clamped =
+          `Part of the shape lies outside the schematic, which is ${doc.width}x${doc.height}x${doc.length} ` +
+          `(x 0-${doc.width - 1}, y 0-${doc.height - 1}, z 0-${doc.length - 1}), and was not drawn. ` +
+          `Use resize_document first if you need the room.`;
+      }
+      if (selection) {
+        const areas = [selection, ...(context.otherAreas ?? [])].map((area) => normalizeRegion(doc, area));
+        let outside = 0;
+        forEachShapeCell(cells, (x, y, z) => {
+          if (!areas.some((area) => boxContains(area, x, y, z))) outside += 1;
+        });
+        if (outside > 0) {
+          notes.outsideSelection =
+            `${outside.toLocaleString()} of the ${cells.count.toLocaleString()} cells of this shape are ` +
+            `outside the user's selection. Say so in your answer, or narrow the region.`;
+        }
+      }
+      return { changed, cells: cells.count, box: shape.box, ...notes };
+    },
+  },
+
+  {
+    /**
+     * A landscape from a noise, one tool. A model asked for hills wrote a
+     * build script that summed sines, which is a lot of arithmetic for a
+     * lumpy egg box; this is the terrain the creative brush paints, with the
+     * same three layers and the same surface for the same settings.
+     *
+     * The region is trimmed to the schematic like every tool here, and the
+     * surface is cut where the region ends rather than squeezed into it: a
+     * terrain is a fact about the columns, not about the box it was asked in.
+     */
+    name: "generate_terrain",
+    description:
+      "Lay terrain from a noise in a region. Defaults to the user's selection. Every column of the " +
+      "region gets a surface height from the noise, between base and base + amplitude (y of the top " +
+      "block): the surface block on top, subsoil_depth blocks of subsoil under it, rock below that, " +
+      "empty space above. noise: perlin and simplex give rolling hills, ridged gives sharp crests, " +
+      "voronoi gives plateaus (mode=patches), cones (distance) or a net of ridges (edges); params are " +
+      "the noise's own, as for a mix distribution -- " +
+      TERRAIN_NOISES.map((kind) => `${kind}{${DISTRIBUTION_PARAMS[kind].map((spec) => spec.key).join(",")}}`).join(" ") +
+      " -- and a lower frequency (or a larger voronoi size) is wider hills. The same noise, seed and " +
+      "params give the same landscape wherever it is laid, so two regions side by side meet without a " +
+      "seam. mode: set (default; the column becomes the terrain), raise (only fills empty cells under " +
+      "the surface, never removes), dig (only clears what stands above the surface, never adds). " +
+      "base defaults to the region's floor and amplitude to two thirds of its height. surface, subsoil " +
+      "and rock are a block or a mix each (default grass_block, dirt and stone). Cells outside the " +
+      "schematic are not written; use resize_document first if you need the room. " +
+      MIX_SPELLING,
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        noise: { type: "string", enum: [...TERRAIN_NOISES] },
+        seed: { type: "integer" },
+        params: { type: "object", additionalProperties: { type: ["number", "string", "boolean"] } },
+        base: { type: "integer" },
+        amplitude: { type: "integer", minimum: TERRAIN_AMPLITUDE.min, maximum: TERRAIN_AMPLITUDE.max },
+        surface: { type: "string" },
+        subsoil: { type: "string" },
+        subsoil_depth: { type: "integer", minimum: SUBSOIL_DEPTH.min, maximum: SUBSOIL_DEPTH.max },
+        rock: { type: "string" },
+        mode: { type: "string", enum: [...TERRAIN_MODES] },
+      },
+      required: ["noise"],
+      additionalProperties: false,
+    },
+    async run(
+      context,
+      args: Partial<RegionArgs> & {
+        noise: string;
+        seed?: number;
+        params?: Record<string, number | string | boolean>;
+        base?: number;
+        amplitude?: number;
+        surface?: string;
+        subsoil?: string;
+        subsoil_depth?: number;
+        rock?: string;
+        mode?: TerrainMode;
+      },
+      id,
+    ) {
+      const given = args ?? ({} as typeof args);
+      const { region, ...notes } = resolveRegion(context, given);
+      const height = region.maxY - region.minY + 1;
+      const field = normalizeHeightField({
+        noise: { kind: given.noise, seed: given.seed ?? 0, params: given.params },
+        base: given.base ?? region.minY,
+        amplitude: given.amplitude ?? Math.max(0, Math.floor(((height - 1) * 2) / 3)),
+      });
+      const mode = given.mode ?? "set";
+      if (!(TERRAIN_MODES as readonly string[]).includes(mode)) {
+        throw new Error(`mode must be one of ${TERRAIN_MODES.join(", ")}, not "${String(mode)}".`);
+      }
+      const depth = given.subsoil_depth ?? 3;
+      if (!Number.isInteger(depth) || depth < SUBSOIL_DEPTH.min || depth > SUBSOIL_DEPTH.max) {
+        throw new Error(`subsoil_depth is a whole number from ${SUBSOIL_DEPTH.min} to ${SUBSOIL_DEPTH.max}.`);
+      }
+      if (regionVolume(region) > MAX_EDIT_VOLUME) {
+        throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
+      }
+      const layerOf = async (spelling: string | undefined, fallback: string): Promise<LayerMix> => {
+        const mix = readMix(spelling ?? fallback);
+        const placements = await placeMix(context, mix);
+        return {
+          distribution: mix.distribution,
+          shares: effectiveShares(mix.entries),
+          written: placements.map((placement) => placement.entry),
+          layers: placements.map((placement) => placement.layers),
+        };
+      };
+      const layers =
+        mode === "dig"
+          ? null
+          : {
+              surface: await layerOf(given.surface, "minecraft:grass_block"),
+              subsoil: await layerOf(given.subsoil, "minecraft:dirt"),
+              rock: await layerOf(given.rock, "minecraft:stone"),
+              subsoilDepth: depth,
+            };
+
+      const { doc } = context;
+      const voidEntry = emptySpaceOf(doc);
+      const isEmpty = (entry: PaletteEntry): boolean =>
+        entry.namespacedName === "minecraft:air" || (voidEntry !== null && matchesBlockPattern(entry, voidEntry));
+      const top = heightField(field, doc.frame);
+      let lowest = Infinity;
+      let highest = -Infinity;
+      for (let x = region.minX; x <= region.maxX; x += 1) {
+        for (let z = region.minZ; z <= region.maxZ; z += 1) {
+          const value = top(x, z);
+          if (value < lowest) lowest = value;
+          if (value > highest) highest = value;
+        }
+      }
+      step(context, "generate_terrain", `laying ${given.noise} terrain in ${describeRegion(region)} (${mode})`, id);
+      const changed = writeTerrain(
+        doc,
+        context.tx,
+        regionCellSet([region]),
+        region,
+        top,
+        layers,
+        mode,
+        isEmpty,
+        voidEntry ?? { namespacedName: "minecraft:air", properties: {} },
+      );
+      const cut =
+        highest > region.maxY || lowest < region.minY
+          ? `The surface runs from y=${lowest} to y=${highest} and the region from y=${region.minY} to y=${region.maxY}, ` +
+            `so it was cut where they do not overlap: columns above the region are solid to its top, columns below it ` +
+            `are empty. Move base, change amplitude or the region if that is not what you meant.`
+          : undefined;
+      return { changed, region, surface: { lowest, highest }, ...notes, ...(cut === undefined ? {} : { cut }) };
+    },
+  },
+
+  {
+    /**
+     * WorldEdit's `//smooth` over a region, the same pass the creative smooth
+     * brush makes. Inside the region and the schematic only: smoothing
+     * reshapes ground that is there, and grows nothing.
+     */
+    name: "smooth_terrain",
+    description:
+      "Smooth the ground in a region, as WorldEdit's //smooth does. Defaults to the user's selection. " +
+      "Takes a heightmap of the region (per column, the highest block that fills its cell or covers its " +
+      "floor or ceiling -- not flowers, torches or fences), blurs it iterations times with WorldEdit's " +
+      "Gaussian (radius 5, sigma 1), and stretches each column to its new height, keeping its top block. " +
+      "Good for terrain, wrong for buildings, walls or caves. iterations defaults to 1.",
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        iterations: { type: "integer", minimum: SMOOTH_ITERATIONS.min, maximum: SMOOTH_ITERATIONS.max },
+      },
+      additionalProperties: false,
+    },
+    async run(context, args: Partial<RegionArgs> & { iterations?: number }, id) {
+      const given = args ?? ({} as typeof args);
+      const { region, ...notes } = resolveRegion(context, given);
+      const iterations = given.iterations ?? 1;
+      if (!Number.isInteger(iterations) || iterations < SMOOTH_ITERATIONS.min || iterations > SMOOTH_ITERATIONS.max) {
+        throw new Error(`iterations is a whole number from ${SMOOTH_ITERATIONS.min} to ${SMOOTH_ITERATIONS.max}.`);
+      }
+      if (regionVolume(region) > MAX_EDIT_VOLUME) {
+        throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
+      }
+      const { doc } = context;
+      const voidEntry = emptySpaceOf(doc);
+      const isEmpty = (entry: PaletteEntry): boolean =>
+        entry.namespacedName === "minecraft:air" || (voidEntry !== null && matchesBlockPattern(entry, voidEntry));
+      step(context, "smooth_terrain", `smoothing ${describeRegion(region)} ${iterations} time${iterations === 1 ? "" : "s"}`, id);
+      const changed = smoothHeights(
+        doc,
+        context.tx,
+        region,
+        iterations,
+        groundFor(isEmpty),
+        voidEntry ?? { namespacedName: "minecraft:air", properties: {} },
+      );
+      return { changed, region, ...notes };
+    },
+  },
+
+  {
+    /**
+     * VoxelSniper's erode brush over a region rather than a sphere: the same
+     * passes, the same presets, the creative erode brush's rule.
+     */
+    name: "erode",
+    description:
+      "Erode or fill the blocks in a region with VoxelSniper's erode rules. Defaults to the user's selection. " +
+      "Erosion turns a block with at least erosion_faces of its six neighbours empty or liquid into empty " +
+      "space, erosion_recursion times; then a fill turns an empty or liquid cell with at least fill_faces " +
+      "solid neighbours into the commonest of them, fill_recursion times. Each pass reads the one before. " +
+      "preset: melt (wears edges away), fill (fills hollows), smooth (rounds both), lift (raises the " +
+      "surface a layer), floatclean (removes lone floating blocks). inverse swaps erosion and fill, as " +
+      "VoxelSniper's gunpowder does. The four numbers, when given, replace the preset's. Never grows the " +
+      "schematic.",
+    schema: {
+      type: "object",
+      properties: {
+        ...regionSchema.properties,
+        preset: { type: "string", enum: [...EROSION_PRESET_NAMES] },
+        inverse: { type: "boolean" },
+        erosion_faces: { type: "integer", minimum: 0, maximum: 6 },
+        erosion_recursion: { type: "integer", minimum: EROSION_RECURSION.min, maximum: EROSION_RECURSION.max },
+        fill_faces: { type: "integer", minimum: 0, maximum: 6 },
+        fill_recursion: { type: "integer", minimum: EROSION_RECURSION.min, maximum: EROSION_RECURSION.max },
+      },
+      additionalProperties: false,
+    },
+    async run(
+      context,
+      args: Partial<RegionArgs> & {
+        preset?: ErosionPreset;
+        inverse?: boolean;
+        erosion_faces?: number;
+        erosion_recursion?: number;
+        fill_faces?: number;
+        fill_recursion?: number;
+      },
+      id,
+    ) {
+      const given = args ?? ({} as typeof args);
+      const { region, ...notes } = resolveRegion(context, given);
+      const preset = given.preset ?? "smooth";
+      if (!(EROSION_PRESET_NAMES as readonly string[]).includes(preset)) {
+        throw new Error(`preset must be one of ${EROSION_PRESET_NAMES.join(", ")}, not "${String(preset)}".`);
+      }
+      const base = erosionRule(preset, given.inverse === true);
+      let rule: ErosionRule;
+      try {
+        rule = normalizeErosionRule({
+          erosionFaces: given.erosion_faces ?? base.erosionFaces,
+          erosionRecursion: given.erosion_recursion ?? base.erosionRecursion,
+          fillFaces: given.fill_faces ?? base.fillFaces,
+          fillRecursion: given.fill_recursion ?? base.fillRecursion,
+        });
+      } catch (err) {
+        throw new Error(err instanceof Error ? err.message : String(err));
+      }
+      if (regionVolume(region) > MAX_EDIT_VOLUME) {
+        throw new Error(`That region covers ${regionVolume(region)} blocks, more than one edit may touch.`);
+      }
+      const { doc } = context;
+      const voidEntry = emptySpaceOf(doc);
+      const isEmpty = (entry: PaletteEntry): boolean =>
+        entry.namespacedName === "minecraft:air" || (voidEntry !== null && matchesBlockPattern(entry, voidEntry));
+      step(context, "erode", `eroding ${describeRegion(region)} (${preset}${given.inverse === true ? ", inverse" : ""})`, id);
+      const changed = erodeCells(
+        doc,
+        context.tx,
+        region,
+        () => true,
+        rule,
+        (entry) => isEmpty(entry) || isLiquid(entry),
+        voidEntry ?? { namespacedName: "minecraft:air", properties: {} },
+      );
+      return { changed, region, rule, ...notes };
     },
   },
 
@@ -1374,7 +1992,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "run_build_script",
     description:
-      "Run a JavaScript build script to place many blocks at once. Define `function buildCreation(startX, startY, startZ) {}` and call safeSetBlock(x,y,z,block,options) and safeFill(x1,y1,z1,x2,y2,z2,block,options) inside it. Coordinates are the schematic's own. Far cheaper than hundreds of individual calls — prefer this for anything structural.",
+      "Run a JavaScript build script to place many blocks at once. Define `function buildCreation(startX, startY, startZ) {}` and call safeSetBlock(x,y,z,block,options) and safeFill(x1,y1,z1,x2,y2,z2,block,options) inside it. Coordinates are the schematic's own. noise(kind, x, y, z, params) returns the value of a mix distribution at a point -- perlin, simplex, ridged, voronoi, random or gradient, with params such as { seed: 7, frequency: 0.03, octaves: 4 } -- the same field fills and generate_terrain read, so a script can shape what the panel previews. Perlin and simplex lie roughly in -1..1. Far cheaper than hundreds of individual calls — prefer this for anything structural.",
     schema: {
       type: "object",
       properties: { code: { type: "string" } },

@@ -42,7 +42,7 @@
  * wrong state is worse than a default, because it looks deliberate.
  */
 
-import { hasProperty } from "./block_states.js";
+import { hasProperty, legalValuesFor } from "./block_states.js";
 
 export type Face = "up" | "down" | "north" | "south" | "east" | "west";
 
@@ -129,7 +129,8 @@ const isFenceGate = (name: string): boolean => name.endsWith("_fence_gate");
 const isWall = (name: string): boolean => name.endsWith("_wall");
 const isPane = (name: string): boolean => name.endsWith("_pane") || name === "iron_bars";
 const isStairs = (name: string): boolean => name.endsWith("_stairs");
-const isRail = (name: string): boolean => name === "rail" || name.endsWith("_rail");
+/** Exported for `orientPlacement`, which lays a rail along the look. */
+export const isRail = (name: string): boolean => name === "rail" || name.endsWith("_rail");
 /**
  * The eight copper chests: four oxidation stages and their waxed mirrors.
  *
@@ -278,59 +279,109 @@ function stairsShape(
 }
 
 /**
- * A rail's shape.
+ * A rail's shape: `RailState.place`, read as the answer it settles on.
  *
- * Two of the ten values are straight, four are curves, and four ascend.
- * **Ascending is deliberately not derived**, and the reason is structural
- * rather than an oversight: a rail ascends towards a rail one block *up and
- * over*, which is a diagonal, and `Neighbours` is the six faces. Extending it
- * for one family would put four more lookups on every cell the pass visits.
+ * Two of the ten values are straight, four are curves and four climb. The
+ * climbing ones were never derived, on the reasoning that a rail ascends
+ * towards a rail one block *up and over*, a diagonal, while `Neighbours` was
+ * the six faces. Redstone then made `Neighbours` carry the eight diagonals,
+ * and `connect.ts` fills them for every cell and revisits them after an edit,
+ * so the reason expired. A track laid up a hillside came out as a staircase of
+ * flat rails with a ledge at every step.
  *
- * Flat-correct is still the whole visible difference here: every rail in the
- * game used to be `north_south`, so a line running east lay across its own
- * track and a corner did not turn at all.
+ * Vanilla's rule, in its own order:
  *
- * Only the plain `rail` curves. Powered, detector and activator rails have no
- * curve in their `shape` at all, so offering one would write a value the game
- * refuses -- `hasProperty` would not catch that, because the property is real
- * and only the value is not.
+ * 1. **A side has a rail if one is beside it, one block up or one block
+ *    down.** `hasNeighborRail` asks `getRail`, which tries the cell, the cell
+ *    above and the cell below. The wiki says the same: rails «on its level, or
+ *    one level up or down».
+ * 2. **Straight or curved from the four sides.** Only the plain `rail` has
+ *    curves in its `shape`; powered, detector and activator rails would be
+ *    written a value the game refuses, and `hasProperty` cannot catch that,
+ *    because the property is real and only the value is not.
+ * 3. **A junction takes the south-east rule.** Three or four sides cannot be
+ *    one rail, and vanilla picks the curve by a fixed order: south before
+ *    north, east before west. That is its *unpowered* order -- a junction with
+ *    a redstone signal prefers the other way -- and power is not simulated
+ *    here, so a file keeps what it says until something near it is edited.
+ *    A straight-only rail at a corner or a junction keeps the shape it has:
+ *    that is the `shape` argument `place` falls back on.
+ * 4. **A straight answer climbs towards a rail one block up.** North-south
+ *    asks north and then south, east-west asks east and then west, and the
+ *    second answer wins. So with rails above *both* ends -- a valley, which a
+ *    rail cannot be -- it ascends south or west. A rail one block *down* is a
+ *    flat link: the lower rail is the one that climbs. A curve never climbs,
+ *    because the check runs only on a straight answer.
+ * 5. **A rail with no rail beside it keeps the shape it has.** That is
+ *    vanilla's own fallback rather than a deviation, unlike the tripwire's: a
+ *    rail is placed along the look (`orientPlacement`) and stays that way
+ *    until a neighbour arrives.
+ *
+ * **What this does not do is remember.** Vanilla's rail keeps a list of the
+ * neighbours it is joined to, and one already joined at both ends ignores a
+ * third rail built beside it later (`canConnectTo`). This pass knows only who
+ * is next door, so a rail laid against a finished line turns the line into a
+ * junction. That was already true of a rail on the same level; reading one
+ * block up and down widens it to a rail on a ledge beside the track.
  */
-const RAIL_CURVES: ReadonlyArray<readonly [Face, Face, string]> = [
+const RAIL_CORNERS: ReadonlyArray<readonly [Face, Face, string]> = [
   ["north", "east", "north_east"],
   ["north", "west", "north_west"],
   ["south", "east", "south_east"],
   ["south", "west", "south_west"],
 ];
 
-function railShape(self: string, neighbours: Neighbours): string {
-  const links = HORIZONTAL_FACES.filter((direction) => {
-    const side = neighbours[direction] ?? null;
-    return side !== null && isRail(side.name);
-  });
+/** The south-east rule, unpowered: the last pair present wins. */
+const RAIL_JUNCTION: ReadonlyArray<readonly [Face, Face, string]> = [
+  ["north", "west", "north_west"],
+  ["north", "east", "north_east"],
+  ["south", "west", "south_west"],
+  ["south", "east", "south_east"],
+];
 
-  const straight = (face: Face): string => (axisOf(face) === "x" ? "east_west" : "north_south");
+function railShape(
+  self: { readonly name: string; readonly properties: Readonly<Record<string, string>> },
+  neighbours: Neighbours,
+): string {
+  const railAt = (key: NeighbourKey): boolean => {
+    const block = neighbours[key] ?? null;
+    return block !== null && isRail(block.name);
+  };
+  const linked = (face: Face): boolean =>
+    railAt(face) || railAt(`${face}_up`) || railAt(`${face}_down`);
+  const links = HORIZONTAL_FACES.filter(linked);
+  const curves = self.name === "rail";
+  // What `place` falls back on. A value the block cannot hold -- a corner on a
+  // powered rail, out of somebody else's file -- is not kept.
+  const own = self.properties.shape;
+  const current =
+    own !== undefined && legalValuesFor(self.name, "shape")?.includes(own) === true ? own : "north_south";
 
-  // No neighbour, or one: lie along whatever axis is implied. `north_south` is
-  // the default state and the answer for a lone rail.
-  if (links.length === 0) return "north_south";
-  if (links.length === 1) return straight(links[0]);
-
-  if (links.length === 2) {
-    if (OPPOSITE[links[0]] === links[1]) return straight(links[0]);
-    if (self === "rail") {
-      const curve = RAIL_CURVES.find(
-        ([a, b]) => links.includes(a) && links.includes(b),
-      );
-      if (curve !== undefined) return curve[2];
+  const alongZ = links.includes("north") || links.includes("south");
+  const alongX = links.includes("east") || links.includes("west");
+  let shape: string | null = null;
+  if (alongZ && !alongX) shape = "north_south";
+  if (alongX && !alongZ) shape = "east_west";
+  if (curves && links.length === 2) {
+    shape = RAIL_CORNERS.find(([a, b]) => links.includes(a) && links.includes(b))?.[2] ?? shape;
+  }
+  if (shape === null && alongZ && alongX) {
+    shape = current;
+    if (curves) {
+      for (const [a, b, curve] of RAIL_JUNCTION) {
+        if (links.includes(a) && links.includes(b)) shape = curve;
+      }
     }
-    // A powered rail at a corner cannot turn, so it keeps a straight run.
-    return straight(links[0]);
   }
 
-  // Three or four ways is a junction, which a rail cannot express. Vanilla
-  // keeps a straight run through it; north/south wins because it is the
-  // default and the choice has to be made somewhere.
-  return links.includes("north") || links.includes("south") ? "north_south" : "east_west";
+  if (shape === "north_south") {
+    if (railAt("north_up")) shape = "ascending_north";
+    if (railAt("south_up")) shape = "ascending_south";
+  } else if (shape === "east_west") {
+    if (railAt("east_up")) shape = "ascending_east";
+    if (railAt("west_up")) shape = "ascending_west";
+  }
+  return shape ?? current;
 }
 
 /**
@@ -625,7 +676,7 @@ export function connectedState(
   }
 
   if (isRail(name)) {
-    put("shape", railShape(name, neighbours));
+    put("shape", railShape(block, neighbours));
     return out;
   }
 

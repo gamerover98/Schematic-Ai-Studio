@@ -54,14 +54,24 @@ export function translate(catalog: Catalog, key: string, params?: MessageParams)
  * choice *here* rather than as a ternary at each call site means a language
  * with three forms is a change to this function and its catalogue, not to
  * forty components.
+ *
+ * The count goes in formatted, so a call site never has to choose between the
+ * right form and the thousands separator -- and formatted in `locale`, the
+ * language of the sentence it goes into. Left to the system's, an Italian
+ * machine wrote "2.056 blocks" into an English sentence, where the separator
+ * reads as a decimal point.
  */
 export function translatePlural(
   catalog: Catalog,
   key: string,
   count: number,
   params?: MessageParams,
+  locale = "en",
 ): string {
-  return translate(catalog, `${key}.${count === 1 ? "one" : "other"}`, { ...params, count });
+  return translate(catalog, `${key}.${count === 1 ? "one" : "other"}`, {
+    ...params,
+    count: count.toLocaleString(locale),
+  });
 }
 
 /**

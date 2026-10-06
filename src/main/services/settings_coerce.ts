@@ -14,6 +14,33 @@
  * test that fails if a field goes missing from either object.
  */
 
+import { tryParseMix } from "../../shared/block_mix.js";
+import {
+  BRUSH_RADIUS,
+  BRUSH_SHAPES,
+  CORNER_SHAPES,
+  CREATIVE_TOOLS,
+  DEFAULT_CREATIVE_SETTINGS,
+  TOOL_HEIGHT,
+  TOOL_THICKNESS,
+  type BrushSettings,
+  type CreativeSettings,
+  type ErodeToolSettings,
+  type ShapeToolSettings,
+  type SmoothToolSettings,
+  type TerrainToolSettings,
+  type WallToolSettings,
+} from "../../shared/creative.js";
+import { SHAPE_AXES, SHAPE_MODES } from "../../shared/shapes.js";
+import {
+  EROSION_PRESET_NAMES,
+  FOOTPRINTS,
+  normalizeHeightField,
+  SMOOTH_ITERATIONS,
+  SUBSOIL_DEPTH,
+  TERRAIN_MODES,
+  type HeightField,
+} from "../../shared/terrain.js";
 import {
   DEFAULT_HOTBAR,
   DEFAULT_MCP_SETTINGS,
@@ -24,6 +51,7 @@ import {
   MCP_PORT,
   PROVIDERS,
   SIDEBAR_WIDTH,
+  DOCK_WIDTH,
   THEMES,
   DEFAULT_EDITING_SETTINGS,
   VOID_OPACITY,
@@ -36,8 +64,10 @@ import {
   type Theme,
   type UiSettings,
   type UpdateSettings,
+  OPTIONS_PANEL_MIN_WIDTH,
   PANEL_SIZE,
   bindAddressRefusal,
+  isMaterialsSort,
 } from "../../shared/settings.js";
 
 function isProvider(value: unknown): value is Provider {
@@ -69,25 +99,29 @@ export function coerceUi(raw: unknown): UiSettings {
     sidebarCollapsed: source.sidebarCollapsed === true,
     theme: isTheme(source.theme) ? source.theme : DEFAULT_UI_SETTINGS.theme,
     language: isLanguage(source.language) ? source.language : DEFAULT_UI_SETTINGS.language,
+    // Clamped on read like the chat's width; the renderer clamps again
+    // against the live window, with the chat's width reserved.
+    dockWidth: clampWidth(source.dockWidth, DOCK_WIDTH, DEFAULT_UI_SETTINGS.dockWidth),
+    dockCollapsed: source.dockCollapsed === true,
+    materialsUnify: source.materialsUnify === true,
+    materialsSort: isMaterialsSort(source.materialsSort)
+      ? source.materialsSort
+      : DEFAULT_UI_SETTINGS.materialsSort,
+    creative: coerceCreative(source.creative),
     // Only non-negative here. The real clamp is the live window, which this
     // process cannot see, so the renderer applies it again on every drag and on
-    // resize -- the same two-stage arrangement `sidebarWidth` uses.
-    toolWindowX: coordinate(source.toolWindowX, DEFAULT_UI_SETTINGS.toolWindowX),
-    toolWindowY: coordinate(source.toolWindowY, DEFAULT_UI_SETTINGS.toolWindowY),
-    // Sizes get the floor, not the ceiling: the pane a panel has to fit in is
-    // the renderer's to measure, and it clamps again on every drag.
-    toolWindowW: extent(source.toolWindowW, DEFAULT_UI_SETTINGS.toolWindowW, PANEL_SIZE.minWidth),
-    toolWindowH: extent(source.toolWindowH, DEFAULT_UI_SETTINGS.toolWindowH, PANEL_SIZE.minHeight),
-    inspectorWindowX: coordinate(source.inspectorWindowX, DEFAULT_UI_SETTINGS.inspectorWindowX),
-    inspectorWindowY: coordinate(source.inspectorWindowY, DEFAULT_UI_SETTINGS.inspectorWindowY),
-    inspectorWindowW: extent(
-      source.inspectorWindowW,
-      DEFAULT_UI_SETTINGS.inspectorWindowW,
-      PANEL_SIZE.minWidth,
+    // resize -- the same two-stage arrangement `sidebarWidth` uses. Sizes get
+    // the floor, not the ceiling, for the same reason.
+    creativeWindowX: coordinate(source.creativeWindowX, DEFAULT_UI_SETTINGS.creativeWindowX),
+    creativeWindowY: coordinate(source.creativeWindowY, DEFAULT_UI_SETTINGS.creativeWindowY),
+    creativeWindowW: extent(
+      source.creativeWindowW,
+      DEFAULT_UI_SETTINGS.creativeWindowW,
+      OPTIONS_PANEL_MIN_WIDTH,
     ),
-    inspectorWindowH: extent(
-      source.inspectorWindowH,
-      DEFAULT_UI_SETTINGS.inspectorWindowH,
+    creativeWindowH: extent(
+      source.creativeWindowH,
+      DEFAULT_UI_SETTINGS.creativeWindowH,
       PANEL_SIZE.minHeight,
     ),
     /*
@@ -98,6 +132,95 @@ export function coerceUi(raw: unknown): UiSettings {
      * newer build no longer has a meaning for.
      */
   };
+}
+
+/**
+ * The creative tools' settings, every field named, `coerceUi`'s rule one
+ * level down.
+ *
+ * A name that is not on its list falls back to the default rather than being
+ * kept: these are read by a gesture in flight, and a brush shape this build
+ * has never heard of is a right button that does nothing. Numbers are clamped
+ * rather than refused, because a radius of 40 written by hand still means
+ * "big".
+ */
+export function coerceCreative(raw: unknown): CreativeSettings {
+  const source = (raw !== null && typeof raw === "object" ? raw : {}) as Partial<CreativeSettings>;
+  const brush = (source.brush ?? {}) as Partial<BrushSettings>;
+  const shape = (source.shape ?? {}) as Partial<ShapeToolSettings>;
+  const walls = (source.walls ?? {}) as Partial<WallToolSettings>;
+  const terrain = (source.terrain ?? {}) as Partial<TerrainToolSettings>;
+  const smooth = (source.smooth ?? {}) as Partial<SmoothToolSettings>;
+  const erode = (source.erode ?? {}) as Partial<ErodeToolSettings>;
+  const defaults = DEFAULT_CREATIVE_SETTINGS;
+  return {
+    tool: oneOf(CREATIVE_TOOLS, source.tool, defaults.tool),
+    brush: {
+      shape: oneOf(BRUSH_SHAPES, brush.shape, defaults.brush.shape),
+      radius: within(brush.radius, BRUSH_RADIUS, defaults.brush.radius),
+      mode: oneOf(SHAPE_MODES, brush.mode, defaults.brush.mode),
+    },
+    shape: {
+      kind: oneOf(CORNER_SHAPES, shape.kind, defaults.shape.kind),
+      axis: oneOf(SHAPE_AXES, shape.axis, defaults.shape.axis),
+      hollow: shape.hollow === true,
+      thickness: within(shape.thickness, TOOL_THICKNESS, defaults.shape.thickness),
+      height: within(shape.height, TOOL_HEIGHT, defaults.shape.height),
+      mode: oneOf(SHAPE_MODES, shape.mode, defaults.shape.mode),
+    },
+    walls: {
+      height: within(walls.height, TOOL_HEIGHT, defaults.walls.height),
+      thickness: within(walls.thickness, TOOL_THICKNESS, defaults.walls.thickness),
+      mode: oneOf(SHAPE_MODES, walls.mode, defaults.walls.mode),
+    },
+    terrain: {
+      radius: within(terrain.radius, BRUSH_RADIUS, defaults.terrain.radius),
+      footprint: oneOf(FOOTPRINTS, terrain.footprint, defaults.terrain.footprint),
+      mode: oneOf(TERRAIN_MODES, terrain.mode, defaults.terrain.mode),
+      field: heightFieldOr(terrain.field, defaults.terrain.field),
+      surface: mixOr(terrain.surface, defaults.terrain.surface),
+      subsoil: mixOr(terrain.subsoil, defaults.terrain.subsoil),
+      subsoilDepth: within(terrain.subsoilDepth, SUBSOIL_DEPTH, defaults.terrain.subsoilDepth),
+      rock: mixOr(terrain.rock, defaults.terrain.rock),
+    },
+    smooth: {
+      radius: within(smooth.radius, BRUSH_RADIUS, defaults.smooth.radius),
+      footprint: oneOf(FOOTPRINTS, smooth.footprint, defaults.smooth.footprint),
+      iterations: within(smooth.iterations, SMOOTH_ITERATIONS, defaults.smooth.iterations),
+    },
+    erode: {
+      radius: within(erode.radius, BRUSH_RADIUS, defaults.erode.radius),
+      preset: oneOf(EROSION_PRESET_NAMES, erode.preset, defaults.erode.preset),
+    },
+  };
+}
+
+/**
+ * A terrain's noise as the store read it, or the default. `normalizeHeightField`
+ * is the one reading of it -- the wire's -- so a noise this build cannot make
+ * a terrain of is the same refusal here as there, answered with the default.
+ */
+function heightFieldOr(raw: unknown, fallback: HeightField): HeightField {
+  if (raw === null || typeof raw !== "object") return fallback;
+  try {
+    return normalizeHeightField(raw as Parameters<typeof normalizeHeightField>[0]);
+  } catch {
+    return fallback;
+  }
+}
+
+/** A layer's mix spelling, or the default when it is not one. */
+function mixOr(raw: unknown, fallback: string): string {
+  return typeof raw === "string" && raw.trim() !== "" && tryParseMix(raw) !== null ? raw : fallback;
+}
+
+function oneOf<T extends string>(names: readonly T[], value: unknown, fallback: T): T {
+  return typeof value === "string" && (names as readonly string[]).includes(value) ? (value as T) : fallback;
+}
+
+function within(raw: unknown, range: { readonly min: number; readonly max: number }, fallback: number): number {
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.min(range.max, Math.max(range.min, Math.round(value))) : fallback;
 }
 
 /**
@@ -134,19 +257,30 @@ function hotbarSlots(raw: unknown): string[] {
      * everywhere else in the app -- the document is mostly made of it -- but a
      * slot holding air is a slot that draws nothing and places nothing, and a
      * settings file from before this rule has one in slot nine.
+     *
+     * A slot may hold a mix (`shared/block_mix.ts`), and the rule is about
+     * the slot: a mix with some air in it places a block some of the time,
+     * which is a sparse scatter and a thing to want. One that is air through
+     * and through is the empty slot again.
      */
-    return held !== "" && !isAir(held) ? held : DEFAULT_HOTBAR[index];
+    return held !== "" && !onlyAir(held) ? held : DEFAULT_HOTBAR[index];
   });
 }
 
-function isAir(block: string): boolean {
-  return block.split("[")[0].replace(/^minecraft:/, "") === "air";
+function onlyAir(slot: string): boolean {
+  const entries = tryParseMix(slot)?.entries ?? [{ block: slot, weight: 1 }];
+  return entries.every((entry) => entry.block.split("[")[0].replace(/^minecraft:/, "") === "air");
 }
 
 /** A stored panel dimension: a number, at least the minimum, or the default. */
 function extent(raw: unknown, fallback: number, minimum: number): number {
   const value = Number(raw);
   return Number.isFinite(value) ? Math.max(minimum, Math.round(value)) : fallback;
+}
+
+function clampWidth(raw: unknown, limits: { min: number; max: number }, fallback: number): number {
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.min(limits.max, Math.max(limits.min, Math.round(value))) : fallback;
 }
 
 function coordinate(raw: unknown, fallback: number): number {

@@ -61,6 +61,35 @@ export interface PropertyRow {
   readonly value: string | null;
   /** The legal values, or `null` where the registry has none to offer. */
   readonly values: readonly string[] | null;
+  /**
+   * How the row is edited.
+   *
+   * - `boolean`: the legal values are exactly `true` and `false`, so the row
+   *   is a checkbox -- `waterlogged`, `lit`, `open`, a fence's four arms.
+   *   Typing the word `true` into a box was the only way to switch one.
+   * - `choice`: a known list of values, offered beside a field that still
+   *   takes anything, for the reason `InspectorPanel` states.
+   * - `free`: nothing is known about the values.
+   *
+   * A value the file carries that is neither `true` nor `false` keeps a text
+   * field even on a boolean row. A checkbox cannot show it, and the first
+   * click would overwrite it with something the user never chose.
+   */
+  readonly kind: PropertyKind;
+}
+
+export type PropertyKind = "boolean" | "choice" | "free";
+
+/** `boolean` exactly when the legal values are `true` and `false` and nothing else. */
+export function propertyKind(values: readonly string[] | null): PropertyKind {
+  if (values === null || values.length === 0) return "free";
+  if (values.length === 2 && values.includes("true") && values.includes("false")) return "boolean";
+  return "choice";
+}
+
+/** Whether a boolean row can be drawn as a checkbox: unset, or holding a real boolean. */
+export function showsAsCheckbox(row: PropertyRow): boolean {
+  return row.kind === "boolean" && (row.value === null || row.value === "true" || row.value === "false");
 }
 
 /**
@@ -78,9 +107,8 @@ export function propertyRows(
 ): PropertyRow[] {
   const legal = legacy === null ? propertiesOf(block) : (legacyPropertiesOf(legacy, block) ?? []);
   const names = new Set([...Object.keys(carried), ...legal]);
-  return [...names].sort().map((name) => ({
-    name,
-    value: carried[name] ?? null,
-    values: legalValuesFor(block, name),
-  }));
+  return [...names].sort().map((name) => {
+    const values = legalValuesFor(block, name);
+    return { name, value: carried[name] ?? null, values, kind: propertyKind(values) };
+  });
 }

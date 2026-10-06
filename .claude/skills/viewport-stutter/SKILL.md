@@ -23,6 +23,9 @@ before it is fixed".
 
 How the user produces a report:
 
+0. Ask which screen the window is on. On a laptop with two GPUs, ask for a
+   second report on the other screen too: the panel and the external monitor
+   are often driven by different cards (Report 1 against Report 3).
 1. Settings → Quality: **Show the frame counter** and **Diagnose stutters**.
 2. Reproduce. The counter shows `worst N ms · culprit` for the last 2 s.
 3. **Copy stutter report**, paste it. Optionally Help → Toggle Developer
@@ -34,11 +37,35 @@ before touching code.
 
 ## Reading a report
 
+Frames that drew nothing are in the report too: the loop wakes on every
+refresh and the interval closes before it decides to draw, so a still scene is
+a run of ~16 ms intervals with no phases, not one long gap. A spike is still a
+late refresh or a long frame.
+
 Start with `culprits` (spikes counted by culprit), then `frames` (p50/p95/p99/
 max), then the individual `spikes`. Check `context.settings` — GI, shadows,
 AA, `maxDpr`, `renderScale`, sky — and `context.gpu`: a software renderer
 (`SwiftShader`, `Microsoft Basic Render Driver`) explains everything and is
 fixed by the GPU driver, not by code.
+
+**Then check which card drew, before anything else.** `context.gpu` is the
+card that drew. `context.gpuLaunch` is what main asked Chromium for, and
+`context.gpuHonoured` is `false` when a particular card was asked for and
+another one drew. `settings.gpuPreference` is only the choice on screen: it
+cannot tell "not restarted yet" from "ignored", and it once hid a startup
+that never applied the choice at all (Report 3). An integrated GPU in
+`context.gpu` on a machine with a discrete one is the first thing to fix, in
+the pane (Settings → Quality → Graphics card), before reading any phase.
+`gpuLoad.pixels × msaaSamples` is the other half: 12 M px × 8 on an iGPU is a
+slideshow whatever the code does.
+
+`context.lod` says what the levels of detail were doing: `state` is main's
+(`off`, `below` the automatic threshold, `pending`, `ready`, with the full
+mesh's triangles), `mode` and `pixels` the settings, `meshes` how many level
+meshes were held, and `chosen` the last frame's choice -- chunks drawn in full
+and at level 1, regions at levels 2 and 3, meshes in a crossing. A heavy
+build drawn with `mode: "off"`, or `below` a threshold set too high, is a
+setting to change before any code.
 
 Each spike's `reading` is the first inference. Then:
 
@@ -54,6 +81,10 @@ Each spike's `reading` is the first inference. Then:
 | `outside the loop` + Long Animation Frame scripts | the `scripts[].fn` / `invoker` named | that function; often a Svelte `$effect` firing more often than it should |
 | `outside the loop`, no scripts, no events | GPU, compositor, GC — see `readingOf` | lower resolution/AA to test the GPU hypothesis; look for per-frame allocation for GC |
 | `mesh answered by main` with a large `ms` | main process | not a frame drop by itself — main is another process; it only delays the picture |
+| `lod select` | `applyLevels` → `LodSelector.choose` over `lodRegions` (`lod.ts`) | it walks every region's eight corners and the chunks of the regions shown in chunks; if it grows, the region count or `rebuildLodIndex` is the place, not the GPU |
+| `shadow map from full chunks`, often | `shadowsFromFullDetail`, run only when `shadowsStale()` was called while levels are shown | something marks shadows stale too often; a delta bringing only levels must not (`touchesFullMesh`) |
+| `mesh answered by main` with `main["levels of detail"]` large | main's level-of-detail queue, at most `LOD_SLICE_MS` per answer plus one piece: a region ~10 ms, a statue chunk's level 1 up to ~400 ms | the known cost of a heavy chunk; the window asks only once the edits stop (400 ms), so it should never be in the middle of a run of clicks |
+| `scene pass` with `context.lod.chosen.fading` above zero on a still frame | a crossing that does not end: `LodSelector.fading` keeps frames coming | crossings last `FADE_MS`; one that never settles is a target flipping every frame, which `HYSTERESIS` exists to stop |
 
 When the report does not settle it, ask for a DevTools Performance recording of
 the moment, or add a finer `lap` inside the suspect phase — temporarily if it
@@ -82,6 +113,30 @@ is only for this investigation.
   How to spot it again: `mesh answered by main` whose `ms` grows by about one
   spike interval per spike.
 
+- **Report 3** (same laptop, window on the **laptop panel**, which the AMD
+  iGPU drives; 21x24x22 document): p50 67 ms, `gpu` = AMD Radeon with
+  `gpuPreference: high-performance` in the settings. Three causes in one
+  report:
+  1. **The preference was never applied.** `gpu_preference.ts` read
+     `preview` from the top of `settings.json`, and the store writes it under
+     `settings`, so every launch read `auto`. The test agreed with the parser,
+     not with the file. Now one reader, `settings_file.ts`, is shared with the
+     store, and a card can be chosen by name (`--use-adapter-luid`, DXGI list
+     through PowerShell). `gpu_runtime.ts` checks which card draws.
+  2. **`compass` 225 ms and 103 ms** was not the compass. three r171 resolves
+     the multisampled target at the end of every `render()`, colour and depth,
+     and the frame made three calls into it (sky, scene, compass). The 104 px
+     compass paid a full-screen blit at 12 M px × 8 samples. Fixed: the sky
+     is in the world's render (on the far plane), the compass has its own
+     small target, so a frame resolves once.
+  3. **`mesh answered by main` 454 ms with `atlas: true`** on a tiny document:
+     the atlas repacked because an edit introduced a texture, which
+     invalidates every chunk and resends 27 MB.
+
+  Lesson for reading: ask which screen the window was on. Report 1 was the
+  external monitor, which the dGPU drives, and looked like a different
+  machine.
+
 ## Fixing
 
 - **One culprit per change**, the biggest first by `culprits` count × typical
@@ -91,6 +146,28 @@ is only for this investigation.
   unthrottled; the hover rules (`pointerOnHandle`, `hoverSource`) keep their
   answers; nothing the raycaster sees may change (`tests/ui.ts` walks every
   `intersectObject`).
+- **The viewport draws on demand** (`render_demand.ts`). Anything new that
+  changes the picture has to ask for a frame: a prop is covered by the
+  invalidation effect (and `tests/ui.ts` fails if it is not in its list), an
+  input by the wake listeners, the camera by comparison. Something that
+  changes the scene from a timer, a promise or an internal variable must call
+  `invalidate()`, or the picture freezes. "Always draw" (`preview.alwaysDraw`)
+  tells a missed invalidation from anything else: if it fixes the symptom, an
+  `invalidate()` is missing.
+- **Something that casts a shadow and moves calls `shadowsStale()`**; the map
+  is not redrawn every frame any more.
+- **"mesh answered by main" carries `main`**: main's own steps in ms (light,
+  diff, mesh chunks, atlas, ship...). A long answer with small steps was a
+  wait, not work. For an edit that is slow in main, reproduce it with
+  `npm run bench:edit` before changing anything: it prints the same steps.
+- **An edit must cost what it touches.** The document records the cells it
+  writes (`writeVoxel`, `doc.changes`) and keeps counts (`doc.counts`); a new
+  write path that bypasses them breaks both, and `tests/document.ts` refuses
+  it. A new texture goes into the atlas reserve (`appendTiles`); a full repack
+  shows up as `atlas` taking ~150 ms and the payload carrying the whole sheet.
+- **One `render()` into `aaTarget` per frame.** Every further render into a
+  multisampled target is a full-screen resolve; draw extra passes into a target
+  of their own, the compass's arrangement.
 - **New work in the loop gets a `lap`**, new work outside it a `note`, through
   the existing `stamp`/`lap`/`note` helpers so diagnosing stays free when off.
 - Put the decision in a plain module when it can be tested (`frameDue`,

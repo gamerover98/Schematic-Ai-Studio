@@ -8,6 +8,14 @@
 import { mount } from "svelte";
 
 import App from "./App.svelte";
+/*
+ * The two faces the design system names, shipped rather than hoped for (both
+ * OFL). Only the weights it uses: Atkinson Hyperlegible for reading, Pixelify
+ * Sans for panel titles and slot numbers. Before app.css, which names them.
+ */
+import "@fontsource/atkinson-hyperlegible/400.css";
+import "@fontsource/atkinson-hyperlegible/700.css";
+import "@fontsource/pixelify-sans/500.css";
 import "./app.css";
 
 const target = document.getElementById("app");

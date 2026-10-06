@@ -16,7 +16,12 @@
     import ChatPanel from "./lib/ChatPanel.svelte";
   import CommandPalette, { type Command } from "./lib/CommandPalette.svelte";
   import DocumentBar from "./lib/DocumentBar.svelte";
-  import McpIndicator from "./lib/McpIndicator.svelte";
+  import DockPanel, { type DockTab } from "./lib/DockPanel.svelte";
+  import type { DocumentMenuItem } from "./lib/DocumentMenu.svelte";
+  import StatusBar from "./lib/StatusBar.svelte";
+  import TerrainPanel from "./lib/TerrainPanel.svelte";
+  import { mapFrameOf } from "./lib/map_frame.js";
+  import Icon from "./lib/Icon.svelte";
   import UpdateIndicator from "./lib/UpdateIndicator.svelte";
   import { showsIndicator } from "./lib/mcp_status.js";
   import type {
@@ -24,6 +29,7 @@
     CameraAimRequest,
     McpActivity,
     McpStatus,
+    TerrainRequest,
     UpdateStatus,
   } from "../../shared/ipc.js";
   import { splitBlockInput } from "../../shared/block_input.js";
@@ -45,6 +51,7 @@ import GizmoBar from "./lib/GizmoBar.svelte";
     import ToolWindow from "./lib/ToolWindow.svelte";
   import { findOpenCodeModel, loadOpenCodeModels } from "./lib/models.svelte.js";
   import SidebarSplitter from "./lib/SidebarSplitter.svelte";
+import Screen from "./lib/Screen.svelte";
 import StartScreen from "./lib/StartScreen.svelte";
 import StartupScreen, { type StartupStep } from "./lib/StartupScreen.svelte";
 import VersionsModal from "./lib/VersionsModal.svelte";
@@ -52,6 +59,8 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { api, bridgeAvailable, forIpc, bridgeMissingMessage } from "./lib/bridge.svelte.js";
   import { diagnosing, recordEvent } from "./lib/frame_profiler.js";
   import { coalesce } from "./lib/coalesce.js";
+  import { glowPatterns, nextGlow, type GlowSlot } from "./lib/materials.js";
+  import { isFileDrop, trackPageDrags } from "./lib/block_drag.js";
   import { applyTraceEvent } from "./lib/trace.js";
   import { primeBlockIcons } from "./lib/block_icons.svelte.js";
   import {
@@ -71,13 +80,40 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   } from "./lib/selection_history.js";
   import SchematicDialog from "./lib/SchematicDialog.svelte";
   import Hotbar from "./lib/Hotbar.svelte";
+  import CreativeToolBar from "./lib/CreativeToolBar.svelte";
+  import CreativeOptions from "./lib/CreativeOptions.svelte";
+  import {
+    cornerClick,
+    cornerSpec,
+    nextTool,
+    resized,
+    takesCorners,
+    toolMode,
+    type Cell as CreativeCell,
+    type StrokeEvent,
+  } from "./lib/creative_tools.js";
+  import type { CreativeSettings, CreativeTool, TerrainToolSettings } from "../../shared/creative.js";
+  import { erosionRule, type TerrainMode } from "../../shared/terrain.js";
   import CreativeInventory from "./lib/CreativeInventory.svelte";
   import { hasTextSelection, isTyping } from "./lib/typing.js";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
   import { blocksIn } from "../../shared/block_versions.js";
   import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
   import { continuedPlacement } from "./lib/block_hover.js";
-  import { movedRegion, translatedRegion } from "./lib/selection_drag.js";
+  import { translatedRegion } from "./lib/selection_drag.js";
+  import {
+    activated,
+    areaAt,
+    areaBounds,
+    areaCells,
+    areaList,
+    activeIndex,
+    mapAreas,
+    single,
+    withArea,
+    withoutArea,
+    type AreaSet,
+  } from "./lib/selection_set.js";
   import { ghostRequests, ghostStillWanted, grabGhost, releaseGhost } from "./lib/ghost_request.js";
 import {
   gizmoOrigin,
@@ -112,9 +148,15 @@ import {
     type RecoveryOffer,
     type ClipboardInfo,
     type MeshPayload,
+    type MixSpec,
     type RegionSpec,
+    type SelectionPaletteSuccess,
+    type FindBlocksSuccess,
     type TransformRequest,
+    singleMix,
   } from "../../shared/ipc.js";
+  import { parseMix, pickAt } from "../../shared/block_mix.js";
+  import { canonicalBlock, isAirBlock, withBlockAdded } from "./lib/block_spelling.js";
   import type { SchematicFormat } from "../../shared/schematic.js";
 import { schematicExtension } from "../../shared/schematic.js";
 import type { FileKind } from "../../shared/ipc.js";
@@ -125,6 +167,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     DEFAULT_PREVIEW_SETTINGS,
   DEFAULT_HOTBAR,
   DEFAULT_UI_SETTINGS,
+    DOCK_WIDTH,
+    lodSettings,
+    OPTIONS_PANEL_MIN_WIDTH,
     providerRequiresApiKey,
     type ExportType,
     type KeyStorageStatus,
@@ -146,6 +191,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   let sidebarWidth = $state(DEFAULT_UI_SETTINGS.sidebarWidth);
   let sidebarCollapsed = $state(DEFAULT_UI_SETTINGS.sidebarCollapsed);
+
+  /**
+   * The docked panel on the left, mirrored for the same reason.
+   *
+   * Which tab is up is not stored: the gesture decides it, as it used to
+   * decide which floating window came back. A click asks what a block is and
+   * brings the inspector up; selecting a region brings the tools.
+   */
+  let dockWidth = $state(DEFAULT_UI_SETTINGS.dockWidth);
+  let dockCollapsed = $state(DEFAULT_UI_SETTINGS.dockCollapsed);
+  let dockTab = $state<DockTab>("selection");
   let keyStatus = $state<KeyStorageStatus | null>(null);
   let versions = $state<string[]>([]);
 
@@ -229,9 +285,40 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * that comes back.
    */
   let docState = $state<DocumentState | null>(null);
+  /** The active area of the selection -- see `selection_set.ts`. */
   let selection = $state<RegionSpec | null>(null);
+  /**
+   * The other selected areas, and where the active one sits among them.
+   *
+   * Beside `selection` rather than replacing it, which is what let several
+   * areas arrive without rewriting every place that reads the selection: those
+   * go on meaning the box being worked on, and only the verbs that act on the
+   * whole selection -- fill, replace, copy, the gizmo, the materials -- ask for
+   * every area. With `selection` null these are empty; the effect that drops
+   * the pivot drops them too.
+   */
+  let otherAreas = $state<RegionSpec[]>([]);
+  let areaSlot = $state(0);
   /** The first corner of a selection being built, before Shift-click extends it. */
   let anchor = $state<{ x: number; y: number; z: number } | null>(null);
+
+  const areaSet = $derived<AreaSet>({ active: selection, others: otherAreas, slot: areaSlot });
+  /** Every selected area, in the panel's order. What whole-selection verbs send. */
+  const selectionAreas = $derived(areaList(areaSet));
+  /** The box around every area: where the gizmo stands and a paste lands. */
+  const selectionBounds = $derived(areaBounds(areaSet));
+
+  /** Puts a whole set of areas on screen. */
+  function setAreas(set: AreaSet): void {
+    selection = set.active === null ? null : { ...set.active };
+    otherAreas = set.others.map((area) => ({ ...area }));
+    areaSlot = set.slot;
+  }
+
+  /** Every area, ready for the wire. */
+  function areasForIpc(): RegionSpec[] {
+    return selectionAreas.map((area) => forIpc(area));
+  }
 
   /**
    * Undo and redo that reach the selection as well as the blocks.
@@ -243,7 +330,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   let selectionTimeline = $state<Timeline>(emptyTimeline());
   /** The selection as it was when the timeline last agreed with the screen. */
-  let lastSelection: SelectionState = { selection: null, anchor: null };
+  let lastSelection: SelectionState = { selection: null, anchor: null, others: [], slot: 0 };
   /** True while a step is being put back, so restoring is not itself recorded. */
   /**
    * Where a drag started, or `null` when no drag is in progress.
@@ -336,7 +423,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * the field in the selection tools, the middle button — writes the slot.
    */
   /**
-   * Mirrored locally, like the sidebar's width and the tool windows' positions.
+   * Mirrored locally, like the two docked panels' widths.
    *
    * Persisting is a round trip through main and a write to disk, and the block
    * field emits on every keystroke — so writing straight through meant sixteen
@@ -530,6 +617,21 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   function holdBlock(block: string): void {
     hotbar = hotbar.map((id, at) => (at === hotbarSlot ? block : id));
     persistHotbar();
+  }
+
+  /** A field's text with one more block in it; see `withBlockAdded`. */
+  function mixWith(text: string, block: string): string {
+    return withBlockAdded(text, block, legacyForDoc);
+  }
+
+  /**
+   * Replace and With trade places, weights and all. The weights ride along
+   * hidden in Replace, so swapping twice gives back exactly what was there.
+   */
+  function swapBlockFields(): void {
+    const held = activeBlock;
+    holdBlock(replaceBlock.trim() === "" ? held : replaceBlock);
+    replaceBlock = held;
   }
 
   /**
@@ -821,7 +923,16 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (busy) return;
     let held: BlockSpec;
     try {
-      held = parseBlock(placingBlock);
+      /*
+       * A slot holding a mix places one of its blocks, chosen by the cell --
+       * so clicking the same cell twice gives the same block, and the shares
+       * hold on average across a wall built by hand. The shares are taken over
+       * the document's box, which is what a gradient runs from end to end of.
+       */
+      const mix = parseMix(placingBlock);
+      const [width, height, length] = docState?.size ?? [64, 64, 64];
+      const frame = { minX: 0, minY: 0, minZ: 0, maxX: width - 1, maxY: height - 1, maxZ: length - 1 };
+      held = parseBlock(pickAt(mix, at.x, at.y, at.z, frame).block);
     } catch (err) {
       // A held block that cannot be read -- a pasted command cut short -- is
       // said out loud, not thrown past the click into the failure handler.
@@ -879,7 +990,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * The block travels either way, because the fall-through half of the verb
      * is a placement and needs it.
      */
-    await runDocument(label, () =>
+    await queueBuild(label, () =>
       api().applyEdit({
         kind: action === "use" ? "use" : "setBlock",
         x: cell.x,
@@ -896,6 +1007,345 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   }
 
   /**
+   * Hand placement's own road: queued, and never waiting for the picture.
+   *
+   * It went through `runDocument` like every other edit, which holds `busy`
+   * from the edit until the new mesh has arrived -- and `onBuild` returns at
+   * once while `busy` is set. So in creative mode every click that landed
+   * during that round trip was dropped: build quickly and a third of the
+   * blocks were simply not placed, which reads as the game stuttering and
+   * then ignoring you.
+   *
+   * Here a click waits only for the clicks before it, in order, and the edit
+   * is all it waits for: the state comes back, the redraw is asked for and not
+   * awaited -- `refreshDocument` already folds a burst of requests into one --
+   * and the next click goes. A click aimed at a surface the screen does not
+   * show yet is answered by main as any other click on a cell it cannot use,
+   * which is better than not being heard.
+   */
+  let buildQueue: Promise<void> = Promise.resolve();
+
+  function queueBuild(doing: string, call: () => Promise<EditResponse>): Promise<void> {
+    buildQueue = buildQueue.then(() => applyBuild(doing, call));
+    return buildQueue;
+  }
+
+  async function applyBuild(doing: string, call: () => Promise<EditResponse>): Promise<void> {
+    try {
+      const response = await call();
+      if (!response.ok) {
+        status = { tone: "warn", text: response.message };
+        return;
+      }
+      docState = response.state;
+      // Before anything reads a cell, as in `runDocument`.
+      followShift(response.shift);
+      if (response.notes !== undefined && response.notes !== "") {
+        status = { tone: "warn", text: response.notes };
+      }
+      void refreshDocument().catch((err: unknown) => failed(err, doing));
+      if (inspectedAt) {
+        const at = inspectedAt;
+        void inspectBlock(at.x, at.y, at.z).catch(() => undefined);
+      }
+    } catch (err) {
+      failed(err, doing);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // The creative tools
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The creative tools' settings, mirrored locally like the hotbar.
+   *
+   * `[` and `]` repeat while held, and a write per press through main -- whose
+   * answer replaces `settings` -- would let a slower answer put the radius
+   * back under the next press. The mirror is what is on screen and what the
+   * next press reads; the write follows behind.
+   */
+  let creative = $state<CreativeSettings>(DEFAULT_UI_SETTINGS.creative);
+  let creativeWrite: ReturnType<typeof setTimeout> | null = null;
+  let creativeOptionsOpen = $state(false);
+  let creativeWindowX = $state(DEFAULT_UI_SETTINGS.creativeWindowX);
+  let creativeWindowY = $state(DEFAULT_UI_SETTINGS.creativeWindowY);
+  let creativeWindowW = $state(DEFAULT_UI_SETTINGS.creativeWindowW);
+  let creativeWindowH = $state(DEFAULT_UI_SETTINGS.creativeWindowH);
+
+  function setCreative(next: CreativeSettings): void {
+    creative = next;
+    if (creativeWrite !== null) clearTimeout(creativeWrite);
+    creativeWrite = setTimeout(() => {
+      creativeWrite = null;
+      void patchUi({ creative: $state.snapshot(creative) });
+    }, HOTBAR_WRITE_DELAY);
+  }
+
+  /**
+   * The pointer is locked: the view is flying and the keyboard is the
+   * camera's. `document.pointerLockElement` is the truth; this is a mirror of
+   * it the template can react to.
+   */
+  let pointerLocked = $state(false);
+
+  /**
+   * What the buttons do, in the camera you are in, said in the status bar as
+   * a 3D editor says it. It was a plate in the viewport's top-left corner,
+   * under every notification the app raised. With a creative tool in hand
+   * the buttons are the tool's, and the bar over the hotbar says what they do.
+   */
+  const viewportHint = $derived(
+    docState === null
+      ? null
+      : cameraMode === "orbit"
+        ? t("viewport.hudOrbit")
+        : !pointerLocked
+          ? t("viewport.hudClickToFly")
+          : creative.tool !== "place"
+            ? t("viewport.hudFlyingTool")
+            : t("viewport.hudFlying"),
+  );
+
+  /**
+   * The first corner of a shape or a wall, waiting for the second.
+   *
+   * The app's rather than the viewer's, because what forgets it is heard here:
+   * Escape, the end of flight, another tool, another camera, another document.
+   * Moved with the content, like the selection, by `followShift`.
+   */
+  let cornerAt = $state<CreativeCell | null>(null);
+
+  /**
+   * The brush stroke in progress: its id, which every touch carries so main
+   * folds them into one undo step, and whether it is rubbing out.
+   */
+  let strokeId: string | null = null;
+  let strokeErase = false;
+
+  const hasDocument = $derived(docState !== null);
+
+  /**
+   * The schematic's box, or a 64-block cube with nothing open: what the
+   * terrain's picture shows in flight, where the brush paints over it.
+   */
+  const documentFootprint = $derived.by((): RegionSpec => {
+    const size = docState?.size;
+    return size === undefined
+      ? { minX: 0, minY: 0, minZ: 0, maxX: 63, maxY: 63, maxZ: 63 }
+      : { minX: 0, minY: 0, minZ: 0, maxX: size[0] - 1, maxY: size[1] - 1, maxZ: size[2] - 1 };
+  });
+
+  /*
+   * Anything that ends what the first corner was for forgets it: another tool,
+   * the other camera, the document going. Not on `docState` itself, which
+   * moves with every edit.
+   */
+  $effect(() => {
+    void creative.tool;
+    void cameraMode;
+    void hasDocument;
+    void framingEpoch;
+    untrack(() => {
+      cornerAt = null;
+    });
+  });
+
+  /** A tool chosen on the bar, which opens its options: clicking it is asking for them. */
+  function chooseTool(tool: CreativeTool): void {
+    setCreative({ ...creative, tool });
+    creativeOptionsOpen = tool !== "place";
+  }
+
+  /**
+   * A touch of the brush, written through the hand's road.
+   *
+   * `queueBuild`, not `runDocument`: a stroke is twenty touches a second at
+   * most, each one waits only for the touch before it, and none of them waits
+   * for the picture. Painting writes what the hand holds, mix and distribution
+   * and all -- the values are the cell's, so the pattern runs on from one
+   * touch to the next; rubbing out writes the empty space block, and only
+   * over blocks, which is also what keeps it from ever growing the schematic.
+   */
+  function onStroke(event: StrokeEvent): void {
+    if (event.phase === "begin") {
+      strokeId = crypto.randomUUID();
+      strokeErase = event.erase;
+      return;
+    }
+    if (event.phase === "end") {
+      strokeId = null;
+      return;
+    }
+    if (strokeId === null || docState === null || busy) return;
+    const stroke = strokeId;
+    const erase = strokeErase;
+    /*
+     * The terrain's touch is the columns round the cell aimed at, and its
+     * left button digs: whatever the mode says, rubbing out a landscape is
+     * taking away what stands above its surface.
+     */
+    if (creative.tool === "terrain") {
+      const settings = creative.terrain;
+      let terrain: TerrainRequest;
+      try {
+        terrain = terrainRequestOf(settings, erase ? "dig" : settings.mode);
+      } catch (err) {
+        failed(err, t("task.layingTerrain"));
+        return;
+      }
+      const { x, y, z } = event.at;
+      void queueBuild(t(erase ? "task.diggingTerrain" : "task.layingTerrain"), () =>
+        api().applyEdit({
+          kind: "terrain",
+          area: { kind: "brush", x, y, z, radius: settings.radius, footprint: settings.footprint },
+          terrain,
+          stroke,
+        }),
+      );
+      return;
+    }
+    /*
+     * The smooth brush blurs what is under it with either button; the erode
+     * brush runs its preset with the right one and the inverse with the left,
+     * VoxelSniper's arrow and gunpowder.
+     */
+    if (creative.tool === "smooth" || creative.tool === "erode") {
+      const { x, y, z } = event.at;
+      if (creative.tool === "smooth") {
+        const settings = creative.smooth;
+        void queueBuild(t("task.smoothing"), () =>
+          api().applyEdit({
+            kind: "smooth",
+            area: { kind: "brush", x, y, z, radius: settings.radius, footprint: settings.footprint },
+            iterations: settings.iterations,
+            stroke,
+          }),
+        );
+      } else {
+        const settings = creative.erode;
+        void queueBuild(t("task.eroding"), () =>
+          api().applyEdit({
+            kind: "erode",
+            area: { kind: "brush", x, y, z, radius: settings.radius, footprint: "disc" },
+            rule: erosionRule(settings.preset, erase),
+            stroke,
+          }),
+        );
+      }
+      return;
+    }
+    if (event.shape === null) return;
+    const shape = event.shape;
+    let mix: MixSpec;
+    try {
+      mix = erase ? singleMix(parseBlock(docState.voidBlock || "minecraft:air")) : mixSpecOf(placingBlock);
+    } catch (err) {
+      failed(err, t("task.painting"));
+      return;
+    }
+    const mode = erase ? "filled" : creative.brush.mode;
+    void queueBuild(t(erase ? "task.erasing" : "task.painting"), () =>
+      api().applyEdit({ kind: "shape", shape, mix, mode, stroke }),
+    );
+  }
+
+  /**
+   * The terrain's settings as main writes them: the three layers parsed here,
+   * where a mix's blocks become blocks, and the noise taken out of `$state`.
+   */
+  function terrainRequestOf(settings: TerrainToolSettings, mode: TerrainMode): TerrainRequest {
+    return {
+      field: forIpc(settings.field),
+      surface: mixSpecOf(settings.surface),
+      subsoil: mixSpecOf(settings.subsoil),
+      rock: mixSpecOf(settings.rock),
+      subsoilDepth: settings.subsoilDepth,
+      mode,
+    };
+  }
+
+  /** The terrain laid over every selected area: one edit, one Ctrl+Z. */
+  async function layTerrain(): Promise<void> {
+    if (!selection) return;
+    const regions = areasForIpc();
+    const outcome = await runDocument(t("task.layingTerrain"), () =>
+      api().applyEdit({
+        kind: "terrain",
+        area: { kind: "regions", regions },
+        terrain: terrainRequestOf(creative.terrain, creative.terrain.mode),
+      }),
+    );
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /** The ground of every selected area smoothed, `//smooth` over each in turn. */
+  async function smoothSelection(): Promise<void> {
+    if (!selection) return;
+    const regions = areasForIpc();
+    const outcome = await runDocument(t("task.smoothing"), () =>
+      api().applyEdit({ kind: "smooth", area: { kind: "regions", regions }, iterations: creative.smooth.iterations }),
+    );
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /** The selected cells eroded by the erode brush's preset. */
+  async function erodeSelection(): Promise<void> {
+    if (!selection) return;
+    const regions = areasForIpc();
+    const outcome = await runDocument(t("task.eroding"), () =>
+      api().applyEdit({ kind: "erode", area: { kind: "regions", regions }, rule: erosionRule(creative.erode.preset) }),
+    );
+    reportChange(outcome?.changed ?? null);
+  }
+
+  /**
+   * The surface fitted to the selection: starting at its floor and rising two
+   * thirds of its height, so the hills stay inside the box with room over them.
+   */
+  function fitTerrain(): void {
+    const bounds = selectionBounds;
+    if (bounds === null) return;
+    const height = bounds.maxY - bounds.minY + 1;
+    setCreative({
+      ...creative,
+      terrain: {
+        ...creative.terrain,
+        field: {
+          ...creative.terrain.field,
+          base: bounds.minY,
+          amplitude: Math.max(0, Math.floor(((height - 1) * 2) / 3)),
+        },
+      },
+    });
+  }
+
+  /**
+   * A right-click with the shape or walls tool: the first corner, or the
+   * second and the build. One edit, so one Ctrl+Z, whatever it drew.
+   */
+  function onCorner(at: CreativeCell): void {
+    const tool = creative.tool;
+    if (docState === null || busy || !takesCorners(tool)) return;
+    const step = cornerClick(cornerAt, at);
+    cornerAt = step.corner;
+    if (step.build === null) return;
+    const [first, second] = step.build;
+    const shape = cornerSpec(tool, creative, first, second);
+    let mix: MixSpec;
+    try {
+      mix = mixSpecOf(placingBlock);
+    } catch (err) {
+      failed(err, t("task.drawingShape"));
+      return;
+    }
+    const mode = toolMode(tool, creative);
+    void queueBuild(t(tool === "walls" ? "task.buildingWalls" : "task.drawingShape"), () =>
+      api().applyEdit({ kind: "shape", shape, mix, mode }),
+    );
+  }
+
+  /**
    * A drag across the build grid, meaning "select this footprint".
    *
    * The grid is the answer to an empty schematic having nothing to raycast: no
@@ -903,16 +1353,58 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * started at all. This is one block tall at the base, which is what a
    * footprint is -- drag the top face upwards afterwards to give it height.
    */
-  function onGridSelect(region: RegionSpec): void {
-    selection = region;
+  function onGridSelect(region: RegionSpec, add: boolean): void {
+    sweptArea(region, add ? "add" : "replace");
     anchor = null;
   }
 
-  /** The selection as a plain value — `$state` proxies do not compare. */
+  /**
+   * Whether the gesture in progress has already added its area.
+   *
+   * A Shift+Alt sweep reports its box on every pointer move, and only the first
+   * report may add an area: every later one is the same area growing. Reset at
+   * each gesture's start.
+   */
+  let gestureAddedArea = false;
+
+  /**
+   * A selection drag reported a box, and what it means for the other areas.
+   *
+   * `resize` is a face of the active area, and the rest stay as they are.
+   * `replace` is a plain Shift-sweep, which starts the selection over. `add`
+   * is Shift+Alt: the first report puts a new area beside the others, and the
+   * rest of the drag grows it.
+   */
+  function sweptArea(region: RegionSpec, mode: "resize" | "replace" | "add"): void {
+    if (mode === "resize") {
+      selection = region;
+      return;
+    }
+    if (mode === "replace") {
+      setAreas(single(region));
+      return;
+    }
+    if (!gestureAddedArea) {
+      gestureAddedArea = true;
+      setAreas(withArea(areaSet, region));
+      return;
+    }
+    selection = region;
+  }
+
+  /**
+   * The selection as a plain value — `$state` proxies do not compare.
+   *
+   * With no active area the others are written empty whatever they hold: they
+   * are dropped by an effect a microtask later, and a step that recorded them
+   * in between would be a state the selection can never be put back into.
+   */
   function selectionNow(): SelectionState {
     return {
       selection: selection === null ? null : { ...selection },
       anchor: anchor === null ? null : { ...anchor },
+      others: selection === null ? [] : otherAreas.map((area) => ({ ...area })),
+      slot: selection === null ? 0 : areaSlot,
     };
   }
 
@@ -932,7 +1424,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * returns the timeline untouched.
    */
   function restoreSelection(state: SelectionState): void {
-    selection = state.selection === null ? null : { ...state.selection };
+    setAreas({ active: state.selection, others: state.others ?? [], slot: state.slot ?? 0 });
     anchor = state.anchor === null ? null : { ...state.anchor };
     lastSelection = state;
   }
@@ -948,6 +1440,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   function onSelectionGesture(phase: "start" | "end"): void {
     if (phase === "start") {
       gestureFrom = lastSelection;
+      gestureAddedArea = false;
       return;
     }
     const from = gestureFrom;
@@ -1221,12 +1714,29 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     return SCHEMATIC_EXTENSIONS.some((extension) => lower.endsWith(extension));
   }
 
+  /**
+   * Whether the drag over the viewport started inside the window, which makes
+   * it never a file: Chromium hands an image dragged from the page over as
+   * `download.png`. See `block_drag.ts`.
+   */
+  let pageDrags: { fromPage(): boolean; dispose(): void } | null = null;
+  onMount(() => {
+    pageDrags = trackPageDrags(window);
+    return () => pageDrags?.dispose();
+  });
+
+  /** A file from outside the window, which is the only thing a drop opens. */
+  function fileDragged(event: DragEvent): boolean {
+    const types = event.dataTransfer ? [...event.dataTransfer.types] : undefined;
+    return isFileDrop(types, pageDrags?.fromPage() ?? false);
+  }
+
   function onDragEnter(event: DragEvent): void {
     if (!bridgeAvailable) return;
     // The dragged file's *name* is not readable during a drag — only its type,
     // for privacy — so the highlight cannot promise the file is supported. It
     // says "you can drop here"; the drop itself says whether it worked.
-    if (!event.dataTransfer?.types.includes("Files")) return;
+    if (!fileDragged(event)) return;
     event.preventDefault();
     dragDepth += 1;
     dropActive = true;
@@ -1252,6 +1762,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     event.preventDefault();
     dragDepth = 0;
     dropActive = false;
+    // Asked again here and not only on the way in: a drop is what opens, and
+    // a drag that began in the page is never somebody's file.
+    if (!fileDragged(event)) return;
 
     const file = event.dataTransfer?.files?.[0];
     if (!file) return;
@@ -1273,6 +1786,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   async function resolveRecovery(restore: boolean): Promise<void> {
     const offer = recovery;
+    /*
+     * Restoring replaces whatever is open, and something can be: the prompt
+     * stays up while a schematic is opened from the File menu, a drop or an
+     * MCP client. So it asks first, as opening does, and a "no" leaves the
+     * question on screen rather than answering it.
+     */
+    if (restore && !(await mayDiscard("restore"))) return;
     // Dismissed first: whichever way this goes, the prompt is answered, and
     // leaving it up while the restore runs invites a second click.
     recovery = null;
@@ -1418,7 +1938,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * previous instance last said.
      */
     const onPointerLock = () => {
-      void api().reportPointerLock(document.pointerLockElement !== null);
+      pointerLocked = document.pointerLockElement !== null;
+      void api().reportPointerLock(pointerLocked);
+      /*
+       * Leaving flight forgets a first corner, whatever left it. Escape is the
+       * usual way, and the browser spends that Escape on releasing the lock --
+       * whether the keydown reaches this window as well is not something to
+       * build on, so the corner goes with the lock rather than with the key.
+       */
+      if (!pointerLocked) cornerAt = null;
     };
     document.addEventListener("pointerlockchange", onPointerLock);
     onPointerLock();
@@ -1446,14 +1974,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         settings = await api().getSettings();
         sidebarWidth = settings.ui.sidebarWidth;
         sidebarCollapsed = settings.ui.sidebarCollapsed;
-        toolWindowX = settings.ui.toolWindowX;
-        toolWindowY = settings.ui.toolWindowY;
-        toolWindowW = settings.ui.toolWindowW;
-        toolWindowH = settings.ui.toolWindowH;
-        inspectorWindowX = settings.ui.inspectorWindowX;
-        inspectorWindowY = settings.ui.inspectorWindowY;
-        inspectorWindowW = settings.ui.inspectorWindowW;
-        inspectorWindowH = settings.ui.inspectorWindowH;
+        dockWidth = settings.ui.dockWidth;
+        dockCollapsed = settings.ui.dockCollapsed;
+        creative = settings.ui.creative;
+        creativeWindowX = settings.ui.creativeWindowX;
+        creativeWindowY = settings.ui.creativeWindowY;
+        creativeWindowW = settings.ui.creativeWindowW;
+        creativeWindowH = settings.ui.creativeWindowH;
         clockTicks = settings.preview.timeOfDay;
         keyStatus = await api().getKeyStatus();
         step("settings", "done");
@@ -1484,12 +2011,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // And the wooden axe the anchor marker is drawn with, for the same
         // reason and out of the same pack.
         anchorTexture = await api().getAnchorTexture();
-        // Asked once, at startup, before the user has done anything they could
-        // lose by answering it.
-        const found = await api().peekRecovery();
-        if (found.ok) {
-          recovery = found.recovery;
-        }
         step("recent", "done");
       } catch (err) {
         // Up with less is better than not up: the steps that did finish stand,
@@ -1497,6 +2018,26 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // message about what it was.
         status = { tone: "error", text: err instanceof Error ? err.message : String(err) };
       } finally {
+        // Whatever failed above: a document main holds is the user's work, and
+        // a window that cannot list the versions can still show it.
+        try {
+          await adoptWhatMainHolds();
+        } catch (err) {
+          failed(err, t("task.resuming"));
+        }
+        /*
+         * Asked once, at startup, before the user has done anything they could
+         * lose by answering it -- and asked whatever failed above. Main keeps
+         * autosave off the snapshot until it is answered (`unanswered` in
+         * `ipc/handlers.ts`), so a question never asked would leave the whole
+         * session without one.
+         */
+        try {
+          const found = await api().peekRecovery();
+          if (found.ok) recovery = found.recovery;
+        } catch (err) {
+          status = { tone: "error", text: err instanceof Error ? err.message : String(err) };
+        }
         startingUp = false;
       }
     })();
@@ -1564,6 +2105,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       }
       cameraRequest = request;
     });
+    /*
+     * A model lighting blocks up, or putting the glow out. It replaces
+     * whatever was lit, the list's included: the last one to point at
+     * something is the one being listened to.
+     */
+    const unsubscribeGlow = api().onGlow((request) => {
+      glow =
+        request.patterns.length === 0
+          ? null
+          : { slots: [], patterns: [...request.patterns], scope: request.regions === null ? null : [...request.regions] };
+    });
     const unsubscribeDocument = api().onDocumentChanged((state) => {
       docState = state;
       void refreshDocument();
@@ -1598,6 +2150,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         if (docState !== null && !busy) saveDocumentAs();
       }),
       api().onMenuClose(() => void closeDocument()),
+      api().onMenuConvert(() => (convertOpen = true)),
       api().onMenuUndo(() => void undoAnything()),
       api().onMenuRedo(() => void redoAnything()),
       api().onMenuAbout(() => {
@@ -1619,11 +2172,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       unsubscribeTrace();
       unsubscribeDocument();
       unsubscribeCamera();
+      unsubscribeGlow();
       unsubscribeMcp();
       unsubscribeUpdates();
       for (const off of unsubscribeMenu) off();
     };
   });
+
+  /** A notification as one sentence for a screen reader: the text, then the detail. */
+  function announcement(note: NonNullable<Status>): string {
+    return note.detail ? `${note.text} ${note.detail}` : note.text;
+  }
 
   function onWindowKey(event: KeyboardEvent): void {
     /*
@@ -1644,8 +2203,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      *
      * Unmodified keys are untouched. `E` opens the inventory in flight because
      * that is where you want it, exactly as the game binds it.
+     *
+     * And the browser's own answer to the chord is declined with ours. Ctrl+A
+     * is select-all to Chromium, and the chat log is the one surface that opts
+     * back into selection, so every strafe left under sprint highlighted the
+     * whole conversation. `preventDefault` stops the default action and
+     * nothing else: the viewer and the hotbar still see the keydown.
      */
     if ((event.ctrlKey || event.metaKey) && document.pointerLockElement !== null) {
+      event.preventDefault();
       return;
     }
     /*
@@ -1691,6 +2257,22 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       !inventoryOpen &&
       schematicDialog === null
     ) {
+      /*
+       * The glow first, then the selection: the glow is the lighter thing to
+       * lose, and putting it out with the key that also drops the selection
+       * would take the list it was lit from away with it.
+       */
+      // A first corner waiting is the lightest thing of all to lose.
+      if (event.key === "Escape" && cornerAt !== null) {
+        event.preventDefault();
+        cornerAt = null;
+        return;
+      }
+      if (event.key === "Escape" && glow !== null) {
+        event.preventDefault();
+        glow = null;
+        return;
+      }
       if (event.key === "Escape" && selection !== null) {
         event.preventDefault();
         clearSelection();
@@ -1982,41 +2564,28 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   let chatDraft = $state("");
 
   /**
-   * Whether the floating tool window is showing.
+   * A region selected brings the tools' tab up, as a selection used to bring
+   * the floating tool window back.
    *
-   * Not persisted, and closing it is not permanent: it comes back with the next
-   * selection. A tool palette you can dismiss for good is one a user can lose,
-   * and the command palette is a poor place to have to go looking for it.
+   * Only on the way *into* a region -- from nothing, or from the single block
+   * a click selects -- so dragging a face of the box, which moves the
+   * selection many times a second, does not pull the panel away from the
+   * Terrain tab somebody chose to work in.
    */
-  let toolsOpen = $state(true);
-
-  /** Mirrored locally so a drag repaints at pointer speed, like the sidebar. */
-  let toolWindowX = $state(DEFAULT_UI_SETTINGS.toolWindowX);
-  let toolWindowY = $state(DEFAULT_UI_SETTINGS.toolWindowY);
-  let toolWindowW = $state(DEFAULT_UI_SETTINGS.toolWindowW);
-  let toolWindowH = $state(DEFAULT_UI_SETTINGS.toolWindowH);
-
-  /**
-   * The inspector, which used to be the sidebar's third tab.
-   *
-   * Same arrangement as the tools: closing it means "not now", and clicking a
-   * block brings it back. That is what stops a closed panel from being one the
-   * user has lost; it is reachable from Ctrl+K as well.
-   */
-  let inspectorOpen = $state(true);
-  let inspectorWindowX = $state(DEFAULT_UI_SETTINGS.inspectorWindowX);
-  let inspectorWindowY = $state(DEFAULT_UI_SETTINGS.inspectorWindowY);
-  let inspectorWindowW = $state(DEFAULT_UI_SETTINGS.inspectorWindowW);
-  let inspectorWindowH = $state(DEFAULT_UI_SETTINGS.inspectorWindowH);
+  let hadRegion = false;
+  $effect(() => {
+    const region = selection !== null && !singleBlockSelection;
+    if (region && !hadRegion) dockTab = "selection";
+    hadRegion = region;
+  });
 
   /**
    * The version history, which used to be the first thing in the Generate tab.
    *
-   * One difference from the other two floating windows: nothing summons it. A
-   * selection brings back the tools and a click brings back the inspector, so
-   * both can default to open without ever being in the way. This one is asked
-   * for -- from the button in the document bar, or from Ctrl+K -- so it starts
-   * closed.
+   * One difference from the docked panel's tabs: nothing summons it. A
+   * selection brings up the tools and a click brings up the inspector; this
+   * one is asked for -- from History in the bar, or from Ctrl+K -- so it
+   * starts closed.
    */
   let versionsOpen = $state(false);
 
@@ -2053,11 +2622,44 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   let startDismissed = $state(false);
 
+  /** Bumped to put the caret in the chat's box; see `describeInChat`. */
+  let composerFocus = $state(0);
+
+  /**
+   * The start screen's fourth way in: put it away and the caret in the chat,
+   * where a message with nothing open builds a schematic. The chat comes back
+   * first if it was put away, or the caret would land in a panel that is not
+   * drawn.
+   */
+  function describeInChat(): void {
+    startDismissed = true;
+    if (sidebarCollapsed) toggleSidebar();
+    composerFocus += 1;
+  }
+
   /**
    * `recovery` keeps precedence, as it always did -- that one is a question
    * about work that may be lost, and it must not be behind anything.
    */
-  const startVisible = $derived(docState === null && recovery === null && !startDismissed);
+  /*
+   * The converter, which is the one panel here that is not about the open
+   * document -- so it is reached from File and from the start screen, and is
+   * never disabled. Converting a `.litematic` somebody sent you is a thing to
+   * do before there is anything open at all.
+   */
+  let convertOpen = $state(false);
+
+  /** Whether the tools' panel takes its column: a document is open and the panel is not put away. */
+  const docked = $derived(docState !== null && !dockCollapsed);
+
+  /*
+   * It steps aside for the two dialogs it opens. Every scrim is on the modal
+   * tier and this one comes later in the document, so it painted over New's
+   * dialog and Convert's; when either closes, it is back.
+   */
+  const startVisible = $derived(
+    docState === null && recovery === null && !startDismissed && schematicDialog === null && !convertOpen,
+  );
 
   /**
    * Fetches OpenCode's model list when the provider calls for it.
@@ -2279,22 +2881,36 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       run: () => void patchPreview({ wireframe: !settings.preview.wireframe }),
     },
     {
-      id: "toggle-tools",
-      title: toolsOpen ? t("command.hideTools") : t("command.showTools"),
+      id: "toggle-dock",
+      title: dockCollapsed ? t("dock.show") : t("dock.hide"),
+      group: t("group.view"),
+      keywords: t("dock.keywords"),
+      enabled: docState !== null,
+      run: toggleDock,
+    },
+    {
+      id: "show-tools",
+      title: t("command.showTools"),
       group: t("group.view"),
       keywords: t("command.showTools.keywords"),
       enabled: docState !== null,
-      run: () => (toolsOpen = !toolsOpen),
+      run: () => showDockTab("selection"),
     },
     {
-      id: "toggle-inspector",
-      title: inspectorOpen ? t("command.hideInspector") : t("command.showInspector"),
+      id: "show-inspector",
+      title: t("command.showInspector"),
       group: t("group.view"),
       keywords: t("command.showInspector.keywords"),
-      // Nothing to show until a block has been asked about, and offering to
-      // reveal an empty panel is how a command reads as broken.
-      enabled: inspection !== null && singleBlockSelection,
-      run: () => (inspectorOpen = !inspectorOpen),
+      enabled: docState !== null,
+      run: () => showDockTab("inspector"),
+    },
+    {
+      id: "show-terrain",
+      title: t("command.showTerrain"),
+      group: t("group.view"),
+      keywords: t("command.showTerrain.keywords"),
+      enabled: docState !== null,
+      run: () => showDockTab("terrain"),
     },
     {
       id: "toggle-versions",
@@ -2377,17 +2993,42 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     void patchUi({ sidebarCollapsed });
   }
 
+  function toggleDock(): void {
+    dockCollapsed = !dockCollapsed;
+    void patchUi({ dockCollapsed });
+  }
+
+  /** A tab of the docked panel, brought up from Ctrl+K: the panel too, if it was put away. */
+  function showDockTab(tab: DockTab): void {
+    dockTab = tab;
+    if (dockCollapsed) toggleDock();
+  }
+
+  /**
+   * One layout write at a time, each over the answer to the one before.
+   *
+   * Each write sends the whole `ui` block, spread from `settings` -- which is
+   * only replaced when main answers. Two in the same instant therefore both
+   * spread the same old block and the second undid the first: a panel moved
+   * while the creative settings were being written came back with the old
+   * radius. Queued, each spreads what the last one left.
+   */
+  let uiWrites: Promise<void> = Promise.resolve();
+
   /**
    * Layout gestures must not depend on the settings write succeeding: the
    * panel has already moved on screen by the time this runs, and a failed
    * persist is worth a banner, not a stuck sidebar.
    */
-  async function patchUi(patch: Partial<Settings["ui"]>): Promise<void> {
-    try {
-      await patchSettings({ ui: { ...settings.ui, ...patch } });
-    } catch (err) {
-      failed(err, t("task.savingLayout"));
-    }
+  function patchUi(patch: Partial<Settings["ui"]>): Promise<void> {
+    uiWrites = uiWrites.then(async () => {
+      try {
+        await patchSettings({ ui: { ...settings.ui, ...patch } });
+      } catch (err) {
+        failed(err, t("task.savingLayout"));
+      }
+    });
+    return uiWrites;
   }
 
   /** Persist on every change; the Python UI persisted nothing at all. */
@@ -2414,7 +3055,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       patch.smoothLighting !== undefined ||
       // The markers are turned back into air by the mesher, not hidden by the
       // viewer, so this one rebuilds too — see `hideMarkers`.
-      patch.showMarkers !== undefined;
+      patch.showMarkers !== undefined ||
+      // Which levels of detail main builds is the window's to ask, so asking
+      // for different ones has to reach main. No chunk is re-meshed for it:
+      // the levels are built beside the chunks, from main's queue. The pixels
+      // and the tint are the viewer's alone and are not here.
+      patch.lodMode !== undefined ||
+      patch.lodShapes !== undefined ||
+      patch.lodCoarse !== undefined ||
+      patch.lodAutoTriangles !== undefined;
     if (!rebuilds || busy) return;
     // Whichever of the two is showing. Before this the tints only ever reached
     // the file-preview path, so changing one with a document open did nothing
@@ -2444,6 +3093,45 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     liveTrace = [];
     await generateFrom(prompt, true);
     if (bridgeAvailable) adoptChat(await api().getChatState());
+  }
+
+  /**
+   * Picks up what main already holds, which after a reload is not nothing.
+   *
+   * Main owns the document and outlives this window. A reload -- Ctrl+R in
+   * development, or the Reload the crash dialog offers -- starts a renderer
+   * with `docState` null while the session, its undo stack and its
+   * conversation are all still in main. Nothing asked, so the window said
+   * "Nothing open" over a schematic that was open, dirty and still being
+   * autosaved, and the next New or Open replaced it without a question,
+   * because `mayDiscard` asks only about the document it knows of. The crash
+   * dialog's promise that a reload loses nothing was true of main and false
+   * of everything on screen.
+   *
+   * At a cold launch main has nothing open and an empty conversation, so this
+   * changes nothing there. The chat is asked for either way: a conversation
+   * held with nothing open is main's too, and survives the reload the same.
+   *
+   * Not an open: no baseline version is kept, and the selection, which was
+   * the window's own, is not coming back.
+   */
+  async function adoptWhatMainHolds(): Promise<void> {
+    if (!bridgeAvailable) return;
+    const response = await api().getDocumentState();
+    if (response.ok && response.state !== null) {
+      docState = response.state;
+      project = response.project ?? null;
+      // A structure this camera has not been aimed at.
+      framingEpoch += 1;
+    }
+    adoptChat(await api().getChatState());
+    await refreshConversations();
+    if (docState !== null) {
+      // Not awaited: the startup screen waits on this, and a large mesh is
+      // seconds of a window that is otherwise ready.
+      void refreshDocument();
+      await refreshVersions();
+    }
   }
 
   /** Takes main's copy of the log as the truth. */
@@ -2607,6 +3295,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   let meshToken = $state<string | null>(null);
   let heldAtlas = $state<number | null>(null);
+  /** Which packing of the atlas `heldAtlas` is a version of; see `MeshAtlas.layout`. */
+  let heldAtlasLayout = $state<number | null>(null);
 
   /**
    * Redraw from main, coalesced: one request in flight and at most one more
@@ -2614,6 +3304,201 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * each, and the window then applied every stale answer in turn.
    */
   const refreshDocument = coalesce(fetchDocumentMesh);
+
+  /** The levels-of-detail settings, read once for the viewer and the pane. */
+  const lod = $derived(lodSettings(settings.preview));
+
+  /*
+   * Levels of detail still queued in main: ask again once the edits stop, and
+   * then a slice at a time until every one is built.
+   *
+   * An edit's own answer never builds a level -- placing a block has to cost
+   * what the block costs -- so main says `pending` and leaves the asking to
+   * the window. The first ask waits for the edits to stop, so a run of clicks
+   * is never held up behind a slice; after that each answer is a slice, and
+   * the next follows shortly.
+   */
+  const LOD_QUIET_MS = 400;
+  const LOD_SLICE_GAP_MS = 50;
+  let revisionAt = 0;
+  $effect(() => {
+    void docState?.revision;
+    revisionAt = performance.now();
+  });
+  $effect(() => {
+    if (mesh?.lod.state !== "pending") return;
+    const wait = Math.max(LOD_SLICE_GAP_MS, LOD_QUIET_MS - (performance.now() - revisionAt));
+    const timer = setTimeout(() => {
+      // A failed ask is no worse than not asking: the full chunks are on
+      // screen, and the next answer will say `pending` again.
+      refreshDocument().catch(() => undefined);
+    }, wait);
+    return () => clearTimeout(timer);
+  });
+
+  /**
+   * What the selection is made of, as main last counted it.
+   *
+   * Asked for rather than pushed, because the selection is the renderer's and
+   * main cannot know when it moved. A face drag moves it many times a second,
+   * so the question waits for the selection to hold still for a moment, and
+   * `coalesce` keeps it to one count in flight: on a large selection a count
+   * is a walk over millions of cells.
+   *
+   * Only while the list is on screen, which is the Selection tab of the docked
+   * panel. With nothing selected it is the whole schematic's (`regions:
+   * null`), which main counts without walking the box and pairs a bed's
+   * halves in as it does here -- the list is how you find the one stray
+   * block, and a docked panel has room for it where a floating window
+   * summoned by a selection did not.
+   *
+   * The last answer stays on screen until the next one lands, so the slots do
+   * not blank and refill on every edit -- but only while it answers the same
+   * question: an answer is tagged with whose materials it counted, so the
+   * schematic's are never shown as the selection's in the moment between.
+   */
+  let selectionMaterials = $state<(SelectionPaletteSuccess & { scope: "selection" | "document" }) | null>(null);
+  const refreshMaterials = coalesce(fetchMaterials);
+
+  async function fetchMaterials(): Promise<void> {
+    if (docState === null || !bridgeAvailable) {
+      selectionMaterials = null;
+      return;
+    }
+    const scope = selection === null ? "document" : "selection";
+    // Every area, a cell two of them share counted once -- main walks the union.
+    const response = await api().selectionPalette({ regions: scope === "selection" ? areasForIpc() : null });
+    // Changed meanwhile: a late answer must not put back the materials of a
+    // selection that is gone, nor the schematic's over a new selection.
+    if (!response.ok || docState === null || (selection === null ? "document" : "selection") !== scope) return;
+    selectionMaterials = {
+      palette: response.palette,
+      air: response.air,
+      outside: response.outside,
+      cells: response.cells,
+      scope,
+    };
+  }
+
+  $effect(() => {
+    if (dockCollapsed || dockTab !== "selection" || docState === null) {
+      selectionMaterials = null;
+      return;
+    }
+    void docState.revision;
+    void selectionAreas;
+    const timer = setTimeout(() => {
+      // A count that fails is no count, not a banner: nothing the user did
+      // has failed, and the slots simply keep the last answer.
+      refreshMaterials().catch(() => undefined);
+    }, 120);
+    return () => clearTimeout(timer);
+  });
+
+  /** Whose materials the list shows: the selection's, or with none the schematic's. */
+  const materialsScope = $derived(selection === null ? "document" : "selection");
+  const materials = $derived(
+    docState === null || selectionMaterials === null || selectionMaterials.scope !== materialsScope
+      ? null
+      : selectionMaterials,
+  );
+
+  /**
+   * What the viewport lights up, through walls, and why.
+   *
+   * Two ways in. A click on a slot of the materials list lights that block in
+   * the selected areas, and follows them as they move -- `scope: "selection"`,
+   * with the slots so the list can draw them pressed. A model over MCP
+   * (`highlight_blocks`) names blocks and a box or the whole schematic, and
+   * that glow stays where it was put whatever the selection does.
+   *
+   * Either way the window asks main for the shell (`findBlocks`), on the
+   * materials' schedule: when the glow, the document or the areas move,
+   * after they have held still for a moment, one question in flight. Main
+   * has the blocks; this only knows what was asked for.
+   */
+  /*
+   * `"selection"` and `"document"` are a glow the list lit, of the areas or --
+   * with nothing selected -- of the whole schematic, and it goes when the list
+   * changes whose materials it shows. A box or `null` is one a model asked
+   * for, which stays.
+   */
+  interface GlowState {
+    slots: GlowSlot[];
+    patterns: string[];
+    scope: "selection" | "document" | RegionSpec[] | null;
+  }
+  let glow = $state.raw<GlowState | null>(null);
+  /** The last shell main sent, and the glow it was found for. */
+  let glowShell = $state.raw<(FindBlocksSuccess & { for: GlowState }) | null>(null);
+  const refreshGlow = coalesce(fetchGlow);
+
+  async function fetchGlow(): Promise<void> {
+    const wanted = glow;
+    if (wanted === null || docState === null || !bridgeAvailable) {
+      glowShell = null;
+      return;
+    }
+    if (wanted.scope === "selection" && selection === null) return;
+    const response = await api().findBlocks({
+      regions: wanted.scope === "selection" ? areasForIpc() : wanted.scope === "document" ? null : wanted.scope,
+      patterns: wanted.patterns,
+    });
+    // Put out or changed meanwhile: a late answer must not light what is no
+    // longer asked for. The effect has already asked again.
+    if (!response.ok || glow !== wanted || docState === null) return;
+    glowShell = { ...response, for: wanted };
+  }
+
+  $effect(() => {
+    if (glow === null || docState === null) {
+      glowShell = null;
+      return;
+    }
+    void docState.revision;
+    if (glow.scope === "selection") void selectionAreas;
+    const timer = setTimeout(() => {
+      // A search that fails leaves the last glow up, as a count that fails
+      // leaves the last slots: nothing the user did has failed.
+      refreshGlow().catch(() => undefined);
+    }, 120);
+    return () => clearTimeout(timer);
+  });
+
+  // Another structure on screen is another set of blocks: the glow was for
+  // the one before, and it goes with it -- as it does when nothing is open.
+  const documentOpen = $derived(docState !== null);
+  $effect(() => {
+    void framingEpoch;
+    void documentOpen;
+    untrack(() => (glow = null));
+  });
+
+  /** A slot was clicked to light it, or Ctrl-clicked: `nextGlow` decides. */
+  function glowMaterial(slot: GlowSlot, add: boolean): void {
+    const scope = materialsScope;
+    const current = glow?.scope === scope ? glow.slots : [];
+    const slots = nextGlow(current, { block: slot.block, pair: [...slot.pair] }, add);
+    glow = slots.length === 0 ? null : { slots, patterns: glowPatterns(slots), scope };
+  }
+
+  /** The slots the list draws pressed: only a glow it lit itself, of what it shows. */
+  const glowingSlots = $derived(glow?.scope === materialsScope ? glow.slots.map((slot) => slot.block) : []);
+
+  // The schematic's list gives way to the selection's the moment there is
+  // one, and a glow lit from it goes too: the slots it was lit from are gone.
+  $effect(() => {
+    if (selection !== null && glow !== null && glow.scope === "document") glow = null;
+  });
+  /** How many cells glow, once main has answered for this glow. */
+  const glowAnswer = $derived(glowShell !== null && glowShell.for === glow ? glowShell : null);
+
+  /** Main's step timings to a tenth of a millisecond, for a readable report. */
+  function roundTimings(timings: Record<string, number>): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [step, ms] of Object.entries(timings)) out[step] = Math.round(ms * 10) / 10;
+    return out;
+  }
 
   async function fetchDocumentMesh(): Promise<void> {
     if (docState === null) {
@@ -2627,13 +3512,23 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       settings: forIpc(settings.preview),
       haveMesh: meshToken,
       haveAtlas: heldAtlas,
+      haveAtlasLayout: heldAtlasLayout,
     });
     // How long main took to answer. A slow answer only delays the picture --
     // main is another process -- so the report has to tell it apart from a
     // stall in this one.
     if (diagnosing()) {
       const at = performance.now();
-      recordEvent({ name: "mesh answered by main", at, ms: at - askedAt, detail: { ok: response.ok } });
+      recordEvent({
+        name: "mesh answered by main",
+        at,
+        ms: at - askedAt,
+        detail: {
+          ok: response.ok,
+          // Main's own steps: what of the wait was work, and which work.
+          ...(response.ok && response.timings ? { main: roundTimings(response.timings) } : {}),
+        },
+      });
     }
     if (!response.ok) {
       /*
@@ -2660,6 +3555,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     bounds = { center: response.center, size: response.size };
     meshToken = response.mesh.token;
     heldAtlas = response.mesh.atlasVersion;
+    heldAtlasLayout = response.mesh.atlasLayout;
   }
 
   /**
@@ -2696,11 +3592,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   function followShift(shift: readonly [number, number, number]): void {
     if (shift[0] === 0 && shift[1] === 0 && shift[2] === 0) return;
     if (selection !== null) selection = translatedRegion(selection, shift);
+    if (otherAreas.length > 0) otherAreas = otherAreas.map((area) => translatedRegion(area, shift));
     if (anchor !== null) {
       anchor = { x: anchor.x + shift[0], y: anchor.y + shift[1], z: anchor.z + shift[2] };
     }
     if (pivot !== null) {
       pivot = { x: pivot.x + shift[0], y: pivot.y + shift[1], z: pivot.z + shift[2] };
+    }
+    if (cornerAt !== null) {
+      cornerAt = { x: cornerAt.x + shift[0], y: cornerAt.y + shift[1], z: cornerAt.z + shift[2] };
     }
     lastSelection = selectionNow();
   }
@@ -2759,7 +3659,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * The box itself is native and lives in main, which is what lets the window's
    * own close button ask the identical question with no renderer involved.
    */
-  async function mayDiscard(intent: "new" | "open" | "close"): Promise<boolean> {
+  async function mayDiscard(intent: "new" | "open" | "close" | "restore"): Promise<boolean> {
     if (docState === null || !docState.dirty) return true;
     try {
       return await api().confirmDiscard({ intent, fileName: docState.fileName });
@@ -2920,8 +3820,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       const response = await api().inspectBlock(x, y, z);
       inspection = response.ok ? response : null;
       // Asking what a block is is the gesture that wants the inspector, exactly
-      // as selecting something is the gesture that wants the tools.
-      if (inspection !== null) inspectorOpen = true;
+      // as selecting a region is the gesture that wants the tools.
+      if (inspection !== null) dockTab = "inspector";
     } catch {
       // A failed inspection is not worth a banner — the panel simply stays
       // empty, and the click still moved the selection, which is the part the
@@ -2938,6 +3838,32 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       anchor = null;
       inspection = null;
       inspectedAt = null;
+      return;
+    }
+    /*
+     * Alt is about which areas: it changes the set and asks nothing of the
+     * inspector, because the click was aimed at an area rather than at a block.
+     */
+    if (block.area === "remove") {
+      const index = areaAt(areaSet, block);
+      if (index !== -1) setAreas(withoutArea(areaSet, index));
+      return;
+    }
+    if (block.area === "add") {
+      const index = areaAt(areaSet, block);
+      setAreas(
+        index !== -1
+          ? activated(areaSet, index)
+          : withArea(areaSet, {
+              minX: block.x,
+              minY: block.y,
+              minZ: block.z,
+              maxX: block.x,
+              maxY: block.y,
+              maxZ: block.z,
+            }),
+      );
+      anchor = { x: block.x, y: block.y, z: block.z };
       return;
     }
     void inspectBlock(block.x, block.y, block.z);
@@ -2963,14 +3889,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       return;
     }
     anchor = { x: block.x, y: block.y, z: block.z };
-    selection = {
-      minX: block.x,
-      minY: block.y,
-      minZ: block.z,
-      maxX: block.x,
-      maxY: block.y,
-      maxZ: block.z,
-    };
+    // A plain click starts the selection over: one block, no other areas.
+    setAreas(
+      single({
+        minX: block.x,
+        minY: block.y,
+        minZ: block.z,
+        maxX: block.x,
+        maxY: block.y,
+        maxZ: block.z,
+      }),
+    );
   }
 
   /**
@@ -2982,22 +3911,38 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * is rather than from wherever it was first clicked — otherwise resizing a
    * selection and then extending it would jump somewhere unrelated.
    */
-  function onSelectionDragged(region: RegionSpec): void {
-    selection = region;
+  function onSelectionDragged(region: RegionSpec, mode: "resize" | "replace" | "add"): void {
+    sweptArea(region, mode);
     anchor = { x: region.minX, y: region.minY, z: region.minZ };
+  }
+
+  /** Makes another area the active one, from the panel's list. */
+  function activateArea(index: number): void {
+    setAreas(activated(areaSet, index));
+    const active = selection;
+    if (active !== null) anchor = { x: active.minX, y: active.minY, z: active.minZ };
+  }
+
+  /** Takes one area away, from the panel's list. */
+  function removeArea(index: number): void {
+    setAreas(withoutArea(areaSet, index));
+    if (selection === null) anchor = null;
   }
 
   function selectAll(): void {
     if (!docState) return;
     anchor = { x: 0, y: 0, z: 0 };
-    selection = {
-      minX: 0,
-      minY: 0,
-      minZ: 0,
-      maxX: docState.size[0] - 1,
-      maxY: docState.size[1] - 1,
-      maxZ: docState.size[2] - 1,
-    };
+    // One area the size of the document: the others are inside it anyway.
+    setAreas(
+      single({
+        minX: 0,
+        minY: 0,
+        minZ: 0,
+        maxX: docState.size[0] - 1,
+        maxY: docState.size[1] - 1,
+        maxZ: docState.size[2] - 1,
+      }),
+    );
   }
 
   function parseBlock(text: string): BlockSpec {
@@ -3036,6 +3981,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       if (eq > 0) properties[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
     }
     return { namespacedName: name.slice(0, bracket), properties, ...patterns };
+  }
+
+  /**
+   * A block field's text as the mix main fills with: each block parsed here,
+   * where `35:14` and a pasted `/give` become blocks, and the weights and the
+   * distribution carried as they are. Throws what `parseMix` and `parseBlock`
+   * throw; every caller is inside `runDocument`, which says it.
+   */
+  function mixSpecOf(text: string): MixSpec {
+    const mix = parseMix(text);
+    return {
+      entries: mix.entries.map((entry) => ({ block: parseBlock(entry.block), weight: entry.weight })),
+      distribution: { ...mix.distribution },
+    };
   }
 
   /**
@@ -3399,12 +4358,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   async function copySelection(cut: boolean): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    // Every area, keeping their arrangement: a paste puts them down the same way.
+    const regions = areasForIpc();
     busy = true;
     try {
-      const response = await (cut
-        ? api().cutRegion(forIpc(region))
-        : api().copyRegion(forIpc(region)));
+      const response = await (cut ? api().cutRegion(regions) : api().copyRegion(regions));
       if (!response.ok) {
         status = { tone: "error", text: response.message };
         return;
@@ -3414,9 +4372,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       if (cut) await refreshDocument();
       status = {
         tone: "ok",
-        text: t(cut ? "status.cut" : "status.copied", {
-          count: response.clipboard.blocks.toLocaleString(),
-        }),
+        text: tn(cut ? "status.cut" : "status.copied", response.clipboard.blocks),
       };
       // Not awaited: the copy is done, and the picture is only a picture.
       void armStamp();
@@ -3435,8 +4391,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * and it makes pasting back into the place something was cut from exact.
    */
   async function pasteHere(): Promise<void> {
-    if (!selection) return;
-    const at = { x: selection.minX, y: selection.minY, z: selection.minZ };
+    if (!selectionBounds) return;
+    // The corner of every area's bounds, which is the clipboard's own corner
+    // when the copy was of several areas -- so pasting back lands exactly.
+    const at = { x: selectionBounds.minX, y: selectionBounds.minY, z: selectionBounds.minZ };
     const outcome = await runDocument(t("task.pasting"), () =>
       api().pasteClipboard({ ...at, skipEmpty: pasteKeepsUnder }),
     );
@@ -3452,9 +4410,24 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   async function transformSelection(transform: TransformRequest["transform"]): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    /*
+     * Several areas go through the gizmo's path, about the middle of their
+     * bounds. Turned in place they would land inside the bounds somewhere else
+     * than they were -- two areas side by side swap under a mirror -- and only
+     * that path carries the boxes along with the blocks.
+     */
+    if (otherAreas.length > 0 && selectionBounds !== null) {
+      await gizmoTransform(
+        transform.kind === "mirror"
+          ? { kind: "mirror", axis: transform.axis }
+          : { kind: "rotate", axis: "y", steps: transform.steps },
+        gizmoOrigin(selectionBounds, null),
+      );
+      return;
+    }
+    const regions = areasForIpc();
     const outcome = await runDocument(t("task.transforming"), () =>
-      api().transformRegion({ region: forIpc(region), transform }),
+      api().transformRegion({ regions, transform }),
     );
     reportChange(outcome?.changed ?? null);
   }
@@ -3473,7 +4446,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * gesture does not wait for it; until it lands the viewport draws the
    * destination as a box.
    */
-  let moving = $state<{ region: RegionSpec; chunks: ChunkGeometry[] } | null>(null);
+  let moving = $state<{ region: RegionSpec; areas: RegionSpec[]; chunks: ChunkGeometry[] } | null>(null);
   /** Which press the mesh in flight belongs to -- see `ghost_request.ts`. */
   const ghostFetch = ghostRequests();
 
@@ -3542,10 +4515,18 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (selection !== null) return;
     if (pivot !== null) pivot = null;
     if (stamp !== null) stamp = null;
+    // The other areas go with the active one: every site that drops the
+    // selection writes `selection = null` and nothing else, and a set of areas
+    // with none active is not a state any gesture can work from.
+    if (otherAreas.length > 0) otherAreas = [];
+    if (areaSlot !== 0) areaSlot = 0;
     // The move ghost is released by the drag ending; this is the net under
     // that, so a ghost can never outlive the selection it was drawn for.
     releaseGhost(ghostFetch);
     if (moving !== null) moving = null;
+    // A glow lit from the list was of the selected areas; one a model asked
+    // for names its own box and stays.
+    if (glow !== null && glow.scope === "selection") glow = null;
   });
 
   /**
@@ -3573,17 +4554,20 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     // A stamp is already the ghost, and it is what the arrows drag: the move
     // about to happen is the box's, so there is no region to fetch.
     if (stamp !== null) return;
-    if (!selection || moving !== null) return;
-    const region = { ...selection };
+    if (!selectionBounds || moving !== null) return;
+    // Every area, meshed from the corner of their bounds -- which is where the
+    // viewport stands the ghost and where the move puts that corner down.
+    const region = { ...selectionBounds };
+    const areas = selectionAreas.map((area) => ({ ...area }));
     const token = grabGhost(ghostFetch);
     try {
-      const response = await api().regionMesh(forIpc(region));
+      const response = await api().regionMesh(areas.map((area) => forIpc(area)));
       // The drag may have ended while this was in flight, and a ghost that
       // arrived after the release would stand at the corner of every
       // selection after it. Asked of the drag, not of the selection: a move
       // takes the selection along, so that one is still there.
       if (!response.ok || !ghostStillWanted(ghostFetch, token)) return;
-      moving = { region, chunks: response.chunks };
+      moving = { region, areas, chunks: response.chunks };
     } catch {
       // A missing ghost costs the preview, not the gesture: the destination
       // box is drawn either way, and the move itself is main's.
@@ -3617,11 +4601,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   function adoptEditedSelection(
     before: SelectionState,
-    next: RegionSpec,
+    next: AreaSet,
     depthBefore: number,
   ): void {
-    selection = { ...next };
-    anchor = { x: next.minX, y: next.minY, z: next.minZ };
+    setAreas(next);
+    anchor = next.active === null ? null : { x: next.active.minX, y: next.active.minY, z: next.active.minZ };
     const now = selectionNow();
     lastSelection = now;
     const depth = historyPosition();
@@ -3660,10 +4644,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * for itself by comparing the two.
      */
     if (stamp !== null) {
-      const held = selection;
+      const held = selectionBounds;
       if (!held) return;
       const before = selectionNow();
-      adoptEditedSelection(before, movedRegion(held, to), historyPosition());
+      const by = [to.x - held.minX, to.y - held.minY, to.z - held.minZ] as const;
+      adoptEditedSelection(before, mapAreas(areaSet, (area) => translatedRegion(area, by)), historyPosition());
       movePivot(held, to);
       return;
     }
@@ -3673,13 +4658,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * big region commits before its mesh does. Losing the picture is fine;
      * losing the move because the picture was slow is not.
      */
-    const region = moving?.region ?? selection;
+    const region = moving?.region ?? selectionBounds;
+    const areas = moving?.areas ?? selectionAreas.map((area) => ({ ...area }));
     moving = null;
     if (!region) return;
     const before = selectionNow();
+    const set = areaSet;
     const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.moving"), () =>
-      api().moveRegion({ region: forIpc(region), to }),
+      api().moveRegion({ regions: areas.map((area) => forIpc(area)), to }),
     );
     if (outcome !== null) {
       /*
@@ -3689,7 +4676,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        * this is the destination being restated in the same frame, or the box
        * would land back where the blocks used to be.
        */
-      adoptEditedSelection(before, translatedRegion(movedRegion(region, to), outcome.shift), depthBefore);
+      const by = [
+        to.x - region.minX + outcome.shift[0],
+        to.y - region.minY + outcome.shift[1],
+        to.z - region.minZ + outcome.shift[2],
+      ] as const;
+      adoptEditedSelection(before, mapAreas(set, (area) => translatedRegion(area, by)), depthBefore);
       // The pivot moved with the blocks, or it would name a cell the region
       // has left -- and the next turn would swing it round empty space. The
       // delta is the same in either frame, so this composes with the shift
@@ -3718,13 +4710,21 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * spelling for. A staircase turned about X would have to face up.
      */
     if (transform.kind === "rotate" && transform.axis !== "y") return;
-    const region = { ...selection };
+    if (selectionBounds === null) return;
+    /*
+     * Every area through the same rigid map, about the same origin, so they
+     * keep their places relative to each other; main is told the corner the
+     * bounds land on, and each box below lands where the map sends it.
+     */
+    const region = { ...selectionBounds };
+    const set = areaSet;
+    const regions = areasForIpc();
     const to = transformedRegion(region, origin, transform);
     const before = selectionNow();
     const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.transforming"), () =>
       api().transformRegion({
-        region: forIpc(region),
+        regions,
         transform:
           transform.kind === "mirror"
             ? { kind: "mirror", axis: transform.axis }
@@ -3737,7 +4737,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       // on the space they came from would make the next operation act on air.
       // ...and follows the *document* too, where the turn made room below the
       // origin and moved everything up.
-      adoptEditedSelection(before, translatedRegion(to, outcome.shift), depthBefore);
+      adoptEditedSelection(
+        before,
+        mapAreas(set, (area) => translatedRegion(transformedRegion(area, origin, transform), outcome.shift)),
+        depthBefore,
+      );
     }
     reportChange(outcome?.changed ?? null);
   }
@@ -3751,8 +4755,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * not a drag and so never passed through one.
    */
   async function mirrorSelection(axis: Axis): Promise<void> {
-    if (!selection || busy) return;
-    await gizmoTransform({ kind: "mirror", axis }, gizmoOrigin(selection, pivot));
+    if (!selectionBounds || busy) return;
+    await gizmoTransform({ kind: "mirror", axis }, gizmoOrigin(selectionBounds, pivot));
   }
 
   /** A scale handle was released. */
@@ -3760,16 +4764,22 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     spec: ScaleSpec,
     origin: { x: number; y: number; z: number },
   ): Promise<void> {
-    if (!selection || busy) return;
-    const region = { ...selection };
+    if (!selectionBounds || busy) return;
+    const region = { ...selectionBounds };
+    const set = areaSet;
+    const regions = areasForIpc();
     const to = scaledRegion(region, origin, spec);
     const before = selectionNow();
     const depthBefore = historyPosition();
     const outcome = await runDocument(t("task.scaling"), () =>
-      api().scaleRegion({ region: forIpc(region), spec, to: { x: to.minX, y: to.minY, z: to.minZ } }),
+      api().scaleRegion({ regions, spec, to: { x: to.minX, y: to.minY, z: to.minZ } }),
     );
     if (outcome !== null) {
-      adoptEditedSelection(before, translatedRegion(to, outcome.shift), depthBefore);
+      adoptEditedSelection(
+        before,
+        mapAreas(set, (area) => translatedRegion(scaledRegion(area, origin, spec), outcome.shift)),
+        depthBefore,
+      );
     }
     reportChange(outcome?.changed ?? null);
   }
@@ -3787,43 +4797,61 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   }
 
   /**
-   * Empties the selection, which is a fill with air.
+   * Empties the selection, which is a fill with the document's empty space.
    *
    * Air is a real block everywhere in this app -- every empty cell in the
    * document is one, and the writers and the agent both name it -- so there is
    * no separate "erase" operation to add. It goes through `applyEdit` like any
    * other fill, which is what makes it one undo step.
+   *
+   * The empty space and not the word air, for the reason a break writes it:
+   * with water chosen, Delete used to leave a dry pocket in the pond, while
+   * breaking the same blocks one at a time left water.
    */
   async function deleteSelection(): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    const regions = areasForIpc();
+    const empty = parseBlock(docState?.voidBlock || "minecraft:air");
     const outcome = await runDocument(t("task.deleting"), () =>
-      api().applyEdit({ kind: "fill", region: forIpc(region), block: { namespacedName: "minecraft:air" } }),
+      api().applyEdit({
+        kind: "fill",
+        regions,
+        mix: singleMix(empty),
+      }),
     );
     reportChange(outcome?.changed ?? null);
   }
 
   async function fillSelection(block: string): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    const regions = areasForIpc();
     const outcome = await runDocument(t("task.filling"), () =>
-      api().applyEdit({ kind: "fill", region: forIpc(region), block: parseBlock(block) }),
+      api().applyEdit({ kind: "fill", regions, mix: mixSpecOf(block) }),
     );
     reportChange(outcome?.changed ?? null);
   }
 
   async function replaceInSelection(from: string, to: string): Promise<void> {
     if (!selection) return;
-    const region = selection;
+    const regions = areasForIpc();
     const outcome = await runDocument(t("task.replacing"), () =>
       api().applyEdit({
         kind: "replace",
-        region: forIpc(region),
-        from: parseBlock(from),
-        to: parseBlock(to),
+        regions,
+        from: parseMix(from).entries.map((entry) => parseBlock(entry.block)),
+        to: mixSpecOf(to),
       }),
     );
-    reportChange(outcome?.changed ?? null);
+    /*
+     * Unlike a fill, a replace cannot be checked by looking: the cells it
+     * found may be anywhere in the selection, so it says how many.
+     */
+    const changed = outcome?.changed ?? null;
+    if (changed !== null && changed > 0) {
+      status = { tone: "ok", text: tn("status.replaced", changed) };
+    } else {
+      reportChange(changed);
+    }
   }
 
   /**
@@ -3989,12 +5017,33 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
 
   /*
-   * The converter, which is the one panel here that is not about the open
-   * document -- so it is also the one whose button is never disabled.
-   * Converting a `.litematic` somebody sent you is a thing to do before there
-   * is anything open at all.
+   * The converter: `convertOpen` is declared with the start screen's state,
+   * which steps aside for it.
    */
-  let convertOpen = $state(false);
+
+  /** One of the schematic's own settings, from the Document menu beside its name. */
+  function openDocumentSetting(item: DocumentMenuItem): void {
+    switch (item) {
+      case "version":
+        mcVersionOpen = true;
+        break;
+      case "dimensions":
+        dimensionsOpen = true;
+        break;
+      case "void":
+        // Seeded on open, not derived: with nothing converted yet, what the
+        // empty cells hold *is* the current choice.
+        voidFilledWith = docState?.voidBlock ?? "";
+        voidOpen = true;
+        break;
+      case "anchor":
+        anchorOpen = true;
+        break;
+      case "nbt":
+        void openNbtPanel();
+        break;
+    }
+  }
   let convertBusy = $state(false);
   let convertSource = $state("");
   let convertTarget = $state("");
@@ -4053,10 +5102,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        */
       convertReport = [
         t("convert.wrote", {
-          count: response.files.length,
+          files: tn("convert.files", response.files.length),
           name: response.files[0]?.split(/[\\/]/).pop() ?? "",
           size: response.size.join(String.fromCharCode(215)),
-          blocks: response.blocks.toLocaleString(),
+          blocks: tn("count.blocks", response.blocks),
         }),
         response.backedUp.length > 0
           ? t("convert.backedUp", { count: response.backedUp.length })
@@ -4127,6 +5176,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         requestId: id,
         prompt,
         selection: selection ? forIpc(selection) : null,
+        otherAreas: selection ? otherAreas.map((area) => forIpc(area)) : [],
       });
       // Both branches carry the log, because a stopped or failed run is a
       // turn too and main has already written it.
@@ -4272,7 +5322,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      * a second block browser for the tools' two fields would be the same nine
      * hundred tiles behind a different scrollbar, and would drift.
      */
-    if (inventoryFor === "replace") replaceBlock = block;
+    if (inventoryFor === "replace") replaceBlock = mixWith(replaceBlock, block);
+    else if (inventoryFor === "fill") holdBlock(mixWith(activeBlock, block));
     else holdBlock(block);
   }}
 />
@@ -4331,6 +5382,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   onclearkey={clearKey}
   {mcpStatus}
   {mcpActivity}
+  lodStatus={mesh?.lod ?? null}
   startOn={settingsCategory}
   onmcpenabled={(enabled) => void setMcpEnabled(enabled)}
   onmcpregenerate={() => void regenerateMcpToken()}
@@ -4464,176 +5516,259 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
 <main
   class:collapsed={sidebarCollapsed}
-  style={`--sidebar-w: ${sidebarCollapsed ? 0 : sidebarWidth}px`}
+  style={`--sidebar-w: ${sidebarCollapsed ? 0 : sidebarWidth}px; --dock-w: ${docked ? dockWidth : 0}px`}
 >
   <!--
-    The application bar: identity and mode on the left, configuration on the
-    right. The gear is deliberately apart from the other two -- they say what
-    you are looking at and how, it opens something that covers all of it.
+    The application bar, in three thirds: the document on the left, how you
+    look at it in the middle, what you can do about it on the right. Chosen in
+    the UX audit, after the bar had grown to fifteen controls in one row --
+    six of them the document's own settings, now behind its Document menu.
 
-    The camera switch used to float over the viewport's top-right corner. It is
-    here now because it is a mode the whole window is in, not a control that
-    belongs to the canvas -- and moving it gives the canvas that corner back.
+    The camera switch is here because it is a mode the whole window is in,
+    not a control that belongs to the canvas.
   -->
   <header class="navbar">
-    <DocumentBar
-      doc={docState}
-      {busy}
-      canundo={canUndoAnything}
-      canredo={canRedoAnything}
-      onundo={() => void undoAnything()}
-      onredo={() => void redoAnything()}
-      onversions={() => (versionsOpen = !versionsOpen)}
-      onstart={() => (startDismissed = false)}
-      startvisible={startVisible}
-    />
-
-    <div class="camera-modes" role="group" aria-label={t("viewport.cameraMode")}>
-      <button
-        class:active={cameraMode === "orbit"}
-        onclick={() => (cameraMode = "orbit")}
-        title={t("viewport.orbitHint")}
-      >
-        {t("viewport.orbit")}
-      </button>
-      <button
-        class:active={cameraMode === "fly"}
-        onclick={() => (cameraMode = "fly")}
-        title={t("viewport.creativeHint")}
-      >
-        {t("viewport.creative")}
-      </button>
+    <div class="bar-start">
+      {#if docState !== null}
+        <button
+          class="icon panel-toggle"
+          onclick={toggleDock}
+          aria-pressed={!dockCollapsed}
+          title={dockCollapsed ? t("dock.show") : t("dock.hide")}
+          aria-label={dockCollapsed ? t("dock.show") : t("dock.hide")}
+          ><Icon name="panelLeft" size={18} weight={1.7} /></button
+        >
+      {/if}
+      <DocumentBar
+        doc={docState}
+        {busy}
+        onsetting={openDocumentSetting}
+        onstart={() => (startDismissed = false)}
+        startvisible={startVisible || recovery !== null}
+      />
     </div>
 
-    <!--
-      A real checkbox rather than a third button in the group above: it is
-      not a fourth camera mode, it is a property of one of them.
+    <div class="bar-middle">
+      <div class="camera-modes segmented" role="group" aria-label={t("viewport.cameraMode")}>
+        <button
+          class:active={cameraMode === "orbit"}
+          aria-pressed={cameraMode === "orbit"}
+          onclick={() => (cameraMode = "orbit")}
+          title={t("viewport.orbitHint")}
+        >
+          {t("viewport.orbit")}
+        </button>
+        <button
+          class:active={cameraMode === "fly"}
+          aria-pressed={cameraMode === "fly"}
+          onclick={() => (cameraMode = "fly")}
+          title={t("viewport.creativeHint")}
+        >
+          {t("viewport.creative")}
+        </button>
+      </div>
 
-      Disabled in flight, and that is the same rule the Stop button is
-      under -- an orthographic projection has no point of view for
-      `PointerLockControls` to move, so flight ignores it, and a live
-      control that does nothing is worse than a greyed one that says why.
-      The viewer forces perspective regardless, because the *setting* is
-      on disk and outlives the mode: launching straight into flight with
-      `orthographic` stored has to come out right too.
-    -->
-    <label class="projection" title={t("viewport.orthographicHint")}>
-      <input
-        type="checkbox"
-        checked={settings.preview.projection === "orthographic"}
-        disabled={cameraMode === "fly"}
-        onchange={(event) =>
-          void patchPreview({
-            projection: event.currentTarget.checked ? "orthographic" : "perspective",
-          })}
-      />
-      {t("viewport.orthographic")}
-    </label>
+      <!--
+        A real checkbox rather than a third button in the group above: it is
+        not a third camera mode, it is a property of one of them.
 
-    <!--
-      Text buttons rather than icons: there is no glyph for "the file's NBT" or
-      "WorldEdit's paste anchor" that anyone would read correctly, and the bar
-      already mixes both. They sit before the gear, which carries the auto
-      margin, so they land at the trailing edge beside it.
-    -->
-    <!--
-      Never disabled, unlike its neighbours: this one converts a file on disk
-      and does not consult the open document at all, so needing one open would
-      be a rule with nothing behind it.
-    -->
-    <button
-      class="nbt-open"
-      onclick={() => (convertOpen = true)}
-      title={t("convert.openHint")}
-    >
-      {t("convert.open")}
-    </button>
+        Disabled in flight, and that is the same rule the Stop button is
+        under -- an orthographic projection has no point of view for
+        `PointerLockControls` to move, so flight ignores it, and a live
+        control that does nothing is worse than a greyed one that says why.
+        The viewer forces perspective regardless, because the *setting* is
+        on disk and outlives the mode: launching straight into flight with
+        `orthographic` stored has to come out right too.
+      -->
+      <label class="projection" title={t("viewport.orthographicHint")}>
+        <input
+          type="checkbox"
+          checked={settings.preview.projection === "orthographic"}
+          disabled={cameraMode === "fly"}
+          onchange={(event) =>
+            void patchPreview({
+              projection: event.currentTarget.checked ? "orthographic" : "perspective",
+            })}
+        />
+        {t("viewport.orthographic")}
+      </label>
+    </div>
 
-    <button
-      class="nbt-open"
-      disabled={docState === null}
-      onclick={() => (mcVersionOpen = true)}
-      title={t("mcversion.openHint")}
-    >
-      {t("mcversion.open")}
-    </button>
-    <button
-      class="nbt-open"
-      disabled={docState === null}
-      onclick={() => (dimensionsOpen = true)}
-      title={t("dimensions.openHint")}
-    >
-      {t("dimensions.open")}
-    </button>
+    <div class="bar-end">
+      {#if docState !== null}
+        <!--
+          Undo and Redo are here rather than in the menu with an accelerator,
+          because the menu deliberately does not claim Ctrl+Z -- see
+          `menu_model.ts`. These buttons and the keyboard handler are the two
+          ways to reach them.
+        -->
+        <div class="edits" role="group" aria-label={t("bar.editing")}>
+          <button
+            class="icon"
+            onclick={() => void undoAnything()}
+            disabled={busy || !canUndoAnything}
+            title={docState.undoLabel
+              ? t("doc.undoNamed", { label: docState.undoLabel })
+              : t("doc.nothingToUndo")}
+            aria-label={t("doc.undo")}><Icon name="undo" size={18} weight={1.8} /></button
+          >
+          <button
+            class="icon"
+            onclick={() => void redoAnything()}
+            disabled={busy || !canRedoAnything}
+            title={docState.redoLabel
+              ? t("doc.redoNamed", { label: docState.redoLabel })
+              : t("doc.nothingToRedo")}
+            aria-label={t("doc.redo")}><Icon name="redo" size={18} weight={1.8} /></button
+          >
+        </div>
+        <!--
+          The version history. Here because nothing else summons it: the tabs
+          come back with a selection or a click, this has no gesture of its
+          own, and a window with no way back is a feature deleted by accident.
+        -->
+        <button
+          class="history"
+          onclick={() => (versionsOpen = !versionsOpen)}
+          disabled={busy}
+          title={t("versions.openHint")}
+        >
+          <Icon name="history" size={16} weight={1.8} />
+          {t("versions.open")}
+        </button>
+      {/if}
 
-    <button
-      class="nbt-open"
-      disabled={docState === null}
-      onclick={() => {
-        // Seeded on open, not derived: with nothing converted yet, what the
-        // empty cells hold *is* the current choice.
-        voidFilledWith = docState?.voidBlock ?? "";
-        voidOpen = true;
-      }}
-      title={t("void.openHint")}
-    >
-      {t("void.open")}
-    </button>
+      <!--
+        Draws itself only while there is something to act on -- an update on
+        offer, one downloading, one waiting for a restart. "Up to date" is not
+        news, and a badge saying so would be one more thing in the bar to ignore.
+      -->
+      {#if updateStatus !== null}
+        <UpdateIndicator status={updateStatus} onopen={openUpdateSettings} />
+      {/if}
 
-    <button
-      class="nbt-open"
-      disabled={docState === null}
-      onclick={() => (anchorOpen = true)}
-      title={t("anchor.openHint")}
-    >
-      {t("anchor.open")}
-    </button>
-
-    <button
-      class="nbt-open"
-      disabled={docState === null}
-      onclick={() => void openNbtPanel()}
-      title={t("nbt.openHint")}
-    >
-      {t("nbt.open")}
-    </button>
-
-    <!--
-      Present only while the server is on, rather than a permanently dim dot in
-      a bar that already carries five controls. It is a button because a status
-      light with no way to act on what it reports is a half-feature.
-    -->
-    {#if showsIndicator(settings.mcp.enabled, mcpStatus)}
-      <McpIndicator status={mcpStatus} onopen={openMcpSettings} />
-    {/if}
-
-    <!--
-      Draws itself only while there is something to act on -- an update on
-      offer, one downloading, one waiting for a restart. "Up to date" is not
-      news, and a badge saying so would be one more thing in the bar to ignore.
-    -->
-    {#if updateStatus !== null}
-      <UpdateIndicator status={updateStatus} onopen={openUpdateSettings} />
-    {/if}
-
-    <button
-      class="icon gear"
-      onclick={() => (settingsOpen = true)}
-      title={t("settings.openShortcut")}
-      aria-label={t("settings.title")}>&#x2699;</button
-    >
-  </header>
-
-  <section class="controls">
-    <header class="sidebar-head">
       <button
         class="icon"
-        onclick={toggleSidebar}
-        title={t("sidebar.hideShortcut")}
-        aria-label={t("sidebar.hide")}>&#x203a;</button
+        onclick={() => (settingsOpen = true)}
+        title={t("settings.openShortcut")}
+        aria-label={t("settings.title")}><Icon name="gear" size={18} weight={1.7} /></button
       >
-    </header>
+      <button
+        class="icon panel-toggle"
+        onclick={toggleSidebar}
+        aria-pressed={!sidebarCollapsed}
+        title={sidebarCollapsed ? t("sidebar.showShortcut") : t("sidebar.hideShortcut")}
+        aria-label={sidebarCollapsed ? t("sidebar.show") : t("sidebar.hide")}
+        ><Icon name="panelRight" size={18} weight={1.7} /></button
+      >
+    </div>
+  </header>
 
+  <!--
+    The tools, docked: the selection's, the inspector and the terrain as tabs
+    of one panel against the left edge, where two floating windows used to
+    open over the build. Only with a document open -- with none there is
+    nothing for any of the three to describe.
+  -->
+  {#if docked && docState !== null}
+    <DockPanel tab={dockTab} ontab={(next) => (dockTab = next)} oncollapse={toggleDock}>
+      {#snippet selectionTab()}
+        <SelectionTools
+          {selection}
+          areas={selectionAreas}
+          activeArea={activeIndex(areaSet)}
+          cells={areaCells(areaSet)}
+          onactivatearea={activateArea}
+          onremovearea={removeArea}
+          {busy}
+          blocks={blockRegistry}
+          placeable={placeableBlocks}
+          legacy={legacyForDoc}
+          block={activeBlock}
+          onblockchange={holdBlock}
+          replaceFrom={replaceBlock}
+          onreplacefromchange={(next) => (replaceBlock = next)}
+          onbrowse={browseBlocks}
+          documentSize={docState?.size ?? null}
+          onswap={swapBlockFields}
+          {materials}
+          materialsUnify={settings.ui.materialsUnify}
+          onmaterialsunifychange={(unify) => void patchUi({ materialsUnify: unify })}
+          materialsSort={settings.ui.materialsSort}
+          onmaterialssortchange={(sort) => void patchUi({ materialsSort: sort })}
+          glowing={glowingSlots}
+          glowTotal={glowAnswer?.total ?? null}
+          glowCapped={glowAnswer?.capped ?? false}
+          glowCoarse={(glowAnswer?.scale ?? 1) > 1}
+          onglow={glowMaterial}
+          onglowclear={() => (glow = null)}
+          onfill={fillSelection}
+          onreplace={replaceInSelection}
+          ondelete={() => void deleteSelection()}
+          onclearselection={clearSelection}
+          onselectall={selectAll}
+        />
+      {/snippet}
+      {#snippet inspectorTab()}
+        <!--
+          Only for a single block, because that is the only time the panel is
+          telling the truth. Sweeping out a region left it showing whichever
+          block the gesture happened to start on, labelled with that block's
+          coordinates, beside a selection of nine hundred others.
+        -->
+        {#if inspection !== null && singleBlockSelection}
+          <InspectorPanel
+            {inspection}
+            at={inspectedAt}
+            {busy}
+            legacy={legacyForDoc}
+            onchangeproperty={changeBlockProperty}
+            onchangenbt={changeNbtValue}
+            onchangebanner={changeBannerPatterns}
+          />
+        {:else}
+          <p class="hint">{t("inspector.empty")}</p>
+        {/if}
+      {/snippet}
+      {#snippet terrainTab()}
+        <TerrainPanel
+          terrain={creative.terrain}
+          onterrainchange={(terrain) => setCreative({ ...creative, terrain })}
+          onlayterrain={() => void layTerrain()}
+          onfitterrain={fitTerrain}
+          smooth={creative.smooth}
+          onsmoothchange={(smooth) => setCreative({ ...creative, smooth })}
+          onsmooth={() => void smoothSelection()}
+          erode={creative.erode}
+          onerodechange={(erode) => setCreative({ ...creative, erode })}
+          onerode={() => void erodeSelection()}
+          none={selection === null}
+          {busy}
+          blocks={blockRegistry}
+          placeable={placeableBlocks}
+          legacy={legacyForDoc}
+          frame={mapFrameOf(selection, selectionAreas, docState?.size ?? null)}
+          origin={docState?.frame ?? [0, 0, 0]}
+        />
+      {/snippet}
+    </DockPanel>
+    <div class="dock-split">
+      <SidebarSplitter
+        side="left"
+        limits={DOCK_WIDTH}
+        reserve={sidebarCollapsed ? 0 : sidebarWidth}
+        label={t("dock.resize")}
+        width={dockWidth}
+        onresize={(next) => (dockWidth = next)}
+        oncommit={(next) => {
+          dockWidth = next;
+          void patchUi({ dockWidth: next });
+        }}
+      />
+    </div>
+  {/if}
+
+  <section class="controls">
     <!--
       No tab strip: the sidebar is the chat.
 
@@ -4647,6 +5782,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       same model and the same progress. What was worth keeping from the form
       was the reference image and the export format, and those are inputs to a
       message rather than a panel.
+
+      Its show and hide is the panel button at the trailing end of the bar,
+      the mirror of the tools' at the leading end, Ctrl+B, and the chevron in
+      its own strip, as the tools' panel has one in its.
     -->
     <div class="tab-body">
       <ChatPanel
@@ -4654,6 +5793,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         live={liveTrace}
         progress={progress !== null && progress.requestId === buildRequestId ? progress : null}
         {selection}
+        otherAreas={selection === null ? 0 : otherAreas.length}
         {remembered}
         {rememberedFrom}
         {conversations}
@@ -4686,19 +5826,24 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         onundo={() => runDocument(t("task.undoing"), () => api().undo())}
         onsettingschange={patchSettings}
         onopensettings={() => (settingsOpen = true)}
+        oncollapse={toggleSidebar}
+        focusRequest={composerFocus}
       />
     </div>
   </section>
 
   {#if !sidebarCollapsed}
-    <SidebarSplitter
-      width={sidebarWidth}
-      onresize={(next) => (sidebarWidth = next)}
-      oncommit={(next) => {
-        sidebarWidth = next;
-        void patchUi({ sidebarWidth: next });
-      }}
-    />
+    <div class="chat-split">
+      <SidebarSplitter
+        width={sidebarWidth}
+        reserve={docked ? dockWidth : 0}
+        onresize={(next) => (sidebarWidth = next)}
+        oncommit={(next) => {
+          sidebarWidth = next;
+          void patchUi({ sidebarWidth: next });
+        }}
+      />
+    </div>
   {/if}
 
   <!--
@@ -4708,22 +5853,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   -->
   <section
     class="preview"
-    class:drop-active={dropActive}
     aria-label={t("viewport.label")}
     ondragenter={onDragEnter}
     ondragover={onDragOver}
     ondragleave={onDragLeave}
     ondrop={onDrop}
   >
-    {#if sidebarCollapsed}
-      <button
-        class="icon show-panel"
-        onclick={toggleSidebar}
-        title={t("sidebar.showShortcut")}
-        aria-label={t("sidebar.show")}>&#x2039;</button
-      >
-    {/if}
-
     <!--
       The status banner lives here, not in the Structure fieldset it was ported
       into. A preview error raised from the Render button at the bottom of a
@@ -4744,6 +5879,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         {busy}
         onnew={() => void startNewDocument()}
         onopen={() => void openDocument()}
+        onconvert={() => (convertOpen = true)}
+        ondescribe={describeInChat}
         onopenrecent={openDocumentAt}
         onopenartifact={(artifact) => void openDocumentAt(artifact.path)}
         onrevealartifact={(artifact) => api().revealPath(artifact.path)}
@@ -4753,9 +5890,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     {/if}
 
     {#if dropActive}
-      <div class="drop-hint" aria-hidden="true">
-        <strong>{t("viewport.dropTitle")}</strong>
-        <span>{t("viewport.dropTypes")}</span>
+      <!--
+        The whole viewport is the target, so the whole viewport says so: an
+        edge and a tint, and in the middle what a drop does. On the start
+        screen's tier and after it in the document, because that screen tells
+        you to drop a file anywhere on it and would otherwise cover the answer.
+      -->
+      <div class="drop" aria-hidden="true">
+        <div class="drop-hint slab">
+          <strong class="pixel">{t("viewport.dropTitle")}</strong>
+          <span>{t("viewport.dropTypes")}</span>
+        </div>
       </div>
     {/if}
 
@@ -4763,36 +5908,55 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       <!--
         Deliberately blocking, unlike the status banner: this is the one
         question where dismissing it by accident loses work permanently, so it
-        does not have a close button and both answers are explicit.
+        does not have a close button and both answers are explicit. It is what
+        the window shows at launch in the start screen's place, so it is the
+        same kind of screen: the whole window, on the start screen's tier. It
+        used to be a card in the middle of the viewport with the bar, the chat
+        and the gear all live around it.
       -->
-      <div class="recovery" role="alertdialog" aria-labelledby="recovery-title">
-        <strong id="recovery-title">{t("recovery.title")}</strong>
-        <p>
-          {t("recovery.body", {
-            name: recovery.fileName ?? t("recovery.unnamed"),
-            blocks: recovery.blockCount.toLocaleString(),
-            when: new Date(recovery.savedAt).toLocaleString(),
-          })}
-        </p>
-        <div class="buttons">
-          <button class="primary" onclick={() => resolveRecovery(true)} disabled={busy}>
-            {t("recovery.restore")}
-          </button>
+      <Screen
+        role="alertdialog"
+        title={t("recovery.title")}
+        lead={t("recovery.body", {
+          name: recovery.fileName ?? t("recovery.unnamed"),
+          blocks: tn("count.blocks", recovery.blockCount),
+          when: new Date(recovery.savedAt).toLocaleString(),
+        })}
+        width={480}
+      >
+        {#snippet footer()}
           <button onclick={() => resolveRecovery(false)} disabled={busy}>
             {t("recovery.discard")}
           </button>
-        </div>
-      </div>
+          <button class="primary" onclick={() => resolveRecovery(true)} disabled={busy}>
+            {t("recovery.restore")}
+          </button>
+        {/snippet}
+      </Screen>
     {/if}
 
+    <!--
+      What a notification says, to a screen reader. Two regions that are
+      always in the document, because a live region announces a *change* to
+      its content: the toast below is created already holding its sentence,
+      and a region born full is one most readers say nothing about. A failure
+      interrupts (`role="alert"`); everything else waits its turn.
+    -->
+    <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {status !== null && status.tone !== "error" ? announcement(status) : ""}
+    </div>
+    <div class="sr-only" role="alert" aria-atomic="true">
+      {status !== null && status.tone === "error" ? announcement(status) : ""}
+    </div>
+
     {#if status}
-      <div class={`status ${status.tone}`} role="status">
-        <div>
+      <div class={`status slab ${status.tone}`}>
+        <p>
           {status.text}
           {#if status.detail}<br /><small>{status.detail}</small>{/if}
-        </div>
+        </p>
         <button class="icon" onclick={() => (status = null)} aria-label={t("common.dismiss")}>
-          &#x00d7;
+          <Icon name="close" size={14} />
         </button>
       </div>
     {/if}
@@ -4820,146 +5984,83 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     {/if}
 
     <!--
-      The way back to the tools, and the reason "close" can mean close.
-      Top-left, which is where the window itself opens, so the panel appears
-      more or less from under the button that summoned it -- but below the
-      HUD line, which it used to sit on top of.
+      The creative tools, in flight only: there the right button builds, and
+      this says what it builds. The options window beside it follows the tool
+      in hand.
     -->
-    {#if docState && !toolsOpen && selection !== null}
-      <button
-        class="reopen-tools"
-        onclick={() => (toolsOpen = true)}
-        title={t("command.showTools")}
-      >
-        {t("selection.legend")}
-      </button>
+    {#if docState && cameraMode === "fly"}
+      <CreativeToolBar
+        settings={creative}
+        corner={cornerAt}
+        flying={pointerLocked}
+        keys={!inventoryOpen && !settingsOpen && !paletteOpen && schematicDialog === null}
+        optionsOpen={creativeOptionsOpen && creative.tool !== "place"}
+        ontool={chooseTool}
+        oncycle={() => setCreative({ ...creative, tool: nextTool(creative.tool) })}
+        onresize={(by) => setCreative(resized(creative, creative.tool, by))}
+        onoptions={() => (creativeOptionsOpen = !creativeOptionsOpen)}
+      />
     {/if}
-
-    <!--
-      Only while there is something selected.
-      
-      Every control in it acts on a region, so with none there was a panel of
-      disabled buttons taking up the corner of the viewport and explaining
-      itself with a hint. Select All moved to Ctrl+A and the palette, which is
-      the one thing in here that never needed a selection to begin with.
-    -->
-    {#if docState && toolsOpen && selection !== null}
+    {#if docState && cameraMode === "fly" && creativeOptionsOpen && creative.tool !== "place"}
       <ToolWindow
-        title={t("selection.legend")}
-        x={toolWindowX}
-        y={toolWindowY}
-        width={toolWindowW}
-        height={toolWindowH}
+        title={t("creative.optionsTitle", { tool: t(`creative.tool.${creative.tool}`) })}
+        x={creativeWindowX}
+        y={creativeWindowY}
+        width={creativeWindowW}
+        height={creativeWindowH}
+        minWidth={OPTIONS_PANEL_MIN_WIDTH}
         closeLabel={t("common.close")}
         onmove={(x, y) => {
-          toolWindowX = x;
-          toolWindowY = y;
+          creativeWindowX = x;
+          creativeWindowY = y;
         }}
         oncommit={(x, y) => {
-          toolWindowX = x;
-          toolWindowY = y;
-          void patchUi({ toolWindowX: x, toolWindowY: y });
+          creativeWindowX = x;
+          creativeWindowY = y;
+          void patchUi({ creativeWindowX: x, creativeWindowY: y });
         }}
         onresize={(w, h) => {
-          toolWindowW = w;
-          toolWindowH = h;
+          creativeWindowW = w;
+          creativeWindowH = h;
         }}
         onresizecommit={(w, h) => {
-          toolWindowW = w;
-          toolWindowH = h;
-          void patchUi({ toolWindowW: w, toolWindowH: h });
+          creativeWindowW = w;
+          creativeWindowH = h;
+          void patchUi({ creativeWindowW: w, creativeWindowH: h });
         }}
-        onclose={() => (toolsOpen = false)}
+        onclose={() => (creativeOptionsOpen = false)}
       >
-        <SelectionTools
-          {selection}
-          {busy}
+        <CreativeOptions
+          settings={creative}
+          onchange={setCreative}
           blocks={blockRegistry}
           placeable={placeableBlocks}
           legacy={legacyForDoc}
-          block={activeBlock}
-          onblockchange={holdBlock}
-          replaceFrom={replaceBlock}
-          onreplacefromchange={(next) => (replaceBlock = next)}
-          onbrowse={browseBlocks}
-          palette={docState?.palette ?? []}
-          onfill={fillSelection}
-          onreplace={replaceInSelection}
-          ondelete={() => void deleteSelection()}
-          onclearselection={clearSelection}
-          onselectall={selectAll}
+          frame={documentFootprint}
+          origin={docState.frame}
         />
       </ToolWindow>
     {/if}
-
-    <!--
-      Only for a single block, because that is the only time the panel is
-      telling the truth. Sweeping out a region left it showing whichever block
-      the gesture happened to start on, labelled with that block's coordinates,
-      beside a selection of nine hundred others.
-    -->
-    {#if docState && inspectorOpen && inspection !== null && singleBlockSelection}
-      <ToolWindow
-        title={t("inspector.title")}
-        x={inspectorWindowX}
-        y={inspectorWindowY}
-        width={inspectorWindowW}
-        height={inspectorWindowH}
-        closeLabel={t("common.close")}
-        onmove={(x, y) => {
-          inspectorWindowX = x;
-          inspectorWindowY = y;
-        }}
-        oncommit={(x, y) => {
-          inspectorWindowX = x;
-          inspectorWindowY = y;
-          void patchUi({ inspectorWindowX: x, inspectorWindowY: y });
-        }}
-        onresize={(w, h) => {
-          inspectorWindowW = w;
-          inspectorWindowH = h;
-        }}
-        onresizecommit={(w, h) => {
-          inspectorWindowW = w;
-          inspectorWindowH = h;
-          void patchUi({ inspectorWindowW: w, inspectorWindowH: h });
-        }}
-        onclose={() => (inspectorOpen = false)}
-      >
-        <InspectorPanel
-          {inspection}
-          at={inspectedAt}
-          {busy}
-          legacy={legacyForDoc}
-          onchangeproperty={changeBlockProperty}
-          onchangenbt={changeNbtValue}
-          onchangebanner={changeBannerPatterns}
-        />
-      </ToolWindow>
-    {/if}
-
-    <!--
-      The version history. A reflection of the open document, exactly like the
-      inspector, and it was a sidebar tab for the same bad reason: it arrived
-      when there was a drawer to put things in.
-    -->
 
     <Viewer
       {mesh}
       {sunAzimuth}
       {sunElevation}
       selection={docState ? selection : null}
+      areas={docState ? otherAreas : []}
+      gizmoRegion={docState ? selectionBounds : null}
       onpick={docState ? onPick : undefined}
       {cameraMode}
       flySpeed={settings.preview.flySpeed}
       framingKey={framingEpoch}
+      glow={docState ? glowShell : null}
       onbuild={docState ? (action, at, look) => void onBuild(action, at, look) : undefined}
       onselectionchange={docState ? onSelectionDragged : undefined}
       onselectiongesture={docState ? onSelectionGesture : undefined}
       onpickmaterial={docState ? onPickMaterial : undefined}
       ghost={moving ?? stamp}
-      ghostAt={selection
-        ? { x: selection.minX, y: selection.minY, z: selection.minZ }
+      ghostAt={selectionBounds
+        ? { x: selectionBounds.minX, y: selectionBounds.minY, z: selectionBounds.minZ }
         : null}
       onghostcommit={(to) => void commitMove(to)}
       {gizmoMode}
@@ -4979,9 +6080,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       projection={settings.preview.projection}
       antialias={settings.preview.antialias}
       maxFps={settings.preview.maxFps}
+      gpuPreference={settings.preview.gpuPreference}
       globalIllumination={settings.preview.globalIllumination}
       showFps={settings.preview.showFps}
+      meshBounds={bounds}
       frameDiagnostics={settings.preview.frameDiagnostics}
+      alwaysDraw={settings.preview.alwaysDraw}
+      lodMode={lod.mode}
+      lodPixels={lod.pixels}
+      lodShapes={lod.shapes}
+      lodCoarse={lod.coarse}
+      lodTint={lod.tint}
       shaderMode={settings.preview.shaderMode}
       showGrid={settings.preview.showGrid}
       showBounds={settings.preview.showBounds}
@@ -5000,6 +6109,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       theme={resolvedTheme}
       {cameraRequest}
       oncameraaimed={(reply) => api().reportCameraAimed(reply)}
+      creative={docState && cameraMode === "fly"
+        ? { settings: creative, corner: cornerAt, frame: docState.frame }
+        : null}
+      onstroke={onStroke}
+      oncorner={onCorner}
     />
 
     <!--
@@ -5018,17 +6132,26 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         hotbar = hotbar.map((id, at) => (at === slot ? activeBlock : id));
         persistHotbar();
       }}
+      onassign={(slot, block) => {
+        // Air cannot be held, and `coerceHotbar` would refuse it anyway.
+        if (isAirBlock(block)) return;
+        hotbar = hotbar.map((id, at) => (at === slot ? canonicalBlock(block, legacyForDoc) : id));
+        persistHotbar();
+      }}
+      raised={inventoryOpen}
     />
-    {#if bounds}
-      <!-- component.py:465-469's caption, same two-decimal formatting. -->
-      <footer>
-        {t("viewport.bounds", {
-          center: bounds.center.map((n) => n.toFixed(2)).join(", "),
-          size: bounds.size.map((n) => n.toFixed(2)).join(", "),
-        })}
-      </footer>
-    {/if}
   </section>
+
+  <StatusBar
+    doc={docState}
+    {selection}
+    areas={selectionAreas.length}
+    cells={areaCells(areaSet)}
+    mcp={showsIndicator(settings.mcp.enabled, mcpStatus)}
+    {mcpStatus}
+    onmcp={openMcpSettings}
+    hint={viewportHint}
+  />
 </main>
 
 <style>
@@ -5046,52 +6169,117 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    */
   main {
     --navbar-h: 44px;
+    --statusbar-h: 26px;
 
     display: grid;
-    /* Viewport, splitter, sidebar -- the sidebar is the *last* column now. */
-    grid-template-columns: 1fr auto var(--sidebar-w);
-    grid-template-rows: var(--navbar-h) minmax(0, 1fr);
+    /*
+     * The tools' panel, its splitter, the viewport, the chat's splitter, the
+     * chat. A panel put away is a zero-width track, and its splitter leaves the
+     * DOM, which an `auto` track turns into zero too.
+     */
+    grid-template-columns: var(--dock-w) auto minmax(0, 1fr) auto var(--sidebar-w);
+    grid-template-rows: var(--navbar-h) minmax(0, 1fr) var(--statusbar-h);
     height: 100%;
     overflow: hidden;
   }
 
   main.collapsed {
-    grid-template-columns: 1fr 0 0;
+    grid-template-columns: var(--dock-w) auto minmax(0, 1fr) 0 0;
   }
 
+  /*
+   * Three thirds on a grid rather than a flex row with an auto margin: the
+   * middle stays in the middle of the window whatever the two sides hold, so
+   * the camera switch does not wander when a file name is long.
+   */
   .navbar {
     grid-column: 1 / -1;
     grid-row: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-4);
+    padding: 0 var(--space-3);
+    min-width: 0;
+    border-bottom: var(--bevel) solid var(--bevel-lo);
+    background: var(--bg-panel);
+  }
+
+  .bar-start,
+  .bar-middle,
+  .bar-end {
     display: flex;
     align-items: center;
-    gap: 16px;
-    padding: 0 14px;
+    gap: var(--space-3);
     min-width: 0;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-panel);
+  }
+
+  .bar-end {
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .edits {
+    display: flex;
+    flex: none;
+    gap: var(--space-1);
+  }
+
+  .history {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  /* Lit while its panel is out, as a toggle should say. */
+  .panel-toggle[aria-pressed="true"] {
+    color: var(--accent-text);
   }
 
   /*
    * Every track is assigned explicitly. Auto-placement is not safe here: the
-   * splitter leaves the DOM when the panel collapses, and without these the
-   * viewport slid into the (0px) splitter track and rendered at zero width --
-   * the precise opposite of what collapsing is for.
+   * splitters leave the DOM when their panels are put away, and without these
+   * the viewport slid into a zero-width splitter track and rendered at zero
+   * width -- the precise opposite of what collapsing is for.
    */
+  main :global(.dock) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .dock-split,
+  .chat-split {
+    display: flex;
+    grid-row: 2;
+  }
+
+  .dock-split {
+    grid-column: 2;
+  }
+
+  .chat-split {
+    grid-column: 4;
+  }
+
   /*
    * A flex column that does not scroll: the tab body below does. The column
    * itself scrolling is what put the chat's input off the bottom of the window
    * as a conversation grew, and it is why the chat gets a tab of its own.
    */
   .controls {
-    grid-column: 3;
+    grid-column: 5;
     grid-row: 2;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     min-width: 0;
     min-height: 0;
-    padding: 12px 18px 16px;
-    border-left: 1px solid var(--border);
+    /* Edge to edge: the chat draws its own strip, log and footer, as the
+       tools' panel does. */
+    background: var(--bg-panel);
+    border-left: var(--bevel) solid var(--bevel-hi);
   }
 
   /* The chat scrolls its own log and pins its own composer, so this must not
@@ -5103,28 +6291,17 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     overflow: hidden;
   }
 
-  main :global(.splitter) {
-    grid-column: 2;
-    grid-row: 2;
-  }
-
   main.collapsed .controls {
     display: none;
   }
 
-  /*
-   * The collapse arrow alone, and pushed to the right-hand edge: the title it
-   * used to sit beside now lives in the navbar, and the arrow has to point at
-   * the edge the panel disappears towards or it reads as the wrong control.
-   */
-  .sidebar-head {
-    display: flex;
-    justify-content: flex-end;
-    margin-bottom: 12px;
+  main :global(.status-bar) {
+    grid-column: 1 / -1;
+    grid-row: 3;
   }
 
   .preview {
-    grid-column: 1;
+    grid-column: 3;
     grid-row: 2;
     position: relative;
     display: flex;
@@ -5133,134 +6310,47 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     min-height: 0;
   }
 
-  /*
-   * Where the tool window lives, so the two read as the same object: the
-   * button is what the panel collapses into.
-   *
-   * Below the viewport's HUD line, not on it. Both were at `top: 16px;
-   * left: 16px` in the same containing block, and this one carries a
-   * `z-index` while the HUD does not -- so a 26px glyph painted straight over
-   * the text telling you how to fly. It is named rather than glyphed for the
-   * same reason: there is no icon for "the selection tools" anyone reads
-   * correctly, and this is the only thing that brings them back.
-   */
-  .reopen-tools {
+  /* The overlay must not eat the drop event it is drawn for. */
+  .drop {
     position: absolute;
-    top: 64px;
-    left: 16px;
-    z-index: 3;
-    padding: 5px 12px;
-    font-size: 12px;
-  }
-
-  /* Against the edge the panel will slide back in from. */
-  .show-panel {
-    position: absolute;
-    top: 12px;
-    right: 12px;
-    z-index: 3;
-  }
-
-  .preview.drop-active::after {
-    content: "";
-    position: absolute;
-    inset: 8px;
-    z-index: 4;
-    border: 2px dashed var(--accent);
-    border-radius: 10px;
+    inset: var(--space-3);
+    z-index: var(--z-screen);
+    display: grid;
+    place-items: center;
+    border: var(--bevel) dashed var(--accent);
     background: var(--accent-tint);
-    /* The overlay must not eat the drop event it is drawn for. */
     pointer-events: none;
   }
 
   .drop-hint {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 5;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 4px;
-    padding: 14px 22px;
-    border-radius: 10px;
-    background: var(--bg-panel);
-    box-shadow: 0 8px 28px var(--shadow);
-    pointer-events: none;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-6);
+    box-shadow: var(--shadow-float);
+  }
+
+  .drop-hint strong {
+    font-size: var(--text-lg);
   }
 
   .drop-hint span {
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
-  .recovery {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 6;
-    width: min(440px, calc(100% - 48px));
-    padding: 16px 18px;
-    border: 1px solid var(--accent);
-    border-radius: 10px;
-    background: var(--bg-panel);
-    box-shadow: 0 12px 40px var(--shadow);
-  }
-
-  .recovery p {
-    margin: 8px 0 14px;
-    font-size: 13px;
-    color: var(--text-dim);
-  }
-
-  .recovery .buttons {
-    display: flex;
-    gap: 8px;
-  }
-
-  /* Floated to the trailing edge, away from the title-and-mode group. */
-  .gear {
-    margin-left: auto;
-    font-size: 18px;
-  }
-
-  /* Sized like the camera-mode buttons beside it rather than like a `.icon`,
-     which is a 28px square and would crop the word. */
-  .nbt-open {
-    padding: 4px 10px;
-    font-size: 12px;
-  }
-
-  .camera-modes {
-    display: flex;
-    gap: 2px;
-    padding: 2px;
-    border-radius: 8px;
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-  }
-
+  /* app.css's `.segmented`, with the room a bar's two words can have. */
   .camera-modes button {
-    padding: 4px 10px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    font-size: 12px;
-  }
-
-  .camera-modes button.active {
-    background: var(--accent);
-    color: var(--accent-contrast);
+    padding: 0 var(--space-4);
   }
 
   .projection {
     display: flex;
     flex: none;
     align-items: center;
-    gap: 5px;
-    font-size: 12px;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
     white-space: nowrap;
   }
 
@@ -5274,43 +6364,52 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     flex: 1;
   }
 
-  footer {
-    padding: 8px 16px;
-    border-top: 1px solid var(--border);
-    font-size: 12px;
+  /*
+   * A notification is a slab with an edge in the colour of what it says, as a
+   * `.callout` is: emerald for done, gold to warn, redstone for a failure. On
+   * the toast tier, over a dialog and over the start screen: an open that
+   * failed was pressed on the start screen, and its answer used to land
+   * behind it.
+   *
+   * Clear of the compass in the corner, each side: its margin, its square
+   * and a gap -- 16 + 104 + 8, `COMPASS_MARGIN` and `COMPASS_PX` in the viewer.
+   */
+  .status {
+    position: absolute;
+    top: var(--space-4);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: var(--z-toast);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    width: max-content;
+    max-width: min(680px, max(240px, calc(100% - 2 * 128px)));
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+    border-left: var(--space-2) solid var(--text-dim);
+    box-shadow: var(--shadow-float);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+  }
+
+  .status p {
+    align-self: center;
+    margin: 0;
+  }
+
+  .status small {
     color: var(--text-dim);
   }
 
-  .status {
-    position: absolute;
-    top: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 4;
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    max-width: min(680px, calc(100% - 96px));
-    padding: 10px 10px 10px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--bg-panel);
-    box-shadow: 0 6px 20px var(--shadow);
-    font-size: 13px;
-  }
-
   .status.ok {
-    color: var(--ok);
-    border-color: var(--ok);
+    border-left-color: var(--ok);
   }
 
   .status.warn {
-    color: var(--warn);
-    border-color: var(--warn);
+    border-left-color: var(--warn);
   }
 
   .status.error {
-    color: var(--danger);
-    border-color: var(--danger);
+    border-left-color: var(--danger);
   }
 </style>

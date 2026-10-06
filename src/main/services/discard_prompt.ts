@@ -36,6 +36,8 @@ const CONFIRM_LABEL: Record<DiscardIntent, string> = {
   open: "Discard and open",
   close: "Discard and close",
   update: "Discard and update",
+  restart: "Discard and restart",
+  restore: "Discard and restore",
 };
 
 const INTENT_DETAIL: Record<DiscardIntent, string> = {
@@ -43,6 +45,8 @@ const INTENT_DETAIL: Record<DiscardIntent, string> = {
   open: "Opening another schematic will replace it.",
   close: "Closing it will throw them away.",
   update: "Installing the update restarts the app and throws them away.",
+  restart: "Restarting the app throws them away.",
+  restore: "Restoring the recovered work will replace it.",
 };
 
 export function discardPrompt(intent: DiscardIntent, fileName: string | null): DiscardPrompt {

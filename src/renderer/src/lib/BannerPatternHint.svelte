@@ -44,12 +44,12 @@
 <style>
   .banner-hint {
     margin: 0;
-    font-size: 11px;
-    line-height: 1.35;
+    font-size: var(--text-sm);
+    line-height: 1.4;
     color: var(--text-dim);
   }
 
   .banner-hint a {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 </style>

@@ -32,7 +32,7 @@
  * and not about the click. It belongs to whoever holds the voxels.
  */
 
-import { COPPER_CHESTS } from "./block_connections.js";
+import { COPPER_CHESTS, isRail } from "./block_connections.js";
 import { defaultStateFor, hasProperty, legalValuesFor } from "./block_states.js";
 
 /** A face of a cell, named as Minecraft names its directions. */
@@ -556,6 +556,20 @@ export function orientPlacement(id: string, look: PlacementLook): Record<string,
   if (name === "tripwire") {
     const eastWest = FACE_AXIS[horizontalFacing(look.direction)] === "x" ? "true" : "false";
     return { north: "false", east: eastWest, south: "false", west: eastWest };
+  }
+
+  /*
+   * A rail is laid along the look. `BaseRailBlock.getStateForPlacement` gives
+   * `east_west` to a player facing east or west and `north_south` otherwise,
+   * which the wiki puts as «in Java Edition the new rail orients itself in the
+   * direction the player is facing». Every rail used to land `north_south`, so
+   * the first rail of a run laid east came out across its own track.
+   *
+   * The neighbours have the last word (`railShape`); with none, a rail keeps
+   * the shape it has, which is vanilla's fallback and why this survives.
+   */
+  if (isRail(name) && hasProperty(name, "shape")) {
+    return { shape: FACE_AXIS[horizontalFacing(look.direction)] === "x" ? "east_west" : "north_south" };
   }
 
   if (name.endsWith("_stairs")) {

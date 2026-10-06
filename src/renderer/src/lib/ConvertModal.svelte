@@ -17,6 +17,7 @@
   import { MC_VERSION_NAMES, mcVersion, refusalFor } from "../../../shared/mc_versions.js";
   import type { SchematicFormat } from "../../../shared/schematic.js";
   import { t } from "./i18n.svelte.js";
+  import Modal from "./Modal.svelte";
 
   interface Props {
     open: boolean;
@@ -51,7 +52,6 @@
     onclose,
   }: Props = $props();
 
-  let dialog = $state<HTMLDivElement | null>(null);
   let format = $state<FileKind>("sponge3");
   /** Empty means "whatever the source says", which is what a conversion wants. */
   let version = $state<string>("");
@@ -82,218 +82,111 @@
     });
   }
 
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      onclose();
-    }
-  }
-
-  $effect(() => {
-    if (open) dialog?.focus();
-  });
-
 </script>
 
-{#if open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="scrim" onclick={onclose} onkeydown={onKeydown}>
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      bind:this={dialog}
-      class="modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("convert.title")}
-      tabindex="-1"
-      onclick={(event) => event.stopPropagation()}
-      onkeydown={onKeydown}
-    >
-      <header>
-        <h2>{t("convert.title")}</h2>
-        <button class="icon" onclick={onclose} aria-label={t("common.close")}>&times;</button>
-      </header>
+<Modal {open} title={t("convert.title")} {onclose} width={520}>
+  <p class="hint lead">{t("convert.hint")}</p>
 
-      <p class="hint">{t("convert.hint")}</p>
-
-      <fieldset>
-        <legend>{t("convert.from")}</legend>
-        <div class="row">
-          <input type="text" readonly value={source} placeholder={t("convert.nothing")} />
-          <button onclick={onpicksource} disabled={busy}>{t("convert.browse")}</button>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>{t("convert.to")}</legend>
-        <label class="field">
-          <span>{t("convert.format")}</span>
-          <select bind:value={format} disabled={busy}>
-            {#each FILE_KINDS as option (option)}
-              <option value={option}>{FILE_KIND_LABEL[option]}</option>
-            {/each}
-          </select>
-        </label>
-
-        <!--
-          Blank first, and it is the default: a conversion keeps whatever the
-          source said unless somebody means to change it. Stamping the newest
-          version on a file cut from 1.16 would be a claim nobody made.
-        -->
-        <label class="field">
-          <span>{t("convert.version")}</span>
-          <select bind:value={version} disabled={busy || format === "mcfunction"}>
-            <option value="">{t("convert.keepVersion")}</option>
-            {#each MC_VERSION_NAMES as name (name)}
-              <option value={name}>{mcVersion(name)?.label ?? name}</option>
-            {/each}
-          </select>
-        </label>
-
-        <div class="row">
-          <input type="text" readonly value={target} placeholder={t("convert.nothing")} />
-          <button onclick={() => onpicktarget(format)} disabled={busy}>
-            {t("convert.browse")}
-          </button>
-        </div>
-
-        {#if refusal !== null}
-          <p class="warn">{refusal}</p>
-        {/if}
-      </fieldset>
-
-      {#if error !== ""}
-        <p class="error">{error}</p>
-      {/if}
-      {#if report !== ""}
-        <p class="report">{report}</p>
-      {/if}
-
-      <footer>
-        <button onclick={onclose}>{t("common.close")}</button>
-        <button class="primary" disabled={!ready} onclick={apply}>{t("convert.apply")}</button>
-      </footer>
+  <fieldset>
+    <legend>{t("convert.from")}</legend>
+    <div class="pick">
+      <input type="text" readonly value={source} placeholder={t("convert.nothing")} aria-label={t("convert.from")} />
+      <button onclick={onpicksource} disabled={busy}>{t("convert.browse")}</button>
     </div>
-  </div>
-{/if}
+  </fieldset>
+
+  <fieldset>
+    <legend>{t("convert.to")}</legend>
+    <div class="choices">
+      <label>
+        <span>{t("convert.format")}</span>
+        <select bind:value={format} disabled={busy}>
+          {#each FILE_KINDS as option (option)}
+            <option value={option}>{FILE_KIND_LABEL[option]}</option>
+          {/each}
+        </select>
+      </label>
+
+      <!--
+        Blank first, and it is the default: a conversion keeps whatever the
+        source said unless somebody means to change it. Stamping the newest
+        version on a file cut from 1.16 would be a claim nobody made.
+      -->
+      <label>
+        <span>{t("convert.version")}</span>
+        <select bind:value={version} disabled={busy || format === "mcfunction"}>
+          <option value="">{t("convert.keepVersion")}</option>
+          {#each MC_VERSION_NAMES as name (name)}
+            <option value={name}>{mcVersion(name)?.label ?? name}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+
+    <div class="pick">
+      <input type="text" readonly value={target} placeholder={t("convert.nothing")} aria-label={t("convert.to")} />
+      <button onclick={() => onpicktarget(format)} disabled={busy}>
+        {t("convert.browse")}
+      </button>
+    </div>
+
+    {#if refusal !== null}
+      <p class="callout warn refusal">{refusal}</p>
+    {/if}
+  </fieldset>
+
+  {#if error !== ""}
+    <p class="callout bad" role="alert">{error}</p>
+  {/if}
+  {#if report !== ""}
+    <p class="callout" role="status">{report}</p>
+  {/if}
+
+  {#snippet footer()}
+    <button onclick={onclose}>{t("common.close")}</button>
+    <button class="primary" disabled={!ready} onclick={apply}>{t("convert.apply")}</button>
+  {/snippet}
+</Modal>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    z-index: 60;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--scrim);
-  }
-
-  .modal {
-    width: min(520px, calc(100vw - 32px));
-    max-height: calc(100vh - 64px);
-    overflow: auto;
-    padding: 16px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--bg-panel);
-    box-shadow: 0 18px 48px var(--shadow);
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  h2 {
-    flex: 1 1 auto;
-    margin: 0;
-    font-size: 15px;
-  }
-
-  .icon {
-    padding: 2px 8px;
-    border: none;
-    background: transparent;
-    font-size: 18px;
-    line-height: 1;
-  }
-
-  .hint {
-    margin: 0 0 12px;
-    font-size: 12px;
+  .lead {
+    margin: 0 0 var(--space-4);
     line-height: 1.5;
-    color: var(--text-dim);
   }
 
   fieldset {
-    margin: 0 0 12px;
-    padding: 10px 12px 12px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    margin-bottom: var(--space-4);
   }
 
-  legend {
-    padding: 0 4px;
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-
-  .row {
+  .pick {
     display: flex;
-    gap: 8px;
-    align-items: center;
+    gap: var(--space-3);
   }
 
-  .row input {
+  .pick input {
     flex: 1 1 auto;
     min-width: 0;
-    padding: 4px 6px;
-    font-size: 12px;
   }
 
-  .field {
+  .choices {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+
+  .choices label {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    margin-bottom: 8px;
-    font-size: 12px;
+    gap: var(--space-1);
+    margin: 0;
   }
 
-  .field select {
-    padding: 4px 6px;
+  .refusal {
+    margin-top: var(--space-4);
   }
 
-  .warn {
-    margin: 10px 0 0;
-    font-size: 12px;
-    color: var(--warn);
-  }
-
-  .error {
-    margin: 0 0 12px;
-    font-size: 12px;
-    color: var(--danger);
-  }
-
-  .report {
-    margin: 0 0 12px;
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-
-  footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-
-  .primary {
-    background: var(--accent);
-    color: var(--accent-contrast);
-    border-color: var(--accent);
+  .callout + .callout {
+    margin-top: var(--space-3);
   }
 </style>

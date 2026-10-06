@@ -65,6 +65,8 @@ const READ_ONLY = new Set([
   "get_schematic_info",
   "get_palette",
   "get_region",
+  // Where blocks are; the same question as get_palette with positions.
+  "find_blocks",
   // Answers what this schematic may hold. It needs the document -- the
   // pre-Flattening set is a few hundred names rather than nine hundred -- and
   // changes nothing about it.

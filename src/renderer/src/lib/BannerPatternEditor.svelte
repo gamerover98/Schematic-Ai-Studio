@@ -40,6 +40,7 @@
   import BannerPatternHint from "./BannerPatternHint.svelte";
   import { placePopover, type Point } from "./floating.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Layer {
     pattern: string;
@@ -236,21 +237,21 @@
             disabled={busy || index === 0}
             title={t("banner.editor.moveUp", { n: index + 1 })}
             aria-label={t("banner.editor.moveUp", { n: index + 1 })}
-            onclick={() => move(index, -1)}>&#x2191;</button
+            onclick={() => move(index, -1)}><Icon name="arrowUp" size={13} /></button
           >
           <button
             class="icon"
             disabled={busy || index === rows.length - 1}
             title={t("banner.editor.moveDown", { n: index + 1 })}
             aria-label={t("banner.editor.moveDown", { n: index + 1 })}
-            onclick={() => move(index, 1)}>&#x2193;</button
+            onclick={() => move(index, 1)}><Icon name="arrowDown" size={13} /></button
           >
           <button
             class="icon remove"
             disabled={busy}
             title={t("banner.editor.remove", { n: index + 1 })}
             aria-label={t("banner.editor.remove", { n: index + 1 })}
-            onclick={() => remove(index)}>&#x00d7;</button
+            onclick={() => remove(index)}><Icon name="close" size={13} /></button
           >
         </li>
       {/each}
@@ -326,7 +327,7 @@
   .banner {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: var(--space-2);
   }
 
   .layers {
@@ -337,15 +338,15 @@
 
   /*
    * Two lines per layer: the design across the whole width, and its colour
-   * under it with the controls. One line was five things in a panel 300px
-   * wide, and `triangle_bottom` came out as `triangle`.
+   * under it with the controls. One line was five things in a narrow panel,
+   * and `triangle_bottom` came out as `triangle`.
    */
   .layers li {
     display: grid;
-    grid-template-columns: 20px minmax(0, 1fr) 18px 16px 16px 16px;
+    grid-template-columns: 20px minmax(0, 1fr) 20px 24px 24px 24px;
     align-items: center;
-    gap: 3px 4px;
-    padding: 3px 0;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-2) 0;
     border-bottom: 1px solid var(--border);
   }
 
@@ -362,7 +363,7 @@
   }
 
   .number {
-    font-size: 11px;
+    font-size: var(--text-sm);
     color: var(--text-dim);
     text-align: right;
     font-variant-numeric: tabular-nums;
@@ -370,17 +371,15 @@
 
   .layers input {
     min-width: 0;
-    padding: 3px 6px;
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
 
   .swatch {
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
+    min-height: 0;
     padding: 0;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    cursor: pointer;
+    border: 1px solid var(--field-edge);
   }
 
   /* A colour that is not a dye: say so rather than drawing a guess. */
@@ -388,55 +387,39 @@
     background: repeating-linear-gradient(45deg, var(--bg-input) 0 3px, var(--border) 3px 6px);
   }
 
+  /* app.css's flat `button.icon`, at the 24px a pointer needs and no more. */
   .icon {
-    width: 16px;
-    padding: 0;
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    line-height: 1;
-  }
-
-  .icon:hover:not(:disabled) {
-    color: var(--text);
-  }
-
-  .icon:disabled {
-    cursor: default;
-    opacity: 0.35;
-  }
-
-  .remove {
-    font-size: 15px;
+    width: 24px;
+    height: 24px;
+    font-size: var(--text-md);
   }
 
   .add {
     align-self: flex-start;
-    padding: 3px 8px;
-    font-size: 12px;
+    padding: 0 var(--space-4);
+    font-size: var(--text-sm);
   }
 
+  /* A slab on the popover tier, of the sixteen dyes. */
   .dyes {
     position: fixed;
-    z-index: 30;
+    z-index: var(--z-popover);
     display: grid;
     grid-template-columns: repeat(4, 22px);
-    gap: 4px;
-    padding: 6px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
     background: var(--bg-panel);
-    box-shadow: 0 6px 20px var(--shadow);
+    box-shadow: var(--shadow-float);
   }
 
   .dye {
     width: 22px;
     height: 22px;
+    min-height: 0;
     padding: 0;
     border: 1px solid var(--border);
-    border-radius: 4px;
-    cursor: pointer;
   }
 
   .dye.chosen {
@@ -447,13 +430,13 @@
   .paste {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    margin-top: 4px;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
 
   .paste-row {
     display: flex;
-    gap: 4px;
+    gap: var(--space-2);
   }
 
   .paste-row input {
@@ -463,7 +446,7 @@
 
   .error {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-sm);
     color: var(--danger);
     overflow-wrap: anywhere;
   }

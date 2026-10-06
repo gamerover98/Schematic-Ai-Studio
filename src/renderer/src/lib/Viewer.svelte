@@ -27,11 +27,33 @@
     MeshPayload,
     PackTexture,
     SkyTextures,
+    AtlasPatch,
   } from "../../../shared/ipc.js";
-  import type { ResolvedTheme } from "../../../shared/settings.js";
-  import { t } from "./i18n.svelte.js";
-import { antialiasSamples, fpsCap, frameDue, shaderPreset } from "./shader_modes.js";
+  import type { GpuPreference, LodMode, ResolvedTheme } from "../../../shared/settings.js";
+  import { formatNumber, t } from "./i18n.svelte.js";
+  import {
+    antialiasSamples,
+    fpsCap,
+    frameDue,
+    shaderPreset,
+    webglPowerPreference,
+  } from "./shader_modes.js";
   import { animationsUsed } from "./atlas_animation.js";
+  import { counterIdle, shouldDraw, ViewWatch } from "./render_demand.js";
+  import {
+    BAYER_4X4,
+    LOD_TINT,
+    LOD_TINT_AMOUNT,
+    LodSelector,
+    meshKey,
+    regionOfChunk,
+    type LodBox,
+    type LodChunk,
+    type LodDraw,
+    type LodRegion,
+    type LodStats,
+    type LodView,
+  } from "./lod.js";
   import {
     FrameProfiler,
     culpritOf,
@@ -65,6 +87,7 @@ import {
   dragFace,
   moveDestination,
   plateScale,
+  translatedRegion,
   type Axis,
   type Side,
 } from "./selection_drag.js";
@@ -88,6 +111,28 @@ import {
     type Vec3,
   } from "./gizmo.js";
   import { isSpuriousLook } from "./look_filter.js";
+  import {
+    brushSpec,
+    columnReach,
+    cornerSpec,
+    erodeGhost,
+    ghostFaces,
+    reachOf,
+    reached,
+    shapeGhost,
+    shouldTouch,
+    smoothSpec,
+    sphereReach,
+    strokeRadius,
+    takesCorners,
+    takesStroke,
+    terrainGhost,
+    type Cell as CreativeCell,
+    type CreativeAim,
+    type Ghost,
+    type StrokeEvent,
+  } from "./creative_tools.js";
+  import type { ShapeSpec } from "../../../shared/shapes.js";
   import { api } from "./bridge.svelte.js";
   import { COPLANAR_OFFSET, GRID_DIVISIONS, GRID_SIZE } from "./depth.js";
   import {
@@ -111,11 +156,12 @@ import {
   import {
     axisAt,
     COMPASS_AXES,
-    FLIGHT_MS,
     flightAt,
+    flightDuration,
     HANDLE_RADIUS,
     HANDLE_REACH,
     orbitFor,
+    prefersReducedMotion,
     type CameraFlight,
   } from "./compass.js";
 import { isTyping } from "./typing.js";
@@ -140,6 +186,11 @@ import { isTyping } from "./typing.js";
     z: number;
     /** True when the click carried Ctrl — the gesture that grows a selection. */
     extend: boolean;
+    /**
+     * A click with Alt, which is about *which areas* are selected: with Shift
+     * it adds one (or makes the one clicked active), without it takes one away.
+     */
+    area?: "add" | "remove";
     /**
      * The empty cell on the outside of the face that was hit — where a new
      * block goes. `null` when that cell falls outside the schematic, which is
@@ -249,6 +300,11 @@ import { isTyping } from "./typing.js";
     /** The most frames drawn per second; `0` follows the display. */
     maxFps?: number;
     /**
+     * Which GPU to ask the context for. Read once, when the context is made:
+     * like the Chromium switch main applies, it cannot change while running.
+     */
+    gpuPreference?: GpuPreference;
+    /**
      * Whether the sky lights the build, as an environment map.
      *
      * Needs `sky`: the environment *is* the sky dome, so with it off there is
@@ -257,8 +313,28 @@ import { isTyping } from "./typing.js";
     globalIllumination?: boolean;
     /** Frames per second, frame time, triangles and draw calls, in a corner. */
     showFps?: boolean;
+    /**
+     * The drawn geometry's centre and size, as main measured it. A diagnostic,
+     * so it is a line of the counter in the corner rather than a caption of
+     * its own: as a strip under the canvas it sat beneath the hotbar, half
+     * covered, on every screen.
+     */
+    meshBounds?: { center: number[]; size: number[] } | null;
     /** Record where each frame's time goes; see `frame_profiler.ts`. */
     frameDiagnostics?: boolean;
+    /** Draw on every refresh rather than on demand; see `render_demand.ts`. */
+    alwaysDraw?: boolean;
+    /**
+     * The levels of detail: whether this chooses between them at all, the
+     * screen-space error a level may cost in pixels, which kinds may be
+     * shown, and the diagnostic tint. The app reads them through
+     * `lodSettings`; `lod.ts` is the rule they feed.
+     */
+    lodMode?: LodMode;
+    lodPixels?: number;
+    lodShapes?: boolean;
+    lodCoarse?: boolean;
+    lodTint?: boolean;
     /** Which look to draw with. `shader_modes.ts` says what each one means. */
     shaderMode?: string;
     /**
@@ -311,8 +387,23 @@ import { isTyping } from "./typing.js";
     /** A virtual floor at y=0, and its colour (empty follows the theme). */
     ground: boolean;
     groundColor: string;
-    /** Drawn as a wire box; `null` hides it. */
+    /** The active area, drawn as a wire box with face handles; `null` hides it. */
     selection?: Region | null;
+    /**
+     * The other selected areas, drawn as dimmer wire boxes with no handles.
+     *
+     * Resizing stays the active area's alone: six plates on every area would
+     * be a field of handles, and a press would have to guess which box it meant.
+     */
+    areas?: readonly Region[];
+    /**
+     * The box the gizmo stands on and carries: the bounds of every area.
+     *
+     * One gizmo for all of them, rigid, because the areas move together and
+     * keep their places relative to each other -- the same reason a copy keeps
+     * their arrangement. `null` falls back to the active area.
+     */
+    gizmoRegion?: Region | null;
     /**
      * A click in orbit mode. `null` means the ray hit nothing — clicking empty
      * space, which clears the selection rather than doing nothing.
@@ -345,8 +436,15 @@ import { isTyping } from "./typing.js";
       at: { x: number; y: number; z: number },
       look: PlacementLook,
     ) => void;
-    /** A face was dragged; the region is already snapped and clamped. */
-    onselectionchange?: (region: Region) => void;
+    /**
+     * The selection was dragged; the region is already snapped and clamped.
+     *
+     * `mode` says what the drag means for the other areas: a face drag resizes
+     * the active one (`resize`), a Shift-sweep replaces the whole selection
+     * (`replace`), and a Shift+Alt sweep adds an area beside the others
+     * (`add`). Only this component knows which of the three the press was.
+     */
+    onselectionchange?: (region: Region, mode: "resize" | "replace" | "add") => void;
     /**
      * A selection *gesture* began or ended.
      *
@@ -371,7 +469,7 @@ import { isTyping } from "./typing.js";
      * neither a selection nor a placement had anything to aim at. This is the
      * selection half; `onbuild` already carries the placement half.
      */
-    ongridselect?: (region: Region) => void;
+    ongridselect?: (region: Region, add: boolean) => void;
     /** A click on the build grid in creative mode, meaning "put a block here". */
     ongridplace?: (at: { x: number; y: number; z: number }, look: PlacementLook) => void;
     /**
@@ -406,6 +504,12 @@ import { isTyping } from "./typing.js";
     ghostAt?: { x: number; y: number; z: number } | null;
     /** The move was confirmed: put the region's corner here. */
     onghostcommit?: (to: { x: number; y: number; z: number }) => void;
+    /**
+     * Blocks to light up through walls, as main found them: four integers a
+     * face, in content coordinates, standing at `frame` as the chunks do.
+     * `null` when nothing glows. See the glow section below.
+     */
+    glow?: { faces: Int32Array; scale: number; frame: readonly [number, number, number] } | null;
     /**
      * What the transform gizmo is doing, and what it therefore draws.
      *
@@ -476,6 +580,20 @@ import { isTyping } from "./typing.js";
     cameraRequest?: CameraAimRequest | null;
     /** The answer, sent once the frame from that camera has been drawn. */
     oncameraaimed?: (reply: CameraAimReply) => void;
+    /**
+     * The creative tool in hand, in flight, or `null` for the block alone.
+     *
+     * With a brush the buttons paint and rub out while held, and with the
+     * terrain they lay it and dig down to it; with the shape and walls tools
+     * the right button is a corner. A ghost of what the button would write
+     * follows the crosshair either way. `place` is the block in your hand and
+     * changes nothing here.
+     */
+    creative?: CreativeAim | null;
+    /** A brush stroke began, touched, or ended. See `StrokeEvent`. */
+    onstroke?: (event: StrokeEvent) => void;
+    /** A corner was clicked with the shape or walls tool. */
+    oncorner?: (at: CreativeCell) => void;
   }
 
   const {
@@ -488,9 +606,17 @@ import { isTyping } from "./typing.js";
     projection = "perspective",
     antialias = 4,
     maxFps = 0,
+    gpuPreference: gpuPref = "auto",
     globalIllumination = false,
     showFps = false,
+    meshBounds = null,
     frameDiagnostics = false,
+    alwaysDraw = false,
+    lodMode = "off",
+    lodPixels = 2,
+    lodShapes = true,
+    lodCoarse = true,
+    lodTint = false,
     shaderMode = "vanilla",
     showBounds = false,
     voidOpacity = 0.4,
@@ -507,6 +633,8 @@ import { isTyping } from "./typing.js";
     ground,
     groundColor,
     selection = null,
+    areas = [],
+    gizmoRegion = null,
     onpick,
     cameraMode = "orbit",
     flySpeed = 12,
@@ -514,7 +642,7 @@ import { isTyping } from "./typing.js";
     framingKey = 0,
     theme = "dark",
     onselectionchange,
-    documentSize = null,
+    documentSize: documentSizeProp = null,
     ongridselect,
     ongridplace,
     onpickmaterial,
@@ -522,6 +650,7 @@ import { isTyping } from "./typing.js";
     ghost = null,
     ghostAt = null,
     onghostcommit,
+    glow = null,
     gizmoMode = "move",
     autoGrow = true,
     pivot = null,
@@ -532,7 +661,30 @@ import { isTyping } from "./typing.js";
     ongizmorelease,
     cameraRequest = null,
     oncameraaimed,
+    creative = null,
+    onstroke,
+    oncorner,
   }: Props = $props();
+
+  /**
+   * The document's size, as the same array for as long as the numbers hold.
+   *
+   * The app hands down a fresh array with every `DocumentState`, which is
+   * every edit, and every effect here that reads it ran again for nothing:
+   * the grid and the cage rebuilt, the sky re-applied (and with global
+   * illumination on, the environment map rebuilt), the shadow map thrown away
+   * and reallocated. Only a different size is a different box.
+   */
+  let sizeSeen: [number, number, number] | null = null;
+  const documentSize = $derived.by((): [number, number, number] | null => {
+    const next = documentSizeProp;
+    const last = sizeSeen;
+    if (next !== null && last !== null && next[0] === last[0] && next[1] === last[1] && next[2] === last[2]) {
+      return last;
+    }
+    sizeSeen = next;
+    return next;
+  });
 
   /**
    * The `framingKey` the camera was last framed for.
@@ -552,6 +704,7 @@ import { isTyping } from "./typing.js";
    */
   let texture: THREE.DataTexture | undefined;
   let textureVersion = -1;
+  let textureLayout = -1;
   let material: THREE.MeshStandardMaterial | undefined;
   let blended: THREE.MeshStandardMaterial | undefined;
   let voidMaterial: THREE.MeshStandardMaterial | undefined;
@@ -707,7 +860,17 @@ import { isTyping } from "./typing.js";
     scene.add(group);
   }
 
-  /** How big the gizmo is, and how far it sits from the corner, in CSS px. */
+  /**
+   * How big the gizmo is, and how far it sits from the top-right corner, in
+   * CSS px.
+   *
+   * Top-right, where a 3D editor keeps its navigation gizmo. It was
+   * bottom-left until the tools docked to the window's left edge: the
+   * viewport lost a panel's width, the hotbar is centred in what is left, and
+   * at an ordinary window size the two met -- the hotbar drawn over the
+   * handles. The corner is measured from the canvas's own size every frame,
+   * so it follows the splitters.
+   */
   const COMPASS_PX = 104;
   const COMPASS_MARGIN = 16;
 
@@ -961,6 +1124,21 @@ import { isTyping } from "./typing.js";
    * and sky light separately and this decides how much of the second counts.
    */
   const daylight = { value: 1 };
+  /**
+   * The sky's colour at the horizon, and how far away the floor gives way to
+   * it -- the far plane, or 0 for not at all.
+   *
+   * The floor is twenty thousand blocks across and the far plane is a few
+   * hundred, so the floor always ended in a straight edge with sky below the
+   * horizon behind it: at eight in the morning a band of pale blue under a
+   * night-coloured floor, which read as a banner or a drawing fault. The floor
+   * now fades into exactly the colour the dome draws below the horizon by the
+   * time it reaches the far plane, so where it is cut off nothing changes.
+   * Shared uniforms, `daylight`'s arrangement: the dome writes the colour, the
+   * floor reads it.
+   */
+  const skyHorizon = { value: new THREE.Color(0x78a7ff) };
+  const groundFade = { value: 0 };
   let loaded: THREE.Object3D | null = null;
   /**
    * The void layer, beside `loaded` and never inside it.
@@ -971,6 +1149,16 @@ import { isTyping } from "./typing.js";
    * `Mesh.raycast` knows nothing about flags either.
    */
   let voidLoaded: THREE.Object3D | null = null;
+  /**
+   * The levels of detail, beside `loaded` and never inside it.
+   *
+   * Every raycast in this file names `loaded`, and that is the whole of what
+   * keeps picking exact at a distance: while a level stands in for a chunk,
+   * the chunk stays in `loaded`, hidden, and three's raycaster does not look
+   * at `visible`. So a click lands on the block that is really there,
+   * whatever is drawn in its place. See `lod.ts`.
+   */
+  let lodLoaded: THREE.Object3D | null = null;
   /** When the pointer lock was taken, for the look filter below. */
   let lockedAt = 0;
   let selectionBox: THREE.LineSegments | undefined;
@@ -1025,6 +1213,25 @@ import { isTyping } from "./typing.js";
   let blockAnchor: { x: number; y: number; z: number } | null = null;
   let blockReach: { x: number; y: number; z: number } | null = null;
   let lastGridAt = 0;
+  /**
+   * Whether the sweep in progress adds an area rather than replacing the
+   * selection: Alt was held at the press. Read at the press and kept, because
+   * letting go of Alt half way through a drag is not a change of mind.
+   */
+  let sweepAdds = false;
+  /**
+   * Whether Alt took part in a click since it went down -- and so whether its
+   * release must be kept from the window.
+   *
+   * On Windows a lone Alt released focuses the menu bar, and Electron decides
+   * "lone" from the keyboard alone: a mouse click in between does not count.
+   * So every Alt+click to add or remove an area would leave the menu bar
+   * holding the keyboard, and the next keystroke would open a menu. Electron
+   * acts only on key events the page did not handle, so `preventDefault` on
+   * that one release is the whole fix -- and Alt pressed and released on its
+   * own still reaches the menu as it always did.
+   */
+  let altClicked = false;
 
   /**
    * Keys held down, by `event.code` — physical position, not the character
@@ -1092,15 +1299,22 @@ import { isTyping } from "./typing.js";
    *
    * Bounded by the chunk boxes three.js already keeps for frustum culling,
    * so a document's worth of chains costs a handful of slab tests rather
-   * than a scan. The meshes carry no transform -- the pipeline emits none --
-   * so object space is world space here, as everywhere else in this file.
+   * than a scan.
+   *
+   * The boxes are in the chunks' own space, which is content coordinates:
+   * the group sits at `MeshPayload.frame`, so the ray is taken into that
+   * space and the box found is brought back out. A translation and nothing
+   * else, so distances are the same in both.
    */
   function nearestThinBox(
     ray: THREE.Ray,
     limit: number,
   ): { box: ThinBox; face: Face; distance: number } | null {
     if (!loaded) return null;
-    const origin: [number, number, number] = [ray.origin.x, ray.origin.y, ray.origin.z];
+    const offset = loaded.position;
+    localRay.origin.copy(ray.origin).sub(offset);
+    localRay.direction.copy(ray.direction);
+    const origin: [number, number, number] = [localRay.origin.x, localRay.origin.y, localRay.origin.z];
     const direction: [number, number, number] = [
       ray.direction.x,
       ray.direction.y,
@@ -1111,7 +1325,7 @@ import { isTyping } from "./typing.js";
       const boxes = (child as THREE.Mesh).userData?.thin as ThinBox[] | undefined;
       if (boxes === undefined || boxes.length === 0) continue;
       const bounds = (child as THREE.Mesh).geometry.boundingBox;
-      if (bounds !== null && !ray.intersectsBox(bounds)) continue;
+      if (bounds !== null && !localRay.intersectsBox(bounds)) continue;
       for (const box of boxes) {
         const meets = rayBox(origin, direction, box.min, box.max);
         if (meets === null) continue;
@@ -1120,7 +1334,38 @@ import { isTyping } from "./typing.js";
         best = { box, face: meets.face, distance: meets.distance };
       }
     }
-    return best;
+    if (best === null || (offset.x === 0 && offset.y === 0 && offset.z === 0)) return best;
+    const shift = (at: readonly [number, number, number]): [number, number, number] => [
+      at[0] + offset.x,
+      at[1] + offset.y,
+      at[2] + offset.z,
+    ];
+    return {
+      ...best,
+      box: { ...best.box, cell: shift(best.box.cell), min: shift(best.box.min), max: shift(best.box.max) },
+    };
+  }
+
+  /** Reused by `nearestThinBox`: one ray per pick, not one per call. */
+  const localRay = new THREE.Ray();
+
+  /**
+   * Puts the chunks where the document has them.
+   *
+   * Main meshes in content coordinates, which a resize below the origin does
+   * not move -- so the chunks it already built stay right, and only this
+   * offset changes. See `MeshPayload.frame`.
+   */
+  function placeChunks(frame: readonly [number, number, number]): void {
+    loaded?.position.set(frame[0], frame[1], frame[2]);
+    voidLoaded?.position.set(frame[0], frame[1], frame[2]);
+    lodLoaded?.position.set(frame[0], frame[1], frame[2]);
+    // The glow's shell is in content coordinates too, so it stands with them.
+    glowGroup?.position.set(frame[0], frame[1], frame[2]);
+    glowGroup?.updateMatrixWorld(true);
+    loaded?.updateMatrixWorld(true);
+    voidLoaded?.updateMatrixWorld(true);
+    lodLoaded?.updateMatrixWorld(true);
   }
 
   function pickBlockAt(clientX: number, clientY: number): PickedBlock | null {
@@ -1531,7 +1776,7 @@ import { isTyping } from "./typing.js";
     // Null means there was no usable answer -- an axis pointed at the camera,
     // or a ray that missed the plane. Leave the selection where it is rather
     // than move it somewhere the user did not indicate.
-    if (next !== null) onselectionchange(next);
+    if (next !== null) onselectionchange(next, "resize");
   }
 
   /** The ray under the pointer, in the shape `build_grid.ts` takes. */
@@ -1700,6 +1945,277 @@ import { isTyping } from "./typing.js";
   });
 
   // ---------------------------------------------------------------------------
+  // The creative tools: the brush's stroke, the corners, and the ghost
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The stroke in progress: which button is painting, whether it is the
+   * rubber, where the last touch landed, and what every touch so far reached
+   * (`reachOf`) -- which the next one may not land in. `null` between strokes.
+   */
+  let stroke: {
+    button: number;
+    erase: boolean;
+    last: CreativeCell | null;
+    trail: ((x: number, y: number, z: number) => boolean)[];
+  } | null = null;
+
+  /** When the tool last looked at the crosshair; the outline's throttle. */
+  let creativeAt = -Infinity;
+
+  /** The ghost: the outside of what the button would write, and its box. */
+  let creativeGhost: THREE.Mesh | null = null;
+  let creativeEdges: THREE.LineSegments | null = null;
+  /** What the ghost's geometry was built for: its size and shape, not where it stands. */
+  let creativeGhostKey = "";
+  /** The colour it was last painted, and for which geometry. */
+  let creativeTint = "";
+
+  /** Ends the stroke, wherever it was: the release, the end of flight, a new tool. */
+  function endStroke(): void {
+    if (stroke === null) return;
+    stroke = null;
+    onstroke?.({ phase: "end" });
+  }
+
+  /**
+   * The cell a corner goes in: across the face aimed at, where a placed block
+   * would go -- so a wall's corner clicked on the ground stands on the ground
+   * -- or the build grid's cell when nothing is.
+   */
+  function cornerAtCrosshair(): CreativeCell | null {
+    const target = pickAtCrosshair();
+    if (target !== null) return target.place;
+    const cell = gridCellAtCrosshair();
+    return cell === null ? null : { x: cell.x, y: cell.y, z: cell.z };
+  }
+
+  /**
+   * What the tool would write right now, and where the stroke would touch.
+   *
+   * A brush is centred on the block aimed at; with nothing aimed at it stands
+   * on the build grid, except the rubber, which has nothing there to rub out.
+   * The corner tools build between the first corner and the cell aimed at,
+   * and before the first corner show the column it would start.
+   */
+  function creativeAim(): {
+    ghost: Ghost;
+    spec: ShapeSpec | null;
+    centre: CreativeCell;
+    reach: (x: number, y: number, z: number) => boolean;
+  } | null {
+    if (creative === null) return null;
+    const settings = creative.settings;
+    if (settings.tool === "brush") {
+      const target = pickAtCrosshair();
+      let spec: ShapeSpec;
+      let centre: CreativeCell;
+      if (target !== null) {
+        centre = { x: target.x, y: target.y, z: target.z };
+        spec = brushSpec(settings.brush, centre, false);
+      } else {
+        if (stroke?.erase) return null;
+        const cell = gridCellAtCrosshair();
+        if (cell === null) return null;
+        centre = { x: cell.x, y: cell.y, z: cell.z };
+        spec = brushSpec(settings.brush, centre, true);
+      }
+      return { ghost: shapeGhost(spec), spec, centre, reach: reachOf(spec) };
+    }
+    /*
+     * The terrain is columns, so the height of the cell aimed at decides
+     * nothing: the block under the crosshair, or the grid's cell with nothing
+     * there -- which is how an empty schematic gets its first hill.
+     */
+    if (settings.tool === "terrain") {
+      const target = pickAtCrosshair();
+      const cell = target ?? gridCellAtCrosshair();
+      if (cell === null) return null;
+      const centre = { x: cell.x, y: cell.y, z: cell.z };
+      return {
+        ghost: terrainGhost(settings.terrain, centre, creative.frame),
+        spec: null,
+        centre,
+        reach: columnReach(centre, settings.terrain.radius, settings.terrain.footprint),
+      };
+    }
+    // The smooth brush reads heights, so on the grid it smooths the floor.
+    if (settings.tool === "smooth") {
+      const cell = pickAtCrosshair() ?? gridCellAtCrosshair();
+      if (cell === null) return null;
+      const centre = { x: cell.x, y: cell.y, z: cell.z };
+      return {
+        ghost: shapeGhost(smoothSpec(settings.smooth, centre)),
+        spec: null,
+        centre,
+        reach: columnReach(centre, settings.smooth.radius, settings.smooth.footprint),
+      };
+    }
+    // Erosion works on blocks, so it needs one aimed at: VoxelSniper's target.
+    if (settings.tool === "erode") {
+      const target = pickAtCrosshair();
+      if (target === null) return null;
+      const centre = { x: target.x, y: target.y, z: target.z };
+      return {
+        ghost: erodeGhost(centre, settings.erode.radius),
+        spec: null,
+        centre,
+        reach: sphereReach(centre, settings.erode.radius),
+      };
+    }
+    if (takesCorners(settings.tool)) {
+      const at = cornerAtCrosshair();
+      if (at === null) return null;
+      const spec = cornerSpec(settings.tool, settings, creative.corner ?? at, at);
+      return { ghost: shapeGhost(spec), spec, centre: at, reach: reachOf(spec) };
+    }
+    return null;
+  }
+
+  /**
+   * Follows the crosshair with the ghost, and touches when the stroke is due.
+   *
+   * On the outline's throttle, for the outline's reason: this is one more
+   * raycast through the crosshair, and twenty a second is as often as the eye
+   * follows a box. A stroke touches at most that often too, which is also as
+   * often as main is asked to write one.
+   */
+  function updateCreative(now: number): void {
+    const active =
+      creative !== null && creative.settings.tool !== "place" && cameraMode === "fly" && flying;
+    if (!active) {
+      hideCreativeGhost();
+      return;
+    }
+    if (now - creativeAt < HIGHLIGHT_INTERVAL_MS) return;
+    creativeAt = now;
+
+    const aim = creativeAim();
+    if (aim === null) {
+      hideCreativeGhost();
+      return;
+    }
+    const settings = creative!.settings;
+    // Both of the smooth brush's buttons smooth; every other stroke's left
+    // button takes away, and its ghost says so.
+    showCreativeGhost(aim.ghost, stroke?.erase === true && settings.tool !== "smooth");
+    if (
+      stroke !== null &&
+      shouldTouch(stroke.last, aim.centre, strokeRadius(settings, settings.tool)) &&
+      !reached(stroke.trail, aim.centre)
+    ) {
+      stroke.last = aim.centre;
+      stroke.trail.push(aim.reach);
+      onstroke?.({ phase: "touch", at: aim.centre, shape: aim.spec });
+    }
+  }
+
+  function hideCreativeGhost(): void {
+    if (creativeGhost) creativeGhost.visible = false;
+    if (creativeEdges) creativeEdges.visible = false;
+  }
+
+  /**
+   * Draws a ghost's cells, translucent and never picked.
+   *
+   * The geometry is the outside of the cells the edit will write -- a
+   * shape's from `shapeCells`, the terrain's surface from `heightField`, the
+   * functions the edit itself asks -- relative to the box's corner, so it is
+   * rebuilt only when the ghost's key changes and otherwise moved. Past
+   * `MAX_GHOST_CELLS` the box alone is drawn. It is held off the faces it shares with blocks already there by
+   * a polygon offset, the floor's arrangement turned the other way, and it
+   * writes no depth, so it never hides what is behind it.
+   *
+   * Nothing raycasts it: it is not under `loaded`, and `tests/ui.ts`
+   * refuses any `intersectObject` that names it.
+   */
+  function showCreativeGhost(ghost: Ghost, erase: boolean): void {
+    if (!scene) return;
+    const box = ghost.box;
+    const w = box.maxX - box.minX + 1;
+    const h = box.maxY - box.minY + 1;
+    const l = box.maxZ - box.minZ + 1;
+    const key = ghost.key;
+    if (key !== creativeGhostKey) {
+      creativeGhostKey = key;
+      for (const old of [creativeGhost, creativeEdges]) {
+        if (!old) continue;
+        scene.remove(old);
+        old.geometry.dispose();
+        (old.material as THREE.Material).dispose();
+      }
+      creativeGhost = null;
+      creativeEdges = null;
+
+      const cells = ghost.cells();
+      if (cells !== null) {
+        const faces = ghostFaces(cells);
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(faces, 3));
+        creativeGhost = new THREE.Mesh(
+          geometry,
+          new THREE.MeshBasicMaterial({
+            transparent: true,
+            opacity: 0.32,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -4,
+          }),
+        );
+        creativeGhost.renderOrder = 996;
+        creativeGhost.frustumCulled = false;
+        scene.add(creativeGhost);
+      }
+      creativeEdges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(w + 0.004, h + 0.004, l + 0.004)),
+        new THREE.LineBasicMaterial({ transparent: true, opacity: 0.55, depthTest: false }),
+      );
+      creativeEdges.renderOrder = 996;
+      scene.add(creativeEdges);
+    }
+    // The colour is read from the theme only when it can have changed: this
+    // runs twenty times a second, and the answer is almost always the same.
+    const tint = [erase, theme, creativeGhostKey].join(":");
+    if (tint !== creativeTint) {
+      creativeTint = tint;
+      const colour = themeColor(erase ? "--danger" : "--selection", erase ? 0xff6b6b : 0x6ea8fe);
+      if (creativeGhost) (creativeGhost.material as THREE.MeshBasicMaterial).color.copy(colour);
+      if (creativeEdges) (creativeEdges.material as THREE.LineBasicMaterial).color.copy(colour);
+    }
+    if (creativeGhost) {
+      creativeGhost.position.set(box.minX, box.minY, box.minZ);
+      creativeGhost.visible = true;
+    }
+    if (creativeEdges) {
+      creativeEdges.position.set(box.minX + w / 2, box.minY + h / 2, box.minZ + l / 2);
+      creativeEdges.visible = true;
+    }
+  }
+
+  function disposeCreativeGhost(): void {
+    for (const old of [creativeGhost, creativeEdges]) {
+      if (!old) continue;
+      scene?.remove(old);
+      old.geometry.dispose();
+      (old.material as THREE.Material).dispose();
+    }
+    creativeGhost = null;
+    creativeEdges = null;
+    creativeGhostKey = "";
+    creativeTint = "";
+  }
+
+  /*
+   * A new tool, or no tool, ends the stroke: a brush stroke that outlived its
+   * brush would go on painting with whatever replaced it.
+   */
+  $effect(() => {
+    const tool = creative?.settings.tool ?? null;
+    if (tool === null || !takesStroke(tool)) untrack(() => endStroke());
+  });
+
+  // ---------------------------------------------------------------------------
   // The transform gizmo
   // ---------------------------------------------------------------------------
 
@@ -1732,6 +2248,8 @@ import { isTyping } from "./typing.js";
     origin: THREE.Vector3;
     grab: number;
     region: Region;
+    /** Every area, frozen with `region`, so the preview draws each one. */
+    areas: Region[];
   } | null = null;
 
   /** What the drag has decided so far: drawn, not yet written. */
@@ -1742,7 +2260,15 @@ import { isTyping } from "./typing.js";
     | { kind: "scale"; spec: ScaleSpec; region: Region }
     | null = null;
 
-  let gizmoPreviewBox: THREE.LineSegments | null = null;
+  let gizmoPreviewBox: THREE.Group | null = null;
+
+  /**
+   * What the gizmo carries: the bounds of every area, or the active one alone.
+   * One rigid gizmo for all of them -- see the `gizmoRegion` prop.
+   */
+  const gizmoBox = $derived(gizmoRegion ?? selection);
+  /** Every area, the active one first; the preview draws a box per area. */
+  const allAreas = $derived(selection === null ? [] : [selection, ...areas]);
 
   function axisColour(axis: Axis): THREE.Color {
     const fallback = axis === "x" ? 0xe05260 : axis === "y" ? 0x6fbf5f : 0x5b8dd9;
@@ -1811,7 +2337,7 @@ import { isTyping } from "./typing.js";
    */
   function buildGizmo(): void {
     disposeGizmo();
-    if (!scene || selection === null) return;
+    if (!scene || gizmoBox === null) return;
     const group = new THREE.Group();
     group.renderOrder = 1000;
     const kind: GizmoHandle["kind"] =
@@ -1846,12 +2372,12 @@ import { isTyping } from "./typing.js";
    */
   function updateGizmo(): void {
     if (gizmoGroup === null) return;
-    if (selection === null || cameraMode !== "orbit" || !camera) {
+    if (gizmoBox === null || cameraMode !== "orbit" || !camera) {
       gizmoGroup.visible = false;
       return;
     }
     gizmoGroup.visible = true;
-    const origin = gizmoOrigin(selection, pivot);
+    const origin = gizmoOrigin(gizmoBox, pivot);
     gizmoOrigin3.set(origin.x, origin.y, origin.z);
     gizmoGroup.position.copy(gizmoOrigin3);
 
@@ -1890,49 +2416,59 @@ import { isTyping } from "./typing.js";
     });
   }
 
-  /** Draws the box a drag would land on, in the warning colour when it cannot. */
-  function showGizmoPreview(region: Region | null): void {
+  /**
+   * Draws the boxes a drag would land on, one per area, in the warning colour
+   * when they cannot.
+   */
+  function showGizmoPreview(regions: readonly Region[] | null): void {
     if (gizmoPreviewBox !== null) {
       scene?.remove(gizmoPreviewBox);
-      gizmoPreviewBox.geometry.dispose();
-      (gizmoPreviewBox.material as THREE.Material).dispose();
+      disposeObject(gizmoPreviewBox);
       gizmoPreviewBox = null;
     }
-    if (region === null || !scene) return;
-    const size = new THREE.Vector3(
-      region.maxX - region.minX + 1,
-      region.maxY - region.minY + 1,
-      region.maxZ - region.minZ + 1,
-    );
+    if (regions === null || regions.length === 0 || !scene) return;
     /*
      * Red when the destination leaves the schematic and automatic resizing is
      * off, because then the release will be refused -- said during the gesture
      * rather than after it, which is the whole difference between a warning
-     * and a report.
+     * and a report. Asked of all the areas together, because main refuses the
+     * whole gesture when any of them leaves.
      */
     const beyond =
       !autoGrow &&
       documentSize !== null &&
-      !regionFits(region, {
-        width: documentSize[0],
-        height: documentSize[1],
-        length: documentSize[2],
-      });
-    const box = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
-      new THREE.LineBasicMaterial({
-        color: beyond ? themeColor("--danger", 0xe05260) : themeColor("--selection", 0x6ea8fe),
-        depthTest: false,
-      }),
-    );
-    box.position.set(
-      region.minX + size.x / 2,
-      region.minY + size.y / 2,
-      region.minZ + size.z / 2,
-    );
-    box.renderOrder = 999;
-    gizmoPreviewBox = box;
-    scene.add(box);
+      regions.some(
+        (region) =>
+          !regionFits(region, {
+            width: documentSize[0],
+            height: documentSize[1],
+            length: documentSize[2],
+          }),
+      );
+    const group = new THREE.Group();
+    for (const region of regions) {
+      const size = new THREE.Vector3(
+        region.maxX - region.minX + 1,
+        region.maxY - region.minY + 1,
+        region.maxZ - region.minZ + 1,
+      );
+      const box = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+        new THREE.LineBasicMaterial({
+          color: beyond ? themeColor("--danger", 0xe05260) : themeColor("--selection", 0x6ea8fe),
+          depthTest: false,
+        }),
+      );
+      box.position.set(
+        region.minX + size.x / 2,
+        region.minY + size.y / 2,
+        region.minZ + size.z / 2,
+      );
+      box.renderOrder = 999;
+      group.add(box);
+    }
+    gizmoPreviewBox = group;
+    scene.add(group);
   }
 
   /** One frame of a gizmo drag: decide, and draw what was decided. */
@@ -1940,7 +2476,7 @@ import { isTyping } from "./typing.js";
     if (gizmoDrag === null) return;
     const ray = rayThrough(clientX, clientY);
     if (ray === null) return;
-    const { handle, region } = gizmoDrag;
+    const { handle, region, areas: dragged } = gizmoDrag;
     const origin = {
       x: gizmoDrag.origin.x,
       y: gizmoDrag.origin.y,
@@ -1955,7 +2491,9 @@ import { isTyping } from "./typing.js";
       const steps = quartersBetween(gizmoDrag.grab, angle);
       const transform: RegionTransform = { kind: "rotate", axis: handle.axis, steps };
       gizmoResult = steps === 0 ? null : { kind: "transform", transform, region };
-      showGizmoPreview(steps === 0 ? region : transformedRegion(region, origin, transform));
+      showGizmoPreview(
+        steps === 0 ? dragged : dragged.map((area) => transformedRegion(area, origin, transform)),
+      );
       return;
     }
 
@@ -1966,7 +2504,7 @@ import { isTyping } from "./typing.js";
       if (Math.abs(start) < 1e-6) return;
       const spec = scaleFromRatio((along - originComponent(origin, handle.axis)) / start);
       gizmoResult = spec === null ? null : { kind: "scale", spec, region };
-      showGizmoPreview(spec === null ? region : scaledRegion(region, origin, spec));
+      showGizmoPreview(spec === null ? dragged : dragged.map((area) => scaledRegion(area, origin, spec)));
       return;
     }
 
@@ -1998,15 +2536,7 @@ import { isTyping } from "./typing.js";
 
     const to = { x: region.minX + step.x, y: region.minY + step.y, z: region.minZ + step.z };
     gizmoResult = delta === 0 ? null : { kind: "move", to, region };
-    const moved: Region = {
-      minX: to.x,
-      minY: to.y,
-      minZ: to.z,
-      maxX: to.x + (region.maxX - region.minX),
-      maxY: to.y + (region.maxY - region.minY),
-      maxZ: to.z + (region.maxZ - region.minZ),
-    };
-    showGizmoPreview(moved);
+    showGizmoPreview(dragged.map((area) => translatedRegion(area, [step.x, step.y, step.z])));
     ghostGroup?.position.set(to.x, to.y, to.z);
   }
 
@@ -2108,6 +2638,44 @@ import { isTyping } from "./typing.js";
     scene.add(selectionBox);
   }
 
+  /**
+   * The other selected areas, as wire boxes in the same colour at half
+   * strength -- selected, plainly, and plainly not the one the face handles
+   * and the inspector belong to.
+   */
+  let otherAreaBoxes: THREE.Group | undefined;
+  function updateOtherAreaBoxes(): void {
+    if (!scene) return;
+    if (otherAreaBoxes) {
+      scene.remove(otherAreaBoxes);
+      disposeObject(otherAreaBoxes);
+      otherAreaBoxes = undefined;
+    }
+    if (selection === null || areas.length === 0) return;
+    const group = new THREE.Group();
+    for (const area of areas) {
+      const size = new THREE.Vector3(
+        area.maxX - area.minX + 1,
+        area.maxY - area.minY + 1,
+        area.maxZ - area.minZ + 1,
+      );
+      const box = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+        new THREE.LineBasicMaterial({
+          color: themeColor("--selection", 0x6ea8fe),
+          transparent: true,
+          opacity: 0.45,
+          depthTest: false,
+        }),
+      );
+      box.position.set(area.minX + size.x / 2, area.minY + size.y / 2, area.minZ + size.z / 2);
+      box.renderOrder = 998;
+      group.add(box);
+    }
+    otherAreaBoxes = group;
+    scene.add(group);
+  }
+
 
   /**
    * WorldEdit's paste anchor, drawn as the cell it occupies.
@@ -2188,10 +2756,11 @@ import { isTyping } from "./typing.js";
   /**
    * The dome is built at radius one and scaled to fit the frustum.
    *
-   * Its distance is arbitrary now that it is drawn in a pass of its own: it
-   * only has to be somewhere between the near and far planes, and the scale
-   * follows `camera.far` so lowering the draw distance can never clip it away.
-   * That is exactly what it did at a fixed 3000 against a default far of 512.
+   * Its distance is arbitrary: the bodies are pushed onto the far plane in
+   * their vertex shaders (`atFarPlane`), so it only has to be somewhere
+   * between the near and far planes, and the scale follows `camera.far` so
+   * lowering the draw distance can never clip it away. That is exactly what
+   * it did at a fixed 3000 against a default far of 512.
    */
   const SKY_RADIUS = 1;
 
@@ -2225,6 +2794,30 @@ import { isTyping } from "./typing.js";
    */
   let skyArt: SkyTextures | null = null;
 
+  /**
+   * Draws a sky body behind everything in the world, in the world's own pass.
+   *
+   * The sky used to be a pass of its own, drawn first, with the depth buffer
+   * cleared before the world. Into a multisampled target that is two
+   * `render()` calls, and three resolves the target at the end of each one --
+   * a full-screen blit of colour and depth that the next pass then draws over.
+   * So the bodies are in the scene now, and kept behind it by depth instead of
+   * by order: `z = w` puts every vertex exactly on the far plane, where the
+   * cleared depth buffer is, so with three's `LessEqual` test a body is drawn
+   * only where nothing in the world has been.
+   *
+   * The sun, the moon and the stars are transparent, so three draws them after
+   * every opaque object; that is what made a single scene impossible before,
+   * and what the depth test now answers. The dome is opaque, drawn first by its
+   * `renderOrder`, writes no depth and tests none, so it needs no such help.
+   */
+  function atFarPlane(material: THREE.Material): void {
+    material.depthTest = true;
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace(/\}\s*$/, "\tgl_Position.z = gl_Position.w;\n}");
+    };
+  }
+
   function buildSky(): void {
     if (!scene) return;
     if (skyDome && skyArt === skyTextures) return;
@@ -2232,15 +2825,19 @@ import { isTyping } from "./typing.js";
     // than reach into the materials: it is two quads, once, at startup.
     if (skyDome) disposeSky();
     skyArt = skyTextures;
+    /*
+     * The group lives in the world's scene and is lent to `skyScene` only for
+     * the moment the environment map is built from it; see `buildEnvironment`.
+     */
     skyScene = new THREE.Scene();
     skyGroup = new THREE.Group();
-    skyScene.add(skyGroup);
+    scene.add(skyGroup);
     const material = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
       depthTest: false,
       uniforms: {
-        uHorizon: { value: new THREE.Color(0x78a7ff) },
+        uHorizon: skyHorizon,
         uZenith: { value: new THREE.Color(0x3c6bdc) },
       },
       vertexShader: `
@@ -2300,6 +2897,7 @@ import { isTyping } from "./typing.js";
       );
       mesh.renderOrder = -999;
       mesh.frustumCulled = false;
+      atFarPlane(mesh.material as THREE.Material);
       skyGroup?.add(mesh);
       return mesh;
     };
@@ -2343,6 +2941,7 @@ import { isTyping } from "./typing.js";
     );
     stars.renderOrder = -998;
     stars.frustumCulled = false;
+    atFarPlane(stars.material as THREE.Material);
     skyGroup.add(stars);
   }
 
@@ -2381,6 +2980,7 @@ import { isTyping } from "./typing.js";
     sunDisc = undefined;
     moonDisc = undefined;
     stars = undefined;
+    skyGroup?.parent?.remove(skyGroup);
     skyGroup = undefined;
     skyScene = undefined;
   }
@@ -2430,6 +3030,7 @@ import { isTyping } from "./typing.js";
       // as though the sun were shining through the world.
       const from = state.night ? state.moonDirection : state.sunDirection;
       sun.position.set(from[0] * 2000, from[1] * 2000, from[2] * 2000);
+      lightDirection.set(from[0], from[1], from[2]).normalize();
       sun.color.setRGB(state.lightColor[0], state.lightColor[1], state.lightColor[2]);
       sunBase = state.lightIntensity;
     }
@@ -2439,13 +3040,10 @@ import { isTyping } from "./typing.js";
       ambient.groundColor.setRGB(0.1, 0.11, 0.14);
     }
 
+    // Outside the dome's guard: the floor reads it too, sky drawn yet or not.
+    skyHorizon.value.setRGB(state.horizon[0], state.horizon[1], state.horizon[2]);
     if (skyDome) {
       const uniforms = (skyDome.material as THREE.ShaderMaterial).uniforms;
-      (uniforms.uHorizon.value as THREE.Color).setRGB(
-        state.horizon[0],
-        state.horizon[1],
-        state.horizon[2],
-      );
       (uniforms.uZenith.value as THREE.Color).setRGB(
         state.zenith[0],
         state.zenith[1],
@@ -2553,6 +3151,7 @@ import { isTyping } from "./typing.js";
           polygonOffsetUnits: COPLANAR_OFFSET.units,
         }),
       );
+      fadeIntoHorizon(groundPlane.material as THREE.MeshLambertMaterial);
       groundPlane.receiveShadow = true;
       groundPlane.castShadow = false;
       // Nothing raycasts it -- picking asks the loaded model and the build grid
@@ -2571,11 +3170,65 @@ import { isTyping } from "./typing.js";
     }
   }
 
+  /**
+   * Fades the floor into the horizon's colour on its way to the far plane.
+   *
+   * Mixed in **last**, after tone mapping and the colour-space conversion,
+   * because that is where the dome's own colour lands: the dome is a raw
+   * `ShaderMaterial` that includes neither, so it writes `uHorizon` as it
+   * is, into the canvas or into the multisampled target alike. Mixed any
+   * earlier, the two would agree in one of those paths and not the other.
+   * The distance is the full one to the camera, which is never less than the
+   * depth the far plane clips at, so every visible scrap of floor at the cut
+   * has already faded. It is measured per fragment from an interpolated
+   * position: the floor is one quad, and a distance interpolated from its four
+   * corners is ten thousand blocks wherever you look.
+   */
+  function fadeIntoHorizon(material: THREE.MeshLambertMaterial): void {
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uHorizon = skyHorizon;
+      shader.uniforms.uFadeFar = groundFade;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+          varying vec3 vGroundPosition;`,
+        )
+        .replace(
+          "#include <project_vertex>",
+          `#include <project_vertex>
+          vGroundPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+          uniform vec3 uHorizon;
+          uniform float uFadeFar;
+          varying vec3 vGroundPosition;`,
+        )
+        .replace(
+          "#include <dithering_fragment>",
+          `#include <dithering_fragment>
+          if (uFadeFar > 0.0) {
+            float fade = smoothstep(uFadeFar * 0.3, uFadeFar * 0.95, distance(vGroundPosition, cameraPosition));
+            gl_FragColor.rgb = mix(gl_FragColor.rgb, uHorizon, fade);
+          }`,
+        );
+    };
+  }
+
   $effect(() => {
     void ground;
     void groundColor;
     void theme;
     applyGround();
+  });
+
+  // Only under the sky: without it the background is the theme's flat colour,
+  // which the floor already sits a shade off.
+  $effect(() => {
+    groundFade.value = sky ? maxDrawDistance || 2048 : 0;
   });
 
   function setSunFromAngles(az: number, el: number): void {
@@ -2586,7 +3239,21 @@ import { isTyping } from "./typing.js";
       radius * Math.sin(el),
       radius * Math.cos(el) * Math.sin(az),
     );
+    lightDirection.copy(sun.position).normalize();
   }
+
+  /**
+   * Which way the light comes from, as `applySky` or the angle sliders set it.
+   *
+   * Kept apart from `sun.position`, which `placeShadow` moves to fit the
+   * shadow camera round the document: read back as the direction, a position
+   * fitted round the box's centre points somewhere slightly different, so
+   * every `placeShadow` that ran without `applySky` first turned the sun a
+   * little. Nobody saw it while the shadow effect re-ran on every edit; the
+   * edit loop's light-for-light comparison with a full rebuild showed the
+   * shadows and the faces moving between two identical meshes.
+   */
+  const lightDirection = new THREE.Vector3(0.5, 0.6, 0.6).normalize();
 
   function applyWireframe(object: THREE.Object3D, on: boolean): void {
     object.traverse((child) => {
@@ -2741,12 +3408,20 @@ import { isTyping } from "./typing.js";
   }
 
   /**
-   * The gizmo, into a scissored square in the bottom-left corner.
+   * The gizmo, into the bottom-left corner.
    *
-   * A third pass over the same renderer. The depth buffer is cleared first
-   * so the build cannot occlude an overlay that is not in the world, and the
-   * scissor is what stops the pass clearing -- or drawing into -- the rest
-   * of the frame.
+   * With anti-aliasing on it is drawn into a multisampled target of its own,
+   * the size of the square, and laid onto the canvas by the copy
+   * (`compositeCompass`). It used to be a third pass into the scene's target,
+   * and three resolves a multisampled target at the end of every `render()`:
+   * a 104-pixel gizmo cost a full-screen blit, which is the 225 ms the third
+   * stutter report blamed on "compass". Resolving its own target costs the
+   * square.
+   *
+   * Without anti-aliasing it is a scissored pass straight onto the canvas, as
+   * before. The depth buffer is cleared first so the build cannot occlude an
+   * overlay that is not in the world, and the scissor is what stops the pass
+   * clearing -- or drawing into -- the rest of the frame.
    *
    * The group takes the *inverse* of the camera's rotation, which is what
    * makes the handles hold still in world terms while the camera swings
@@ -2759,18 +3434,54 @@ import { isTyping } from "./typing.js";
   function drawCompass(): void {
     if (!renderer || !compassScene || !compassCamera || !compassGroup || !camera) return;
     compassGroup.quaternion.copy(camera.quaternion).invert();
+    if (compassTarget !== null) {
+      /*
+       * Cleared to transparent black, so what lands in it is premultiplied --
+       * three's normal blending over (0, 0, 0, 0) leaves exactly that -- and
+       * the copy lays it on with `One, OneMinusSrcAlpha`.
+       */
+      renderer.getClearColor(clearColour);
+      const clearAlpha = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(compassTarget);
+      renderer.render(compassScene, compassCamera);
+      renderer.setClearColor(clearColour, clearAlpha);
+      return;
+    }
     const wasAutoClear = renderer.autoClear;
     renderer.autoClear = false;
     renderer.clearDepth();
     renderer.setScissorTest(true);
-    renderer.setViewport(COMPASS_MARGIN, COMPASS_MARGIN, COMPASS_PX, COMPASS_PX);
-    renderer.setScissor(COMPASS_MARGIN, COMPASS_MARGIN, COMPASS_PX, COMPASS_PX);
+    // WebGL counts from the bottom-left, so the top-right square starts a
+    // margin and a square short of both far edges.
+    renderer.getSize(viewSize);
+    const left = viewSize.x - COMPASS_MARGIN - COMPASS_PX;
+    const bottom = viewSize.y - COMPASS_MARGIN - COMPASS_PX;
+    renderer.setViewport(left, bottom, COMPASS_PX, COMPASS_PX);
+    renderer.setScissor(left, bottom, COMPASS_PX, COMPASS_PX);
     renderer.render(compassScene, compassCamera);
     renderer.setScissorTest(false);
-    const size = renderer.getSize(new THREE.Vector2());
-    renderer.setViewport(0, 0, size.x, size.y);
+    renderer.setViewport(0, 0, viewSize.x, viewSize.y);
     renderer.autoClear = wasAutoClear;
   }
+
+  /** Lays the compass's own target onto its square of the canvas. */
+  function compositeCompass(): void {
+    if (!renderer || compassTarget === null || !compassCopy || !aaCamera) return;
+    renderer.getSize(viewSize);
+    renderer.setViewport(
+      viewSize.x - COMPASS_MARGIN - COMPASS_PX,
+      viewSize.y - COMPASS_MARGIN - COMPASS_PX,
+      COMPASS_PX,
+      COMPASS_PX,
+    );
+    renderer.render(compassCopy, aaCamera);
+    renderer.setViewport(0, 0, viewSize.x, viewSize.y);
+  }
+
+  /** Reused: an allocation per frame was garbage per frame. */
+  const viewSize = new THREE.Vector2();
+  const clearColour = new THREE.Color();
 
   function resize(): void {
     if (!renderer || !camera || !container) return;
@@ -2778,8 +3489,32 @@ import { isTyping } from "./typing.js";
     const height = container.clientHeight || 1;
     applyProjection(width / height);
     renderer.setSize(width, height, false);
-    sizeAaTarget();
+    sizeAaTargetSoon();
+    sizeGlowTargetSoon();
     reportRect();
+    invalidate();
+  }
+
+  /**
+   * How long the multisampled targets wait after the last resize.
+   *
+   * A `ResizeObserver` fires on every step of a sidebar drag or a window
+   * resize, and reallocating a multisampled target at that rate was 148 ms of
+   * the third stutter report. The canvas follows at once; until the targets
+   * catch up, the copy stretches the old picture over it, which for a tenth of
+   * a second nobody can tell from the new one.
+   */
+  const AA_RESIZE_MS = 120;
+  let aaResizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function sizeAaTargetSoon(): void {
+    if (aaTarget === null) return;
+    if (aaResizeTimer !== null) clearTimeout(aaResizeTimer);
+    aaResizeTimer = setTimeout(() => {
+      aaResizeTimer = null;
+      sizeAaTarget();
+      invalidate();
+    }, AA_RESIZE_MS);
   }
 
   /**
@@ -2799,6 +3534,10 @@ import { isTyping } from "./typing.js";
   let aaScene: THREE.Scene | null = null;
   let aaCamera: THREE.OrthographicCamera | null = null;
   let aaQuad: THREE.Mesh | null = null;
+  /** The compass's own multisampled square, beside `aaTarget`; see `drawCompass`. */
+  let compassTarget: THREE.WebGLRenderTarget | null = null;
+  let compassCopy: THREE.Scene | null = null;
+  let compassQuad: THREE.Mesh | null = null;
 
   /**
    * Sized in *drawing buffer* pixels, not CSS ones.
@@ -2808,13 +3547,17 @@ import { isTyping } from "./typing.js";
    */
   function sizeAaTarget(): void {
     if (!renderer || aaTarget === null) return;
-    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const size = renderer.getDrawingBufferSize(viewSize);
     aaTarget.setSize(Math.max(1, size.x), Math.max(1, size.y));
+    const square = Math.max(1, Math.round(COMPASS_PX * renderer.getPixelRatio()));
+    compassTarget?.setSize(square, square);
   }
 
   function disposeAaTarget(): void {
     aaTarget?.dispose();
     aaTarget = null;
+    compassTarget?.dispose();
+    compassTarget = null;
   }
 
   /**
@@ -2831,11 +3574,25 @@ import { isTyping } from "./typing.js";
     }
     if (aaTarget !== null && aaTarget.samples === samples) return;
     disposeAaTarget();
-    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const size = renderer.getDrawingBufferSize(viewSize);
+    /*
+     * `resolveDepthBuffer: false`: the depth is never read after the frame,
+     * and resolving it doubled the blit. three also invalidates the
+     * multisampled depth after the resolve then, which on a tiler is memory it
+     * never has to write back.
+     */
     aaTarget = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
       samples,
       depthBuffer: true,
       stencilBuffer: false,
+      resolveDepthBuffer: false,
+    });
+    const square = Math.max(1, Math.round(COMPASS_PX * renderer.getPixelRatio()));
+    compassTarget = new THREE.WebGLRenderTarget(square, square, {
+      samples,
+      depthBuffer: true,
+      stencilBuffer: false,
+      resolveDepthBuffer: false,
     });
     if (aaScene === null) {
       aaScene = new THREE.Scene();
@@ -2857,6 +3614,27 @@ import { isTyping } from "./typing.js";
       aaScene.add(aaQuad);
     }
     if (aaQuad) (aaQuad.material as THREE.MeshBasicMaterial).map = aaTarget.texture;
+    if (compassCopy === null) {
+      compassCopy = new THREE.Scene();
+      /*
+       * Premultiplied in, so `One, OneMinusSrcAlpha` out -- and not three's own
+       * `premultipliedAlpha`, which multiplies by alpha in the shader and would
+       * do it a second time, darkening every edge of the gizmo.
+       */
+      compassQuad = new THREE.Mesh(
+        new THREE.PlaneGeometry(2, 2),
+        new THREE.MeshBasicMaterial({
+          depthTest: false,
+          depthWrite: false,
+          transparent: true,
+          blending: THREE.CustomBlending,
+          blendSrc: THREE.OneFactor,
+          blendDst: THREE.OneMinusSrcAlphaFactor,
+        }),
+      );
+      compassCopy.add(compassQuad);
+    }
+    if (compassQuad) (compassQuad.material as THREE.MeshBasicMaterial).map = compassTarget.texture;
   }
 
   /**
@@ -2901,7 +3679,11 @@ import { isTyping } from "./typing.js";
      */
     skyGroup.position.set(0, 0, 0);
     skyGroup.scale.setScalar(10);
+    // Lent to the sky's own scene for the cube render, then handed back: the
+    // environment is the sky alone, never the build lit by it.
+    skyScene.add(skyGroup);
     const built = pmrem.fromScene(skyScene, 0, 0.1, 100);
+    scene.add(skyGroup);
     environment?.dispose();
     environment = built;
     scene.environment = built.texture;
@@ -2922,6 +3704,10 @@ import { isTyping } from "./typing.js";
     calls: number;
     /** The slowest frame of the last `WORST_WINDOW_MS`, while diagnosing. */
     worst: { ms: number; culprit: string } | null;
+    /** Nothing has been drawn for a while, because nothing changed. */
+    idle?: boolean;
+    /** What the level selection chose, while it is choosing. */
+    lod?: LodStats | null;
   } | null>(null);
   const FPS_MS = 500;
 
@@ -2960,6 +3746,35 @@ import { isTyping } from "./typing.js";
   }
   let fpsFrames = 0;
   let fpsAt = 0;
+
+  /**
+   * Drawing on demand: the last moment anything asked for a frame, and the
+   * last frame drawn. See `render_demand.ts`.
+   */
+  let activeAt = 0;
+  let lastDrawnAt = 0;
+  const view = new ViewWatch();
+
+  /** Something changed the picture; the loop draws for a little while. */
+  function invalidate(): void {
+    activeAt = performance.now();
+  }
+
+  /** Everything about the camera that changes the picture, as numbers. */
+  const viewScratch = new Float64Array(3 + 4 + 16 + 2);
+  function viewNumbers(of: THREE.Camera): Float64Array {
+    viewScratch[0] = of.position.x;
+    viewScratch[1] = of.position.y;
+    viewScratch[2] = of.position.z;
+    viewScratch[3] = of.quaternion.x;
+    viewScratch[4] = of.quaternion.y;
+    viewScratch[5] = of.quaternion.z;
+    viewScratch[6] = of.quaternion.w;
+    viewScratch.set(of.projectionMatrix.elements, 7);
+    viewScratch[23] = of === ortho ? 1 : 0;
+    viewScratch[24] = (of as THREE.OrthographicCamera).zoom ?? 1;
+    return viewScratch;
+  }
 
   /**
    * Gives the active camera the frustum this viewport's shape asks for.
@@ -3043,7 +3858,7 @@ import { isTyping } from "./typing.js";
   }
 
   /**
-   * Draws one frame from wherever the camera is: the sky, the world, the
+   * Draws one frame from wherever the camera is: the world with its sky, the
    * compass, and the anti-aliased copy onto the canvas.
    *
    * Out of the animation loop so a frame can be drawn *on request* as well as
@@ -3055,6 +3870,7 @@ import { isTyping } from "./typing.js";
    */
   function renderFrame(): void {
     if (renderer && scene && camera) {
+      lastDrawnAt = performance.now();
       renderer.info.reset();
       /*
        * Rebuilt here rather than in an effect, and before anything is
@@ -3069,21 +3885,15 @@ import { isTyping } from "./typing.js";
           note("environment rebuilt", t0);
         }
       }
-      if (aaTarget !== null) renderer.setRenderTarget(aaTarget);
-      let t0 = stamp();
       /*
-       * The sky first, then the depth buffer cleared, then the world.
-       *
-       * Two renders rather than one scene, because the sky has to be behind
-       * everything at every distance: the sun and the moon are transparent,
-       * and three.js draws transparent objects after every opaque one, so
-       * in a single scene they would paint over the schematic however their
-       * depth test was set.
+       * Everything in the world in one `render()`, the sky included -- see
+       * `atFarPlane`. Into a multisampled target that is one resolve per
+       * frame, where the sky's own pass and the compass made it three.
        *
        * The dome rides with the camera, which is also what makes it a sky
        * rather than a sphere you can fly out of.
        */
-      if (skyScene && skyGroup && sky) {
+      if (skyGroup && sky) {
         /*
          * Position and scale every frame rather than in an effect: both
          * follow the camera -- one its place, the other its far plane --
@@ -3102,33 +3912,45 @@ import { isTyping } from "./typing.js";
            */
           (stars.material as THREE.PointsMaterial).size = reach * 0.004;
         }
-        renderer.autoClear = true;
-        renderer.render(skyScene, camera);
-        lap("sky pass", t0);
-        t0 = stamp();
-        renderer.autoClear = false;
-        renderer.clearDepth();
-        renderer.render(scene, camera);
-        renderer.autoClear = true;
-      } else {
-        renderer.render(scene, camera);
       }
+      /*
+       * The levels of detail: the shadow map from the full chunks first, if it
+       * is stale, then the selection for this view. Both only while levels
+       * exist and are wanted -- without them the frame is what it always was.
+       */
+      const choosing = levelsActive();
+      if (choosing) shadowsFromFullDetail();
+      applyLevels(choosing);
+      let t0 = stamp();
+      // Before the scene's target is bound: see the glow section.
+      drawGlowMask();
+      lap("glow mask", t0);
+      t0 = stamp();
+      renderer.setRenderTarget(aaTarget);
+      renderer.render(scene, camera);
       lap("scene pass", t0);
+      if (aaTarget === null) {
+        t0 = stamp();
+        compositeGlow();
+        lap("glow", t0);
+      }
       t0 = stamp();
       drawCompass();
       lap("compass", t0);
       t0 = stamp();
       /*
-       * ...and the whole frame, resolved, onto the canvas. The compass is
-       * inside it: it is part of the picture, and a pass that landed on
-       * the canvas after the copy would be the one unaliased thing on
-       * screen.
+       * ...and the frame, resolved, onto the canvas, with the compass's own
+       * resolved square on top. The compass is anti-aliased like the rest: a
+       * pass that landed on the canvas unaliased would be the one jagged
+       * thing on screen.
        */
       if (aaTarget !== null && aaScene && aaCamera) {
         renderer.setRenderTarget(null);
         const wasAutoClear = renderer.autoClear;
         renderer.autoClear = false;
         renderer.render(aaScene, aaCamera);
+        compositeGlow();
+        compositeCompass();
         renderer.autoClear = wasAutoClear;
         lap("anti-aliasing copy", t0);
       }
@@ -3143,6 +3965,7 @@ import { isTyping } from "./typing.js";
           ms: Math.round(((now - fpsAt) / fpsFrames) * 10) / 10,
           triangles: renderer.info.render.triangles,
           calls: renderer.info.render.calls,
+          lod: lodStats === null ? null : { ...lodStats },
           worst:
             worst === null
               ? null
@@ -3173,13 +3996,24 @@ import { isTyping } from "./typing.js";
        * render target instead. The flag is fixed for the life of the context,
        * so a setting built on it could only ever apply at the next launch.
        */
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: false,
+        powerPreference: webglPowerPreference(untrack(() => gpuPref)),
+      });
       /*
        * The counter reports a whole frame, and a frame is three or four
        * renders. `info` resets itself at the start of every one of them
        * unless told not to, so it would otherwise report the compass.
        */
       renderer.info.autoReset = false;
+      /*
+       * The shadow map is drawn when something that casts or aims it moved,
+       * not every frame: it is a whole second pass over the geometry, and on
+       * a still scene it drew the same map sixty times a second. Every reason
+       * to redraw it goes through `shadowsStale`.
+       */
+      renderer.shadowMap.autoUpdate = false;
       scene = new THREE.Scene();
       scene.background = themeColor("--viewport-bg", 0x0b0f14);
 
@@ -3228,6 +4062,9 @@ import { isTyping } from "./typing.js";
         // Keys held when the pointer released would otherwise stay held
         // forever: the keyup lands on whatever has focus next, not here.
         held.clear();
+        // The button that was painting is still down, and its release will
+        // land somewhere else -- the same reason, for the brush.
+        endStroke();
       });
 
       /*
@@ -3280,9 +4117,15 @@ import { isTyping } from "./typing.js";
         frameAnchor = due.anchor;
         if (!due.draw) return;
         const delta = clock.getDelta();
-        // Closes the interval the previous frame opened: what happened between
-        // the two, inside the loop and outside it. After the cap, so a skipped
-        // refresh is not an interval of its own.
+        /*
+         * Closes the interval the previous refresh opened: what happened
+         * between the two, inside the loop and outside it. After the cap, so a
+         * skipped refresh is not an interval of its own -- and before the
+         * on-demand decision, so a refresh that draws nothing still is one.
+         * The loop wakes on every refresh either way, so an idle stretch is a
+         * run of short intervals rather than one long one that reads as a
+         * stutter.
+         */
         if (profiler) profiler.beginFrame(performance.now());
         let t0 = stamp();
         /*
@@ -3295,7 +4138,8 @@ import { isTyping } from "./typing.js";
          * ends.
          */
         if (flight !== null && camera && controls) {
-          const at = flightAt(flight, performance.now(), FLIGHT_MS);
+          // Cut rather than flown for somebody who asked for less motion.
+          const at = flightAt(flight, performance.now(), flightDuration(prefersReducedMotion()));
           camera.position.set(at.position.x, at.position.y, at.position.z);
           camera.lookAt(controls.target);
           controls.update();
@@ -3312,6 +4156,45 @@ import { isTyping } from "./typing.js";
           controls?.update();
         }
         lap("camera", t0);
+        /*
+         * Whether this refresh draws at all; see `render_demand.ts`. The camera
+         * is compared rather than announced, because damping, flight and the
+         * compass all move it from inside this loop.
+         */
+        const now = performance.now();
+        if (camera && view.moved(viewNumbers(camera))) activeAt = now;
+        // Clocked on wall time, not on frames: the game states its animations
+        // in ticks of 50ms, and a 144Hz display must not run the water four
+        // times too fast.
+        // Timed inside, split into its first upload and the rest; a lap
+        // around it as well would count the same milliseconds twice.
+        const animated = playAnimations(now);
+        // Work left over: an environment map held back by its floor, or a
+        // level of detail still crossing to the next.
+        const pending =
+          (usingEnvironment() && environmentStale && now - environmentAt > ENVIRONMENT_MS) ||
+          lodSelector.fading;
+        if (!shouldDraw({ now, activeAt, animated, pending, always: alwaysDraw })) {
+          if (showFps && fps !== null && !fps.idle && counterIdle(now, lastDrawnAt, FPS_MS) && renderer) {
+            // The last frame's own counts: `info` is reset only when a frame
+            // starts, so it still describes the picture on screen.
+            fps = {
+              ...fps,
+              idle: true,
+              triangles: renderer.info.render.triangles,
+              calls: renderer.info.render.calls,
+              lod: lodStats === null ? null : { ...lodStats },
+            };
+          }
+          return;
+        }
+        // Back from a pause: the counter's window starts again rather than
+        // averaging the idle stretch into a rate nobody saw.
+        if (counterIdle(now, lastDrawnAt, FPS_MS)) {
+          fpsFrames = 0;
+          fpsAt = now;
+          if (fps?.idle) fps = { ...fps, idle: false };
+        }
         t0 = stamp();
         // Before the outline and the grid, both of which read what it writes:
         // after them, each would be acting on the previous frame's hover.
@@ -3321,15 +4204,11 @@ import { isTyping } from "./typing.js";
         updateBlockHighlight(performance.now());
         lap("block outline raycast", t0);
         t0 = stamp();
-        // Clocked on wall time, not on frames: the game states its animations
-        // in ticks of 50ms, and a 144Hz display must not run the water four
-        // times too fast.
-        // Timed inside, split into its first upload and the rest; a lap
-        // around it as well would count the same milliseconds twice.
-        playAnimations(performance.now());
-        t0 = stamp();
         updateBuildGrid(performance.now());
         lap("build grid", t0);
+        t0 = stamp();
+        updateCreative(performance.now());
+        lap("creative tool", t0);
         t0 = stamp();
         // Every frame rather than on the throttle: the gizmo is sized from the
         // distance to the camera, so it would visibly swell and shrink in steps
@@ -3341,11 +4220,19 @@ import { isTyping } from "./typing.js";
       animate();
 
       const onKeyDown = (event: KeyboardEvent) => {
+        // A fresh Alt starts a fresh question: see `altClicked`.
+        if (event.key === "Alt" && !event.repeat) altClicked = false;
         if (fly?.isLocked) {
           held.add(event.code);
         }
       };
-      const onKeyUp = (event: KeyboardEvent) => held.delete(event.code);
+      const onKeyUp = (event: KeyboardEvent) => {
+        held.delete(event.code);
+        if (event.key === "Alt" && altClicked) {
+          altClicked = false;
+          event.preventDefault();
+        }
+      };
       window.addEventListener("keydown", onKeyDown);
       window.addEventListener("keyup", onKeyUp);
 
@@ -3379,6 +4266,29 @@ import { isTyping } from "./typing.js";
           event.button === 0 || event.button === 1
             ? { x: event.clientX, y: event.clientY, button: event.button }
             : null;
+        if (event.altKey) altClicked = true;
+
+        /*
+         * A brush paints from the press, not the release: a stroke is the
+         * button held down, and the first touch lands where it went down.
+         * Either button, and only one at a time -- the second button of a
+         * chord would be a stroke inside a stroke.
+         */
+        if (
+          cameraMode === "fly" &&
+          fly?.isLocked &&
+          creative !== null &&
+          takesStroke(creative.settings.tool) &&
+          (event.button === 0 || event.button === 2) &&
+          stroke === null &&
+          onstroke
+        ) {
+          stroke = { button: event.button, erase: event.button === 0, last: null, trail: [] };
+          onstroke({ phase: "begin", erase: stroke.erase });
+          creativeAt = -Infinity;
+          updateCreative(performance.now());
+          return;
+        }
 
         /*
          * The right button rotates, so this is the moment to decide what it
@@ -3431,9 +4341,9 @@ import { isTyping } from "./typing.js";
          * falling through to `clickIntent` and collapsing the selection to
          * whatever block is behind the handle.
          */
-        const handle = selection === null ? null : gizmoAt(event.clientX, event.clientY);
+        const handle = gizmoBox === null ? null : gizmoAt(event.clientX, event.clientY);
         if (handle !== null) {
-          const origin = gizmoOrigin(selection as Region, pivot);
+          const origin = gizmoOrigin(gizmoBox as Region, pivot);
           const ray = rayThrough(event.clientX, event.clientY);
           const grab = ray === null ? null : gizmoGrabAt(handle, origin, ray);
           if (grab !== null) {
@@ -3441,7 +4351,8 @@ import { isTyping } from "./typing.js";
               handle,
               origin: new THREE.Vector3(origin.x, origin.y, origin.z),
               grab,
-              region: selection as Region,
+              region: gizmoBox as Region,
+              areas: allAreas.map((area) => ({ ...area })),
             };
             gizmoResult = null;
             draggedThisGesture = true;
@@ -3492,6 +4403,7 @@ import { isTyping } from "./typing.js";
           const hit = pickBlockAt(event.clientX, event.clientY);
           if (hit !== null) {
             blockAnchor = { x: hit.x, y: hit.y, z: hit.z };
+            sweepAdds = event.altKey;
             blockReach = blockAnchor;
             draggedThisGesture = true;
             onselectiongesture?.("start");
@@ -3509,6 +4421,7 @@ import { isTyping } from "./typing.js";
           const cell = gridCellAt(event.clientX, event.clientY);
           if (cell === null) return;
           gridAnchor = cell;
+          sweepAdds = event.altKey;
           gridCell = cell;
           draggedThisGesture = true;
           onselectiongesture?.("start");
@@ -3557,7 +4470,7 @@ import { isTyping } from "./typing.js";
           const hit = pickBlockAt(event.clientX, event.clientY);
           if (hit !== null) blockReach = { x: hit.x, y: hit.y, z: hit.z };
           if (blockReach !== null) {
-            onselectionchange?.(regionBetween(blockAnchor, blockReach));
+            onselectionchange?.(regionBetween(blockAnchor, blockReach), sweepAdds ? "add" : "replace");
           }
           return;
         }
@@ -3568,7 +4481,7 @@ import { isTyping } from "./typing.js";
           const cell = gridCellAt(event.clientX, event.clientY);
           if (cell !== null) {
             gridCell = cell;
-            ongridselect?.(regionBetween(gridAnchor, cell));
+            ongridselect?.(regionBetween(gridAnchor, cell), sweepAdds);
           }
         }
       };
@@ -3579,6 +4492,12 @@ import { isTyping } from "./typing.js";
       const onPointerUp = (event: PointerEvent) => {
         const start = downAt;
         downAt = null;
+
+        // The release that ends a stroke ends nothing else.
+        if (stroke !== null) {
+          if (event.button === stroke.button) endStroke();
+          return;
+        }
 
         if (gizmoDrag !== null) {
           try {
@@ -3647,7 +4566,7 @@ import { isTyping } from "./typing.js";
            * means "select", down to a single cell.
            */
           if (stayed) {
-            ongridselect?.(regionBetween(anchor, anchor));
+            ongridselect?.(regionBetween(anchor, anchor), sweepAdds);
           }
           onselectiongesture?.("end");
           draggedThisGesture = false;
@@ -3684,6 +4603,21 @@ import { isTyping } from "./typing.js";
         if (cameraMode === "fly") {
           if (!fly?.isLocked) {
             fly?.lock();
+            return;
+          }
+          // A brush's buttons are its stroke, handled at the press, and so
+          // are the terrain's.
+          if (creative !== null && takesStroke(creative.settings.tool)) return;
+          /*
+           * The shape and walls tools take the right button for a corner:
+           * where a block would go, which is the cell across the face aimed
+           * at, or the build grid's cell when there is no block. The left
+           * button still breaks, so a wall can be cleared without changing
+           * tools.
+           */
+          if (creative !== null && takesCorners(creative.settings.tool) && event.button === 2) {
+            const corner = cornerAtCrosshair();
+            if (corner !== null) oncorner?.(corner);
             return;
           }
           if (!onbuild) return;
@@ -3729,12 +4663,19 @@ import { isTyping } from "./typing.js";
             hit: picked !== null,
             shift: event.shiftKey,
             ctrl: event.ctrlKey || event.metaKey,
+            alt: event.altKey,
           })
         ) {
           case "ignore":
             return;
           case "clear":
             onpick(null);
+            return;
+          case "add":
+            if (picked) onpick({ ...picked, extend: false, area: "add" });
+            return;
+          case "remove":
+            if (picked) onpick({ ...picked, extend: false, area: "remove" });
             return;
           case "extend":
             if (picked) onpick({ ...picked, extend: true });
@@ -3759,7 +4700,22 @@ import { isTyping } from "./typing.js";
       renderer.domElement.addEventListener("pointerup", onPointerUp);
       renderer.domElement.addEventListener("contextmenu", onContextMenu);
 
+      /*
+       * Input wakes the loop. The camera's own movement is caught by
+       * comparison, so these are for what follows the pointer without moving
+       * the camera: the hover, the outline, the build grid, a gizmo drag.
+       */
+      const wake = () => invalidate();
+      const wakeOn = ["pointermove", "pointerdown", "pointerup", "pointerleave", "wheel"] as const;
+      for (const type of wakeOn) renderer.domElement.addEventListener(type, wake, { passive: true });
+      window.addEventListener("keydown", wake);
+      window.addEventListener("keyup", wake);
+
       return () => {
+        for (const type of wakeOn) renderer?.domElement.removeEventListener(type, wake);
+        window.removeEventListener("keydown", wake);
+        window.removeEventListener("keyup", wake);
+        if (aaResizeTimer !== null) clearTimeout(aaResizeTimer);
         cancelAnimationFrame(frame);
         observer.disconnect();
         renderer?.domElement.ownerDocument.removeEventListener("mousemove", onLookMove, true);
@@ -3792,9 +4748,12 @@ import { isTyping } from "./typing.js";
         fly?.dispose();
         controls?.dispose();
         disposeAaTarget();
-        if (aaQuad) {
-          aaQuad.geometry.dispose();
-          (aaQuad.material as THREE.Material).dispose();
+        disposeGlow();
+        disposeCreativeGhost();
+        for (const quad of [aaQuad, compassQuad]) {
+          if (!quad) continue;
+          quad.geometry.dispose();
+          (quad.material as THREE.Material).dispose();
         }
         environment?.dispose();
         pmrem?.dispose();
@@ -3806,7 +4765,349 @@ import { isTyping } from "./typing.js";
     }
   });
 
+  // --- the glow --------------------------------------------------------------
+
+  /*
+   * Blocks lit up through walls: what a click on a material shows, and what
+   * `highlight_blocks` asks for. The game's Glowing effect is the model -- an
+   * outline round the thing, seen wherever it is -- because "where are the
+   * diamonds" is asked about blocks that are mostly *inside* the build.
+   *
+   * Two passes, and only while something glows:
+   *
+   * 1. **The mask.** The shell main found (`domain/find_blocks.ts`: one quad
+   *    per face of a matching cell that does not touch another) drawn white,
+   *    with no depth test, into a target of its own -- before the scene's
+   *    target is bound, so the frame still binds that target once and draws
+   *    the world in one render. The target has no depth buffer and no
+   *    samples, so it resolves nothing.
+   * 2. **The outline**, laid on the *canvas* by a fullscreen quad: wherever
+   *    the mask is empty but a pixel within a couple of pixels of it is not,
+   *    plus a light veil over the inside. On the canvas and never into the
+   *    multisampled target, because a second render into that one is a second
+   *    resolve. With anti-aliasing it goes after the copy, and without it
+   *    after the scene pass; either way before the compass, which stays on top.
+   *
+   * `glowScene` is its own scene, never `scene` and never under `loaded`, so
+   * no raycast reaches it and no light or shadow pass sees it. A
+   * `capture_viewport` photographs it, which is meant: the model sees what it
+   * pointed at.
+   */
+  let glowScene: THREE.Scene | null = null;
+  let glowGroup: THREE.Group | null = null;
+  let glowMesh: THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial> | null = null;
+  let glowTarget: THREE.WebGLRenderTarget | null = null;
+  let glowComposite: THREE.Scene | null = null;
+  let glowCamera: THREE.OrthographicCamera | null = null;
+  let glowQuad: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial> | null = null;
+  let glowResizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * A face from four integers: the corner of its cell, `uScale` blocks a side
+   * -- one, or more when main had too many faces to send one block at a time
+   * -- and the side in `FACE_STEPS`' order
+   * (east, west, up, down, south, north). `o` puts the quad on that side of
+   * the cell, and `u` and `v` are chosen so `u x v` points outwards: the
+   * corners then wind anticlockwise seen from outside, which is what
+   * `FrontSide` keeps. Only the silhouette matters to the mask, so the back
+   * faces are not worth drawing.
+   */
+  const GLOW_FACE_VERTEX = `
+    uniform float uScale;
+    attribute vec2 corner;
+    attribute ivec4 face;
+    void main() {
+      vec3 o = vec3(0.0);
+      vec3 u;
+      vec3 v;
+      if (face.w == 0) { o = vec3(1.0, 0.0, 0.0); u = vec3(0.0, 1.0, 0.0); v = vec3(0.0, 0.0, 1.0); }
+      else if (face.w == 1) { u = vec3(0.0, 0.0, 1.0); v = vec3(0.0, 1.0, 0.0); }
+      else if (face.w == 2) { o = vec3(0.0, 1.0, 0.0); u = vec3(0.0, 0.0, 1.0); v = vec3(1.0, 0.0, 0.0); }
+      else if (face.w == 3) { u = vec3(1.0, 0.0, 0.0); v = vec3(0.0, 0.0, 1.0); }
+      else if (face.w == 4) { o = vec3(0.0, 0.0, 1.0); u = vec3(1.0, 0.0, 0.0); v = vec3(0.0, 1.0, 0.0); }
+      else { u = vec3(0.0, 1.0, 0.0); v = vec3(1.0, 0.0, 0.0); }
+      vec3 at = vec3(face.xyz) + (o + u * corner.x + v * corner.y) * uScale;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(at, 1.0);
+    }
+  `;
+
+  const GLOW_MASK_FRAGMENT = `
+    void main() {
+      gl_FragColor = vec4(1.0);
+    }
+  `;
+
+  const GLOW_COPY_VERTEX = `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `;
+
+  /**
+   * The outline: the mask's largest value on two rings round the pixel,
+   * minus the mask at the pixel, so only the outside of the silhouette is
+   * drawn -- and a fifth of the colour over the inside, so a block lit in
+   * plain view reads as lit too. Linear filtering softens the stair-steps an
+   * edge would otherwise carry.
+   *
+   * The colour arrives in sRGB and goes out as it came: this is a
+   * `ShaderMaterial` drawing onto the canvas, so nothing converts it.
+   */
+  const GLOW_COPY_FRAGMENT = `
+    uniform sampler2D uMask;
+    uniform vec2 uTexel;
+    uniform float uRadius;
+    uniform vec3 uColor;
+    varying vec2 vUv;
+    void main() {
+      float inside = texture2D(uMask, vUv).r;
+      float near = 0.0;
+      for (int i = 0; i < 16; i++) {
+        float angle = float(i) * 0.39269908;
+        vec2 reach = vec2(cos(angle), sin(angle)) * uRadius * uTexel;
+        near = max(near, texture2D(uMask, vUv + reach).r);
+        near = max(near, texture2D(uMask, vUv + reach * 0.5).r);
+      }
+      float alpha = max(clamp(near - inside, 0.0, 1.0), inside * 0.2);
+      if (alpha <= 0.0) discard;
+      gl_FragColor = vec4(uColor, alpha);
+    }
+  `;
+
+  /** The two scenes, built at the first glow and kept: they cost nothing. */
+  function ensureGlowScene(): void {
+    if (glowScene !== null) return;
+    glowScene = new THREE.Scene();
+    glowGroup = new THREE.Group();
+    glowScene.add(glowGroup);
+    glowMesh = new THREE.Mesh(
+      new THREE.InstancedBufferGeometry(),
+      new THREE.ShaderMaterial({
+        uniforms: { uScale: { value: 1 } },
+        vertexShader: GLOW_FACE_VERTEX,
+        fragmentShader: GLOW_MASK_FRAGMENT,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.FrontSide,
+      }),
+    );
+    // Its geometry has no positions to take a bounding sphere of, and the
+    // shell is wherever the blocks are; the GPU clips what is off screen.
+    glowMesh.frustumCulled = false;
+    glowMesh.visible = false;
+    glowGroup.add(glowMesh);
+
+    glowComposite = new THREE.Scene();
+    glowCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    glowQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      new THREE.ShaderMaterial({
+        uniforms: {
+          uMask: { value: null },
+          uTexel: { value: new THREE.Vector2(1, 1) },
+          uRadius: { value: 2 },
+          uColor: { value: new THREE.Color() },
+        },
+        vertexShader: GLOW_COPY_VERTEX,
+        fragmentShader: GLOW_COPY_FRAGMENT,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    );
+    glowQuad.frustumCulled = false;
+    glowComposite.add(glowQuad);
+    applyGlowColour();
+  }
+
+  /** `--glow`, in sRGB: see `GLOW_COPY_FRAGMENT`. */
+  function applyGlowColour(): void {
+    glowQuad?.material.uniforms.uColor.value.copy(themeColor("--glow", 0xffd84a)).convertLinearToSRGB();
+  }
+
+  /** Whether anything glows this frame. */
+  function glowing(): boolean {
+    return glowMesh !== null && glowMesh.visible;
+  }
+
+  /**
+   * Puts the shell main sent on screen, or takes the glow down.
+   *
+   * The faces go to the GPU as they came, an `Int32Array` read as an
+   * integer attribute: four numbers a quad, where vertex positions would be
+   * thirty-six. They are content coordinates, so the group stands at the
+   * document's frame, where `placeChunks` stands the chunks.
+   */
+  function setGlow(shell: { faces: Int32Array; scale: number; frame: readonly [number, number, number] } | null): void {
+    if (shell === null || shell.faces.length === 0) {
+      if (glowMesh !== null && glowMesh.visible) {
+        glowMesh.visible = false;
+        glowMesh.geometry.dispose();
+        glowMesh.geometry = new THREE.InstancedBufferGeometry();
+      }
+      glowTarget?.dispose();
+      glowTarget = null;
+      invalidate();
+      return;
+    }
+    ensureGlowScene();
+    if (!glowMesh || !glowGroup) return;
+    const geometry = new THREE.InstancedBufferGeometry();
+    geometry.setIndex([0, 1, 2, 0, 2, 3]);
+    geometry.setAttribute("corner", new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+    geometry.setAttribute("face", new THREE.InstancedBufferAttribute(shell.faces, 4));
+    geometry.instanceCount = shell.faces.length / 4;
+    glowMesh.geometry.dispose();
+    glowMesh.geometry = geometry;
+    glowMesh.material.uniforms.uScale.value = shell.scale;
+    glowMesh.visible = true;
+    glowGroup.position.set(shell.frame[0], shell.frame[1], shell.frame[2]);
+    glowGroup.updateMatrixWorld(true);
+    invalidate();
+  }
+
+  /** The mask, into its own target; see the section's header. */
+  function drawGlowMask(): void {
+    if (!renderer || !camera || !glowScene || !glowing()) return;
+    if (glowTarget === null) {
+      const size = renderer.getDrawingBufferSize(viewSize);
+      glowTarget = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+    }
+    renderer.getClearColor(clearColour);
+    const clearAlpha = renderer.getClearAlpha();
+    renderer.setClearColor(0x000000, 0);
+    renderer.setRenderTarget(glowTarget);
+    renderer.render(glowScene, camera);
+    renderer.setClearColor(clearColour, clearAlpha);
+  }
+
+  /** The outline, onto whatever is bound -- the canvas, by the time it is called. */
+  function compositeGlow(): void {
+    if (!renderer || !glowComposite || !glowCamera || !glowQuad || glowTarget === null || !glowing()) return;
+    const uniforms = glowQuad.material.uniforms;
+    uniforms.uMask.value = glowTarget.texture;
+    (uniforms.uTexel.value as THREE.Vector2).set(1 / glowTarget.width, 1 / glowTarget.height);
+    // Two CSS pixels wide, on any display.
+    uniforms.uRadius.value = Math.max(1, Math.min(4, Math.round(2 * renderer.getPixelRatio())));
+    const wasAutoClear = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.render(glowComposite, glowCamera);
+    renderer.autoClear = wasAutoClear;
+  }
+
+  /**
+   * The mask follows the canvas on `AA_RESIZE_MS`' terms: a resize fires on
+   * every step of a drag, and until it catches up the outline is drawn from
+   * the old mask stretched over the new canvas, which nobody can tell apart.
+   */
+  function sizeGlowTargetSoon(): void {
+    if (glowTarget === null) return;
+    if (glowResizeTimer !== null) clearTimeout(glowResizeTimer);
+    glowResizeTimer = setTimeout(() => {
+      glowResizeTimer = null;
+      if (!renderer || glowTarget === null) return;
+      const size = renderer.getDrawingBufferSize(viewSize);
+      glowTarget.setSize(Math.max(1, size.x), Math.max(1, size.y));
+      invalidate();
+    }, AA_RESIZE_MS);
+  }
+
+  function disposeGlow(): void {
+    if (glowResizeTimer !== null) clearTimeout(glowResizeTimer);
+    glowTarget?.dispose();
+    glowTarget = null;
+    for (const mesh of [glowMesh, glowQuad]) {
+      if (!mesh) continue;
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+    }
+  }
+
+  $effect(() => {
+    const shell = glow;
+    untrack(() => setGlow(shell));
+  });
+
+  $effect(() => {
+    void theme;
+    applyGlowColour();
+    invalidate();
+  });
+
   // --- reactive prop application -------------------------------------------
+
+  /*
+   * The one entry point for "a prop changed, draw again".
+   *
+   * Drawing on demand means a change nobody announces is a picture that
+   * stops updating, so every prop that is not a callback is read here, plus
+   * the component's own state that the loop's hover writes. `tests/ui.ts`
+   * compares this list with the props: one added and left out of it fails a
+   * check rather than leaving a stale frame on screen.
+   */
+  $effect(() => {
+    void [
+      mesh,
+      sunAzimuth,
+      sunElevation,
+      maxDpr,
+      renderScale,
+      maxDrawDistance,
+      projection,
+      antialias,
+      maxFps,
+      gpuPref,
+      globalIllumination,
+      showFps,
+      meshBounds,
+      frameDiagnostics,
+      alwaysDraw,
+      lodMode,
+      lodPixels,
+      lodShapes,
+      lodCoarse,
+      lodTint,
+      shaderMode,
+      showBounds,
+      voidOpacity,
+      showGrid,
+      wireframe,
+      sky,
+      skyTextures,
+      anchor,
+      anchorTexture,
+      showAnchor,
+      timeOfDay,
+      shadows,
+      shadowQuality,
+      ground,
+      groundColor,
+      selection,
+      areas,
+      gizmoRegion,
+      cameraMode,
+      flySpeed,
+      framingKey,
+      theme,
+      documentSizeProp,
+      ghost,
+      ghostAt,
+      glow,
+      gizmoMode,
+      autoGrow,
+      pivot,
+      cameraRequest,
+      creative,
+    ];
+    void [hovered, gizmoHover, gridCell, flying, scene, deviceRatio];
+    invalidate();
+  });
 
   $effect(() => {
     if (!renderer) return;
@@ -3834,13 +5135,32 @@ import { isTyping } from "./typing.js";
     applyLook();
   });
 
+  /**
+   * The display's pixel ratio, kept current.
+   *
+   * `window.devicePixelRatio` is not reactive, so the effect below read it
+   * once and kept that answer when the window moved to a monitor with another
+   * scale: a 1.5 panel's ratio drawn on a 1.0 monitor is 2.25 times the pixels
+   * anyone can see. A media query on the current value fires when it stops
+   * being true, which is the only notice a page gets.
+   */
+  let deviceRatio = $state(typeof window === "undefined" ? 1 : window.devicePixelRatio);
+  $effect(() => {
+    const query = window.matchMedia(`(resolution: ${deviceRatio}dppx)`);
+    const changed = () => {
+      deviceRatio = window.devicePixelRatio;
+    };
+    query.addEventListener("change", changed);
+    return () => query.removeEventListener("change", changed);
+  });
+
   $effect(() => {
     if (!renderer) return;
     // The original clamped `devicePixelRatio` by `maxDPR` only; `renderScale`
     // was passed into the payload but never consumed, so its slider did
     // nothing. Both now apply, which is what the label "Clamp renderer pixel
     // ratio for performance" (component.py:323) always claimed.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxDpr) * renderScale);
+    renderer.setPixelRatio(Math.min(deviceRatio, maxDpr) * renderScale);
     resize();
   });
 
@@ -3893,18 +5213,41 @@ import { isTyping } from "./typing.js";
     renderer.shadowMap.enabled = shadows;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     sun.castShadow = shadows;
-    sun.shadow.mapSize.set(shadowQuality, shadowQuality);
     // Without these a face lit at a grazing angle shadows itself in stripes,
     // which on a flat wall of blocks is the whole wall.
     sun.shadow.bias = -0.0006;
     sun.shadow.normalBias = 0.05;
-    // The map is sized at allocation, so an existing one has to go for a new
-    // resolution to take.
-    sun.shadow.map?.dispose();
-    sun.shadow.map = null;
-    placeShadow();
+    /*
+     * The map is sized at allocation, so a new resolution needs a new map --
+     * and only a new resolution does. This used to throw the map away on
+     * every run, and the run followed `documentSize` through `placeShadow`,
+     * which is every edit: a fresh shadow map allocated per placed block.
+     */
+    if (sun.shadow.mapSize.x !== shadowQuality || sun.shadow.mapSize.y !== shadowQuality) {
+      sun.shadow.mapSize.set(shadowQuality, shadowQuality);
+      sun.shadow.map?.dispose();
+      sun.shadow.map = null;
+    }
+    untrack(placeShadow);
+    // The shadow pass draws with a depth copy of each material, which copies
+    // `wireframe` too, so the map is stale when it changes.
     if (loaded) applyWireframe(loaded, wireframe);
+    shadowsStale();
   });
+
+  /**
+   * The one way to ask for the shadow map to be drawn again.
+   *
+   * Called when the light or its box moved (`placeShadow`), when a payload
+   * changed the geometry, and when a setting changed the map. Anything else
+   * that casts a shadow and moves has to call it too, or its shadow stays
+   * where it was; `tests/ui.ts` requires this to be the only place that
+   * writes `needsUpdate`.
+   */
+  function shadowsStale(): void {
+    if (renderer) renderer.shadowMap.needsUpdate = true;
+    invalidate();
+  }
 
   /**
    * Aims the shadow camera at the structure, from wherever the light is.
@@ -3920,12 +5263,12 @@ import { isTyping } from "./typing.js";
   function placeShadow(): void {
     if (!sun || !scene) return;
     const [width, height, length] = documentSize ?? [64, 64, 64];
-    // The light's direction is where it *is*, since it always looks at the
-    // structure; `applySky` has already put it there.
+    // The direction `applySky` chose, not where the last fit left the light:
+    // see `lightDirection`.
     const fit = fitShadow({
       center: { x: width / 2, y: height / 2, z: length / 2 },
       size: { x: width, y: height, z: length },
-      direction: { x: sun.position.x, y: sun.position.y, z: sun.position.z },
+      direction: { x: lightDirection.x, y: lightDirection.y, z: lightDirection.z },
       mapSize: shadowQuality,
     });
     sun.position.set(fit.position.x, fit.position.y, fit.position.z);
@@ -3942,6 +5285,7 @@ import { isTyping } from "./typing.js";
     camera.near = fit.near;
     camera.far = fit.far;
     camera.updateProjectionMatrix();
+    shadowsStale();
   }
 
   $effect(() => {
@@ -3976,6 +5320,15 @@ import { isTyping } from "./typing.js";
     void scene;
     void theme;
     updateSelectionBox();
+  });
+
+  $effect(() => {
+    // The other areas' boxes, on the same terms as the active one's above.
+    void selection;
+    void areas;
+    void scene;
+    void theme;
+    updateOtherAreaBoxes();
   });
 
   $effect(() => {
@@ -4381,42 +5734,45 @@ import { isTyping } from "./typing.js";
    * cannot see what you are working on" is a bug however faithful it is.
    */
   function shadeWithBakedLight(target: THREE.Material): void {
-    target.onBeforeCompile = (shader) => {
-      shader.uniforms.uDaylight = daylight;
-      shader.fragmentShader = shader.fragmentShader
-        .replace("void main() {", "uniform float uDaylight;\nvoid main() {")
-        .replace(
-          "#include <color_fragment>",
-          `
-          vec3 albedo = diffuseColor.rgb;
-          float blockLight = vColor.r;
-          float skyLight = vColor.g * uDaylight;
-          float occlusion = vColor.b;
-
-          /*
-           * The sky half dims the surface, so the sun still lights it and the
-           * shadow map still darkens it.
-           */
-          diffuseColor.rgb = albedo * max(0.06, skyLight) * occlusion;
-
-          /*
-           * The block half is *light*, and adding it is the whole point.
-           *
-           * As a multiply on the albedo it could only ever stop a surface being
-           * dark -- never make it brighter than whatever the scene's own lights
-           * gave it. So a torch in a sealed room at night lit nothing: the
-           * ambient there is near zero, and near zero times anything is near
-           * zero. That is what "the torches do not light the area" was.
-           *
-           * Emissive is added after the lighting pass, which is what lets a
-           * torch light a room the sun cannot reach -- and, being independent
-           * of uDaylight, lets it stay lit when the sun goes down.
-           */
-          totalEmissiveRadiance += albedo * blockLight * occlusion * 0.9;
-          `,
-        );
-    };
+    target.onBeforeCompile = (shader) => injectBakedLight(shader);
     target.needsUpdate = true;
+  }
+
+  /** `shadeWithBakedLight`'s shader edit, which the level-of-detail copies repeat. */
+  function injectBakedLight(shader: THREE.WebGLProgramParametersWithUniforms): void {
+    shader.uniforms.uDaylight = daylight;
+    shader.fragmentShader = shader.fragmentShader
+      .replace("void main() {", "uniform float uDaylight;\nvoid main() {")
+      .replace(
+        "#include <color_fragment>",
+        `
+        vec3 albedo = diffuseColor.rgb;
+        float blockLight = vColor.r;
+        float skyLight = vColor.g * uDaylight;
+        float occlusion = vColor.b;
+
+        /*
+         * The sky half dims the surface, so the sun still lights it and the
+         * shadow map still darkens it.
+         */
+        diffuseColor.rgb = albedo * max(0.06, skyLight) * occlusion;
+
+        /*
+         * The block half is *light*, and adding it is the whole point.
+         *
+         * As a multiply on the albedo it could only ever stop a surface being
+         * dark -- never make it brighter than whatever the scene's own lights
+         * gave it. So a torch in a sealed room at night lit nothing: the
+         * ambient there is near zero, and near zero times anything is near
+         * zero. That is what "the torches do not light the area" was.
+         *
+         * Emissive is added after the lighting pass, which is what lets a
+         * torch light a room the sun cannot reach -- and, being independent
+         * of uDaylight, lets it stay lit when the sun goes down.
+         */
+        totalEmissiveRadiance += albedo * blockLight * occlusion * 0.9;
+        `,
+      );
   }
 
   /**
@@ -4429,7 +5785,7 @@ import { isTyping } from "./typing.js";
    * A decode that never happens cannot fail silently.
    */
   function ensureTexture(atlas: MeshAtlas): THREE.Texture {
-    if (texture && textureVersion === atlas.version) {
+    if (texture && textureVersion === atlas.version && textureLayout === atlas.layout) {
       return texture;
     }
     texture?.dispose();
@@ -4447,8 +5803,49 @@ import { isTyping } from "./typing.js";
     next.needsUpdate = true;
     texture = next;
     textureVersion = atlas.version;
+    textureLayout = atlas.layout;
     adoptAnimations(atlas);
     return next;
+  }
+
+  /**
+   * Tiles main added to the atlas this window already holds.
+   *
+   * A texture nobody had drawn before -- a lit furnace, a sign's letters --
+   * used to repack the whole sheet, re-mesh the document and resend 27 MB.
+   * It lands in the sheet's reserve now (`packAtlas`), every other UV stays
+   * where it was, and this copies the new squares into the texture on the GPU
+   * the way an animation frame is copied. The CPU copy is written too, so a
+   * re-upload of the texture would not lose them.
+   */
+  function applyAtlasPatch(patch: AtlasPatch): void {
+    if (!renderer || !texture || patch.layout !== textureLayout) return;
+    const image = texture.image as { data: Uint8Array; width: number; height: number };
+    renderer.initTexture(texture);
+    for (const tile of patch.tiles) {
+      for (let row = 0; row < tile.height; row += 1) {
+        image.data.set(
+          tile.pixels.subarray(row * tile.width * 4, (row + 1) * tile.width * 4),
+          ((tile.y + row) * image.width + tile.x) * 4,
+        );
+      }
+      const scratch = new THREE.DataTexture(
+        new Uint8Array(tile.pixels),
+        tile.width,
+        tile.height,
+        THREE.RGBAFormat,
+      );
+      scratch.magFilter = THREE.NearestFilter;
+      scratch.minFilter = THREE.NearestFilter;
+      scratch.generateMipmaps = false;
+      scratch.colorSpace = THREE.SRGBColorSpace;
+      scratch.needsUpdate = true;
+      blitAt.set(tile.x, tile.y);
+      renderer.copyTextureToTexture(scratch, texture, null, blitAt);
+      scratch.dispose();
+    }
+    playing.push(...patch.animations.map(playingFor));
+    textureVersion = patch.version;
   }
 
   /**
@@ -4480,7 +5877,11 @@ import { isTyping } from "./typing.js";
 
   function adoptAnimations(atlas: MeshAtlas): void {
     for (const item of playing) item.scratch.dispose();
-    playing = atlas.animations.map((animation) => {
+    playing = atlas.animations.map(playingFor);
+  }
+
+  function playingFor(animation: AtlasAnimation): PlayingTexture {
+    {
       const scratch = new THREE.DataTexture(
         new Uint8Array(animation.size * animation.size * 4),
         animation.size,
@@ -4495,7 +5896,7 @@ import { isTyping } from "./typing.js";
       scratch.generateMipmaps = false;
       scratch.colorSpace = THREE.SRGBColorSpace;
       return { animation, scratch, shown: -1, active: false };
-    });
+    }
   }
 
   /**
@@ -4510,8 +5911,8 @@ import { isTyping } from "./typing.js";
    * Nothing is uploaded for a texture already showing the right frame, which is
    * most ticks for most of them.
    */
-  function playAnimations(nowMs: number): void {
-    if (!renderer || !texture || playing.length === 0) return;
+  function playAnimations(nowMs: number): boolean {
+    if (!renderer || !texture || playing.length === 0) return false;
     const ticks = nowMs / 50;
     let uploads = 0;
     let t0 = stamp();
@@ -4543,6 +5944,7 @@ import { isTyping } from "./typing.js";
     }
     if (uploads > 1) lap("texture animations: uploads", t0);
     if (uploads > 0) note("animations uploaded", undefined, { count: uploads });
+    return uploads > 0;
   }
 
   /** Reused by every blit: one allocation per upload was garbage per tick. */
@@ -4626,11 +6028,17 @@ import { isTyping } from "./typing.js";
      * than in a map of their own, so they are evicted exactly when it is:
      * `chunkMeshes` is already keyed on layer *and* number for a reason,
      * and a second map keyed the same way is a second chance to get that
-     * wrong. The void layer gets none, because nothing raycasts it.
+     * wrong. Only the solid layer gets them: nothing raycasts the void or a
+     * level of detail.
      */
-    if (chunk.layer !== "void") {
+    if (chunk.layer === "solid") {
       mesh.userData.thin = thinBoxes(chunk.positions, chunk.normals);
     }
+    // What the level selection walks: which chunk or region this is, and for
+    // a level of detail how far it strays from the full mesh, in blocks.
+    mesh.userData.layer = chunk.layer;
+    mesh.userData.key = chunk.key;
+    mesh.userData.lodError = chunk.lodError ?? null;
     return mesh;
   }
 
@@ -4642,7 +6050,34 @@ import { isTyping } from "./typing.js";
    * was empty space beside it.
    */
   function meshId(chunk: { key: number; layer: ChunkLayer }): string {
-    return `${chunk.layer}:${chunk.key}`;
+    return meshKey(chunk.layer, chunk.key);
+  }
+
+  /** The group a layer's meshes live in: picked, never picked, or a level of detail. */
+  function groupOf(
+    layer: ChunkLayer,
+    solid: THREE.Object3D,
+    filler: THREE.Object3D,
+    lod: THREE.Object3D,
+  ): THREE.Object3D {
+    return layer === "void" ? filler : layer === "solid" ? solid : lod;
+  }
+
+  /**
+   * Where a new mesh of a layer starts out. A level of detail starts hidden:
+   * it is the selection's to show, and a frame drawn before the selection
+   * runs must not put it on top of the chunks it stands for.
+   */
+  function prepareMesh(mesh: THREE.Mesh, layer: ChunkLayer): void {
+    /*
+     * The void casts no shadow and receives none. A document-sized volume
+     * of it would put the whole build in its own shade, and it is not there
+     * in the sense a shadow means. A level of detail casts none either: the
+     * shadow map is drawn from the full chunks, see `shadowsFromFullDetail`.
+     */
+    mesh.castShadow = layer === "solid";
+    mesh.receiveShadow = layer !== "void";
+    mesh.visible = layer === "solid" || layer === "void";
   }
 
   /**
@@ -4657,26 +6092,21 @@ import { isTyping } from "./typing.js";
   function buildModel(
     payload: MeshPayload,
     texture: THREE.Texture,
-  ): { solid: THREE.Group; filler: THREE.Group } {
+  ): { solid: THREE.Group; filler: THREE.Group; lod: THREE.Group } {
     const solid = new THREE.Group();
     const filler = new THREE.Group();
-    const shared = [ensureMaterial(texture), ensureBlendedMaterial(texture)];
+    const lod = new THREE.Group();
+    const shared = sharedMaterials(texture);
     const voidShared = [ensureVoidMaterial(texture), ensureVoidMaterial(texture)];
+    releaseAllFades();
     chunkMeshes.clear();
     for (const chunk of payload.chunks) {
-      const isVoid = chunk.layer === "void";
-      const mesh = chunkMesh(chunk, isVoid ? voidShared : shared);
+      const mesh = chunkMesh(chunk, chunk.layer === "void" ? voidShared : shared);
       chunkMeshes.set(meshId(chunk), mesh);
-      /*
-       * The void casts no shadow and receives none. A document-sized volume
-       * of it would put the whole build in its own shade, and it is not
-       * there in the sense a shadow means.
-       */
-      mesh.castShadow = !isVoid;
-      mesh.receiveShadow = !isVoid;
-      (isVoid ? filler : solid).add(mesh);
+      prepareMesh(mesh, chunk.layer);
+      groupOf(chunk.layer, solid, filler, lod).add(mesh);
     }
-    return { solid, filler };
+    return { solid, filler, lod };
   }
 
   /**
@@ -4691,34 +6121,349 @@ import { isTyping } from "./typing.js";
   function applyDelta(
     solid: THREE.Object3D,
     filler: THREE.Object3D,
+    lod: THREE.Object3D,
     payload: MeshPayload,
     texture: THREE.Texture,
   ): void {
-    const shared = [ensureMaterial(texture), ensureBlendedMaterial(texture)];
+    const shared = sharedMaterials(texture);
     const voidShared = [ensureVoidMaterial(texture), ensureVoidMaterial(texture)];
-    const groupFor = (layer: ChunkLayer): THREE.Object3D => (layer === "void" ? filler : solid);
     for (const ref of payload.dropped) {
       const id = meshId(ref);
       const gone = chunkMeshes.get(id);
       if (!gone) continue;
-      groupFor(ref.layer).remove(gone);
+      groupOf(ref.layer, solid, filler, lod).remove(gone);
       gone.geometry.dispose();
+      releaseFade(gone);
       chunkMeshes.delete(id);
     }
     for (const chunk of payload.chunks) {
       const id = meshId(chunk);
-      const isVoid = chunk.layer === "void";
       const existing = chunkMeshes.get(id);
       if (existing) {
-        groupFor(chunk.layer).remove(existing);
+        groupOf(chunk.layer, solid, filler, lod).remove(existing);
         existing.geometry.dispose();
+        releaseFade(existing);
       }
-      const mesh = chunkMesh(chunk, isVoid ? voidShared : shared);
-      mesh.castShadow = !isVoid;
-      mesh.receiveShadow = !isVoid;
+      const mesh = chunkMesh(chunk, chunk.layer === "void" ? voidShared : shared);
+      prepareMesh(mesh, chunk.layer);
       chunkMeshes.set(id, mesh);
-      groupFor(chunk.layer).add(mesh);
+      groupOf(chunk.layer, solid, filler, lod).add(mesh);
     }
+  }
+
+  // --- levels of detail -----------------------------------------------------
+
+  /** The block materials as one stable pair, so a mesh can be handed it back. */
+  type MaterialPair = [THREE.MeshStandardMaterial, THREE.MeshStandardMaterial];
+  let sharedPair: MaterialPair | null = null;
+
+  function sharedMaterials(texture: THREE.Texture): MaterialPair {
+    const opaque = ensureMaterial(texture);
+    const blend = ensureBlendedMaterial(texture);
+    if (sharedPair === null || sharedPair[0] !== opaque || sharedPair[1] !== blend) {
+      sharedPair = [opaque, blend];
+    }
+    return sharedPair;
+  }
+
+  /**
+   * The copies of the block materials the levels of detail are drawn with.
+   *
+   * Two kinds. A tinted copy per level, shared by its meshes, for `lodTint`.
+   * And a copy per mesh while it is one side of a cross-fade, because its
+   * fade is its own: three uploads a material's uniforms when the material
+   * changes between two draws, and only a `ShaderMaterial` can ask for it per
+   * object (`uniformsNeedUpdate`). The copies share one program -- the same
+   * `customProgramCacheKey` -- and each has its own uniforms, so a fading
+   * mesh costs one uniform upload. A mesh in no band keeps the shared
+   * material and costs nothing at all, and has no `discard` in its shader.
+   */
+  const tintPairs = new Map<string, MaterialPair>();
+  const fadeFree: MaterialPair[] = [];
+  const fadeInUse = new Map<THREE.Mesh, MaterialPair>();
+
+  /** The ordered dither's thresholds as a GLSL array, from `lod.ts`'s own table. */
+  const BAYER_GLSL = `const float LOD_BAYER[16] = float[16](${BAYER_4X4.map((value) => value.toFixed(6)).join(", ")});`;
+
+  function lodVariant(base: THREE.MeshStandardMaterial, fade: boolean): THREE.MeshStandardMaterial {
+    const variant = new THREE.MeshStandardMaterial();
+    variant.copy(base);
+    const uniforms = {
+      uLodFade: { value: 0 },
+      uLodCoarse: { value: 0 },
+      // The tint's colour, and how far towards it: zero is no tint.
+      uLodTint: { value: new THREE.Vector4(1, 1, 1, 0) },
+    };
+    variant.userData.lod = uniforms;
+    variant.onBeforeCompile = (shader) => {
+      shader.uniforms.uLodTint = uniforms.uLodTint;
+      // The tint goes on the albedo before the baked light reads it, so the
+      // light and the torches act on the tinted colour like any other.
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <color_fragment>",
+        "diffuseColor.rgb = mix(diffuseColor.rgb, uLodTint.rgb, uLodTint.a);\n#include <color_fragment>",
+      );
+      injectBakedLight(shader);
+      let head = "uniform vec4 uLodTint;\n";
+      let body = "";
+      if (fade) {
+        shader.uniforms.uLodFade = uniforms.uLodFade;
+        shader.uniforms.uLodCoarse = uniforms.uLodCoarse;
+        head += `uniform float uLodFade;\nuniform float uLodCoarse;\n${BAYER_GLSL}\n`;
+        // `keepsPixel` in `lod.ts`, which the checks hold this to.
+        body = `
+          {
+            ivec2 lodCell = ivec2(mod(gl_FragCoord.xy, 4.0));
+            float lodThreshold = LOD_BAYER[lodCell.y * 4 + lodCell.x];
+            if (uLodCoarse > 0.5 ? lodThreshold >= uLodFade : lodThreshold < uLodFade) discard;
+          }
+        `;
+      }
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "void main() {",
+        `${head}void main() {${body}`,
+      );
+    };
+    variant.customProgramCacheKey = () => (fade ? "lod-fade" : "lod-tint");
+    variant.needsUpdate = true;
+    return variant;
+  }
+
+  /** Keeps a copy in step with what the shared material has been told since. */
+  function syncVariant(variant: THREE.MeshStandardMaterial, base: THREE.MeshStandardMaterial): void {
+    if (variant.map !== base.map) {
+      variant.map = base.map;
+      variant.needsUpdate = true;
+    }
+    variant.envMapIntensity = base.envMapIntensity;
+    variant.wireframe = base.wireframe;
+  }
+
+  function tintedPair(layer: ChunkLayer, base: MaterialPair): MaterialPair {
+    let pair = tintPairs.get(layer);
+    if (pair === undefined) {
+      pair = [lodVariant(base[0], false), lodVariant(base[1], false)];
+      const [r, g, b] = LOD_TINT[layer] ?? [1, 1, 1];
+      for (const material of pair) {
+        (material.userData.lod.uLodTint.value as THREE.Vector4).set(r, g, b, LOD_TINT_AMOUNT);
+      }
+      tintPairs.set(layer, pair);
+    }
+    syncVariant(pair[0], base[0]);
+    syncVariant(pair[1], base[1]);
+    return pair;
+  }
+
+  function releaseFade(mesh: THREE.Mesh): void {
+    const pair = fadeInUse.get(mesh);
+    if (pair === undefined) return;
+    fadeInUse.delete(mesh);
+    fadeFree.push(pair);
+  }
+
+  function releaseAllFades(): void {
+    for (const pair of fadeInUse.values()) fadeFree.push(pair);
+    fadeInUse.clear();
+  }
+
+  /** The materials a mesh is drawn with for what the selection decided. */
+  function materialsFor(mesh: THREE.Mesh, layer: ChunkLayer, draw: LodDraw): THREE.Material[] {
+    const base = sharedPair!;
+    const tint = lodTint && layer !== "solid" ? (LOD_TINT[layer] ?? null) : null;
+    if (draw === null) {
+      releaseFade(mesh);
+      return tint === null ? base : tintedPair(layer, base);
+    }
+    let pair = fadeInUse.get(mesh);
+    if (pair === undefined) {
+      pair = fadeFree.pop() ?? [lodVariant(base[0], true), lodVariant(base[1], true)];
+      fadeInUse.set(mesh, pair);
+    }
+    for (let i = 0; i < 2; i += 1) {
+      syncVariant(pair[i], base[i]);
+      const uniforms = pair[i].userData.lod;
+      uniforms.uLodFade.value = draw.t;
+      uniforms.uLodCoarse.value = draw.coarse ? 1 : 0;
+      const [r, g, b] = tint ?? [1, 1, 1];
+      (uniforms.uLodTint.value as THREE.Vector4).set(r, g, b, tint === null ? 0 : LOD_TINT_AMOUNT);
+    }
+    return pair;
+  }
+
+  /**
+   * The regions and chunks the selection walks, rebuilt when the meshes
+   * change rather than every frame.
+   */
+  let lodRegions: LodRegion[] = [];
+  const lodDraw = new Map<string, LodDraw>();
+  /** What the last selection chose, for the counter and the stutter report. */
+  let lodStats: LodStats | null = null;
+  /** The levels each region and chunk shows, kept so a change is crossed. */
+  const lodSelector = new LodSelector();
+  /** Whether a selection is applied, as opposed to every chunk in full. */
+  let levelsShown = false;
+
+  function rebuildLodIndex(): void {
+    const shapes = new Map<number, number>();
+    const coarse = new Map<number, { lod2: number | null; lod3: number | null }>();
+    for (const mesh of chunkMeshes.values()) {
+      const layer = mesh.userData.layer as ChunkLayer;
+      const error = mesh.userData.lodError as number | null;
+      if (error === null) continue;
+      const key = mesh.userData.key as number;
+      if (layer === "lod1") shapes.set(key, error);
+      if (layer === "lod2" || layer === "lod3") {
+        const held = coarse.get(key) ?? { lod2: null, lod3: null };
+        held[layer] = error;
+        coarse.set(key, held);
+      }
+    }
+    const regions = new Map<number, { key: number; box: LodBox; lod2: number | null; lod3: number | null; chunks: LodChunk[] }>();
+    for (const mesh of chunkMeshes.values()) {
+      if (mesh.userData.layer !== "solid") continue;
+      const bounds = mesh.geometry.boundingBox;
+      if (bounds === null) continue;
+      const key = mesh.userData.key as number;
+      const regionKey = regionOfChunk(key);
+      let region = regions.get(regionKey);
+      if (region === undefined) {
+        const held = coarse.get(regionKey);
+        region = {
+          key: regionKey,
+          box: { minX: Infinity, minY: Infinity, minZ: Infinity, maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity },
+          lod2: held?.lod2 ?? null,
+          lod3: held?.lod3 ?? null,
+          chunks: [],
+        };
+        regions.set(regionKey, region);
+      }
+      const box: LodBox = {
+        minX: bounds.min.x,
+        minY: bounds.min.y,
+        minZ: bounds.min.z,
+        maxX: bounds.max.x,
+        maxY: bounds.max.y,
+        maxZ: bounds.max.z,
+      };
+      region.chunks.push({ key, box, shapes: shapes.get(key) ?? null });
+      region.box.minX = Math.min(region.box.minX, box.minX);
+      region.box.minY = Math.min(region.box.minY, box.minY);
+      region.box.minZ = Math.min(region.box.minZ, box.minZ);
+      region.box.maxX = Math.max(region.box.maxX, box.maxX);
+      region.box.maxY = Math.max(region.box.maxY, box.maxY);
+      region.box.maxZ = Math.max(region.box.maxZ, box.maxZ);
+    }
+    lodRegions = [...regions.values()];
+  }
+
+  /** Whether this frame chooses between levels at all. */
+  function levelsActive(): boolean {
+    return lodMode !== "off" && lodLoaded !== null && lodLoaded.children.length > 0 && sharedPair !== null;
+  }
+
+  /** The camera, as `lod.ts` wants it. */
+  function lodViewNow(): LodView {
+    const eye = camera!;
+    eye.updateMatrixWorld();
+    const isPerspective = (eye as THREE.PerspectiveCamera).isPerspectiveCamera === true;
+    const ortho = eye as THREE.OrthographicCamera;
+    return {
+      view: eye.matrixWorldInverse.elements,
+      perspective: isPerspective,
+      fovDeg: isPerspective ? (eye as THREE.PerspectiveCamera).fov : 0,
+      orthoHeight: isPerspective ? 0 : (ortho.top - ortho.bottom) / ortho.zoom,
+      near: (eye as THREE.PerspectiveCamera).near,
+      // The pixels drawn before supersampling: `renderScale` above one makes
+      // no pixel smaller to the eye.
+      heightPx: (canvas?.clientHeight ?? 1) * Math.min(deviceRatio, maxDpr),
+      offset: [loaded?.position.x ?? 0, loaded?.position.y ?? 0, loaded?.position.z ?? 0],
+    };
+  }
+
+  /** Every chunk in full and every level hidden: how the scene is without levels. */
+  function restoreFullDetail(): void {
+    levelsShown = false;
+    lodStats = null;
+    lodSelector.reset();
+    for (const mesh of chunkMeshes.values()) {
+      const layer = mesh.userData.layer as ChunkLayer;
+      if (layer === "void") continue;
+      mesh.visible = layer === "solid";
+      if (layer === "solid" && sharedPair !== null) mesh.material = sharedPair;
+    }
+    releaseAllFades();
+  }
+
+  /** Shows each mesh the selection chose, in the way it chose, and hides the rest. */
+  function applyLevels(active: boolean): void {
+    if (!active) {
+      if (levelsShown) restoreFullDetail();
+      return;
+    }
+    const t0 = stamp();
+    levelsShown = true;
+    lodStats = lodSelector.choose(
+      lodViewNow(),
+      lodRegions,
+      lodPixels,
+      { shapes: lodShapes, coarse: lodCoarse },
+      performance.now(),
+      lodDraw,
+    );
+    for (const [id, mesh] of chunkMeshes) {
+      const layer = mesh.userData.layer as ChunkLayer;
+      if (layer === "void") continue;
+      const draw = lodDraw.get(id);
+      if (draw === undefined) {
+        mesh.visible = false;
+        releaseFade(mesh);
+        continue;
+      }
+      mesh.visible = true;
+      mesh.material = materialsFor(mesh, layer, draw);
+    }
+    lap("lod select", t0);
+  }
+
+  /**
+   * The shadow map, drawn from the full chunks whatever is on screen.
+   *
+   * A level of detail is a shell around the blocks it stands for, so a shadow
+   * map drawn from what is on screen would darken the full chunks with the
+   * shell the moment the camera came close enough to show them -- and would
+   * have to be drawn again at every change of level, which is every few
+   * frames of moving. Drawn from the full chunks it is exact, and a change of
+   * level never touches it.
+   *
+   * three draws the shadow map at the start of a `render()`, from what is
+   * visible then, culling by the *light's* frustum and not the camera's. So a
+   * render of nothing -- a camera with the same layers, pointed away from the
+   * world, into a target one pixel square -- with the full chunks visible and
+   * the levels hidden draws exactly the shadow map, and costs what the shadow
+   * pass costs without levels: only when shadows are stale.
+   */
+  let shadowProbe: THREE.WebGLRenderTarget | null = null;
+  const shadowCamera = new THREE.OrthographicCamera(-1e-3, 1e-3, 1e-3, -1e-3, 1e-3, 2e-3);
+
+  function shadowsFromFullDetail(): void {
+    if (!renderer || !scene || !camera) return;
+    if (!renderer.shadowMap.enabled || !renderer.shadowMap.needsUpdate) return;
+    const t0 = stamp();
+    for (const mesh of chunkMeshes.values()) {
+      const layer = mesh.userData.layer as ChunkLayer;
+      if (layer === "void") continue;
+      mesh.visible = layer === "solid";
+    }
+    shadowProbe ??= new THREE.WebGLRenderTarget(1, 1);
+    shadowCamera.layers.mask = camera.layers.mask;
+    shadowCamera.position.set(0, -1e7, 0);
+    shadowCamera.lookAt(0, -2e7, 0);
+    shadowCamera.updateMatrixWorld();
+    const previous = renderer.getRenderTarget();
+    renderer.setRenderTarget(shadowProbe);
+    renderer.render(scene, shadowCamera);
+    renderer.setRenderTarget(previous);
+    lap("shadow map from full chunks", t0);
   }
 
   /**
@@ -4817,6 +6562,14 @@ import { isTyping } from "./typing.js";
     frameDocument(size);
     framedFor = key;
   });
+
+  /** Whether a delta changes anything that casts a shadow: a full chunk. */
+  function touchesFullMesh(payload: MeshPayload): boolean {
+    return (
+      payload.chunks.some((chunk) => chunk.layer === "solid") ||
+      payload.dropped.some((ref) => ref.layer === "solid")
+    );
+  }
 
   /** How big a mesh payload was, for the stutter report. */
   function payloadDetail(payload: MeshPayload): Record<string, unknown> {
@@ -4991,8 +6744,22 @@ import { isTyping } from "./typing.js";
       },
       display: displayNow(),
       documentSize,
+      /*
+       * The levels of detail: what main says of them, what the settings ask,
+       * and what the selection chose for the last frame drawn.
+       */
+      lod: {
+        state: mesh?.lod ?? null,
+        mode: lodMode,
+        pixels: lodPixels,
+        shapes: lodShapes,
+        coarse: lodCoarse,
+        meshes: lodLoaded?.children.length ?? 0,
+        chosen: lodStats,
+      },
       settings: {
         maxFps,
+        gpuPreference: gpuPref,
         antialias,
         maxDpr,
         renderScale,
@@ -5039,8 +6806,16 @@ import { isTyping } from "./typing.js";
         disposeObject(voidLoaded, { keepMaterials: true });
         voidLoaded = null;
       }
+      if (lodLoaded) {
+        scene.remove(lodLoaded);
+        disposeObject(lodLoaded, { keepMaterials: true });
+        lodLoaded = null;
+      }
+      releaseAllFades();
       chunkMeshes.clear();
+      rebuildLodIndex();
       refreshAnimated();
+      shadowsStale();
       error = null;
       return;
     }
@@ -5054,6 +6829,7 @@ import { isTyping } from "./typing.js";
      */
     const previous = loaded;
     const previousVoid = voidLoaded;
+    const previousLod = lodLoaded;
     /*
      * Applying a payload runs outside the loop, in this effect, so a spike it
      * causes shows up there as time outside; this event is what names it.
@@ -5067,6 +6843,7 @@ import { isTyping } from "./typing.js";
         throw new Error(t("viewport.noAtlas"));
       }
       const map = payload.atlas ? ensureTexture(payload.atlas) : texture!;
+      if (payload.atlasPatch) applyAtlasPatch(payload.atlasPatch);
 
       /*
        * An update to what is already up, rather than a replacement for it.
@@ -5077,26 +6854,61 @@ import { isTyping } from "./typing.js";
        * incrementally to a token it issued -- but the check costs nothing and
        * the failure it prevents is a structure with holes in it.
        */
-      if (payload.partial && previous !== null && previousVoid !== null) {
-        applyDelta(previous, previousVoid, payload, map);
+      if (payload.partial && previous !== null && previousVoid !== null && previousLod !== null) {
+        const moved =
+          previous.position.x !== payload.frame[0] ||
+          previous.position.y !== payload.frame[1] ||
+          previous.position.z !== payload.frame[2];
+        applyDelta(previous, previousVoid, previousLod, payload, map);
+        /*
+         * In flight the camera goes where the build went.
+         *
+         * A growth below the origin moves the content up in the document,
+         * and the chunks with it, while the camera stays -- so the build
+         * jumped under somebody standing in it, and with a brush the next
+         * touch landed as far from the crosshair as it had jumped. Painting
+         * on the floor of a schematic does that on the first touch. In orbit
+         * nothing is held under the crosshair from one edit to the next, and
+         * the selection follows the content there already.
+         */
+        if (moved && cameraMode === "fly" && camera) {
+          camera.position.x += payload.frame[0] - previous.position.x;
+          camera.position.y += payload.frame[1] - previous.position.y;
+          camera.position.z += payload.frame[2] - previous.position.z;
+        }
+        placeChunks(payload.frame);
+        rebuildLodIndex();
         applyWireframe(previous, wireframe);
         refreshAnimated();
+        /*
+         * The shadow map is drawn from the full chunks alone, so a delta that
+         * only brought levels of detail -- which is every slice of the queue,
+         * twenty times a second while it drains -- leaves it as it was.
+         * Redrawing it there was a whole extra pass over the full mesh per
+         * slice.
+         */
+        if (moved || touchesFullMesh(payload)) shadowsStale();
         applied("delta applied");
         error = null;
         return;
       }
       const built = buildModel(payload, map);
-      for (const gone of [previous, previousVoid]) {
+      for (const gone of [previous, previousVoid, previousLod]) {
         if (!gone) continue;
         target.remove(gone);
         disposeObject(gone, { keepMaterials: true });
       }
       loaded = built.solid;
       voidLoaded = built.filler;
+      lodLoaded = built.lod;
       target.add(built.solid);
       target.add(built.filler);
+      target.add(built.lod);
+      placeChunks(payload.frame);
+      rebuildLodIndex();
       applyWireframe(built.solid, wireframe);
       refreshAnimated();
+      shadowsStale();
       applied("rebuilt");
       error = null;
     } catch (err) {
@@ -5106,7 +6918,12 @@ import { isTyping } from "./typing.js";
 
 </script>
 
-<div class="viewer" bind:this={container}>
+<div
+  class="viewer"
+  bind:this={container}
+  style:--compass-size={`${COMPASS_PX}px`}
+  style:--compass-margin={`${COMPASS_MARGIN}px`}
+>
   <canvas bind:this={canvas}></canvas>
   <!--
     Not only frames per second: the triangle count is what makes this a
@@ -5115,15 +6932,35 @@ import { isTyping } from "./typing.js";
   -->
   {#if showFps && fps}
     <div class="fps" aria-hidden="true">
-      <strong>{fps.fps}</strong> fps &middot; {fps.ms} ms<br />
-      {fps.triangles.toLocaleString()} tris &middot; {fps.calls} draws
+      {#if fps.idle}
+        {t("viewport.fpsIdle")}<br />
+      {:else}
+        <strong>{fps.fps}</strong> fps &middot; {fps.ms} ms<br />
+      {/if}
+      {formatNumber(fps.triangles)} tris &middot; {fps.calls} draws
+      {#if fps.lod}
+        <br />{t("viewport.lodCounts", {
+          full: fps.lod.full,
+          shapes: fps.lod.shapes,
+          lod2: fps.lod.lod2,
+          lod3: fps.lod.lod3,
+          fading: fps.lod.fading,
+        })}
+      {/if}
       {#if fps.worst}
         <br />{t("viewport.worstFrame", { ms: fps.worst.ms, culprit: fps.worst.culprit })}
+      {/if}
+      {#if meshBounds}
+        <!-- component.py:465-469's caption, same two-decimal formatting. -->
+        <br />{t("viewport.bounds", {
+          center: meshBounds.center.map((n) => n.toFixed(2)).join(", "),
+          size: meshBounds.size.map((n) => n.toFixed(2)).join(", "),
+        })}
       {/if}
     </div>
   {/if}
   {#if error}
-    <div class="error">
+    <div class="error slab">
       {t("viewport.unavailable")}<br />
       <small>{error}</small>
     </div>
@@ -5131,14 +6968,9 @@ import { isTyping } from "./typing.js";
     <!--
       No placeholder for the empty state: an empty viewport is self-evidently
       empty, and a card in the middle of it was noise rather than information.
+      What the buttons do is said in the status bar, as a 3D editor says it:
+      up here, in the corner, it sat under every notification.
     -->
-    <div class="overlay">
-      {#if cameraMode === "fly"}
-        {flying ? t("viewport.hudFlying") : t("viewport.hudClickToFly")}
-      {:else}
-        {t("viewport.hudOrbit")}
-      {/if}
-    </div>
     {#if cameraMode === "fly" && flying}
       <!-- A crosshair, because in flight there is no cursor to aim with. -->
       <div class="crosshair" aria-hidden="true"></div>
@@ -5163,7 +6995,6 @@ import { isTyping } from "./typing.js";
     <button
       class="compass"
       class:locked={flying}
-      style={`width:${COMPASS_PX}px;height:${COMPASS_PX}px;left:${COMPASS_MARGIN}px;bottom:${COMPASS_MARGIN}px`}
       onclick={onCompassClick}
       title={t("viewport.compassHint")}
       aria-label={t("viewport.compass")}
@@ -5188,34 +7019,21 @@ import { isTyping } from "./typing.js";
   }
 
   /*
-   * Top right, where the overlay is not: the two would otherwise sit on each
-   * other, which is the fault the gizmo bar had against the notifications.
+   * Under the compass, which has the corner: its margin, its square and a gap,
+   * from the two numbers the gizmo is drawn with. A translucent plate with
+   * hard corners and nothing behind it blurred, as the game's own debug
+   * screen is: a blur here was a second pass over the scene for a caption.
    */
   .fps {
     position: absolute;
-    top: 16px;
-    right: 16px;
-    padding: 6px 10px;
+    top: calc(var(--compass-margin) + var(--compass-size) + var(--space-3));
+    right: var(--compass-margin);
+    padding: var(--space-2) var(--space-3);
     background: var(--overlay-bg);
-    border-radius: 6px;
-    backdrop-filter: blur(6px);
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: var(--text-xs);
     line-height: 1.5;
     text-align: right;
-    pointer-events: none;
-  }
-
-  .overlay {
-    position: absolute;
-    top: 16px;
-    left: 16px;
-    padding: 8px 12px;
-    background: var(--overlay-bg);
-    border-radius: 6px;
-    backdrop-filter: blur(6px);
-    font-size: 13px;
-    line-height: 1.4;
     pointer-events: none;
   }
 
@@ -5223,12 +7041,23 @@ import { isTyping } from "./typing.js";
    * Transparent: what is inside it is drawn by WebGL, in the same pixels.
    * This element exists to be clicked and to carry the tooltip, and giving
    * it any background of its own would put that background over the gizmo.
+   *
+   * Under the pointer too, which is the half that has to be said: app.css
+   * paints every hovered button `--bg-hover` at a specificity one element
+   * above this class, and with the radius here that was a grey disc over
+   * the compass the moment the pointer reached it.
    */
-  .compass {
+  .compass,
+  .compass:hover {
     position: absolute;
+    top: var(--compass-margin);
+    right: var(--compass-margin);
+    width: var(--compass-size);
+    height: var(--compass-size);
+    min-height: 0;
     padding: 0;
     border: none;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: transparent;
     cursor: pointer;
   }
@@ -5256,17 +7085,16 @@ import { isTyping } from "./typing.js";
     mix-blend-mode: difference;
   }
 
+  /* A slab in the middle of the empty canvas: the one thing on it to read. */
   .error {
     position: absolute;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    padding: 12px 16px;
-    max-width: 720px;
+    padding: var(--space-4) var(--space-5);
+    max-width: min(720px, calc(100% - 2 * var(--space-5)));
     text-align: center;
-    background: var(--overlay-bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    box-shadow: var(--shadow-float);
     pointer-events: none;
   }
 </style>

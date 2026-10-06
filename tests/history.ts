@@ -22,7 +22,9 @@ import {
 import {
   canRedo,
   canUndo,
+  contentShiftSince,
   createHistory,
+  historyMark,
   isDirty,
   markHistorySaved,
   nextUndoId,
@@ -604,6 +606,123 @@ console.log("\n--- after the derivation ---");
     check("a throw in it is not swallowed", raised);
     equal("...and the edit is rolled back", getBlock(doc, 1, 1, 1).namespacedName, "minecraft:air");
     equal("...leaving nothing on the stack", history.undoStack.length, 0);
+  }
+}
+
+// --- a brush stroke is one step ----------------------------------------------
+//
+// A stroke is many edits, one per touch, and one Ctrl+Z. A touch carrying the
+// stroke's key joins the transaction on top, keeping its id, while nothing else
+// came between -- see `commit`.
+console.log("\n--- a stroke is one step ---");
+{
+  const touch = (doc: SchematicDocument, history: ReturnType<typeof createHistory>, x: number, key: string | undefined, entry = STONE) =>
+    runTransaction(doc, history, "Brush", (tx) => (tx.setBlock(x, 0, 0, entry) ? 1 : 0), { mergeKey: key });
+
+  {
+    const doc = createDocument({ width: 8, height: 2, length: 2 });
+    const history = createHistory();
+    touch(doc, history, 0, "s1");
+    const first = nextUndoId(history);
+    touch(doc, history, 1, "s1");
+    touch(doc, history, 2, "s1");
+    equal("three touches of one stroke are one step", history.undoStack.length, 1);
+    equal("...under the id the first touch pushed", nextUndoId(history), first);
+    equal("...holding all three blocks", countBlocks(doc), 3);
+    undo(doc, history);
+    equal("one undo takes the whole stroke back", countBlocks(doc), 0);
+    redo(doc, history);
+    equal("...and one redo puts it back", countBlocks(doc), 3);
+  }
+  {
+    const doc = createDocument({ width: 8, height: 2, length: 2 });
+    const history = createHistory();
+    touch(doc, history, 0, "s1");
+    touch(doc, history, 1, "s2");
+    equal("another stroke is another step", history.undoStack.length, 2);
+    touch(doc, history, 2, undefined);
+    touch(doc, history, 3, "s2");
+    equal("an edit with no stroke between two touches closes the stroke", history.undoStack.length, 4);
+  }
+  {
+    const doc = createDocument({ width: 8, height: 2, length: 2 });
+    const history = createHistory();
+    touch(doc, history, 0, "s1");
+    touch(doc, history, 1, "s1");
+    undo(doc, history);
+    touch(doc, history, 2, "s1");
+    equal("a touch after an undo starts a step of its own", history.undoStack.length, 1);
+    equal("...holding only itself", countBlocks(doc), 1);
+    check("...and the redo branch is gone, as after any edit", !canRedo(history));
+  }
+  {
+    const doc = createDocument({ width: 8, height: 2, length: 2 });
+    const history = createHistory();
+    touch(doc, history, 0, "s1");
+    undo(doc, history);
+    redo(doc, history);
+    touch(doc, history, 1, "s1");
+    equal("a redo closes the stroke too", history.undoStack.length, 2);
+  }
+  {
+    /*
+     * The one that matters most. Joining does not move the depth, so a touch
+     * after a save would land in the saved transaction and the document would
+     * read as clean with an edit on it.
+     */
+    const doc = createDocument({ width: 8, height: 2, length: 2 });
+    const history = createHistory();
+    touch(doc, history, 0, "s1");
+    markHistorySaved(history);
+    touch(doc, history, 1, "s1");
+    check("a touch after a save makes the document dirty", isDirty(history));
+    equal("...because the save closed the stroke", history.undoStack.length, 2);
+  }
+  {
+    const doc = createDocument({ width: 8, height: 2, length: 2 });
+    const history = createHistory();
+    touch(doc, history, 0, "s1");
+    touch(doc, history, 0, "s1");
+    touch(doc, history, 1, "s1");
+    equal("a touch that changed nothing keeps the stroke open", history.undoStack.length, 1);
+  }
+  {
+    const doc = createDocument({ width: 8, height: 2, length: 2 });
+    const history = createHistory(2);
+    for (let x = 0; x < 6; x += 1) touch(doc, history, x, "s1");
+    equal("a stroke longer than the stack's limit loses nothing", countBlocks(doc), 6);
+    undo(doc, history);
+    equal("...and comes back whole", countBlocks(doc), 0);
+  }
+  {
+    /*
+     * The shift a touch reports is its own. A mark taken before it sees the
+     * resize it appended to the stroke's transaction, and not the one an
+     * earlier touch put there.
+     */
+    const doc = createDocument({ width: 4, height: 2, length: 2 });
+    const history = createHistory();
+    const grow = (dx: number) =>
+      runTransaction(
+        doc,
+        history,
+        "Brush",
+        (tx) => {
+          tx.resize({ width: doc.width + dx, height: doc.height, length: doc.length }, [dx, 0, 0]);
+          return tx.setBlock(0, 0, 0, STONE) ? 1 : 0;
+        },
+        { mergeKey: "s1" },
+      );
+    const start = historyMark(history);
+    grow(1);
+    equal("a touch that grew below the origin says so", contentShiftSince(history, start), [1, 0, 0]);
+    const second = historyMark(history);
+    grow(2);
+    equal("one stroke", history.undoStack.length, 1);
+    equal("...and the next touch reports its own shift, not the stroke's", contentShiftSince(history, second), [2, 0, 0]);
+    equal("...while the stroke as a whole moved by both", contentShiftSince(history, start), [3, 0, 0]);
+    const idle = historyMark(history);
+    equal("nothing since says nothing", contentShiftSince(history, idle), [0, 0, 0]);
   }
 }
 

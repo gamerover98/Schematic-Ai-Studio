@@ -57,6 +57,20 @@ export function t(key: string, params?: MessageParams): string {
  * `count` is passed through as a parameter so the message can print it.
  */
 export function tn(key: string, count: number, params?: MessageParams): string {
-  return translatePlural(CATALOGS[locale], key, count, params);
+  return translatePlural(CATALOGS[locale], key, count, params, locale);
+}
+
+/**
+ * A number as the current language writes it: "2,056" in English.
+ *
+ * Every number the window prints goes through here or through `tn`, never
+ * through a bare `toLocaleString()`, which asks the operating system. The
+ * sentence around the number is in the app's language, so the separator has
+ * to be too: on an Italian machine the system's answer is "2.056", which an
+ * English reader takes for two and a bit. Dates are the exception and keep
+ * the system's format (`age_label.ts` says why).
+ */
+export function formatNumber(value: number): string {
+  return value.toLocaleString(locale);
 }
 

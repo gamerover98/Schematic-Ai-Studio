@@ -14,6 +14,7 @@
    */
   import type { UpdateStatus } from "../../../shared/ipc.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     status: UpdateStatus;
@@ -46,7 +47,7 @@
     title={`${t("updates.title")} — ${label}`}
     aria-label={`${t("updates.title")}: ${label}`}
   >
-    <span class="arrow" aria-hidden="true">↑</span>
+    <span class="arrow"><Icon name="arrowUp" size={13} weight={2.6} /></span>
     <span class="name">{label}</span>
   </button>
 {/if}
@@ -55,20 +56,21 @@
   .update {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    font-size: 12px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
   }
 
   .arrow {
-    font-weight: 700;
-    color: var(--accent);
+    display: grid;
+    place-items: center;
+    color: var(--accent-text);
   }
 
   /* Ready is the one state that is waiting on a click, so it is the one that
      stands out. */
   .update.ready {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
   }
 
   .name {

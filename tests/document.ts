@@ -40,6 +40,9 @@ import {
   toStructureData,
   voxelIndex,
 } from "../src/main/domain/document.js";
+import { countsOf, takeVoxelChanges, writeVoxel } from "../src/main/domain/document.js";
+import { createHistory, redo, runTransaction, undo } from "../src/main/domain/history.js";
+import { readdirSync, readFileSync, statSync } from "fs";
 import { flattenNbt, NbtEditError, setNbtValue } from "../src/main/domain/nbt_edit.js";
 import { mirrorProperties, rotateProperties } from "../src/main/domain/transform.js";
 import { loadStructure } from "../src/main/pipeline/loader.js";
@@ -599,6 +602,115 @@ console.log("\n--- block states follow a mirror ---");
   const varied = { facing: "east", rotation: "3", shape: "outer_left", hinge: "right", north: "true" };
   equal("mirroring twice is the identity", m(m(varied, "x"), "x"), varied);
   equal("...on the other axis too", m(m(varied, "z"), "z"), varied);
+}
+
+// --- the counts and the change list stay true ----------------------------
+//
+// `counts` answers the materials list, the block count and which blocks the
+// mesher must bake, and `changes` tells the chunk cache which cells to look
+// at. Both are kept by the writes rather than counted, so both are checked
+// against counting: after random writes, undos, redos and resizes the counts
+// equal a full count, and every cell that differs from before is in the list.
+console.log("\n--- the counts and the change list stay true ---");
+{
+  const doc = createDocument({ width: 12, height: 8, length: 10 });
+  const history = createHistory();
+  const blocks = ["minecraft:stone", "minecraft:dirt", "minecraft:oak_planks", "minecraft:air"].map(
+    (name) => ({ namespacedName: name, properties: {} }) as PaletteEntry,
+  );
+  let seed = 11;
+  const random = (): number => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  let wrong = 0;
+  let missed = 0;
+  let epoch: number | null = takeVoxelChanges(doc, null).epoch;
+  for (let step = 0; step < 120; step += 1) {
+    const snapshot = Int32Array.from(doc.voxels);
+    const shape = [doc.width, doc.height, doc.length].join("x");
+    const roll = random();
+    if (roll < 0.15 && history.undoStack.length > 0) {
+      undo(doc, history);
+    } else if (roll < 0.22 && history.redoStack.length > 0) {
+      redo(doc, history);
+    } else if (roll < 0.3) {
+      // Through the history, so the undos around it replay in the right frame.
+      const grow = { width: doc.width + 1, height: doc.height, length: doc.length + (random() < 0.5 ? 1 : 0) };
+      const shift: [number, number, number] = [random() < 0.5 ? 1 : 0, 0, 0];
+      runTransaction(doc, history, "grow", (tx) => {
+        tx.resize(grow, shift);
+        return 0;
+      });
+    } else {
+      runTransaction(doc, history, "edit", (tx) => {
+        for (let i = 0; i < 5; i += 1) {
+          tx.setBlock(
+            Math.floor(random() * doc.width),
+            Math.floor(random() * doc.height),
+            Math.floor(random() * doc.length),
+            blocks[Math.floor(random() * blocks.length)],
+          );
+        }
+        return 5;
+      });
+    }
+    const counted = countsOf(doc.voxels, doc.palette.length);
+    if (counted.some((count, index) => count !== (doc.counts[index] ?? 0))) wrong += 1;
+    // Same shape: every cell that changed has to be listed.
+    const taken = takeVoxelChanges(doc, epoch);
+    epoch = taken.epoch;
+    if (shape === [doc.width, doc.height, doc.length].join("x") && taken.cells !== null) {
+      for (let i = 0; i < doc.voxels.length; i += 1) {
+        if (doc.voxels[i] !== snapshot[i] && !taken.cells.has(i)) missed += 1;
+      }
+    }
+  }
+  equal("the counts equal a full count after every step", wrong, 0);
+  equal("every changed cell is in the change list", missed, 0);
+
+  const fresh = createDocument({ width: 4, height: 4, length: 4 });
+  const first = takeVoxelChanges(fresh, null);
+  writeVoxel(fresh, 5, 0);
+  check("writing a cell's own value lists nothing", takeVoxelChanges(fresh, first.epoch).cells?.size === 0);
+  const again = takeVoxelChanges(fresh, null);
+  check("a list taken without the epoch is unknown, never partial", again.cells === null);
+
+  /*
+   * And nothing else writes the grid. `counts` and `changes` are only as true
+   * as the list of places that write `voxels`, so the source is walked: a
+   * write anywhere but the functions that keep both is refused.
+   */
+  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..", "src", "main");
+  const offenders: string[] = [];
+  const allowed: Record<string, readonly string[]> = {
+    // The one-cell write, and the three bulk rewrites that recount.
+    [path.join("domain", "document.ts")]: ["writeVoxel", "documentFromLoaded", "compactPalette"],
+  };
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!name.endsWith(".ts")) continue;
+      const relative = path.relative(root, full);
+      const text = readFileSync(full, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      const lines = text.split(/\r?\n/);
+      let fn = "";
+      lines.forEach((line, index) => {
+        const opened = /^(?:export )?(?:async )?function (\w+)/.exec(line);
+        if (opened) fn = opened[1];
+        if (!/\b(?:doc|document|session\.doc)\.voxels\s*(?:\[[^\]]*\]\s*=[^=]|\.set\(|\.fill\(|=[^=])/.test(line)) return;
+        if ((allowed[relative] ?? []).includes(fn)) return;
+        if (relative === path.join("domain", "document.ts") && fn === "resizeDocument") return;
+        offenders.push(`${relative}:${index + 1} (${fn || "top level"})`);
+      });
+    }
+  };
+  walk(root);
+  check("nothing in src/main writes a document's voxels but the functions that keep the counts", offenders.length === 0, offenders.join(", "));
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

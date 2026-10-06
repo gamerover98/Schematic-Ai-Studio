@@ -35,6 +35,7 @@ import { getBlock, normalizeRegion, type SchematicDocument } from "./document.js
 import type { TransactionScope } from "./history.js";
 import type { RegionSpec } from "../../shared/ipc.js";
 import { hasProperty } from "../../shared/block_states.js";
+import { boxContains, forEachUnionCell, type Box } from "../../shared/regions.js";
 
 /** Quarter-turns, in the east -> south direction. */
 export type Quarter = 0 | 1 | 2 | 3;
@@ -334,9 +335,44 @@ export interface TransformPlacement {
    * from coming back full of bubbles.
    */
   empty?: PaletteEntry;
+  /**
+   * The areas that actually move, when the region is the bounds of several.
+   *
+   * The gap between two areas is inside their bounds and was never selected,
+   * so it is neither read, nor cleared, nor written from: the transform is a
+   * rigid map of the cells in these boxes and of nothing else. Absent, the
+   * whole region moves, which is the one-box case exactly.
+   */
+  mask?: readonly Box[] | null;
 }
 
 const AIR: PaletteEntry = { namespacedName: "minecraft:air", properties: {} };
+
+/** The cells a transform reads: the masked ones, or the whole region. */
+function forEachMovedCell(
+  region: Box,
+  mask: readonly Box[] | null | undefined,
+  visit: (x: number, y: number, z: number) => void,
+): void {
+  forEachUnionCell(mask ?? [region], (x, y, z) => {
+    if (boxContains(region, x, y, z)) visit(x, y, z);
+  });
+}
+
+/** Leaves the masked cells -- or the whole region -- holding `entry`. */
+function clearMoved(
+  tx: TransactionScope,
+  region: Box,
+  mask: readonly Box[] | null | undefined,
+  entry: PaletteEntry,
+): number {
+  if (!mask) return tx.fill(region, entry);
+  let changed = 0;
+  forEachMovedCell(region, mask, (x, y, z) => {
+    if (tx.setBlock(x, y, z, entry)) changed += 1;
+  });
+  return changed;
+}
 
 /**
  * A block's orientation as it is *drawn*, written out when the entry leaves it
@@ -439,23 +475,28 @@ export function applyRegionTransform(
     entry: PaletteEntry;
     entity: BlockEntityRecord | null;
   }[] = [];
-  for (let x = region.minX; x <= region.maxX; x += 1) {
-    for (let y = region.minY; y <= region.maxY; y += 1) {
-      for (let z = region.minZ; z <= region.maxZ; z += 1) {
-        cells.push({
-          x,
-          y,
-          z,
-          entry: getBlock(doc, x, y, z),
-          entity: doc.blockEntities.get(`${x},${y},${z}`) ?? null,
-        });
-      }
-    }
-  }
+  forEachMovedCell(region, placement.mask, (x, y, z) => {
+    cells.push({
+      x,
+      y,
+      z,
+      entry: getBlock(doc, x, y, z),
+      entity: doc.blockEntities.get(`${x},${y},${z}`) ?? null,
+    });
+  });
 
   const corner = to ?? { x: region.minX, y: region.minY, z: region.minZ };
+  /*
+   * Several areas are never "in place", even landing on their own corner: a
+   * turn of the bounds is a bijection on the bounds, not on the areas inside
+   * them, so a cell can be sent onto the gap and the cell it left would keep
+   * its block.
+   */
   const inPlace =
-    corner.x === region.minX && corner.y === region.minY && corner.z === region.minZ;
+    !placement.mask &&
+    corner.x === region.minX &&
+    corner.y === region.minY &&
+    corner.z === region.minZ;
 
   /*
    * In place there is no clearing pass, though one looks prudent: both a turn
@@ -472,7 +513,7 @@ export function applyRegionTransform(
    */
   let changed = 0;
   if (!inPlace) {
-    changed += tx.fill(region, placement.empty ?? AIR);
+    changed += clearMoved(tx, region, placement.mask, placement.empty ?? AIR);
   }
 
   for (const cell of cells) {
@@ -539,21 +580,18 @@ export function scaleWouldDrop(
   doc: SchematicDocument,
   request: RegionSpec,
   spec: ScaleSpec,
+  mask: readonly Box[] | null = null,
 ): number {
   if (spec.kind === "multiply") return 0;
   const region = normalizeRegion(doc, request);
   const n = spec.factor;
   let dropped = 0;
-  for (let x = region.minX; x <= region.maxX; x += 1) {
-    for (let y = region.minY; y <= region.maxY; y += 1) {
-      for (let z = region.minZ; z <= region.maxZ; z += 1) {
-        const kept =
-          (x - region.minX) % n === 0 && (y - region.minY) % n === 0 && (z - region.minZ) % n === 0;
-        if (kept) continue;
-        if (getBlock(doc, x, y, z).namespacedName !== AIR.namespacedName) dropped += 1;
-      }
-    }
-  }
+  forEachMovedCell(region, mask, (x, y, z) => {
+    const kept =
+      (x - region.minX) % n === 0 && (y - region.minY) % n === 0 && (z - region.minZ) % n === 0;
+    if (kept) return;
+    if (getBlock(doc, x, y, z).namespacedName !== AIR.namespacedName) dropped += 1;
+  });
   return dropped;
 }
 
@@ -583,20 +621,19 @@ export function applyRegionScale(
   const out = scaledExtent({ width, height, length }, spec);
   const corner = placement.to ?? { x: region.minX, y: region.minY, z: region.minZ };
 
+  // A cell outside the mask stays `undefined`, which the write below already
+  // reads as "nothing to put here" -- so the gap between two areas is neither
+  // scaled nor written over.
   const source: (PaletteEntry | undefined)[] = [];
   const entities: (BlockEntityRecord | null)[] = [];
   const at = (x: number, y: number, z: number): number => (y * length + z) * width + x;
-  for (let x = 0; x < width; x += 1) {
-    for (let y = 0; y < height; y += 1) {
-      for (let z = 0; z < length; z += 1) {
-        source[at(x, y, z)] = getBlock(doc, region.minX + x, region.minY + y, region.minZ + z);
-        entities[at(x, y, z)] =
-          doc.blockEntities.get(`${region.minX + x},${region.minY + y},${region.minZ + z}`) ?? null;
-      }
-    }
-  }
+  forEachMovedCell(region, placement.mask, (wx, wy, wz) => {
+    const index = at(wx - region.minX, wy - region.minY, wz - region.minZ);
+    source[index] = getBlock(doc, wx, wy, wz);
+    entities[index] = doc.blockEntities.get(`${wx},${wy},${wz}`) ?? null;
+  });
 
-  let changed = tx.fill(region, placement.empty ?? AIR);
+  let changed = clearMoved(tx, region, placement.mask, placement.empty ?? AIR);
   const n = spec.factor;
   for (let x = 0; x < out.width; x += 1) {
     for (let y = 0; y < out.height; y += 1) {

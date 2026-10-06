@@ -58,6 +58,7 @@ const DISPATCH: Record<MenuCommand, (item: MenuItemModel) => void> = {
   save: () => send(IPC.menuSave),
   saveAs: () => send(IPC.menuSaveAs),
   close: () => send(IPC.menuClose),
+  convert: () => send(IPC.menuConvert),
   undo: () => send(IPC.menuUndo),
   redo: () => send(IPC.menuRedo),
   about: () => send(IPC.menuAbout),

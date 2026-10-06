@@ -22,12 +22,14 @@
  * The numerically lowest wins, so the answer is deterministic and the same
  * everywhere.
  *
- * ## What this deliberately does not do
+ * ## Two exact-state indexes, deliberately
  *
- * It does not build the writer's `byState` index. That one re-keys through
- * `parsePaletteEntry` and `paletteEntryCacheKey` so property *order* cannot
- * decide a match, and those live in `main/pipeline/`. Matching an exact state
- * is a different job from naming a block, and the writer keeps it.
+ * The writer keeps its own `byState`, re-keyed through `parsePaletteEntry` and
+ * `paletteEntryCacheKey`, which live in `main/pipeline/`. This one exists
+ * because the block tooltip has to say which `ID:DATA` a *state* will be
+ * stored as, and the renderer cannot follow into main. `legacyStateKey` sorts
+ * the states the way `paletteEntryCacheKey` does, so the two agree row for
+ * row; `tests/formats.ts` compares them over the whole table.
  */
 
 /** A pre-Flattening block: a numeric id and a metadata nibble. */
@@ -96,6 +98,19 @@ export interface LegacyIndex {
    * accident of the data: it is the era.
    */
   readonly properties: ReadonlyMap<string, ReadonlySet<string>>;
+  /**
+   * `name[sorted=states]` -> the lowest `id:meta` that is exactly that state.
+   *
+   * The same inversion `buildReverseLegacyTable` makes in main for the MCEdit
+   * writer, keyed the same way -- name, then the states sorted by key -- so a
+   * tooltip that says what an entry will be stored as says what the writer
+   * will actually write. Main keeps its own because it re-keys through
+   * `paletteEntryCacheKey`, which lives where the renderer cannot follow; the
+   * two keys agree on every row of the table.
+   */
+  readonly byState: ReadonlyMap<string, LegacyId>;
+  /** Numeric id -> every metadata value the table has a row for, lowest first. */
+  readonly variants: ReadonlyMap<number, readonly { readonly meta: number; readonly modern: string }[]>;
 }
 
 export function buildLegacyIndex(table: Readonly<Record<string, string>>): LegacyIndex {
@@ -103,6 +118,8 @@ export function buildLegacyIndex(table: Readonly<Record<string, string>>): Legac
   const byId = new Map<string, string>();
   const names = new Set<string>();
   const properties = new Map<string, Set<string>>();
+  const byState = new Map<string, LegacyId>();
+  const variants = new Map<number, { meta: number; modern: string }[]>();
 
   const rank = (a: LegacyId, b: LegacyId): number => a.id - b.id || a.meta - b.meta;
 
@@ -122,9 +139,82 @@ export function buildLegacyIndex(table: Readonly<Record<string, string>>): Legac
       properties.set(name, held);
     }
     for (const pair of statePairs(modern)) held.add(pair);
-  }
 
-  return { byName, byId, names, properties };
+    const stateKey = legacyStateKey(modern);
+    const known = byState.get(stateKey);
+    if (known === undefined || rank(legacy, known) < 0) byState.set(stateKey, legacy);
+
+    let rows = variants.get(legacy.id);
+    if (rows === undefined) {
+      rows = [];
+      variants.set(legacy.id, rows);
+    }
+    rows.push({ meta: legacy.meta, modern });
+  }
+  for (const rows of variants.values()) rows.sort((a, b) => a.meta - b.meta);
+
+  return { byName, byId, names, properties, byState, variants };
+}
+
+/**
+ * `minecraft:oak_fence[west=false,east=false]` as one key whatever order the
+ * states were written in: the name, then the pairs sorted by key. A bare name
+ * gets the `minecraft:` it was written without.
+ */
+export function legacyStateKey(spelling: string): string {
+  const open = spelling.indexOf("[");
+  const rawName = (open < 0 ? spelling : spelling.slice(0, open)).trim();
+  const name = rawName.includes(":") ? rawName : `minecraft:${rawName}`;
+  if (open < 0 || !spelling.trimEnd().endsWith("]")) return name;
+  const pairs = spelling
+    .trim()
+    .slice(open + 1, -1)
+    .split(",")
+    .map((pair) => pair.trim())
+    .filter((pair) => pair !== "")
+    .sort((a, b) => {
+      // Code-unit order, as `paletteEntryCacheKey`'s plain `.sort()` has it.
+      const ka = a.split("=")[0];
+      const kb = b.split("=")[0];
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+  return pairs.length === 0 ? name : `${name}[${pairs.join(",")}]`;
+}
+
+/**
+ * The `ID:DATA` a full state will be stored as, and whether it is that state
+ * exactly.
+ *
+ * `exact: false` is the writer's `degraded`: the state has no row of its own,
+ * so the MCEdit save writes the base block's lowest id and reports it. Saying
+ * so beside the number is the difference between a label and a promise.
+ * `null` where the era cannot name the block at all.
+ */
+export function legacyIdForState(
+  index: LegacyIndex | null,
+  spelling: string,
+): { label: string; exact: boolean } | null {
+  if (index === null) return null;
+  const exact = index.byState.get(legacyStateKey(spelling));
+  if (exact !== undefined) return { label: legacyIdLabel(exact), exact: true };
+  const named = index.byName.get(legacyStateKey(legacyBaseName(spelling)));
+  return named === undefined ? null : { label: legacyIdLabel(named), exact: false };
+}
+
+/**
+ * Every `ID:DATA` that shares this block's numeric id -- `35:0` to `35:15` for
+ * wool -- which is how a pre-Flattening block's variants were chosen. Empty
+ * where the era cannot name the block.
+ */
+export function legacyVariantsOf(
+  index: LegacyIndex | null,
+  spelling: string,
+): readonly { readonly label: string; readonly modern: string }[] {
+  if (index === null) return [];
+  const own = legacyIdForState(index, spelling);
+  if (own === null) return [];
+  const id = Number(own.label.split(":")[0]);
+  return (index.variants.get(id) ?? []).map((row) => ({ label: `${id}:${row.meta}`, modern: row.modern }));
 }
 
 /** The property names inside `oak_fence[east=false,north=false]`, if any. */

@@ -277,11 +277,21 @@ export function computeLight(struct: StructureData): LightGrid {
    * all was 200ms an edit: each one is dequeued, decomposed into coordinates
    * and asked about six neighbours, only to find every one of them already at
    * 15 and do nothing. The only cells that can spread are the ones next to
-   * something dimmer, which is to say next to a solid block or the grid's edge,
-   * and there are a few thousand of those.
+   * something dimmer.
+   *
+   * "Dimmer" is an open neighbour below 15, and for a long time it was read
+   * as "a solid neighbour" instead. That is the same set wherever the sky
+   * meets the ground, and a different one under an overhang: the open column
+   * beside a roof is next to the dark cells under it and next to nothing
+   * solid, so it lit nothing, and the space under every overhang took its
+   * light from the floor upwards -- darkest just under the roof, where the
+   * game has it brightest. It also made the flood something a partial
+   * recompute could not reproduce, because which cells spread depended on
+   * more than their light. See `relight`.
    */
   const skyQueue: number[] = [];
   const strideX = sizeY * sizeZ;
+  const dimmer = (at: number): boolean => solid[at] !== 1 && sky[at] < MAX_LIGHT;
   for (let index = 0; index < cells; index += 1) {
     if (sky[index] !== MAX_LIGHT) continue;
     const x = (index / strideX) | 0;
@@ -289,17 +299,263 @@ export function computeLight(struct: StructureData): LightGrid {
     const y = (rest / sizeZ) | 0;
     const z = rest - y * sizeZ;
     const edge =
-      (x > 0 && solid[index - strideX] === 1) ||
-      (x + 1 < sizeX && solid[index + strideX] === 1) ||
-      (y > 0 && solid[index - sizeZ] === 1) ||
-      (y + 1 < sizeY && solid[index + sizeZ] === 1) ||
-      (z > 0 && solid[index - 1] === 1) ||
-      (z + 1 < sizeZ && solid[index + 1] === 1);
+      (x > 0 && dimmer(index - strideX)) ||
+      (x + 1 < sizeX && dimmer(index + strideX)) ||
+      (y > 0 && dimmer(index - sizeZ)) ||
+      (y + 1 < sizeY && dimmer(index + sizeZ)) ||
+      (z > 0 && dimmer(index - 1)) ||
+      (z + 1 < sizeZ && dimmer(index + 1));
     if (edge) skyQueue.push(index);
   }
   spread(sky, solid, skyQueue, sizeX, sizeY, sizeZ);
 
   return { block, sky, sizeX, sizeY, sizeZ };
+}
+
+/**
+ * How far one changed cell can move the light, sideways.
+ *
+ * Light loses a level per step and starts at 15 at most, so a change reaches
+ * at most fourteen cells away along any path, and a path is at least as long
+ * as its distance on each axis. Fifteen leaves a cell of margin. Vertically
+ * there is no such bound: a block placed high in a column shades the whole
+ * column under it, which is why `relight` takes whole columns.
+ */
+export const LIGHT_REACH = 15;
+
+/**
+ * The light again after some cells changed, recomputed only where it can have
+ * moved.
+ *
+ * `computeLight` floods the whole document, and it ran on every edit: about
+ * 100 ms on a 256x96x256 terrain for one placed block, four times the cost of
+ * meshing the chunk that changed. A change can only move the light within
+ * `LIGHT_REACH` columns of itself, so this resets that box -- whole columns,
+ * because of the sky -- and floods it again.
+ *
+ * Everything outside the box keeps its value, and that is what makes the
+ * result exact rather than close: those values do not change (nothing in the
+ * box is near enough to them), and they are where light enters the box from
+ * outside, so each cell on the box's sides is seeded with its outside
+ * neighbour's level less one. Inside, the seeds are `computeLight`'s own --
+ * what glows, the open sky down each column, and the open sky beside
+ * something dimmer -- so the two agree cell for cell. `tests/chunks.ts` holds
+ * them equal over random edits; it is what found that `computeLight` used to
+ * seed only beside solid blocks, which no boundary can reproduce.
+ *
+ * `prev` is not touched; the answer is a new grid. `changed` lists the cells
+ * whose block or sky level differs from `prev`, which is what the chunk cache
+ * redraws.
+ */
+export function relight(
+  prev: LightGrid,
+  struct: StructureData,
+  box: { minX: number; maxX: number; minZ: number; maxZ: number },
+): { grid: LightGrid; changed: number[] } {
+  const sizeX = prev.sizeX;
+  const sizeY = prev.sizeY;
+  const sizeZ = prev.sizeZ;
+  const strideX = sizeY * sizeZ;
+  const voxels = struct.voxels;
+  const opaque = struct.palette.map((entry) => blocksLight(entry));
+  const emits = struct.palette.map((entry) => blockEmission(entry));
+  const solidAt = (index: number): boolean => opaque[voxels[index]] === true;
+
+  const x0 = Math.max(0, box.minX - LIGHT_REACH);
+  const x1 = Math.min(sizeX - 1, box.maxX + LIGHT_REACH);
+  const z0 = Math.max(0, box.minZ - LIGHT_REACH);
+  const z1 = Math.min(sizeZ - 1, box.maxZ + LIGHT_REACH);
+
+  const block = new Uint8Array(prev.block);
+  const sky = new Uint8Array(prev.sky);
+  const blockQueue: number[] = [];
+  const skyQueue: number[] = [];
+
+  // Reset and seed the box exactly as `computeLight` seeds the whole grid.
+  for (let x = x0; x <= x1; x += 1) {
+    for (let z = z0; z <= z1; z += 1) {
+      let open = true;
+      for (let y = sizeY - 1; y >= 0; y -= 1) {
+        const index = x * strideX + y * sizeZ + z;
+        const paletteIndex = voxels[index];
+        block[index] = 0;
+        sky[index] = 0;
+        if (opaque[paletteIndex] === true) {
+          open = false;
+        } else if (open) {
+          sky[index] = MAX_LIGHT;
+        }
+        const emission = emits[paletteIndex] ?? 0;
+        if (emission > 0) {
+          block[index] = emission;
+          blockQueue.push(index);
+        }
+      }
+    }
+  }
+
+  // The sky's own seeds: open sky beside something dimmer, `computeLight`'s
+  // rule. A neighbour outside the box still holds its old value, which is its
+  // value.
+  const dimmer = (at: number): boolean => !solidAt(at) && sky[at] < MAX_LIGHT;
+  for (let x = x0; x <= x1; x += 1) {
+    for (let z = z0; z <= z1; z += 1) {
+      for (let y = 0; y < sizeY; y += 1) {
+        const index = x * strideX + y * sizeZ + z;
+        if (sky[index] !== MAX_LIGHT) continue;
+        const edge =
+          (x > 0 && dimmer(index - strideX)) ||
+          (x + 1 < sizeX && dimmer(index + strideX)) ||
+          (y > 0 && dimmer(index - sizeZ)) ||
+          (y + 1 < sizeY && dimmer(index + sizeZ)) ||
+          (z > 0 && dimmer(index - 1)) ||
+          (z + 1 < sizeZ && dimmer(index + 1));
+        if (edge) skyQueue.push(index);
+      }
+    }
+  }
+
+  // Light coming in through the box's sides, from values that do not change.
+  const enter = (index: number, from: number): void => {
+    if (solidAt(index)) return;
+    const fromBlock = prev.block[from] - 1;
+    if (fromBlock > block[index]) {
+      block[index] = fromBlock;
+      blockQueue.push(index);
+    }
+    const fromSky = prev.sky[from] - 1;
+    if (fromSky > sky[index]) {
+      sky[index] = fromSky;
+      skyQueue.push(index);
+    }
+  };
+  for (let y = 0; y < sizeY; y += 1) {
+    for (let z = z0; z <= z1; z += 1) {
+      if (x0 > 0) enter(x0 * strideX + y * sizeZ + z, (x0 - 1) * strideX + y * sizeZ + z);
+      if (x1 + 1 < sizeX) enter(x1 * strideX + y * sizeZ + z, (x1 + 1) * strideX + y * sizeZ + z);
+    }
+    for (let x = x0; x <= x1; x += 1) {
+      if (z0 > 0) enter(x * strideX + y * sizeZ + z0, x * strideX + y * sizeZ + z0 - 1);
+      if (z1 + 1 < sizeZ) enter(x * strideX + y * sizeZ + z1, x * strideX + y * sizeZ + z1 + 1);
+    }
+  }
+
+  const solid = (index: number): boolean => solidAt(index);
+  spreadWithin(block, solid, blockQueue, sizeX, sizeY, sizeZ, x0, x1, z0, z1);
+  spreadWithin(sky, solid, skyQueue, sizeX, sizeY, sizeZ, x0, x1, z0, z1);
+
+  const changed: number[] = [];
+  for (let x = x0; x <= x1; x += 1) {
+    for (let y = 0; y < sizeY; y += 1) {
+      let index = x * strideX + y * sizeZ + z0;
+      for (let z = z0; z <= z1; z += 1, index += 1) {
+        if (block[index] !== prev.block[index] || sky[index] !== prev.sky[index]) changed.push(index);
+      }
+    }
+  }
+  return { grid: { block, sky, sizeX, sizeY, sizeZ }, changed };
+}
+
+/**
+ * A light grid carried into a resized box, the new cells lit as though they
+ * were outside it.
+ *
+ * `shift` is where the old grid's cells went (a document cell moved by the
+ * resize's shift). A new cell gets what the mesher reads for a cell outside
+ * the grid -- no block light, full sky -- which is exactly right for an air
+ * cell under open sky, and is the assumption `relight` then corrects wherever
+ * it is wrong: run it over a box holding the new cells and it relights them
+ * from scratch.
+ */
+export function carryLight(
+  prev: LightGrid,
+  size: readonly [number, number, number],
+  shift: readonly [number, number, number],
+): LightGrid {
+  const [sizeX, sizeY, sizeZ] = size;
+  const cells = sizeX * sizeY * sizeZ;
+  const block = new Uint8Array(cells);
+  const sky = new Uint8Array(cells).fill(MAX_LIGHT);
+  const oldPlane = prev.sizeY * prev.sizeZ;
+  for (let ox = 0; ox < prev.sizeX; ox += 1) {
+    const x = ox + shift[0];
+    if (x < 0 || x >= sizeX) continue;
+    for (let oy = 0; oy < prev.sizeY; oy += 1) {
+      const y = oy + shift[1];
+      if (y < 0 || y >= sizeY) continue;
+      const z0 = Math.max(0, shift[2]);
+      const z1 = Math.min(sizeZ, prev.sizeZ + shift[2]);
+      if (z1 <= z0) continue;
+      const from = ox * oldPlane + oy * prev.sizeZ + (z0 - shift[2]);
+      const to = x * sizeY * sizeZ + y * sizeZ + z0;
+      block.set(prev.block.subarray(from, from + (z1 - z0)), to);
+      sky.set(prev.sky.subarray(from, from + (z1 - z0)), to);
+    }
+  }
+  return { block, sky, sizeX, sizeY, sizeZ };
+}
+
+/**
+ * `spread`, kept inside a box of columns.
+ *
+ * Nothing outside the box can get brighter -- see `relight` -- so a step out of
+ * it is simply not taken, which also keeps the flood from walking the rest of
+ * the document to confirm that.
+ */
+function spreadWithin(
+  levels: Uint8Array,
+  solid: (index: number) => boolean,
+  queue: number[],
+  sizeX: number,
+  sizeY: number,
+  sizeZ: number,
+  x0: number,
+  x1: number,
+  z0: number,
+  z1: number,
+): void {
+  const strideX = sizeY * sizeZ;
+  for (let head = 0; head < queue.length; head += 1) {
+    const index = queue[head];
+    const level = levels[index];
+    if (level <= 1) continue;
+    const next = level - 1;
+    const x = (index / strideX) | 0;
+    const rest = index - x * strideX;
+    const y = (rest / sizeZ) | 0;
+    const z = rest - y * sizeZ;
+
+    let at = index - strideX;
+    if (x > x0 && !solid(at) && levels[at] < next) {
+      levels[at] = next;
+      queue.push(at);
+    }
+    at = index + strideX;
+    if (x < x1 && x + 1 < sizeX && !solid(at) && levels[at] < next) {
+      levels[at] = next;
+      queue.push(at);
+    }
+    at = index - sizeZ;
+    if (y > 0 && !solid(at) && levels[at] < next) {
+      levels[at] = next;
+      queue.push(at);
+    }
+    at = index + sizeZ;
+    if (y + 1 < sizeY && !solid(at) && levels[at] < next) {
+      levels[at] = next;
+      queue.push(at);
+    }
+    at = index - 1;
+    if (z > z0 && !solid(at) && levels[at] < next) {
+      levels[at] = next;
+      queue.push(at);
+    }
+    at = index + 1;
+    if (z < z1 && z + 1 < sizeZ && !solid(at) && levels[at] < next) {
+      levels[at] = next;
+      queue.push(at);
+    }
+  }
 }
 
 /**

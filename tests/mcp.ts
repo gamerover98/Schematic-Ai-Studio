@@ -30,6 +30,8 @@ import {
 } from "../src/main/mcp/tools.js";
 import { LIFECYCLE_SPECS, findLifecycle, type Lifecycle } from "../src/main/mcp/lifecycle.js";
 import { DOCUMENT_SPECS, findDocumentTool } from "../src/main/mcp/document_tools.js";
+import { PNG } from "pngjs";
+import { categoryColour } from "../src/shared/distribution_map.js";
 import {
   acceptsRequest,
   chooseToken,
@@ -44,7 +46,7 @@ import {
   startupRefusal,
   withinRoot,
 } from "../src/main/mcp/policy.js";
-import { countBlocks, getBlock } from "../src/main/domain/document.js";
+import { countBlocks, getBlock, setBlock } from "../src/main/domain/document.js";
 import { BANNER_EDITOR_URL, BANNER_PATTERNS } from "../src/shared/banner_patterns.js";
 import {
   MC_VERSION_NAMES,
@@ -79,6 +81,7 @@ import {
   undoEdit,
 } from "../src/main/services/session.js";
 import type { DocumentSession } from "../src/main/services/session.js";
+import { heightField, normalizeHeightField } from "../src/shared/terrain.js";
 
 let failures = 0;
 
@@ -172,6 +175,10 @@ function fakeLifecycle(over: Partial<Lifecycle> & { log?: string[] } = {}): Life
       log.push("announce");
     },
     capture: async () => null,
+    glow: (request) => {
+      log.push(`glow:${request.patterns.join(",")}${request.regions === null ? "" : `@${request.regions.length}`}`);
+      return true;
+    },
     drawDistance: async () => 512,
     versions: async () => [{ id: "v1", label: "before the roof", at: 1 }],
     saveVersion: async (label) => {
@@ -427,6 +434,8 @@ try {
       // ...and a block list for the one read-only tool that is not about the
       // document at all.
       blocks: ["minecraft:stone"],
+      // ...and a mix for the one that draws a distribution.
+      block: "#perlin{seed=3}1%minecraft:stone,1%minecraft:dirt",
     };
     for (const tool of describeTools().filter((t) => t.annotations.readOnlyHint)) {
       const spy = { changed: 0 };
@@ -462,6 +471,218 @@ try {
   // bug report: the writers write what they are given, the mesher ignores what
   // it does not recognise, and the game fills in whatever the file left out. It
   // surfaces two steps away, as an inspector with nothing in it.
+  /*
+   * A bed is one bed. `get_palette` listed a foot and a head, which is true
+   * of the file and false of the build -- and a model replacing "the beds"
+   * from that list would name both, or worse, only the foot and leave the
+   * heads standing. One row now, with the other half spelled out under
+   * `pair` for the replace that has to name it.
+   */
+  console.log("\n--- get_palette counts a block of two cells once ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const put = (x: number, z: number, block: string, properties: Record<string, string>): void => {
+      setBlock(session.doc, x, 0, z, { namespacedName: block, properties });
+    };
+    put(0, 1, "minecraft:red_bed", { facing: "north", occupied: "false", part: "foot" });
+    put(0, 0, "minecraft:red_bed", { facing: "north", occupied: "false", part: "head" });
+    put(2, 0, "minecraft:red_bed", { facing: "east", occupied: "false", part: "foot" });
+    put(3, 0, "minecraft:red_bed", { facing: "east", occupied: "false", part: "head" });
+    put(5, 0, "minecraft:piston", { extended: "true", facing: "east" });
+    put(6, 0, "minecraft:piston_head", { facing: "east", short: "false", type: "normal" });
+
+    type Rows = { blocks: { block: string; count: number; pair?: string[] }[] };
+    const exact = (await callTool("get_palette", {}, options(sink))).result as Rows;
+    equal(
+      "each bed is one row, with its head as its pair",
+      exact.blocks
+        .filter((row) => row.block.startsWith("minecraft:red_bed"))
+        .map((row) => [row.block, row.count, row.pair?.length ?? 0].join(" "))
+        .sort(),
+      [
+        "minecraft:red_bed[facing=east,occupied=false,part=foot] 1 1",
+        "minecraft:red_bed[facing=north,occupied=false,part=foot] 1 1",
+      ],
+    );
+    check(
+      "...and no head is listed on its own",
+      exact.blocks.every((row) => !row.block.includes("part=head") && !row.block.startsWith("minecraft:piston_head")),
+    );
+
+    const merged = (await callTool("get_palette", { unify: true }, options(sink))).result as Rows;
+    equal(
+      "unify merges every state into the bare id",
+      merged.blocks.map((row) => [row.block, row.count, (row.pair ?? []).join("+")].join(" ")).sort(),
+      [
+        "minecraft:piston 1 minecraft:piston_head[facing=east,short=false,type=normal]",
+        "minecraft:red_bed 2 ",
+      ],
+    );
+    closeDocument();
+  }
+
+  /*
+   * Where a block is, which get_palette cannot say, and the glow a model
+   * lights to show the user. The count is main's; the window is only told
+   * what to light, and asks main for the shell itself.
+   */
+  console.log("\n--- find_blocks and highlight_blocks ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    setBlock(session.doc, 1, 2, 3, { namespacedName: "minecraft:diamond_ore", properties: {} });
+    setBlock(session.doc, 6, 0, 6, { namespacedName: "minecraft:diamond_ore", properties: {} });
+    setBlock(session.doc, 4, 4, 4, { namespacedName: "minecraft:oak_stairs", properties: { facing: "east" } });
+
+    const found = await attempt("find_blocks", { blocks: "diamond_ore", limit: 1 }, options(sink));
+    equal("find_blocks counts the whole schematic", found.total, 2);
+    equal("...gives the box holding them", found.bounds, { minX: 1, minY: 0, minZ: 3, maxX: 6, maxY: 2, maxZ: 6 });
+    equal("...and as many positions as asked, saying there are more", [(found.positions as unknown[]).length, typeof found.note], [1, "string"]);
+    equal(
+      "...or only a region, when given one",
+      (await attempt("find_blocks", { blocks: "diamond_ore", minX: 0, minY: 0, minZ: 0, maxX: 3, maxY: 7, maxZ: 7 }, options(sink))).total,
+      1,
+    );
+    equal(
+      "a bare name finds every state, as replace_blocks matches from",
+      (await attempt("find_blocks", { blocks: "oak_stairs,diamond_ore" }, options(sink))).total,
+      3,
+    );
+
+    const log: string[] = [];
+    const lit = await attempt("highlight_blocks", { blocks: "diamond_ore" }, options(sink, fakeLifecycle({ log })));
+    equal("highlight_blocks says how many it lit", [lit.lit, lit.total], [true, 2]);
+    equal("...and tells the window what, in a spelling main reads back", log, ["glow:minecraft:diamond_ore"]);
+    await attempt(
+      "highlight_blocks",
+      { blocks: "oak_stairs", region: { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 } },
+      options(sink, fakeLifecycle({ log })),
+    );
+    equal("...with the box it was given", log[1], "glow:minecraft:oak_stairs@1");
+    const none = await attempt("highlight_blocks", { blocks: "minecraft:gold_block" }, options(sink, fakeLifecycle({ log })));
+    equal("...and says so when there is nothing to light", [none.lit, typeof none.note], [false, "string"]);
+    const out = await attempt("highlight_blocks", {}, options(sink, fakeLifecycle({ log })));
+    equal("no blocks put the glow out", [out.lit, log[3]], [false, "glow:"]);
+    const windowless = await attempt(
+      "highlight_blocks",
+      { blocks: "diamond_ore" },
+      options(sink, fakeLifecycle({ glow: () => false })),
+    );
+    check("with no window it is refused by name", String(windowless.refused ?? "").includes("no window"));
+    equal("none of it touched the schematic", [session.history.undoStack.length, sink.changed], [0, 0]);
+    closeDocument();
+  }
+
+  /*
+   * WorldEdit's shapes from one tool, in the chat and over MCP alike. The
+   * geometry is `tests/session.ts`'s; this is the wire: the region it is
+   * inscribed in, the modes, and what it says when the shape leaves the
+   * schematic.
+   */
+  console.log("\n--- draw_shape ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const ball = await attempt("draw_shape", { shape: "sphere", block: "stone", minX: 0, minY: 0, minZ: 0, maxX: 6, maxY: 6, maxZ: 6 }, options(sink));
+    equal("draw_shape draws //sphere 3 in the box centre ± 3", [ball.changed, ball.cells], [179, 179]);
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...and the window is told the schematic moved", sink.changed > 0);
+
+    const walls = await attempt(
+      "draw_shape",
+      { shape: "walls", block: "oak_planks", mode: "empty", minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 3, maxZ: 7 },
+      options(sink),
+    );
+    equal("walls are the four sides of the region", walls.cells, 28 * 4);
+    check(
+      "...and drawn into empty space only, they leave the stone where it was",
+      (walls.changed as number) < 28 * 4 && getBlock(session.doc, 3, 3, 0)?.namespacedName === "minecraft:stone",
+    );
+
+    const spilled = await attempt("draw_shape", { shape: "sphere", block: "oak_planks", hollow: true, minX: -3, minY: 0, minZ: 0, maxX: 3, maxY: 6, maxZ: 6 }, options(sink));
+    check("a shape past the edge says so", typeof spilled.clamped === "string" && String(spilled.clamped).includes("resize_document"));
+    equal("...and does not grow the schematic", session.doc.width, 8);
+    check("...but draws the half that is inside", (spilled.cells as number) > 0);
+
+    const refused = await attempt("draw_shape", { shape: "cone", block: "stone" }, options(sink));
+    check("a shape that does not exist is refused by name", String(refused.refused ?? "").includes("not a shape"));
+    closeDocument();
+  }
+
+  /*
+   * The terrain the creative brush paints, from one tool. The landscape is
+   * `tests/session.ts`'s; this is the wire: the region, the defaults, and
+   * what it says when the surface does not fit the region.
+   */
+  console.log("\n--- generate_terrain ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    const region = { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 };
+    // The defaults are grass, dirt and stone, which the small set above lacks.
+    const lands = { ...options(sink), allowedBlocks: new Set([...ALLOWED, "minecraft:grass_block", "minecraft:dirt"]) };
+    const laid = await attempt(
+      "generate_terrain",
+      { noise: "perlin", seed: 3, params: { frequency: 0.1 }, base: 1, amplitude: 4, ...region },
+      lands,
+    );
+    check("generate_terrain lays a landscape", (laid.changed as number) > 0, JSON.stringify(laid));
+    equal("...as one step", session.history.undoStack.length, 1);
+    check("...and the window is told the schematic moved", sink.changed > 0);
+    const surface = laid.surface as { lowest: number; highest: number };
+    check("...and it says where its surface runs", surface.lowest >= 1 && surface.highest <= 5, JSON.stringify(surface));
+    const top = heightField(
+      normalizeHeightField({ noise: { kind: "perlin", seed: 3, params: { frequency: 0.1 } }, base: 1, amplitude: 4 }),
+      session.doc.frame,
+    );
+    let wrong = 0;
+    for (let x = 0; x < 8; x += 1) {
+      for (let z = 0; z < 8; z += 1) {
+        const y = top(x, z);
+        if (getBlock(session.doc, x, y, z)?.namespacedName !== "minecraft:grass_block") wrong += 1;
+        if (getBlock(session.doc, x, y + 1, z)?.namespacedName !== "minecraft:air") wrong += 1;
+        if (getBlock(session.doc, x, y - 1, z)?.namespacedName !== "minecraft:dirt") wrong += 1;
+      }
+    }
+    equal("...grass on dirt by default, on the surface the brush paints for the same settings", wrong, 0);
+    const tall = await attempt("generate_terrain", { noise: "simplex", base: 6, amplitude: 10, ...region }, lands);
+    check("a surface the region cannot hold says where it was cut", typeof tall.cut === "string" && String(tall.cut).includes("y="));
+    equal("...and does not grow the schematic", session.doc.height, 8);
+    const refused = await attempt("generate_terrain", { noise: "gradient" }, options(sink));
+    check("a noise a terrain cannot be made of is refused by name", String(refused.refused ?? "").includes("gradient"));
+    closeDocument();
+  }
+
+  /*
+   * Smoothing and erosion from the tools. The rules are `tests/session.ts`'s,
+   * held to WorldEdit and VoxelSniper; this is the wire.
+   */
+  console.log("\n--- smooth_terrain and erode ---");
+  {
+    const session = open();
+    const sink = { changed: 0 };
+    for (let x = 0; x < 8; x += 1) {
+      for (let z = 0; z < 8; z += 1) {
+        const top = (x * 3 + z * 5) % 6;
+        for (let y = 0; y <= top; y += 1) setBlock(session.doc, x, y, z, { namespacedName: "minecraft:stone", properties: {} });
+      }
+    }
+    const smoothed = await attempt("smooth_terrain", { iterations: 3 }, options(sink));
+    check("smooth_terrain smooths the whole schematic by default", (smoothed.changed as number) > 0, JSON.stringify(smoothed));
+    equal("...as one step, telling the window", [session.history.undoStack.length, sink.changed > 0], [1, true]);
+    equal("...and grows nothing", [session.doc.width, session.doc.height, session.doc.length], [8, 8, 8]);
+    setBlock(session.doc, 4, 7, 4, { namespacedName: "minecraft:stone", properties: {} });
+    const cleaned = await attempt("erode", { preset: "floatclean", minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 }, options(sink));
+    check("erode with floatclean takes away a block floating on its own", getBlock(session.doc, 4, 7, 4)?.namespacedName === "minecraft:air" && (cleaned.changed as number) > 0, JSON.stringify(cleaned));
+    equal("...and says which rule it ran", cleaned.rule, { erosionFaces: 6, erosionRecursion: 1, fillFaces: 6, fillRecursion: 1 });
+    const inverted = await attempt("erode", { preset: "melt", inverse: true, fill_recursion: 2 }, options(sink));
+    equal("inverse swaps erosion and fill, and a number given replaces the preset's", inverted.rule, { erosionFaces: 5, erosionRecursion: 1, fillFaces: 2, fillRecursion: 2 });
+    const refused = await attempt("erode", { preset: "none" }, options(sink));
+    check("VoxelSniper's none is not offered, by name", String(refused.refused ?? "").includes("none"));
+    closeDocument();
+  }
+
   console.log("\n--- a tool places a block in the state the game would give it ---");
   {
     const session = open();
@@ -1131,6 +1352,66 @@ try {
         JSON.stringify(described),
       );
       equal("...and anything else is not a picture", pictureContent({ changed: 1 }), null);
+    }
+
+    /*
+     * What a mix would look like, before anything is filled with it. A
+     * gradient along x is the fixture because its answer can be stated: the
+     * first block on the left half of the region, the last on the right.
+     */
+    {
+      closeDocument();
+      const region = { minX: 0, minY: 0, minZ: 0, maxX: 9, maxY: 0, maxZ: 3 };
+      const shown = await attempt(
+        "preview_distribution",
+        { block: "#gradient{axis=x,edge=0}1%minecraft:stone,1%minecraft:dirt", region },
+        options(sink),
+      );
+      check(
+        "a distribution is drawn with nothing open",
+        typeof shown.data === "string" && typeof shown.width === "number",
+        JSON.stringify(shown).slice(0, 300),
+      );
+      equal("...and reaches the client as an image", pictureContent(shown)?.[0]?.type, "image");
+      if (typeof shown.data === "string") {
+        const png = PNG.sync.read(Buffer.from(shown.data, "base64"));
+        // 10 by 4 cells, each 26 pixels square to make 256 across, then a gap.
+        equal("...the values and the blocks side by side", [png.width, png.height], [26 * 10 * 2 + 26, 26 * 4]);
+        const at = (x: number, y: number): number[] => Array.from(png.data.subarray((y * png.width + x) * 4, (y * png.width + x) * 4 + 3));
+        const right = 26 * 10 + 26;
+        equal("...the first block at the low end of the gradient", at(right + 5, 5), [...categoryColour(0)]);
+        equal("...and the last at the high end", at(right + 259, 5), [...categoryColour(1)]);
+        check(
+          "...beside the values in grey, darker where they are lower",
+          at(5, 5)[0] < at(259, 5)[0] && at(5, 5)[0] === at(5, 5)[2],
+          `${at(5, 5)} / ${at(259, 5)}`,
+        );
+      }
+      equal(
+        "the legend names each block's colour and share",
+        (shown.legend as { block: string; colour: string; asked: number; shown: number }[] | undefined)?.map((entry) => [
+          entry.block,
+          entry.colour,
+          entry.asked,
+          entry.shown,
+        ]),
+        [
+          ["minecraft:stone", "#4e79a7", 0.5, 0.5],
+          ["minecraft:dirt", "#f28e2b", 0.5, 0.5],
+        ],
+      );
+      const unknown = await attempt("preview_distribution", { block: "#plasma{}1%stone,1%dirt" }, options(sink));
+      check("a distribution that does not exist is refused by name", String(unknown.refused).includes("plasma"), JSON.stringify(unknown));
+
+      const session = open();
+      const revision = session.doc.revision;
+      const whole = await attempt("preview_distribution", { block: "1%stone,1%dirt" }, options(sink));
+      equal(
+        "with a schematic open, the region is the schematic",
+        whole.region,
+        { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 7, maxZ: 7 },
+      );
+      equal("...and the schematic is not touched", session.doc.revision, revision);
     }
 
     /*

@@ -21,6 +21,7 @@
     type Settings,
   } from "../../../shared/settings.js";
   import { t } from "./i18n.svelte.js";
+  import { providerLabel } from "./provider_label.js";
 
   interface Props {
     settings: Settings;
@@ -57,7 +58,7 @@
 </script>
 
 {#if keyStatus && !keyStatus.encryptionAvailable}
-  <p class="hint warn">{t("provider.noEncryption")}</p>
+  <p class="callout warn">{t("provider.noEncryption")}</p>
 {/if}
 
 <!--
@@ -71,13 +72,13 @@
   one click away.
 -->
 {#if keyStatus?.legacyProfile}
-  <p class="hint warn">
+  <p class="callout warn">
     {t("provider.legacyProfile", {
-      providers: keyStatus.legacyProfile.providers.join(", "),
+      providers: keyStatus.legacyProfile.providers.map(providerLabel).join(", "),
       path: keyStatus.legacyProfile.path,
     })}
   </p>
-  <button onclick={() => onrevealpath(keyStatus?.legacyProfile?.path ?? "")}>
+  <button class="reveal" onclick={() => onrevealpath(keyStatus?.legacyProfile?.path ?? "")}>
     {t("provider.legacyProfileReveal")}
   </button>
 {/if}
@@ -85,7 +86,7 @@
 {#each PROVIDERS as provider (provider)}
   <div class="field">
     <label for={`key-${provider}`}>
-      {provider}{providerRequiresApiKey(provider) ? "" : ` — ${t("provider.apiKeyOptional")}`}
+      {providerLabel(provider)}{providerRequiresApiKey(provider) ? "" : ` — ${t("provider.apiKeyOptional")}`}
     </label>
     <div class="key-row">
       <input
@@ -109,7 +110,7 @@
       </button>
     </div>
     {#if hasKey(provider)}
-      <p class="hint ok">{t("provider.keyStored", { provider })}</p>
+      <p class="hint ok">{t("provider.keyStored", { provider: providerLabel(provider) })}</p>
     <!--
       A key is on disk and this machine cannot read it back -- a keyring that
       changed, or a profile copied to another machine. Said out loud, because
@@ -118,7 +119,7 @@
       `Invalid API key.` with nothing pointing here.
     -->
     {:else if keyStatus?.keys.find((entry) => entry.provider === provider)?.unreadable}
-      <p class="hint warn">{t("provider.keyUnreadable", { provider })}</p>
+      <p class="hint warn">{t("provider.keyUnreadable", { provider: providerLabel(provider) })}</p>
     {/if}
   </div>
 {/each}
@@ -135,13 +136,30 @@
 </div>
 
 <style>
+  /* A row of the settings pane it sits in: the label above, in the pane's
+     voice rather than a panel's small one. */
+  .field > label {
+    color: var(--text);
+    font-size: var(--text-md);
+  }
+
   .key-row {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    gap: var(--space-3);
   }
 
   .key-row input {
     flex: 1;
+    min-width: 0;
+  }
+
+  .callout {
+    margin-bottom: var(--space-4);
+  }
+
+  .reveal {
+    margin: calc(-1 * var(--space-2)) 0 var(--space-5);
   }
 
   .ok {

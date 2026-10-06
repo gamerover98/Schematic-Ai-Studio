@@ -21,8 +21,10 @@ import type {
   DocumentState,
   EditRequest,
   MeshPayload,
+  MixSpec,
   PaletteCount,
   RegionSpec,
+  ToolArea,
 } from "../../shared/ipc.js";
 import type { SchematicFormat } from "../../shared/schematic.js";
 import { schematicExtension } from "../../shared/schematic.js";
@@ -59,7 +61,7 @@ import {
 } from "../domain/history.js";
 
 import {
-  copyRegion,
+  copyRegions,
   pasteClipboard,
   type Clipboard,
   type PasteOptions,
@@ -89,6 +91,7 @@ import {
   legalValuesFor,
 } from "../../shared/block_states.js";
 import { FACE_VECTOR } from "../../shared/block_orientation.js";
+import { FACING_STEP, twoPartFamily } from "../../shared/two_part.js";
 import { standsOn, type SupportBelow } from "../../shared/block_support.js";
 import { coversFace } from "../pipeline/block_shapes.js";
 import { normaliseVoidBlock, voidSources } from "../../shared/settings.js";
@@ -100,7 +103,12 @@ import {
   renameFor,
 } from "../../shared/block_versions.js";
 import { DOCUMENT_SIZE } from "../../shared/settings.js";
-import { buildDocumentPreview, type DocumentPreviewOptions } from "./preview.js";
+import {
+  atlasFor,
+  buildDocumentPreview,
+  type AtlasSource,
+  type DocumentPreviewOptions,
+} from "./preview.js";
 import type { ChunkMeshCache } from "../pipeline/chunked_mesh.js";
 import { saveDocument, type WriteResult } from "./writers.js";
 import { cropToContent, type CropSummary } from "../domain/crop.js";
@@ -112,10 +120,11 @@ import {
   type Extent,
 } from "../domain/grow.js";
 import { peelEmptyFaces } from "../domain/shrink.js";
+import { countMaterials, listMaterials } from "../domain/materials.js";
+import { findBlocks, type FindOptions, type FoundBlocks } from "../domain/find_blocks.js";
 import {
   bannerFormatOf,
   checkBannerPatterns,
-  regionCells,
   restateBanners,
   stampBanner,
 } from "../domain/banner_place.js";
@@ -127,6 +136,45 @@ import {
   type BannerLayer,
 } from "../pipeline/banner_nbt.js";
 import { isBannerBlock } from "../../shared/banner_patterns.js";
+import {
+  effectiveShares,
+  MAX_MIX_ENTRIES,
+  MixSyntaxError,
+  normalizeDistribution,
+} from "../../shared/block_mix.js";
+import {
+  boxContains,
+  forEachUnionCell,
+  intersectBox,
+  MAX_BOXES,
+  unionBounds,
+  unionVolume,
+  type Box,
+} from "../../shared/regions.js";
+import { regionCellSet, shapeCellSet, writeMix, type CellFilter, type CellSet } from "../domain/mix.js";
+import {
+  normalizeShape,
+  SHAPE_MODES,
+  shapeCells,
+  ShapeError,
+  shapeLabel,
+} from "../../shared/shapes.js";
+import {
+  FOOTPRINTS,
+  heightField,
+  inErodeSphere,
+  inFootprint,
+  normalizeErosionRule,
+  normalizeHeightField,
+  SMOOTH_ITERATIONS,
+  SUBSOIL_DEPTH,
+  TERRAIN_MODES,
+  TerrainError,
+  TOOL_REACH,
+  type Footprint,
+  type TerrainMode,
+} from "../../shared/terrain.js";
+import { erodeCells, groundFor, isLiquid, smoothHeights, writeTerrain } from "../domain/terrain.js";
 
 export interface DocumentSession {
   readonly doc: SchematicDocument;
@@ -135,7 +183,25 @@ export interface DocumentSession {
    * The GLB last handed out, and everything it was built from — the document's
    * revision *and* the preview options that reach the atlas. See `documentMesh`.
    */
-  mesh: { key: string; payload: MeshPayload; center: [number, number, number]; size: [number, number, number] } | null;
+  mesh: {
+    key: string;
+    /**
+     * The levels of detail it was built with, apart from `key`: changing them
+     * re-meshes no chunk, so they must not be part of what decides one.
+     */
+    lodKey: string;
+    /**
+     * Which build of `key` this is. A queued level of detail lands as a new
+     * payload for the same revision, and the token the renderer hands back has
+     * to say which of the two it holds.
+     */
+    serial: number;
+    payload: MeshPayload;
+    center: [number, number, number];
+    size: [number, number, number];
+    /** The atlas the payload's UVs address; `shipMesh` sends what is missing of it. */
+    atlas: AtlasSource;
+  } | null;
   /**
    * Per-chunk geometry carried between rebuilds, so an edit re-meshes only the
    * chunks it touched. Belongs to the session because it is per document; the
@@ -322,25 +388,6 @@ export function adoptDocument(doc: SchematicDocument, history?: History): Docume
 // State for the renderer
 // ---------------------------------------------------------------------------
 
-/**
- * Every block in the document, most common first.
- *
- * It was capped at 64, silently, while the panel showing it capped at 8 and
- * said "…and N more" -- so past 64 distinct states that sentence *understated*
- * the palette, which is worse than either cap alone. A schematic's materials
- * list is one of the few things worth being complete: it is how you find the
- * one stray block you did not mean to place.
- *
- * The cost is already paid. `paletteHistogram` walks every voxel and runs on
- * every state push either way; dropping the `.slice` adds payload, not work.
- */
-function paletteCounts(histogram: ReadonlyMap<string, number>): PaletteCount[] {
-  return [...histogram.entries()]
-    .filter(([block]) => !block.startsWith("minecraft:air"))
-    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
-    .map(([block, count]) => ({ block, count }));
-}
-
 export function documentState(session: DocumentSession): DocumentState {
   const { doc, history } = session;
   // One walk for both numbers. This runs on every mutating handler, and a
@@ -355,7 +402,12 @@ export function documentState(session: DocumentSession): DocumentState {
     offset: doc.offset === null ? null : ([...doc.offset] as [number, number, number]),
     worldOrigin: doc.worldOrigin === null ? null : ([...doc.worldOrigin] as [number, number, number]),
     blockCount: tally.blocks,
-    palette: paletteCounts(tally.histogram),
+    /*
+     * Every state, two halves of a bed counted as two: this runs on every
+     * edit and reads the counts the document keeps, and pairing them would
+     * be a walk. The materials list asks `selectionPalette`, which pairs.
+     */
+    palette: listMaterials(tally.histogram),
     dirty: isDirty(history),
     canUndo: canUndo(history),
     undoDepth: history.undoStack.length,
@@ -364,8 +416,93 @@ export function documentState(session: DocumentSession): DocumentState {
     undoTransactionId: nextUndoId(history),
     redoLabel: nextRedoLabel(history),
     voidBlock: session.voidBlock,
+    frame: [doc.frame[0], doc.frame[1], doc.frame[2]],
     revision: doc.revision,
   };
+}
+
+/**
+ * What the selected areas are made of, for the materials inventory -- or the
+ * whole document, for `null`.
+ *
+ * The materials list was the whole document's, beside tools that act on the
+ * selection -- so "click a material to replace it" offered blocks the selection
+ * did not hold, and gave no count for the ones it did. This is the same list
+ * over the cells of the areas, each cell once however many areas cover it
+ * (`forEachUnionCell`, the walk the fill and the replace take).
+ *
+ * Each area is cut to the document first, which is the union cut to the
+ * document: a cell outside holds nothing and is counted as `outside`, not as
+ * air, because a replace of air would never reach it.
+ *
+ * A block of two cells is one block here (`countMaterials`), which is why the
+ * whole document is asked for too rather than read off `DocumentState`.
+ *
+ * Asked for, never pushed: `documentState` runs on every edit and a selection
+ * is the renderer's, so this is the renderer's question to ask when either
+ * moves.
+ */
+export function selectionPalette(
+  session: DocumentSession,
+  request: readonly RegionSpec[] | null,
+): { palette: PaletteCount[]; air: number; outside: number; cells: number } {
+  const { doc } = session;
+  if (request === null) {
+    const whole = countMaterials(doc, null);
+    return { palette: whole.palette, air: whole.air, outside: 0, cells: whole.walked };
+  }
+  const { cells, inside } = areasInDocument(doc, request);
+  const counted = countMaterials(doc, inside);
+  return { palette: counted.palette, air: counted.air, outside: cells - counted.walked, cells };
+}
+
+/**
+ * The areas a request names, each cut to the document, and how many cells
+ * their union holds before the cut. Shared by the questions about a set of
+ * areas -- what is in them, and where a block is in them.
+ */
+function areasInDocument(doc: SchematicDocument, request: readonly RegionSpec[]): { cells: number; inside: Box[] } {
+  if (request.length === 0 || request.length > MAX_BOXES) {
+    throw new RegionCountError(request.length);
+  }
+  const asked = request.map(orderRegion);
+  const inside = asked
+    .map((box) => ({
+      minX: Math.max(0, box.minX),
+      minY: Math.max(0, box.minY),
+      minZ: Math.max(0, box.minZ),
+      maxX: Math.min(doc.width - 1, box.maxX),
+      maxY: Math.min(doc.height - 1, box.maxY),
+      maxZ: Math.min(doc.length - 1, box.maxZ),
+    }))
+    .filter((box) => box.minX <= box.maxX && box.minY <= box.maxY && box.minZ <= box.maxZ);
+  return { cells: unionVolume(asked), inside };
+}
+
+/**
+ * Where some blocks are, in the selected areas or -- for `null` -- the whole
+ * document: the glow's shell, or a count and the first few positions for a
+ * model asking `find_blocks`. See `domain/find_blocks.ts`.
+ *
+ * A pattern is a palette spelling, read as a replace reads `from`: a bare id
+ * is the block in any state. A slot standing for a bed sends both halves.
+ */
+export function findInDocument(
+  session: DocumentSession,
+  request: { regions: readonly RegionSpec[] | null; patterns: readonly string[] },
+  options: FindOptions = {},
+): FoundBlocks & { frame: [number, number, number] } {
+  const { doc } = session;
+  const boxes = request.regions === null ? null : areasInDocument(doc, request.regions).inside;
+  const patterns = request.patterns
+    .map((pattern) => pattern.trim())
+    .filter((pattern) => pattern !== "")
+    .map((pattern) => parsePaletteEntry(pattern.split("[", 1)[0].includes(":") ? pattern : `minecraft:${pattern}`));
+  const found =
+    patterns.length === 0 || (boxes !== null && boxes.length === 0)
+      ? findBlocks(doc, [], [], options)
+      : findBlocks(doc, boxes, patterns, options);
+  return { ...found, frame: [...doc.frame] };
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +620,52 @@ export class EditTooLargeError extends Error {
     );
     this.name = "EditTooLargeError";
   }
+}
+
+/**
+ * A fill or a replace that names no region, or more than `MAX_BOXES` of them.
+ *
+ * Neither comes from the window -- the buttons need a selection, and a
+ * selection is a handful of areas -- so this is a caller's mistake, said by
+ * name rather than answered with `changed: 0`.
+ */
+export class RegionCountError extends Error {
+  constructor(count: number) {
+    super(
+      count === 0
+        ? "The edit names no region to work in. Select one first."
+        : `The edit names ${count} regions; at most ${MAX_BOXES} may be edited at once.`,
+    );
+    this.name = "RegionCountError";
+  }
+}
+
+/**
+ * What a region edit acts on: one box, or several meaning their union.
+ *
+ * Both spellings, because the window sends the selection's areas and every
+ * other caller -- the agent, MCP, the suites -- names a single box, and making
+ * those wrap it in an array would be churn that buys nothing.
+ */
+export type Areas = RegionSpec | readonly RegionSpec[];
+
+function isOneBox(request: Areas): request is RegionSpec {
+  return !Array.isArray(request);
+}
+
+/**
+ * The areas clipped to the document, their bounds, and the mask a move, a turn
+ * or a scale passes down -- `null` for one box, which is its own bounds.
+ */
+function resolveAreas(
+  doc: SchematicDocument,
+  request: Areas,
+): { region: Region; boxes: Region[]; mask: Region[] | null } {
+  const list: readonly RegionSpec[] = isOneBox(request) ? [request] : request;
+  if (list.length === 0 || list.length > MAX_BOXES) throw new RegionCountError(list.length);
+  const boxes = list.map((box) => normalizeRegion(doc, box));
+  const region = unionBounds(boxes) as Region;
+  return { region, boxes, mask: boxes.length > 1 ? boxes : null };
 }
 
 /**
@@ -779,7 +962,7 @@ function useTarget(
   });
 
   const cells = [{ ...at, entry: swung(existing) }];
-  const family = TWO_PART.find((candidate) => candidate.matches(existing.namespacedName));
+  const family = twoPartFamily(existing.namespacedName);
   const held = family === undefined ? undefined : existing.properties[family.property];
   if (family !== undefined && family.step !== null && (held === family.near || held === family.far)) {
     const away = held === family.near ? 1 : -1;
@@ -795,68 +978,6 @@ function useTarget(
   }
   return { cells, label: `${opening ? "Open" : "Close"} ${existing.namespacedName}` };
 }
-
-/**
- * The families that are one block to place and two blocks in the file.
- *
- * A bed is a foot and a head; a door is a lower half and an upper. Both are
- * states the game cannot hold on their own -- a lone bed foot drops as an item
- * the moment anything updates it, and a lone door half is a door you can walk
- * through -- and both were being written as one block, so the schematic looked
- * right here and came apart when it was pasted.
- *
- * `step` is `null` for the family whose second cell is decided by `facing`,
- * which is the bed: its head goes one cell the way you were looking when you
- * laid it. A door's is always the cell above, whichever way it faces.
- *
- * A request that already names the far half -- `part=head`, `half=upper` -- is
- * somebody placing one half on purpose: the inspector, a paste, an agent tool.
- * Those are left alone. Only an absent value, or the near one, means "place the
- * whole thing".
- */
-const TWO_PART: readonly {
-  readonly matches: (name: string) => boolean;
-  readonly property: string;
-  readonly near: string;
-  readonly far: string;
-  readonly step: readonly [number, number, number] | null;
-}[] = [
-  { matches: (name) => name.endsWith("_bed"), property: "part", near: "foot", far: "head", step: null },
-  // `_trapdoor` does not end in `_door`, which is why this needs no guard --
-  // `tests/session.ts` says so, because it is the kind of thing that reads as
-  // true and would be relied on without ever being checked.
-  { matches: (name) => name.endsWith("_door"), property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
-  /*
-   * The double plants: tall grass, large fern, the four tall flowers, tall
-   * seagrass, the small dripleaf and the pitcher plant. Vanilla's
-   * `DoublePlantBlock` places both halves, and a lone lower half is a tuft cut
-   * off at the top. Asked of the registry rather than listed: a `half` whose
-   * legal values are `lower` and `upper` is exactly that family (a stair's
-   * or a slab's is `top`/`bottom`). The pitcher *crop* has the property and
-   * is not one of them: it is planted as a seed and grows its upper half from
-   * stage 3, so placing it is one cell.
-   *
-   * The pre-Flattening era needs nothing of its own: `legacy_blocks.json`
-   * maps `175:0..5` and `175:8..13` onto these same six names with
-   * `half=lower` and `half=upper`, so a 1.8.8 to 1.12.2 document holds them
-   * spelled this way and the MCEdit writer maps both halves back.
-   */
-  { matches: isDoublePlant, property: "half", near: "lower", far: "upper", step: [0, 1, 0] },
-];
-
-function isDoublePlant(name: string): boolean {
-  if (name.endsWith("_door") || name === "minecraft:pitcher_crop") return false;
-  const values = legalValuesFor(name, "half");
-  return values !== null && values.length === 2 && values.includes("lower") && values.includes("upper");
-}
-
-/** One cell along each horizontal facing, as `[dx, dy, dz]`. */
-const FACING_STEP: Readonly<Record<string, readonly [number, number, number]>> = {
-  north: [0, 0, -1],
-  south: [0, 0, 1],
-  west: [-1, 0, 0],
-  east: [1, 0, 0],
-};
 
 interface TwoPartPlacement {
   readonly other: { x: number; y: number; z: number };
@@ -888,7 +1009,7 @@ function twoPartPlacement(
   entry: PaletteEntry,
   free: (entry: PaletteEntry) => boolean,
 ): TwoPartPlacement | "blocked" | null {
-  const family = TWO_PART.find((candidate) => candidate.matches(entry.namespacedName));
+  const family = twoPartFamily(entry.namespacedName);
   if (family === undefined) return null;
   if (entry.properties[family.property] === family.far) return null;
 
@@ -1402,23 +1523,246 @@ export function applyEdit(
   }
 
   /*
+   * A shape is written the way a fill is: one mix over a set of cells, shared
+   * out exactly, the document growing to hold it, one transaction. Only which
+   * cells differ -- `shared/shapes.ts` -- and which of them `mode` lets
+   * through.
+   */
+  if (request.kind === "shape") {
+    const shape = normalizeShape(request.shape);
+    const mode = request.mode ?? "all";
+    if (!(SHAPE_MODES as readonly string[]).includes(mode)) {
+      throw new ShapeError(`"${String(mode)}" is not a way to draw. The modes are ${SHAPE_MODES.join(", ")}.`);
+    }
+    const mix = checkedMix(doc, request.mix, placeable);
+    /*
+     * `filled` writes only over what is there, and outside the box there is
+     * nothing -- `replace`'s reason for never growing. Past the edge the shape
+     * is cut off instead, and stays the shape it was asked to be.
+     */
+    const wantedGrowth = mode === "filled" ? null : growthToInclude(doc, shape.box);
+    if (wantedGrowth !== null && !mayGrow) throw new OutsideDocumentError();
+    const growth = wantedGrowth;
+    if (growth !== null && extentVolume(growth.size) > MAX_DOCUMENT_VOLUME) {
+      throw new DocumentTooLargeError(extentVolume(growth.size));
+    }
+    // In the document's coordinates after the resize, as a fill's regions are.
+    const box = growth === null ? shape.box : shiftRegion(shape.box, growth.shift);
+    const size = growth?.size ?? { width: doc.width, height: doc.height, length: doc.length };
+    const cells = shapeCells(
+      { ...shape, box },
+      { minX: 0, minY: 0, minZ: 0, maxX: size.width - 1, maxY: size.height - 1, maxZ: size.length - 1 },
+    );
+    if (cells.count > MAX_EDIT_VOLUME) throw new EditTooLargeError(cells.count);
+    if (cells.count === 0) return 0;
+    const filter: CellFilter | null =
+      mode === "empty" ? emptiness : mode === "filled" ? (entry) => !emptiness(entry) : null;
+    return runTransaction(
+      doc,
+      history,
+      `Draw ${shapeLabel(shape)} with ${mix.label}`,
+      (tx) => {
+        if (growth !== null) tx.resize(growth.size, growth.shift);
+        return writeMix(
+          doc,
+          tx,
+          shapeCellSet(cells),
+          mix.distribution,
+          mix.shares,
+          mix.written,
+          mix.layers,
+          filter,
+        );
+      },
+      { mergeKey: request.stroke },
+    );
+  }
+
+  /*
+   * Terrain is a fill in layers: the surface from the noise, ground under it,
+   * empty space over it, each layer a mix shared out exactly -- and the
+   * document grows to hold what is written, as a fill's does.
+   *
+   * What grows it is what is *built*: ground, up to the highest column of the
+   * surface. Empty space above that is only written over blocks already
+   * there, so a terrain asked for under a tall selection does not raise the
+   * ceiling for nothing -- except over a selection in `set`, which grows to
+   * the selection like a fill of it does, because somebody drew that box.
+   * `dig` builds nothing and never grows, `replace`'s reason.
+   */
+  if (request.kind === "terrain") {
+    const field = normalizeHeightField(request.terrain.field);
+    const mode = request.terrain.mode;
+    if (!(TERRAIN_MODES as readonly string[]).includes(mode)) {
+      throw new TerrainError(`"${String(mode)}" is not a way to lay terrain. The modes are ${TERRAIN_MODES.join(", ")}.`);
+    }
+    const depth = request.terrain.subsoilDepth;
+    if (!Number.isInteger(depth) || depth < SUBSOIL_DEPTH.min || depth > SUBSOIL_DEPTH.max) {
+      throw new TerrainError(`The subsoil is a whole number of blocks deep, from ${SUBSOIL_DEPTH.min} to ${SUBSOIL_DEPTH.max}.`);
+    }
+    const layers =
+      mode === "dig"
+        ? null
+        : {
+            surface: checkedMix(doc, request.terrain.surface, placeable),
+            subsoil: checkedMix(doc, request.terrain.subsoil, placeable),
+            rock: checkedMix(doc, request.terrain.rock, placeable),
+            subsoilDepth: depth,
+          };
+    const place = toolPlace(doc, request.area, {
+      minY: Math.min(0, field.base),
+      maxY: Math.max(doc.height - 1, field.base + field.amplitude),
+    });
+    const top = heightField(field, doc.frame);
+    let highest = -Infinity;
+    place.forEachColumn((x, z) => {
+      highest = Math.max(highest, top(x, z));
+    });
+    const built = { ...place.bounds, maxY: Math.min(place.bounds.maxY, highest) };
+    const reach =
+      mode === "dig" ? null : mode === "set" && place.brush === null ? place.bounds : built.maxY < built.minY ? null : built;
+    const wantedGrowth = reach === null ? null : growthToInclude(doc, reach);
+    if (wantedGrowth !== null && !mayGrow) throw new OutsideDocumentError();
+    const growth = wantedGrowth;
+    if (growth !== null && extentVolume(growth.size) > MAX_DOCUMENT_VOLUME) {
+      throw new DocumentTooLargeError(extentVolume(growth.size));
+    }
+    const size = growth?.size ?? { width: doc.width, height: doc.height, length: doc.length };
+    const area = place.cells(growth?.shift ?? [0, 0, 0], {
+      minX: 0,
+      minY: 0,
+      minZ: 0,
+      maxX: size.width - 1,
+      maxY: size.height - 1,
+      maxZ: size.length - 1,
+    });
+    if (area === null) return 0;
+    if (area.cells.count > MAX_EDIT_VOLUME) throw new EditTooLargeError(area.cells.count);
+    const empty = emptyEntry(session, options.voidBlock);
+    const verb = mode === "set" ? "Lay" : mode === "raise" ? "Raise" : "Dig";
+    return runTransaction(
+      doc,
+      history,
+      `${verb} terrain`,
+      (tx) => {
+        if (growth !== null) tx.resize(growth.size, growth.shift);
+        // Read after the resize: the frame has moved with the content, and the
+        // landscape is the content's.
+        return writeTerrain(doc, tx, area.cells, area.bounds, heightField(field, doc.frame), layers, mode as TerrainMode, emptiness, empty);
+      },
+      { mergeKey: request.stroke },
+    );
+  }
+
+  /*
+   * Smoothing reshapes the ground that is there, so it writes only inside the
+   * document and never grows it: `//smooth` reads and writes its selection,
+   * and outside the box there is no ground to read. Several areas are
+   * smoothed one after another, as several `//smooth`s would be, so where two
+   * overlap the overlap is smoothed twice.
+   */
+  if (request.kind === "smooth") {
+    const iterations = request.iterations;
+    if (!Number.isInteger(iterations) || iterations < SMOOTH_ITERATIONS.min || iterations > SMOOTH_ITERATIONS.max) {
+      throw new TerrainError(
+        `Smoothing runs a whole number of times, from ${SMOOTH_ITERATIONS.min} to ${SMOOTH_ITERATIONS.max}.`,
+      );
+    }
+    const whole = { minX: 0, minY: 0, minZ: 0, maxX: doc.width - 1, maxY: doc.height - 1, maxZ: doc.length - 1 };
+    let boxes: Region[];
+    let columns: ((x: number, z: number) => boolean) | null = null;
+    if (request.area.kind === "regions") {
+      if (request.area.regions.length === 0 || request.area.regions.length > MAX_BOXES) {
+        throw new RegionCountError(request.area.regions.length);
+      }
+      boxes = request.area.regions.flatMap((region) => {
+        const cut = intersectBox(orderRegion(region), whole);
+        return cut === null ? [] : [cut];
+      });
+    } else {
+      const { x, y, z, radius, footprint } = request.area;
+      // `SmoothBrush`: the radius round the cell aimed at, and ten more above.
+      const place = toolPlace(doc, request.area, { minY: y - radius, maxY: y + radius + 10 });
+      const cut = intersectBox(place.bounds, whole);
+      boxes = cut === null ? [] : [cut];
+      columns = (cx, cz) => inFootprint(footprint, cx - x, cz - z, radius);
+    }
+    if (boxes.length === 0) return 0;
+    const volume = boxes.reduce((sum, box) => sum + regionVolume(box), 0);
+    if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
+    const empty = emptyEntry(session, options.voidBlock);
+    const ground = groundFor(emptiness);
+    return runTransaction(
+      doc,
+      history,
+      "Smooth terrain",
+      (tx) => boxes.reduce((changed, box) => changed + smoothHeights(doc, tx, box, iterations, ground, empty, columns), 0),
+      { mergeKey: request.stroke },
+    );
+  }
+
+  /*
+   * Erosion opens and closes cells that are there, so it too stays inside the
+   * document: a fill reaches for the commonest neighbour, and outside the box
+   * there is none.
+   */
+  if (request.kind === "erode") {
+    const rule = normalizeErosionRule(request.rule);
+    const whole = { minX: 0, minY: 0, minZ: 0, maxX: doc.width - 1, maxY: doc.height - 1, maxZ: doc.length - 1 };
+    let bounds: Region | null;
+    let inside: (x: number, y: number, z: number) => boolean;
+    if (request.area.kind === "regions") {
+      if (request.area.regions.length === 0 || request.area.regions.length > MAX_BOXES) {
+        throw new RegionCountError(request.area.regions.length);
+      }
+      const boxes = request.area.regions.map(orderRegion);
+      bounds = intersectBox(unionBounds(boxes) as Region, whole);
+      inside = (x, y, z) => boxes.some((box) => boxContains(box, x, y, z));
+    } else {
+      const { x, y, z, radius } = request.area;
+      const place = toolPlace(doc, request.area, { minY: y - radius, maxY: y + radius });
+      bounds = intersectBox(place.bounds, whole);
+      inside = (cx, cy, cz) => inErodeSphere(cx - x, cy - y, cz - z, radius);
+    }
+    if (bounds === null) return 0;
+    if (regionVolume(bounds) > MAX_EDIT_VOLUME) throw new EditTooLargeError(regionVolume(bounds));
+    const empty = emptyEntry(session, options.voidBlock);
+    const area = bounds;
+    return runTransaction(
+      doc,
+      history,
+      "Erode",
+      (tx) => erodeCells(doc, tx, area, inside, rule, (entry) => emptiness(entry) || isLiquid(entry), empty),
+      { mergeKey: request.stroke },
+    );
+  }
+
+  /*
    * A region may reach outside the document, and a fill into it grows the
    * document to suit. `replace` deliberately does not: it rewrites blocks that
    * are already there, and there are none outside the box -- growing first would
    * add air and then replace nothing in it, which is a resize the user did not
    * ask for and would have to undo.
+   *
+   * The regions are one set of cells. The growth is the one their union needs,
+   * and a cell two of them share is written once -- `shared/regions.ts`.
    */
-  const asked = orderRegion(request.region);
-  const wantedGrowth = request.kind === "fill" ? growthToInclude(doc, asked) : null;
+  if (request.regions.length === 0 || request.regions.length > MAX_BOXES) {
+    throw new RegionCountError(request.regions.length);
+  }
+  const asked = request.regions.map(orderRegion);
+  const bounds = unionBounds(asked) as Region;
+  const wantedGrowth = request.kind === "fill" ? growthToInclude(doc, bounds) : null;
   if (wantedGrowth !== null && !mayGrow) throw new OutsideDocumentError();
   const growth = wantedGrowth;
 
   // In the document's coordinates *after* the resize: existing content moves by
-  // `shift`, and so does the region naming the cells to write.
-  const region =
-    growth === null ? normalizeRegion(doc, asked) : shiftRegion(asked, growth.shift);
+  // `shift`, and so do the regions naming the cells to write.
+  const regions = asked.map((region) =>
+    growth === null ? normalizeRegion(doc, region) : shiftRegion(region, growth.shift),
+  );
 
-  const volume = regionVolume(region);
+  const volume = unionVolume(regions);
   if (volume > MAX_EDIT_VOLUME) {
     throw new EditTooLargeError(volume);
   }
@@ -1426,55 +1770,171 @@ export function applyEdit(
     throw new DocumentTooLargeError(extentVolume(growth.size));
   }
 
+  const { distribution, shares, written, layers, label: toLabel } = checkedMix(
+    doc,
+    request.kind === "fill" ? request.mix : request.to,
+    placeable,
+  );
+
   if (request.kind === "fill") {
-    const entry = placeable(toEntry(request.block));
-    const layers = layersOf(request.block);
-    if (layers !== null) checkBannerPatterns(doc, entry, layers);
-    return runTransaction(doc, history, `Fill with ${entry.namespacedName}`, (tx) => {
+    return runTransaction(doc, history, `Fill with ${toLabel}`, (tx) => {
       // One transaction, so growing and filling are one undo step -- and the
       // resize goes in first, because a block delta recorded before it would be
       // an index into the old shape. `history.ts` flushes on resize for exactly
       // that reason.
       if (growth !== null) tx.resize(growth.size, growth.shift);
-      const changed = tx.fill(region, entry);
-      // Every banner in the box, including one that already held this state
-      // and so was not counted as changed: it was asked for with this design.
-      if (layers !== null) stampBanner(doc, tx, regionCells(region), entry, layers);
-      return changed;
+      return writeMix(doc, tx, regions, distribution, shares, written, layers, null);
     });
   }
 
   // `from` is a pattern over what is already there, so it is deliberately not
   // guarded: refusing it would make "take out the block some other tool wrote"
   // impossible, which is exactly when somebody needs it.
-  if (request.from.bannerPatterns !== undefined) {
+  if (request.from.length === 0) throw new MixSyntaxError("Name at least one block to replace.");
+  if (request.from.some((block) => block.bannerPatterns !== undefined)) {
     throw new BannerPatternError(
       "The block being replaced is matched by its name and states; banner patterns only go on the block that replaces it.",
     );
   }
-  const from = toEntry(request.from);
-  const to = placeable(toEntry(request.to));
-  const layers = layersOf(request.to);
-  if (layers !== null) checkBannerPatterns(doc, to, layers);
-  return runTransaction(
-    doc,
-    history,
-    `Replace ${from.namespacedName} with ${to.namespacedName}`,
-    (tx) => {
-      // The cells the replace is about to write, found before it writes them:
-      // afterwards they are indistinguishable from the ones that already held
-      // `to`, and those were not asked to change.
-      const matched =
-        layers === null
-          ? []
-          : [...regionCells(region)].filter(({ x, y, z }) =>
-              matchesBlockPattern(getBlock(doc, x, y, z), from),
-            );
-      const changed = tx.replace(region, from, to);
-      if (layers !== null) stampBanner(doc, tx, matched, to, layers);
-      return changed;
-    },
+  const from = request.from.map(toEntry);
+  const fromLabel = from.length === 1 ? from[0].namespacedName : `${from.length} blocks`;
+  return runTransaction(doc, history, `Replace ${fromLabel} with ${toLabel}`, (tx) =>
+    writeMix(doc, tx, regions, distribution, shares, written, layers, from),
   );
+}
+
+/**
+ * Where a terrain tool works, resolved: the selection's boxes, or the columns
+ * under a brush's footprint.
+ */
+interface ToolPlace {
+  /** Every cell the tool reads, before any growth: what a growth is measured from. */
+  readonly bounds: Region;
+  /** The brush's footprint, or `null` over a selection. */
+  readonly brush: { readonly x: number; readonly z: number; readonly radius: number; readonly footprint: Footprint } | null;
+  /** Every column under the place, once. */
+  forEachColumn(visit: (x: number, z: number) => void): void;
+  /**
+   * The cells after a growth by `shift`, cut to `window` (the document after
+   * it), and the box that holds them; `null` when nothing is left.
+   */
+  cells(shift: readonly [number, number, number], window: Region): { cells: CellSet; bounds: Region } | null;
+}
+
+/**
+ * A tool's area off the wire, checked. A brush's columns run over `column`'s
+ * heights, which are the tool's to decide.
+ */
+function toolPlace(doc: SchematicDocument, area: ToolArea, column: { minY: number; maxY: number }): ToolPlace {
+  if (area.kind === "regions") {
+    if (area.regions.length === 0 || area.regions.length > MAX_BOXES) {
+      throw new RegionCountError(area.regions.length);
+    }
+    const boxes = area.regions.map(orderRegion);
+    const bounds = unionBounds(boxes) as Region;
+    return {
+      bounds,
+      brush: null,
+      forEachColumn(visit) {
+        for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+          for (let z = bounds.minZ; z <= bounds.maxZ; z += 1) {
+            if (boxes.some((box) => x >= box.minX && x <= box.maxX && z >= box.minZ && z <= box.maxZ)) visit(x, z);
+          }
+        }
+      },
+      cells(shift, window) {
+        const kept = boxes.flatMap((box) => {
+          const cut = intersectBox(shiftRegion(box, shift), window);
+          return cut === null ? [] : [cut];
+        });
+        if (kept.length === 0) return null;
+        return { cells: regionCellSet(kept), bounds: unionBounds(kept) as Region };
+      },
+    };
+  }
+  const { x, y, z, radius, footprint } = area;
+  if (![x, y, z].every((value) => Number.isInteger(value))) {
+    throw new TerrainError("A brush is aimed at a block, in whole coordinates.");
+  }
+  if (!Number.isInteger(radius) || radius < TOOL_REACH.min || radius > TOOL_REACH.max) {
+    throw new TerrainError(`A brush's radius is a whole number of blocks, from ${TOOL_REACH.min} to ${TOOL_REACH.max}.`);
+  }
+  if (!(FOOTPRINTS as readonly string[]).includes(footprint)) {
+    throw new TerrainError(`"${String(footprint)}" is not a brush. A brush is a ${FOOTPRINTS.join(" or a ")}.`);
+  }
+  const bounds: Region = {
+    minX: x - radius,
+    minY: column.minY,
+    minZ: z - radius,
+    maxX: x + radius,
+    maxY: column.maxY,
+    maxZ: z + radius,
+  };
+  return {
+    bounds,
+    brush: { x, z, radius, footprint },
+    forEachColumn(visit) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        for (let dz = -radius; dz <= radius; dz += 1) {
+          if (inFootprint(footprint, dx, dz, radius)) visit(x + dx, z + dz);
+        }
+      }
+    },
+    cells(shift, window) {
+      // The footprint is `shapes.ts`' cylinder, the one `inFootprint` states.
+      const found = shapeCells(
+        { kind: footprint === "disc" ? "cylinder" : "box", axis: "y", box: shiftRegion(bounds, shift) },
+        window,
+      );
+      if (found.window === null || found.count === 0) return null;
+      return { cells: shapeCellSet(found), bounds: found.window };
+    },
+  };
+}
+
+/** A mix off the wire, checked, with every block as it will be written. */
+interface CheckedMix {
+  distribution: ReturnType<typeof normalizeDistribution>;
+  shares: ReturnType<typeof effectiveShares>;
+  written: PaletteEntry[];
+  layers: (BannerLayer[] | null)[];
+  /** What an undo label calls it. */
+  label: string;
+}
+
+/**
+ * Checks a mix the way every edit that writes one has to.
+ *
+ * The wire is a structured object that never went near the parser, so the
+ * distribution is checked here as well: a kind that exists, parameters it
+ * takes. Every block has to exist in the document's version, and a banner's
+ * design in it too, before anything is written.
+ */
+function checkedMix(
+  doc: SchematicDocument,
+  mix: MixSpec,
+  placeable: (entry: PaletteEntry) => PaletteEntry,
+): CheckedMix {
+  if (mix.entries.length === 0) throw new MixSyntaxError("Name at least one block to write.");
+  if (mix.entries.length > MAX_MIX_ENTRIES) {
+    throw new MixSyntaxError(`A mix holds at most ${MAX_MIX_ENTRIES} blocks; this one names ${mix.entries.length}.`);
+  }
+  if (mix.entries.some((entry) => !Number.isFinite(entry.weight) || entry.weight < 0)) {
+    throw new MixSyntaxError("A weight in the mix is not a number of zero or more.");
+  }
+  if (mix.entries.every((entry) => entry.weight === 0)) {
+    throw new MixSyntaxError("Every weight in the mix is zero, so it would place nothing.");
+  }
+  const distribution = normalizeDistribution(mix.distribution);
+  const shares = effectiveShares(mix.entries);
+  const written = mix.entries.map((entry) => placeable(toEntry(entry.block)));
+  const layers = mix.entries.map((entry) => layersOf(entry.block));
+  written.forEach((entry, index) => {
+    const own = layers[index];
+    if (own !== null) checkBannerPatterns(doc, entry, own);
+  });
+  const label = written.length === 1 ? written[0].namespacedName : `a mix of ${written.length} blocks`;
+  return { distribution, shares, written, layers, label };
 }
 
 /**
@@ -2013,9 +2473,12 @@ export function currentClipboard(): Clipboard | null {
   return clipboard;
 }
 
-/** Copies a region out. Reads only, so no transaction. */
-export function copySelection(session: DocumentSession, request: RegionSpec): Clipboard {
-  clipboard = copyRegion(session.doc, normalizeRegion(session.doc, request));
+/**
+ * Copies a region out -- or several, keeping where they were relative to each
+ * other. Reads only, so no transaction.
+ */
+export function copySelection(session: DocumentSession, request: Areas): Clipboard {
+  clipboard = copyRegions(session.doc, resolveAreas(session.doc, request).boxes);
   return clipboard;
 }
 
@@ -2028,14 +2491,16 @@ export function copySelection(session: DocumentSession, request: RegionSpec): Cl
  */
 export function cutSelection(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   options: RegionEditOptions = {},
 ): Clipboard {
   const { doc, history } = session;
-  const region = normalizeRegion(doc, request);
-  clipboard = copyRegion(doc, region);
+  const { boxes } = resolveAreas(doc, request);
+  clipboard = copyRegions(doc, boxes);
+  // Box by box: a cell two areas share is written twice with the same block,
+  // and `setBlock` answers the second write with nothing changed.
   runTransaction(doc, history, "Cut the selection", (tx) =>
-    tx.fill(region, emptyEntry(options.voidBlock)),
+    boxes.reduce((changed, box) => changed + tx.fill(box, emptyEntry(session, options.voidBlock)), 0),
   );
   return clipboard;
 }
@@ -2074,7 +2539,7 @@ export function pasteSelection(
    * says the intent and main supplies the fact, which is `EditOptions.voidBlock`
    * arriving at the same arrangement from the other side.
    */
-  const keepUnder = options.skipEmpty === true ? emptyEntry(options.voidBlock) : null;
+  const keepUnder = options.skipEmpty === true ? emptyEntry(session, options.voidBlock) : null;
   const landing = pasteLanding(held, at, options.includeAir === true, keepUnder);
   const growth = landing === null ? null : growthFor(doc, landing, options.autoGrow !== false);
   return runTransaction(doc, history, "Paste", (tx) => {
@@ -2171,7 +2636,8 @@ export interface RegionEditOptions {
   /** Whether the schematic grows to hold the result. Refuses by name when off. */
   autoGrow?: boolean;
   /**
-   * What the region leaves behind: the document's own empty space.
+   * What the region leaves behind, when a caller wants something other than
+   * the document's own empty space. Absent means that empty space.
    *
    * A string, the way `EditOptions.voidBlock` is, and parsed here for the same
    * reason -- so a caller passes what the session holds rather than converting
@@ -2182,10 +2648,23 @@ export interface RegionEditOptions {
   voidBlock?: string;
 }
 
-/** The block a region leaves behind, from whatever the session was told. */
-function emptyEntry(voidBlock: string | undefined): PaletteEntry {
-  if (voidBlock === undefined || voidBlock === "") return AIR_ENTRY;
-  return parsePaletteEntry(voidBlock);
+/**
+ * The block a region leaves behind: what the caller said, else the session's
+ * own empty space.
+ *
+ * The fallback is the session's and not air, and that is the fix. The field
+ * used to be the only way in, so a caller that left it out got air -- and two
+ * of them did: the window's cut and every MCP verb (cut, paste, move). An
+ * underwater build cut from the window came back with a dry hole in it, with
+ * the option that prevents exactly that sitting unused one call away. The
+ * empty space belongs to the session (`session.voidBlock`, the same answer
+ * `emptySpaceFor` gives the connection pass), so the session supplies it, and
+ * a caller only has to speak when it means something else.
+ */
+function emptyEntry(session: DocumentSession, voidBlock: string | undefined): PaletteEntry {
+  const block = voidBlock ?? session.voidBlock;
+  if (block === "") return AIR_ENTRY;
+  return parsePaletteEntry(block);
 }
 
 /**
@@ -2235,13 +2714,15 @@ function transformedBox(
 
 export function moveRegion(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   to: { x: number; y: number; z: number },
   options: RegionEditOptions = {},
 ): number {
   const { doc, history } = session;
-  const region = normalizeRegion(doc, request);
-  const volume = regionVolume(region);
+  // `to` is where the corner of the areas' *bounds* lands: they move together
+  // and keep their places relative to each other, so one corner says it all.
+  const { region, boxes } = resolveAreas(doc, request);
+  const volume = unionVolume(boxes);
   if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
 
   const landing: Region = {
@@ -2253,8 +2734,8 @@ export function moveRegion(
     maxZ: to.z + (region.maxZ - region.minZ),
   };
   const growth = growthFor(doc, landing, options.autoGrow !== false);
-  const held = copyRegion(doc, region);
-  const empty = emptyEntry(options.voidBlock);
+  const held = copyRegions(doc, boxes);
+  const empty = emptyEntry(session, options.voidBlock);
 
   return runTransaction(doc, history, "Move the selection", (tx) => {
     /*
@@ -2264,8 +2745,13 @@ export function moveRegion(
      */
     if (growth !== null) tx.resize(growth.size, growth.shift);
     const shift = growth?.shift ?? ([0, 0, 0] as const);
-    const source = growth === null ? region : shiftRegion(region, growth.shift);
-    let changed = tx.fill(source, empty);
+    // The areas, not their bounds: the gap between two of them stays exactly
+    // as it was, which is what keeps a move of two walls from also moving the
+    // garden between them.
+    let changed = 0;
+    for (const box of boxes) {
+      changed += tx.fill(growth === null ? box : shiftRegion(box, growth.shift), empty);
+    }
     changed += pasteClipboard(
       doc,
       tx,
@@ -2292,11 +2778,11 @@ export function moveRegion(
  */
 export async function regionMesh(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   options: DocumentPreviewOptions,
 ): Promise<{ chunks: ChunkGeometry[]; atlasVersion: number }> {
-  const region = normalizeRegion(session.doc, request);
-  return meshDetached(copyRegion(session.doc, region), session.doc.format, options);
+  const { boxes } = resolveAreas(session.doc, request);
+  return meshDetached(copyRegions(session.doc, boxes), session.doc.format, options);
 }
 
 /**
@@ -2371,13 +2857,13 @@ async function meshDetached(
  */
 export function transformRegion(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   transform: RegionTransform,
   options: RegionEditOptions & { to?: { x: number; y: number; z: number } | null } = {},
 ): number {
   const { doc, history } = session;
-  const region = normalizeRegion(doc, request);
-  const volume = regionVolume(region);
+  const { region, boxes, mask } = resolveAreas(doc, request);
+  const volume = unionVolume(boxes);
   if (volume > MAX_EDIT_VOLUME) throw new EditTooLargeError(volume);
 
   const to = options.to ?? null;
@@ -2394,7 +2880,8 @@ export function transformRegion(
         : { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] };
     return applyRegionTransform(doc, tx, source, transform, {
       to: corner,
-      empty: emptyEntry(options.voidBlock),
+      empty: emptyEntry(session, options.voidBlock),
+      mask: mask === null ? null : mask.map((box) => shiftRegion(box, shift)),
     });
   });
 }
@@ -2432,14 +2919,14 @@ export interface ScaleResult {
  */
 export function scaleRegion(
   session: DocumentSession,
-  request: RegionSpec,
+  request: Areas,
   spec: ScaleSpec,
   options: RegionEditOptions & {
     to?: { x: number; y: number; z: number } | null;
   } = {},
 ): ScaleResult {
   const { doc, history } = session;
-  const region = normalizeRegion(doc, request);
+  const { region, mask } = resolveAreas(doc, request);
   const size = {
     width: region.maxX - region.minX + 1,
     height: region.maxY - region.minY + 1,
@@ -2459,7 +2946,7 @@ export function scaleRegion(
    * pass because after it the source cells have already been overwritten and
    * there is nothing left to count.
    */
-  const dropped = scaleWouldDrop(doc, region, spec);
+  const dropped = scaleWouldDrop(doc, region, spec, mask);
 
   const to = options.to ?? { x: region.minX, y: region.minY, z: region.minZ };
   const landing: Region = {
@@ -2479,7 +2966,8 @@ export function scaleRegion(
     const source = growth === null ? region : shiftRegion(region, growth.shift);
     return applyRegionScale(doc, tx, source, spec, {
       to: { x: to.x + shift[0], y: to.y + shift[1], z: to.z + shift[2] },
-      empty: emptyEntry(options.voidBlock),
+      empty: emptyEntry(session, options.voidBlock),
+      mask: mask === null ? null : mask.map((box) => shiftRegion(box, shift)),
     });
   });
 
@@ -2537,6 +3025,17 @@ export function editBlockEntityValue(
 // ---------------------------------------------------------------------------
 
 /**
+ * How long one request may spend building queued levels of detail, in
+ * milliseconds. A slice rather than the lot, because main is one thread and
+ * an edit that arrives meanwhile waits for it: a region is ~10 ms, so this is
+ * a few regions, and nothing waits for longer than one of these.
+ */
+export const LOD_SLICE_MS = 40;
+
+/** Counts builds, for `DocumentSession.mesh.serial`. */
+let meshSerial = 0;
+
+/**
  * The GLB for the current state, rebuilt only when the document has moved on.
  *
  * `doc.revision` is exactly the right key: monotonic, and bumped by every
@@ -2545,8 +3044,17 @@ export function editBlockEntityValue(
 export async function documentMesh(
   session: DocumentSession,
   options: DocumentPreviewOptions,
-  held: { mesh: string | null; atlas: number | null } = { mesh: null, atlas: null },
-): Promise<{ mesh: MeshPayload; center: [number, number, number]; size: [number, number, number]; cached: boolean }> {
+  held: { mesh: string | null; atlas: number | null; atlasLayout?: number | null } = {
+    mesh: null,
+    atlas: null,
+  },
+): Promise<{
+  mesh: MeshPayload;
+  center: [number, number, number];
+  size: [number, number, number];
+  cached: boolean;
+  timings: Record<string, number>;
+}> {
   // The revision is not the whole key. The two biome tints are multiplied into
   // the texture atlas rather than applied by the viewer, so changing one has to
   // rebuild the mesh — and it changes no revision, because it changes no block.
@@ -2569,20 +3077,53 @@ export async function documentMesh(
     // no revision, so the same stale mesh would come back after changing it.
     options.voidBlock ?? "",
   ].join("|");
-
-  const cached = session.mesh !== null && session.mesh.key === key;
+  /*
+   * The levels of detail are geometry too, but not the chunks': asking for
+   * them, or no longer, changes what is built beside the chunks and re-meshes
+   * none of them. So they are compared apart, and a payload with levels still
+   * queued is never the cached answer -- asking again is how they get built.
+   */
+  const lodKey = options.lod
+    ? `${options.lod.shapes ? "shapes" : ""},${options.lod.coarse ? "coarse" : ""},${options.lod.autoTriangles ?? "always"}`
+    : "off";
+  const same = session.mesh !== null && session.mesh.key === key;
+  const cached =
+    same && session.mesh!.lodKey === lodKey && session.mesh!.payload.lod.state !== "pending";
+  let timings: Record<string, number> = {};
   if (!cached) {
-    const built = await buildDocumentPreview(session.doc, options, session.meshCache);
+    /*
+     * A build that throws may have taken the document's record of changed
+     * cells, so the cache it started from can no longer be brought up to
+     * date incrementally: it is dropped, and the next build meshes everything.
+     */
+    const from = session.meshCache;
+    session.meshCache = undefined;
+    const built = await buildDocumentPreview(
+      session.doc,
+      // An edit's own build spends nothing on queued levels; asking again with
+      // nothing changed -- which is what the window does while some are
+      // queued -- spends a slice. See `LodRequest.budgetMs`.
+      { ...options, lodBudgetMs: same ? LOD_SLICE_MS : 0 },
+      from,
+    );
+    timings = built.timings;
     session.meshCache = built.meshCache;
+    meshSerial += 1;
     session.mesh = {
       key,
+      lodKey,
+      serial: meshSerial,
       payload: built.mesh,
       center: built.center,
       size: built.size,
+      atlas: built.atlas,
     };
   }
-  const { payload, center, size } = session.mesh!;
-  return { mesh: shipMesh(session, key, payload, held), center, size, cached };
+  const { payload, center, size, atlas, serial } = session.mesh!;
+  const shipAt = performance.now();
+  const mesh = shipMesh(session, `${key}#${serial}`, payload, held, atlas);
+  timings.ship = performance.now() - shipAt;
+  return { mesh, center, size, cached, timings };
 }
 
 /**
@@ -2628,7 +3169,8 @@ function shipMesh(
   session: DocumentSession,
   token: string,
   payload: MeshPayload,
-  held: { mesh: string | null; atlas: number | null },
+  held: { mesh: string | null; atlas: number | null; atlasLayout?: number | null },
+  source: AtlasSource,
 ): MeshPayload {
   const sent = session.sent ?? null;
   /*
@@ -2668,16 +3210,26 @@ function shipMesh(
     chunks: new Map(payload.chunks.map((chunk) => [chunkId(chunk), chunk.positions])),
   };
 
+  /*
+   * The atlas is the larger half and changes far less often than the
+   * geometry: it grows only when a texture nothing has drawn before appears,
+   * and then by a tile or two into the sheet the renderer already has.
+   */
+  const { atlas, patch } = atlasFor(source, {
+    version: held.atlas,
+    layout: held.atlasLayout ?? null,
+  });
   return {
     chunks,
     dropped,
     partial: incremental,
     token,
-    // The atlas is the larger half and changes far less often than the
-    // geometry: it grows only when a block type nothing has drawn before
-    // appears, which after the startup warm-up is never.
-    atlas: held.atlas === payload.atlasVersion ? null : payload.atlas,
-    atlasVersion: payload.atlasVersion,
+    atlas,
+    atlasVersion: source.version,
+    atlasLayout: source.layout,
+    atlasPatch: patch,
+    frame: payload.frame,
+    lod: payload.lod,
   };
 }
 

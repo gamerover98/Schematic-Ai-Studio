@@ -19,6 +19,8 @@
 -->
 <script lang="ts">
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
+  import type { IconName } from "./icons.js";
   import type { Axis, GizmoMode } from "./gizmo.js";
 
   interface Props {
@@ -85,19 +87,19 @@
     mode: GizmoMode;
     label: string;
     hint: string;
-    glyph: string;
+    icon: IconName;
     key: string;
   }[] = [
-    { mode: "move", label: "gizmo.move", hint: "gizmo.move.hint", glyph: "✥", key: "G" },
-    { mode: "rotate", label: "gizmo.rotate", hint: "gizmo.rotate.hint", glyph: "↻", key: "T" },
-    { mode: "scale", label: "gizmo.scale", hint: "gizmo.scale.hint", glyph: "⤢", key: "Y" },
-    { mode: "pivot", label: "gizmo.pivot", hint: "gizmo.pivot.hint", glyph: "⌖", key: "P" },
+    { mode: "move", label: "gizmo.move", hint: "gizmo.move.hint", icon: "move", key: "G" },
+    { mode: "rotate", label: "gizmo.rotate", hint: "gizmo.rotate.hint", icon: "rotate", key: "T" },
+    { mode: "scale", label: "gizmo.scale", hint: "gizmo.scale.hint", icon: "scale", key: "Y" },
+    { mode: "pivot", label: "gizmo.pivot", hint: "gizmo.pivot.hint", icon: "pivot", key: "P" },
   ];
 
   const AXES: readonly Axis[] = ["x", "y", "z"];
 </script>
 
-<div class="gizmo-bar" role="toolbar" aria-label={t("gizmo.legend")}>
+<div class="gizmo-bar slab" role="toolbar" aria-label={t("gizmo.legend")}>
   <!--
     Copy and paste, because the stamp turned them into a loop rather than two
     one-off commands: copy, carry the box, paste, carry it again. Cut is
@@ -111,22 +113,25 @@
   -->
   <div class="group">
     <button
+      class="icon"
       onclick={oncopy}
       disabled={busy}
       aria-label={t("gizmo.copy")}
       title={`${t("gizmo.copy")} (Ctrl+C) — ${t("gizmo.copy.hint")}`}
     >
-      ⧉
+      <Icon name="copy" />
     </button>
     <button
+      class="icon"
       onclick={onpaste}
       disabled={busy || !canPaste}
       aria-label={t("gizmo.paste")}
       title={`${t("gizmo.paste")} (Ctrl+V) — ${t("gizmo.paste.hint")}`}
     >
-      ⤓
+      <Icon name="paste" />
     </button>
     <button
+      class="icon toggle"
       class:active={emptyIsAir || skipEmpty}
       onclick={() => onskipempty(!skipEmpty)}
       disabled={busy || emptyIsAir}
@@ -136,11 +141,12 @@
         ? `${t("gizmo.skipEmpty")} — ${t("gizmo.skipEmpty.air")}`
         : `${t("gizmo.skipEmpty")} — ${t("gizmo.skipEmpty.hint", { block: emptyBlock })}`}
     >
-      ⬚
+      <Icon name="air" weight={1.8} />
     </button>
   </div>
 
-  <div class="group">
+  <!-- One of four, so `.segmented`: the camera switch's look, in the bar. -->
+  <div class="segmented modes">
     {#each MODES as entry (entry.mode)}
       <button
         class:active={mode === entry.mode}
@@ -150,7 +156,7 @@
         aria-pressed={mode === entry.mode}
         title={`${t(entry.label)} (${entry.key}) — ${t(entry.hint)}`}
       >
-        {entry.glyph}
+        <Icon name={entry.icon} />
       </button>
     {/each}
   </div>
@@ -165,14 +171,14 @@
     The axis letters carry their own colours rather than a glyph each, because
     X and Z are both horizontal and any mirror glyph would draw them
     identically. The colour is the language the gizmo has already taught in the
-    viewport, so it is read without being explained; the `⇄` in front says which
-    verb the three letters belong to and is decorative.
+    viewport, so it is read without being explained; the mirror icon in front
+    says which verb the three letters belong to and is decorative.
   -->
   <div class="group mirrors">
-    <span class="marker" aria-hidden="true">⇄</span>
+    <span class="marker"><Icon name="swapHorizontal" size={13} /></span>
     {#each AXES as axis (axis)}
       <button
-        class={`axis-${axis}`}
+        class={`icon axis axis-${axis}`}
         onclick={() => onmirror(axis)}
         disabled={busy}
         aria-label={t(`gizmo.mirror.${axis}`)}
@@ -185,99 +191,82 @@
 
   {#if moved}
     <button
-      class="reset"
+      class="icon"
       onclick={onresetpivot}
       disabled={busy}
       aria-label={t("gizmo.resetPivot")}
       title={`${t("gizmo.resetPivot")} — ${t("gizmo.resetPivotHint")}`}
     >
-      ⌾
+      <Icon name="anchor" />
     </button>
   {/if}
 </div>
 
 <style>
+  /* A slab over the scene, clear of the hotbar from the tokens that describe
+     it. See `app.css`. */
   .gizmo-bar {
     position: absolute;
-    /* Clear of the hotbar, from the tokens that describe it. See `app.css`. */
-    bottom: calc(var(--hotbar-inset) + var(--hotbar-height) + 8px);
+    bottom: calc(var(--hotbar-inset) + var(--hotbar-height) + var(--space-3));
     left: 50%;
     transform: translateX(-50%);
-    z-index: 5;
+    z-index: var(--z-overlay);
     display: flex;
-    gap: 10px;
+    gap: var(--space-4);
     align-items: center;
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg-panel);
-    box-shadow: 0 6px 20px var(--shadow);
+    padding: var(--space-1) var(--space-2);
+    box-shadow: var(--shadow-float);
   }
 
   .group {
     display: flex;
-    gap: 2px;
+    gap: var(--space-1);
     align-items: center;
   }
 
-  button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 26px;
-    border: 1px solid transparent;
-    border-radius: 5px;
-    background: none;
-    color: var(--text-dim);
-    font: inherit;
-    /* The glyphs are drawn small by most families; the letters are not. */
-    font-size: 15px;
-    line-height: 1;
-    cursor: pointer;
+  /* Pressed into the slab and lit, as the chosen one of a `.segmented` is --
+     under the pointer too, and dimmed with it where it can do nothing. */
+  .toggle.active,
+  .toggle.active:hover:not(:disabled) {
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--accent);
+    color: var(--accent-contrast);
   }
 
-  button:hover:not(:disabled) {
-    background: var(--bg-input);
-    color: var(--text);
+  /* Icons, so square: the segmented control's own padding is for words. */
+  .modes > button {
+    display: grid;
+    place-items: center;
+    width: var(--control-h);
+    padding: 0;
   }
 
-  button:disabled {
-    opacity: 0.45;
-    cursor: default;
+  /* The body face, bold: in the pixel face a Z reads as a 2. */
+  .axis {
+    font-size: var(--text-md);
+    font-weight: 700;
   }
 
-  button.active {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .mirrors button {
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  /* The same three tokens the gizmo's own arrows are drawn from. */
-  .mirrors .axis-x {
+  /* The same three tokens the gizmo's own arrows are drawn from, under the
+     pointer too: `button.icon`'s hover would turn every letter grey. */
+  .axis-x,
+  .axis-x:hover:not(:disabled) {
     color: var(--axis-x);
   }
 
-  .mirrors .axis-y {
+  .axis-y,
+  .axis-y:hover:not(:disabled) {
     color: var(--axis-y);
   }
 
-  .mirrors .axis-z {
+  .axis-z,
+  .axis-z:hover:not(:disabled) {
     color: var(--axis-z);
   }
 
   .marker {
-    padding-right: 2px;
+    display: grid;
+    place-items: center;
     color: var(--text-dim);
-    font-size: 13px;
-    opacity: 0.7;
-  }
-
-  .reset {
-    border-color: var(--border);
   }
 </style>

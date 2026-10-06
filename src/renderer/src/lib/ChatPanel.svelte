@@ -14,6 +14,16 @@
    * disclosure once the turn lands, though: while it is running they are the
    * only evidence of progress, and afterwards they are the least interesting
    * part of the answer.
+   *
+   * ## The right-hand docked panel, and it looks like the left-hand one
+   *
+   * The same strip across the top, with the conversation standing on it as
+   * the panel's one tab -- the tools' panel has three -- so the two edges of
+   * the window read as one piece of furniture. Each turn is a name in the
+   * pixel face behind a square of its colour, the way the game prints a
+   * player's name in chat; what the model did is a well sunk into the slab;
+   * what changed is the blocks themselves, in slots, with the count beside
+   * each.
    */
   import type {
     ChatEntry,
@@ -23,11 +33,14 @@
     TraceItem,
   } from "../../../shared/ipc.js";
   import type { KeyStorageStatus, Settings } from "../../../shared/settings.js";
+  import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import ChatComposer from "./ChatComposer.svelte";
   import ConversationPicker from "./ConversationPicker.svelte";
+  import { formatNumber, t, tn } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
+  import { blockLabel, isAir } from "./inventory.js";
   import Markdown from "./Markdown.svelte";
   import TraceView from "./TraceView.svelte";
-  import { t, tn } from "./i18n.svelte.js";
 
   interface Props {
     entries: ChatEntry[];
@@ -50,6 +63,8 @@
      */
     progress: ProgressEvent | null;
     selection: RegionSpec | null;
+    /** How many areas are selected beside `selection`; see `ChatComposer`. */
+    otherAreas?: number;
     /** Exchanges the agent is carrying into the next question. */
     remembered: number;
     /**
@@ -116,6 +131,10 @@
     onundo: () => void;
     onsettingschange: (patch: Partial<Settings>) => void;
     onopensettings: () => void;
+    /** Puts the panel away; the bar's toggle and Ctrl+B bring it back. */
+    oncollapse: () => void;
+    /** Bumped to put the caret in the composer; see `ChatComposer`. */
+    focusRequest?: number;
   }
 
   const {
@@ -123,6 +142,7 @@
     live,
     progress,
     selection,
+    otherAreas = 0,
     remembered,
     rememberedFrom,
     hasDocument,
@@ -152,6 +172,8 @@
     onundo,
     onsettingschange,
     onopensettings,
+    oncollapse,
+    focusRequest = 0,
   }: Props = $props();
 
   /** The few tallies that matter, and how many were left out. */
@@ -170,6 +192,30 @@
   let log = $state<HTMLDivElement | null>(null);
   /** Which agent turns have had their tool list opened, by index. */
   let expanded = $state<Record<number, boolean>>({});
+
+  /**
+   * The blocks the receipts name, for their slots.
+   *
+   * Only the tallies that are shown, and never air: there is no picture of
+   * air, and the slot of a block that was emptied out stays empty, which is
+   * the honest picture of it.
+   */
+  const receiptBlocks = $derived(
+    entries.flatMap((entry) =>
+      entry.summary && entry.summary.changed > 0
+        ? [...entry.summary.removed.slice(0, SHOWN), ...entry.summary.added.slice(0, SHOWN)]
+            .map((tally) => tally.block)
+            .filter((block) => !isAir(block))
+        : [],
+    ),
+  );
+  const icons = $derived(blockIcons());
+
+  $effect(() => {
+    // Read so an atlas that moved asks for every icon again.
+    void iconsReady();
+    requestBlockIcons(receiptBlocks);
+  });
 
   /**
    * Follows the conversation down.
@@ -196,13 +242,17 @@
   }
 </script>
 
-<section class="chat">
 <!--
+  The panel's `aria-label` is what a screen reader announces on the way in;
+  the conversation's own name is the tab.
+-->
+<section class="chat" aria-label={t("chat.label")}>
+  <!--
     The header names the conversation you are in rather than the panel you are
     looking at: "Chat" was true and told you nothing, and with several
     conversations per schematic the useful fact is which one this is.
   -->
-  <header>
+  <header class="panel-head">
     <ConversationPicker
       {conversations}
       activeId={activeConversationId}
@@ -211,12 +261,20 @@
       onopen={onopenconversation}
       ondelete={ondeleteconversation}
     />
+    <span class="spacer"></span>
     <button
       class="icon"
       onclick={onforget}
       disabled={busy || (entries.length === 0 && remembered === 0)}
       title={t("chat.newChatHint")}
-      aria-label={t("chat.newChat")}>&#x002b;</button
+      aria-label={t("chat.newChat")}><Icon name="plus" /></button
+    >
+    <!-- The mirror of the tools' chevron, pointing at the edge it goes to. -->
+    <button
+      class="icon"
+      onclick={oncollapse}
+      title={t("sidebar.hideShortcut")}
+      aria-label={t("sidebar.hide")}><Icon name="chevronRight" /></button
     >
   </header>
 
@@ -249,125 +307,142 @@
         </div>
       {/if}
       <article class={`turn ${entry.role}`}>
-        <div class="avatar" aria-hidden="true">{entry.role === "user" ? "●" : "✦"}</div>
-        <div class="body">
-          <span class="who">{who(entry.role)}</span>
-
-          <!--
-            The trace when there is one, and the old summary list when there is
-            not. Conversations written before traces existed still hold `steps`,
-            and dropping them would blank the history of anyone who had been
-            using the app -- which is why `CONVERSATION_FORMAT` did not have to
-            change for this.
-          -->
-          {#if entry.trace && entry.trace.length > 0}
-            <TraceView items={entry.trace} />
-          {:else if entry.steps && entry.steps.length > 0}
-            <button
-              class="tools"
-              aria-expanded={expanded[index] === true}
-              onclick={() => (expanded = { ...expanded, [index]: !expanded[index] })}
-            >
-              <span class="caret" aria-hidden="true">{expanded[index] ? "▾" : "▸"}</span>
-              {tn("chat.toolsUsed", entry.steps.length)}
-            </button>
-            {#if expanded[index]}
-              <ul class="steps">
-                {#each entry.steps as step, stepIndex (stepIndex)}
-                  <li>{step.summary}</li>
-                {/each}
-              </ul>
-            {/if}
-          {/if}
-
-          <!--
-            Only the agent's turns are markdown. What the user typed is shown
-            back exactly as typed -- their asterisks and their
-            `minecraft:oak_log` survive -- and an error message is main's own
-            wording, which arrives already phrased and is not ours to reformat.
-          -->
-          {#if entry.role === "agent"}
-            <Markdown source={entry.text} />
-          {:else}
-            <p class="text">{entry.text}</p>
-          {/if}
-
+        <div class="who">
+          <span class="mark" aria-hidden="true"></span>
+          <span class="name">{who(entry.role)}</span>
           <!--
             Wherever a snapshot is attached, whatever kind of entry carries it:
             a user turn carries the state before it was asked, and the note left
             by an earlier restore carries the state that restore stepped away
             from. One rule rather than two, and the second is what makes going
             back reversible.
+
+            On the name's line, so it takes no room of its own: hidden until
+            the turn is pointed at, it used to leave a blank line under every
+            message that had one.
           -->
           {#if entry.checkpoint}
-            <button class="restore" disabled={busy} onclick={() => onrestore(index)}>
-              {t("chat.restore")}
-            </button>
-          {/if}
-
-          {#if entry.summary && entry.summary.changed > 0}
-            <div class="receipt">
-              {#if entry.summary.removed.length > 0}
-                <p class="removed">
-                  {#each entry.summary.removed.slice(0, SHOWN) as tally, i (tally.block)}
-                    {i > 0 ? ", " : ""}−{tally.count.toLocaleString()}
-                    {tally.block}
-                  {/each}
-                  {#if entry.summary.removed.length > SHOWN}
-                    {t("chat.andMore", { count: entry.summary.removed.length - SHOWN })}
-                  {/if}
-                </p>
-              {/if}
-              {#if entry.summary.added.length > 0}
-                <p class="added">
-                  {#each entry.summary.added.slice(0, SHOWN) as tally, i (tally.block)}
-                    {i > 0 ? ", " : ""}+{tally.count.toLocaleString()}
-                    {tally.block}
-                  {/each}
-                  {#if entry.summary.added.length > SHOWN}
-                    {t("chat.andMore", { count: entry.summary.added.length - SHOWN })}
-                  {/if}
-                </p>
-              {/if}
-            </div>
-            <!--
-              By id, not by label. The label comes from the prompt, so asking
-              for "make it taller" twice produced two turns this could not tell
-              apart, and the button offered to undo whichever was on top.
-            -->
-            {#if entry.undoTransactionId != null && entry.undoTransactionId === undoTransactionId}
-              <div class="buttons">
-                <button onclick={onundo} disabled={busy}>{t("chat.undoThis")}</button>
-              </div>
-            {/if}
-          {:else if entry.changed !== undefined && entry.changed > 0}
-            <span class="hint">
-              {t("chat.blocksChanged", { count: entry.changed.toLocaleString() })}
-            </span>
+            <button
+              class="icon restore"
+              disabled={busy}
+              onclick={() => onrestore(index)}
+              title={t("chat.restore")}
+              aria-label={t("chat.restore")}><Icon name="history" size={14} /></button
+            >
           {/if}
         </div>
+
+        <!--
+          The trace when there is one, and the old summary list when there is
+          not. Conversations written before traces existed still hold `steps`,
+          and dropping them would blank the history of anyone who had been
+          using the app -- which is why `CONVERSATION_FORMAT` did not have to
+          change for this.
+        -->
+        {#if entry.trace && entry.trace.length > 0}
+          <TraceView items={entry.trace} />
+        {:else if entry.steps && entry.steps.length > 0}
+          <button
+            class="tools"
+            aria-expanded={expanded[index] === true}
+            onclick={() => (expanded = { ...expanded, [index]: !expanded[index] })}
+          >
+            <Icon name={expanded[index] ? "chevronDown" : "chevronRight"} size={10} weight={2.6} />
+            {tn("chat.toolsUsed", entry.steps.length)}
+          </button>
+          {#if expanded[index]}
+            <ul class="steps sunken">
+              {#each entry.steps as step, stepIndex (stepIndex)}
+                <li>{step.summary}</li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
+
+        <!--
+          Only the agent's turns are markdown. What the user typed is shown
+          back exactly as typed -- their asterisks and their
+          `minecraft:oak_log` survive -- and an error message is main's own
+          wording, which arrives already phrased and is not ours to reformat.
+        -->
+        {#if entry.role === "agent"}
+          <Markdown source={entry.text} />
+        {:else}
+          <p class="text">{entry.text}</p>
+        {/if}
+
+        {#if entry.summary && entry.summary.changed > 0}
+          <!--
+            What came out and what went in, as the blocks themselves: a slot
+            with the block in it and the count beside it, read the way the
+            materials list is. The id is the hover, for whoever has to type it.
+          -->
+          <ul class="receipt">
+            {#each entry.summary.removed.slice(0, SHOWN) as tally (tally.block)}
+              <li class="removed" title={tally.block}>
+                <span class="slot">
+                  {#if icons.get(tally.block)}<img src={icons.get(tally.block)} alt="" />{/if}
+                </span>
+                <span class="count">−{formatNumber(tally.count)}</span>
+                <span class="block">{blockLabel(tally.block)}</span>
+              </li>
+            {/each}
+            {#if entry.summary.removed.length > SHOWN}
+              <li class="more">{t("chat.andMore", { count: entry.summary.removed.length - SHOWN })}</li>
+            {/if}
+            {#each entry.summary.added.slice(0, SHOWN) as tally (tally.block)}
+              <li class="added" title={tally.block}>
+                <span class="slot">
+                  {#if icons.get(tally.block)}<img src={icons.get(tally.block)} alt="" />{/if}
+                </span>
+                <span class="count">+{formatNumber(tally.count)}</span>
+                <span class="block">{blockLabel(tally.block)}</span>
+              </li>
+            {/each}
+            {#if entry.summary.added.length > SHOWN}
+              <li class="more">{t("chat.andMore", { count: entry.summary.added.length - SHOWN })}</li>
+            {/if}
+          </ul>
+          <!--
+            By id, not by label. The label comes from the prompt, so asking
+            for "make it taller" twice produced two turns this could not tell
+            apart, and the button offered to undo whichever was on top.
+          -->
+          {#if entry.undoTransactionId != null && entry.undoTransactionId === undoTransactionId}
+            <button class="link undo" onclick={onundo} disabled={busy}>
+              <Icon name="undo" size={14} />{t("chat.undoThis")}
+            </button>
+          {/if}
+        {:else if entry.changed !== undefined && entry.changed > 0}
+          <span class="hint">
+            {tn("chat.blocksChanged", entry.changed)}
+          </span>
+        {/if}
       </article>
     {/each}
 
     {#if live.length > 0 || progress !== null}
-      <article class="turn agent">
-        <div class="avatar pulse" aria-hidden="true">&#x2726;</div>
-        <div class="body">
-          <span class="who">{t("chat.ai")}</span>
-          {#if live.length > 0}
-            <TraceView items={live} live />
-          {/if}
-          {#if progress !== null}
-            <div
-              class="progress"
-              role="progressbar"
-              aria-valuenow={Math.round(progress.fraction * 100)}
-            >
-              <div class="bar" style={`width: ${Math.round(progress.fraction * 100)}%`}></div>
-            </div>
-            <span class="hint">{progress.message}</span>
-          {/if}
+      <article class="turn agent live" aria-busy="true">
+        <div class="who">
+          <span class="mark" aria-hidden="true"></span>
+          <span class="name">{t("chat.ai")}</span>
         </div>
+        {#if live.length > 0}
+          <TraceView items={live} live />
+        {/if}
+        {#if progress !== null}
+          <!-- The experience bar: a well, filled with emerald from the left. -->
+          <div
+            class="progress sunken"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(progress.fraction * 100)}
+          >
+            <div class="bar" style={`width: ${Math.round(progress.fraction * 100)}%`}></div>
+          </div>
+          <span class="hint">{progress.message}</span>
+        {/if}
       </article>
     {/if}
   </div>
@@ -375,6 +450,7 @@
   <footer>
     <ChatComposer
       {selection}
+      {otherAreas}
       {busy}
       {running}
       {hasDocument}
@@ -392,6 +468,7 @@
       {onstop}
       {onsettingschange}
       {onopensettings}
+      {focusRequest}
     />
     {#if remembered > 0}
       <p class="hint memory">{tn("chat.remembered", remembered)}</p>
@@ -400,20 +477,6 @@
 </section>
 
 <style>
-  .progress {
-    height: 4px;
-    margin: 6px 0 4px;
-    border-radius: 2px;
-    background: var(--bg-input);
-    overflow: hidden;
-  }
-
-  .bar {
-    height: 100%;
-    background: var(--accent);
-    transition: width 120ms linear;
-  }
-
   /*
    * `min-height: 0` on the log is what lets it scroll instead of stretching the
    * panel: a flex item's automatic minimum size is its content, so without it a
@@ -426,36 +489,28 @@
     min-height: 0;
   }
 
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 0 2px 8px;
+  .panel-head {
+    flex: none;
   }
 
-  .title {
-    font-size: 12px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-dim);
+  .spacer {
+    flex: 1;
   }
 
   .log {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding-right: 4px;
+    padding: var(--space-2) var(--space-4);
   }
 
   .empty {
-    padding: 24px 4px;
+    padding: var(--space-5) 0;
     color: var(--text-dim);
-    font-size: 13px;
   }
 
   .empty p {
-    margin: 0 0 10px;
+    margin: 0 0 var(--space-4);
   }
 
   .examples {
@@ -464,119 +519,69 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
+  /* Slabs, as every button is; long enough to wrap, so they wrap. */
   .example {
     width: 100%;
-    padding: 7px 10px;
+    padding: var(--space-2) var(--space-3);
     text-align: left;
-    font-size: 12px;
     color: var(--text-dim);
-    background: var(--bg-input);
   }
 
-  .example:hover {
+  .example:hover:not(:disabled) {
     color: var(--text);
   }
 
-  .restore {
-    justify-self: start;
-    margin-top: 4px;
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: none;
-    color: var(--text-dim);
-    font-size: 11px;
-    /* Quiet until wanted: this is the one control in the log that throws work
-       away, and it should not read as the obvious next thing to press. */
-    opacity: 0;
-  }
-
-  .turn:hover .restore,
-  .restore:focus-visible {
-    opacity: 1;
-  }
-
-  .restore:hover:not(:disabled) {
-    color: var(--text);
-    border-color: var(--accent);
-  }
-
+  /* A line cut into the stone, light under dark, with the words in its gap. */
   .boundary {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin: 4px 0 10px;
+    gap: var(--space-3);
+    margin: var(--space-3) 0;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--text-xs);
   }
 
   .boundary::before,
   .boundary::after {
     content: "";
     flex: 1;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--bevel-lo);
+    border-bottom: 1px solid var(--bevel-hi);
   }
 
   .turn {
-    display: grid;
-    grid-template-columns: 22px minmax(0, 1fr);
-    gap: 8px;
-    padding: 10px 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3) 0;
+    min-width: 0;
   }
 
-  .turn + .turn {
-    border-top: 1px solid var(--border);
+  /* Each exchange starts below a groove, as the boundary is cut. */
+  .turn + .turn.user {
+    border-top: 1px solid var(--bevel-lo);
+    box-shadow: inset 0 1px 0 var(--bevel-hi);
+    padding-top: var(--space-4);
   }
 
-  .avatar {
+  /*
+   * The name, in the pixel face behind a square of its colour. Gold is you,
+   * emerald the model, redstone a failure; a run that was stopped is said in
+   * the quiet colour, because nothing went wrong.
+   */
+  .who {
     display: flex;
     align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-    font-size: 10px;
-    color: var(--text-dim);
+    gap: var(--space-3);
+    min-height: 24px;
+    color: var(--accent-text);
   }
 
-  .turn.agent .avatar {
-    color: var(--accent);
-  }
-
-  .turn.error .avatar {
-    color: var(--danger);
-  }
-
-  .turn.note .avatar {
+  .turn.user .who {
     color: var(--warn);
-  }
-
-  .pulse {
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
-
-  .body {
-    min-width: 0;
-    font-size: 13px;
-  }
-
-  .who {
-    display: block;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-dim);
-    margin-bottom: 2px;
   }
 
   .turn.error .who {
@@ -584,7 +589,49 @@
   }
 
   .turn.note .who {
-    color: var(--warn);
+    color: var(--text-dim);
+  }
+
+  .mark {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    background: currentColor;
+  }
+
+  .name {
+    font-family: var(--font-pixel);
+    font-size: var(--text-md);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
+  /* The cursor of a turn still being written, blinking as a caret does. */
+  .live .mark {
+    animation: blink 1s steps(1, end) infinite;
+  }
+
+  @keyframes blink {
+    50% {
+      opacity: 0.25;
+    }
+  }
+
+  /*
+   * Quiet until wanted: this is the one control in the log that throws work
+   * away, and it should not read as the obvious next thing to press. 24px, the
+   * smallest target a pointer is owed.
+   */
+  .restore {
+    width: 24px;
+    height: 24px;
+    margin-left: auto;
+    opacity: 0;
+  }
+
+  .turn:hover .restore,
+  .restore:focus-visible {
+    opacity: 1;
   }
 
   .text {
@@ -594,75 +641,115 @@
   }
 
   .tools {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 5px;
-    margin-bottom: 4px;
-    padding: 1px 0;
-    border: none;
+    gap: var(--space-2);
+    align-self: flex-start;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
     background: none;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
 
   .tools:hover:not(:disabled) {
+    background: none;
     color: var(--text);
   }
 
-  .caret {
-    font-size: 9px;
-  }
-
   .steps {
-    list-style: none;
-    margin: 0 0 6px;
-    padding: 0 0 0 10px;
-    border-left: 2px solid var(--border);
-    font-size: 12px;
+    margin: 0;
+    padding: var(--space-2) var(--space-3) var(--space-2) var(--space-6);
+    font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
-  .steps.live {
-    margin-top: 4px;
+  .receipt {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
   }
 
-  .receipt {
-    margin: 6px 0 0;
-    font-size: 12px;
+  .receipt li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  /* An inventory slot, a size down: dark in every theme, as the list's are. */
+  .slot {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    background: var(--slot);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+  }
+
+  .slot img {
+    width: 20px;
+    height: 20px;
+  }
+
+  /* A count is figures, not pixels: `.figures` in app.css says why. */
+  .count {
+    flex: none;
+    min-width: 5ch;
+    font-family: var(--font-body);
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
 
-  .receipt p {
-    margin: 0;
-    /* Long block ids wrap rather than stretching the panel. */
-    overflow-wrap: anywhere;
-  }
-
-  .receipt .removed {
+  .removed .count {
     color: var(--danger);
   }
 
-  .receipt .added {
+  .added .count {
     color: var(--ok);
   }
 
-  .buttons {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
+  /* Long block names wrap rather than stretching the panel. */
+  .block {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
-  .buttons button {
-    padding: 4px 10px;
-    font-size: 12px;
+  .receipt .more {
+    padding-left: calc(28px + var(--space-3));
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+  }
+
+  .undo {
+    align-self: flex-start;
+  }
+
+  .progress {
+    height: 10px;
+    overflow: hidden;
+  }
+
+  .bar {
+    height: 100%;
+    background: var(--accent);
+    transition: width var(--duration-fast) linear;
   }
 
   footer {
     flex: none;
-    padding-top: 10px;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+    border-top: 1px solid var(--bevel-lo);
+    box-shadow: inset 0 1px 0 var(--bevel-hi);
   }
 
   .memory {
-    margin: 6px 2px 0;
+    margin: var(--space-2) var(--space-1) 0;
   }
 </style>

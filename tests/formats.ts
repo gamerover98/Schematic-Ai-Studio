@@ -152,7 +152,10 @@ const block = (name: string, properties: Record<string, string> = {}): PaletteEn
 import {
   buildLegacyIndex,
   legacyIdFor,
+  legacyIdForState,
   legacyIdLabel,
+  legacyStateKey,
+  legacyVariantsOf,
   parseLegacyId,
   resolveBlockInput,
 } from "../src/shared/legacy_ids.js";
@@ -2481,6 +2484,35 @@ console.log("\n--- the legacy id table, read both ways ---");
   }
   equal("the writer names blocks the same way, on every row", mismatched, 0);
   equal("...over the whole table", index.byName.size, reverse.byName.size);
+
+  /*
+   * And states: the tooltip says which `ID:DATA` a chip will be stored as, from
+   * the shared index, and the writer decides it from its own. Two keys, one
+   * answer -- or the tooltip promises a number the file will not contain.
+   */
+  let stateMismatched = 0;
+  for (const [key, id] of reverse.byState) {
+    const ours = index.byState.get(legacyStateKey(key));
+    if (ours === undefined || ours.id !== id.id || ours.meta !== id.meta) stateMismatched += 1;
+  }
+  equal("the tooltip and the writer agree on every exact state", stateMismatched, 0);
+  equal("...and hold the same number of them", index.byState.size, reverse.byState.size);
+  equal(
+    "a state written in another order is the same state",
+    legacyIdForState(index, "minecraft:oak_stairs[shape=outer_right,half=bottom,facing=east]"),
+    { label: "53:0", exact: true },
+  );
+  equal(
+    "a state the era cannot store falls back to the block, and says so",
+    legacyIdForState(index, "minecraft:oak_fence[waterlogged=true]"),
+    { label: legacyIdFor(index, "minecraft:oak_fence"), exact: false },
+  );
+  equal("a block the era has never heard of has no id", legacyIdForState(index, "minecraft:deepslate"), null);
+  equal(
+    "wool's variants are its sixteen data values",
+    legacyVariantsOf(index, "minecraft:red_wool").map((variant) => variant.label),
+    Array.from({ length: 16 }, (_unused, meta) => `35:${meta}`),
+  );
 
   /*
    * The name set is what the editor refuses against, so it has to be exactly

@@ -1,0 +1,450 @@
+<script lang="ts">
+  /**
+   * The states of one block in a mix, opened by a right-click on its chip.
+   *
+   * It edits the **chip** and nothing else -- the spelling a fill or a
+   * placement will write -- so it is not the inspector, which edits a block
+   * already in the document. The neighbour rules still have the last word at
+   * the moment of writing: a fence's arms set here are re-derived from what
+   * actually stands beside it, as every write is.
+   *
+   * On a pre-Flattening document a block is an `ID:DATA` pair, and that is how
+   * its variants were chosen: wool is `35:0` to `35:15`. So there the panel is
+   * the grid of rows `legacy_blocks.json` has for the id, each drawn and
+   * labelled, with the chosen one's states shown underneath for reading. The
+   * modern state editor would offer combinations that era cannot store.
+   */
+  import { legacyIdForState, legacyVariantsOf, type LegacyIndex } from "../../../shared/legacy_ids.js";
+  import { defaultStateFor } from "../../../shared/block_states.js";
+  import { blockIcons, requestBlockIcons } from "./block_icons.svelte.js";
+  import Icon from "./Icon.svelte";
+  import { canonicalBlock, readSpelling, writeSpelling } from "./block_spelling.js";
+  import { placePopover, type AnchorRect } from "./floating.js";
+  import { propertyRows, showsAsCheckbox } from "./inspector_rows.js";
+  import { t } from "./i18n.svelte.js";
+
+  interface Props {
+    block: string;
+    anchor: AnchorRect;
+    legacy?: LegacyIndex | null;
+    onchange: (block: string) => void;
+    onclose: () => void;
+  }
+
+  const { block, anchor, legacy = null, onchange, onclose }: Props = $props();
+
+  let root = $state<HTMLDivElement | null>(null);
+  let placement = $state<{ x: number; y: number } | null>(null);
+  let innerWidth = $state(0);
+  let innerHeight = $state(0);
+
+  const icons = $derived(blockIcons());
+  const spelling = $derived(readSpelling(block));
+
+  const rows = $derived(
+    spelling === null ? [] : propertyRows(spelling.name, spelling.properties, legacy),
+  );
+  const defaults = $derived(spelling === null || legacy !== null ? {} : defaultStateFor(spelling.name));
+
+  const variants = $derived(legacy === null ? [] : legacyVariantsOf(legacy, block));
+  const current = $derived(legacyIdForState(legacy, block));
+
+  $effect(() => {
+    requestBlockIcons([block, ...variants.map((variant) => variant.modern)]);
+  });
+
+  function setProperty(name: string, value: string): void {
+    if (spelling === null) return;
+    const properties = { ...spelling.properties };
+    if (value === "") delete properties[name];
+    else properties[name] = value;
+    onchange(writeSpelling({ ...spelling, properties }));
+  }
+
+  function resetAll(): void {
+    if (spelling === null) return;
+    onchange(writeSpelling({ ...spelling, properties: {} }));
+  }
+
+  function chooseVariant(modern: string): void {
+    // The design rides along: a banner's look is not in its `ID:DATA`.
+    const next = readSpelling(modern);
+    if (next === null) return;
+    onchange(canonicalBlock(writeSpelling({ ...next, bannerPatterns: spelling?.bannerPatterns ?? null }), null));
+  }
+
+  $effect(() => {
+    if (root === null) {
+      placement = null;
+      return;
+    }
+    void rows.length;
+    void variants.length;
+    const box = root.getBoundingClientRect();
+    placement = placePopover(
+      anchor,
+      {
+        viewportWidth: innerWidth,
+        viewportHeight: innerHeight,
+        popoverWidth: box.width,
+        popoverHeight: box.height,
+        margin: 8,
+        gap: 6,
+      },
+      "below",
+    );
+  });
+
+  function onWindowPointer(event: PointerEvent): void {
+    if (root !== null && !root.contains(event.target as Node)) onclose();
+  }
+
+  /*
+   * Escape closes this and nothing else. The app's own window handler drops
+   * the selection on Escape, and it was registered first, so a bubbling
+   * listener here would run second and both would happen. Capture on the
+   * window runs before either, and stopping there keeps the key from them.
+   */
+  $effect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      event.preventDefault();
+      onclose();
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  });
+</script>
+
+<svelte:window bind:innerWidth bind:innerHeight onpointerdown={onWindowPointer} />
+
+<div
+  class="modal"
+  role="dialog"
+  aria-label={t("blockState.title")}
+  bind:this={root}
+  style={placement === null ? "visibility: hidden" : `left: ${placement.x}px; top: ${placement.y}px`}
+>
+  <div class="head">
+    <span class="slot">
+      {#if icons.get(block)}
+        <img src={icons.get(block)} alt="" width="32" height="32" />
+      {/if}
+    </span>
+    <code class="id">{block}</code>
+    <button class="icon" onclick={onclose} title={t("common.close")} aria-label={t("common.close")}>
+      <Icon name="close" size={14} weight={2.2} />
+    </button>
+  </div>
+
+  {#if legacy !== null}
+    {#if variants.length === 0}
+      <p class="hint">{t("blockState.legacyUnknown")}</p>
+    {:else}
+      <p class="label">{t("blockState.legacyVariants")}</p>
+      <div class="variants">
+        {#each variants as variant (variant.label)}
+          <button
+            class="variant"
+            class:chosen={current?.exact === true && current.label === variant.label}
+            title={variant.modern}
+            onclick={() => chooseVariant(variant.modern)}
+          >
+            {#if icons.get(variant.modern)}
+              <img src={icons.get(variant.modern)} alt="" width="28" height="28" />
+            {:else}
+              <span class="pending" aria-hidden="true"></span>
+            {/if}
+            <span class="data">{variant.label}</span>
+          </button>
+        {/each}
+      </div>
+      {#if current !== null && !current.exact}
+        <p class="hint">{t("blockState.legacyNotExact", { id: current.label })}</p>
+      {/if}
+    {/if}
+    {#if rows.length > 0}
+      <dl class="readonly">
+        {#each rows as row (row.name)}
+          <dt>{row.name}</dt>
+          <dd>{row.value ?? "—"}</dd>
+        {/each}
+      </dl>
+    {/if}
+  {:else if rows.length === 0}
+    <p class="hint">{t("blockState.none")}</p>
+  {:else}
+    <ul class="rows">
+      {#each rows as row (row.name)}
+        <li>
+          <label for={`state-${row.name}`} class:unset={row.value === null}>{row.name}</label>
+          {#if showsAsCheckbox(row)}
+            <!--
+              A true-or-false state is a checkbox showing what the block will
+              be: the value if one is written, the default dimmed if not. A
+              click writes the opposite of what is shown, and the button beside
+              it takes the property back off, which is what "default" means
+              in the select the other rows keep.
+            -->
+            <span class="bool" class:inherited={row.value === null}>
+              <input
+                id={`state-${row.name}`}
+                type="checkbox"
+                checked={(row.value ?? defaults[row.name]) === "true"}
+                onchange={(event) => setProperty(row.name, event.currentTarget.checked ? "true" : "false")}
+              />
+              {#if row.value === null}
+                <span class="note">{t("blockState.defaultShort")}</span>
+              {:else}
+                <button
+                  class="reset"
+                  onclick={() => setProperty(row.name, "")}
+                  title={t("blockState.useDefault", { value: defaults[row.name] ?? "—" })}
+                  aria-label={t("blockState.useDefault", { value: defaults[row.name] ?? "—" })}
+                >
+                  <Icon name="close" size={11} weight={2.4} />
+                </button>
+              {/if}
+            </span>
+          {:else if row.values}
+            <select
+              id={`state-${row.name}`}
+              value={row.value ?? ""}
+              onchange={(event) => setProperty(row.name, event.currentTarget.value)}
+            >
+              <option value="">
+                {t("blockState.default", { value: defaults[row.name] ?? "—" })}
+              </option>
+              {#each row.values as option (option)}
+                <option value={option}>{option}</option>
+              {/each}
+            </select>
+          {:else}
+            <input
+              id={`state-${row.name}`}
+              value={row.value ?? ""}
+              placeholder={t("inspector.unset")}
+              spellcheck="false"
+              onchange={(event) => setProperty(row.name, event.currentTarget.value.trim())}
+            />
+          {/if}
+        </li>
+      {/each}
+    </ul>
+    <div class="foot">
+      <p class="hint">{t("blockState.hint")}</p>
+      <button onclick={resetAll} disabled={spelling === null || Object.keys(spelling.properties).length === 0}>
+        {t("blockState.reset")}
+      </button>
+    </div>
+  {/if}
+</div>
+
+<style>
+  /* A slab on the popover tier, anchored to the chip it edits: the block
+     list's arrangement, not a dialog's. */
+  .modal {
+    position: fixed;
+    z-index: var(--z-popover);
+    width: min(280px, calc(100vw - 16px));
+    max-height: min(440px, calc(100vh - 16px));
+    overflow-y: auto;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+    font-size: var(--text-sm);
+  }
+
+  .head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+
+  /* The block in a slot, as the field it came from holds it. */
+  .slot {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
+  }
+
+  .slot img {
+    width: 32px;
+    height: 32px;
+    image-rendering: pixelated;
+  }
+
+  .id {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    overflow-wrap: anywhere;
+  }
+
+  .rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .rows li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .rows label {
+    margin: 0;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .rows label.unset {
+    color: var(--text-dim);
+  }
+
+  .rows select,
+  .rows input:not([type="checkbox"]) {
+    width: 100%;
+    min-width: 0;
+    font-size: var(--text-sm);
+  }
+
+  .bool {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .bool input {
+    margin: 0;
+  }
+
+  /* The box shows the default, and says so by being quieter than a value
+     somebody wrote. */
+  .bool.inherited input {
+    opacity: 0.55;
+  }
+
+  .bool .note {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+  }
+
+  .bool .reset {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    min-height: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+
+  .bool .reset:hover {
+    color: var(--text);
+    background: none;
+  }
+
+  .foot {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+  }
+
+  .foot .hint {
+    flex: 1;
+  }
+
+  .foot button {
+    font-size: var(--text-sm);
+  }
+
+  .hint,
+  .label {
+    margin: var(--space-2) 0;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+  }
+
+  .variants {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(46px, 1fr));
+    gap: var(--space-2);
+  }
+
+  /* Each variant a slot, the chosen one lit: the inventory's grid. */
+  .variant {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: 0;
+    padding: var(--space-1) var(--space-1) var(--space-2);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
+    cursor: pointer;
+  }
+
+  .variant:hover {
+    background: color-mix(in srgb, var(--slot-text) 12%, var(--slot));
+  }
+
+  .variant img {
+    width: 28px;
+    height: 28px;
+    image-rendering: pixelated;
+  }
+
+  .pending {
+    display: block;
+    width: 28px;
+    height: 28px;
+  }
+
+  .variant.chosen {
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+
+  /* A slot's number, the game's: white with a hard shadow, on slot-dark. */
+  .data {
+    color: var(--slot-text);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+    text-shadow: 1px 1px 0 var(--slot-text-shadow);
+  }
+
+  .readonly {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--space-1) var(--space-4);
+    margin: var(--space-3) 0 0;
+    font-size: var(--text-xs);
+  }
+
+  .readonly dt,
+  .readonly dd {
+    margin: 0;
+  }
+
+  .readonly dt {
+    color: var(--text-dim);
+  }
+</style>

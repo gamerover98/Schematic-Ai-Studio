@@ -172,6 +172,54 @@ export function buildAtlas(
   maxTile = MAX_TILE,
   padding = 6,
 ): AtlasResult {
+  return packAtlas(images, maxTile, padding, 0);
+}
+
+/**
+ * Where an atlas has room left, and where each tile went.
+ *
+ * Kept beside the image so tiles can be added later without moving the ones
+ * already placed -- see `appendTiles`.
+ */
+export interface AtlasLayout {
+  readonly width: number;
+  readonly height: number;
+  readonly padding: number;
+  readonly maxTile: number;
+  /** The packing pen: where the next tile goes on the current shelf. */
+  penX: number;
+  penY: number;
+  shelfHeight: number;
+  /** Each tile's padded top-left corner and inner size, by key. */
+  readonly placed: Map<string, { x: number; y: number; size: number }>;
+}
+
+export interface GrowableAtlas extends AtlasResult {
+  readonly layout: AtlasLayout;
+}
+
+/**
+ * `buildAtlas`, with room left over for tiles that arrive later.
+ *
+ * The atlas is packed once, after the block-icon warm-up has decoded every
+ * block, and then a texture nobody had asked for before shows up while
+ * editing: a lit furnace, the letters on a sign, a banner's design. Each of
+ * those used to repack the whole sheet -- and every UV in every chunk
+ * addresses the old one, so the whole document was meshed again and 27 MB of
+ * pixels resent: **five seconds on a 256x96x256 terrain for one furnace lit.**
+ *
+ * `reserve` is extra height, as a fraction of what the packing used, kept
+ * empty at the bottom of the sheet. `appendTiles` puts new tiles there, the
+ * UVs of every tile already placed stay exactly what they were, and the
+ * renderer receives the new tiles alone. The sheet's size is fixed when it is
+ * packed, because a UV is a fraction of it.
+ */
+export function packAtlas(
+  images: Record<string, RgbaImage>,
+  maxTile = MAX_TILE,
+  padding = 6,
+  reserve = 0,
+): GrowableAtlas {
   const keys = Object.keys(images);
 
   if (keys.length === 0) {
@@ -182,7 +230,18 @@ export function buildAtlas(
     // depend on the exact values.
     const blank = createFilledRgba(FALLBACK_TILE, FALLBACK_TILE, 255, 255, 255, 255);
     const uvRects: Record<string, UVRect> = { default: [0.0, 0.0, 1.0, 1.0] };
-    return { image: blank, uvRects };
+    // No room at all: the first tile to arrive has the sheet packed again.
+    const layout: AtlasLayout = {
+      width: FALLBACK_TILE,
+      height: FALLBACK_TILE,
+      padding,
+      maxTile,
+      penX: FALLBACK_TILE,
+      penY: FALLBACK_TILE,
+      shelfHeight: 0,
+      placed: new Map(),
+    };
+    return { image: blank, uvRects, layout };
   }
 
   const tiles = keys
@@ -209,33 +268,118 @@ export function buildAtlas(
     penX += stride;
     shelfHeight = Math.max(shelfHeight, stride);
   }
-  const height = penY + shelfHeight;
+  const used = penY + shelfHeight;
+  /*
+   * At least two shelves of the largest tile, so the reserve can take
+   * anything the packing could; otherwise the fraction asked for.
+   */
+  const spare = reserve > 0 ? Math.max(Math.ceil(used * reserve), (maxTile + padding * 2) * 2) : 0;
+  const height = used + spare;
 
   const atlas = createBlankRgba(width, height);
   const uvRects: Record<string, UVRect> = {};
+  const layout: AtlasLayout = {
+    width,
+    height,
+    padding,
+    maxTile,
+    penX,
+    penY,
+    shelfHeight,
+    placed: new Map(),
+  };
 
   for (const { key, size, x, y } of placed) {
-    const source = images[key];
-    let tile =
-      source.width === size && source.height === size ? source : resizeNearest(source, size, size);
-    if (padding > 0) {
-      tile = padEdge(tile, padding);
-    }
-    pasteInto(atlas, tile, x, y);
-
-    const innerLeft = x + padding;
-    const innerTop = y + padding;
-    const innerRight = innerLeft + size;
-    const innerBottom = innerTop + size;
-    const halfPx = 0.5;
-    const u0 = (innerLeft + halfPx) / width;
-    const v0 = (innerTop + halfPx) / height;
-    const u1 = (innerRight - halfPx) / width;
-    const v1 = (innerBottom - halfPx) / height;
-    uvRects[key] = [u0, v0, u1, v1];
+    placeTile(atlas, uvRects, layout, images[key], key, size, x, y);
   }
 
-  return { image: atlas, uvRects };
+  return { image: atlas, uvRects, layout };
+}
+
+/** Pastes one tile at a padded corner and records its rect. */
+function placeTile(
+  atlas: RgbaImage,
+  uvRects: Record<string, UVRect>,
+  layout: AtlasLayout,
+  source: RgbaImage,
+  key: string,
+  size: number,
+  x: number,
+  y: number,
+): void {
+  const { padding, width, height } = layout;
+  let tile =
+    source.width === size && source.height === size ? source : resizeNearest(source, size, size);
+  if (padding > 0) {
+    tile = padEdge(tile, padding);
+  }
+  pasteInto(atlas, tile, x, y);
+
+  const innerLeft = x + padding;
+  const innerTop = y + padding;
+  const innerRight = innerLeft + size;
+  const innerBottom = innerTop + size;
+  const halfPx = 0.5;
+  const u0 = (innerLeft + halfPx) / width;
+  const v0 = (innerTop + halfPx) / height;
+  const u1 = (innerRight - halfPx) / width;
+  const v1 = (innerBottom - halfPx) / height;
+  uvRects[key] = [u0, v0, u1, v1];
+  layout.placed.set(key, { x, y, size });
+}
+
+/**
+ * Puts tiles into an atlas's reserve, leaving every tile already there where
+ * it was.
+ *
+ * `false` when they do not fit, and then the caller packs a new sheet; what
+ * was pasted before the one that did not fit stays in this one, which is
+ * thrown away. Placed largest first, then by key, so the same arrivals land
+ * the same way.
+ */
+export function appendTiles(
+  atlas: GrowableAtlas,
+  images: Record<string, RgbaImage>,
+  keys: readonly string[],
+): boolean {
+  const layout = atlas.layout;
+  const uvRects = atlas.uvRects as Record<string, UVRect>;
+  const tiles = keys
+    .filter((key) => !layout.placed.has(key) && images[key] !== undefined)
+    .map((key) => ({ key, size: tileSizeFor(images[key], layout.maxTile) }))
+    .sort((a, b) => b.size - a.size || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  for (const tile of tiles) {
+    const stride = tile.size + layout.padding * 2;
+    if (stride > layout.width) return false;
+    if (layout.penX > 0 && layout.penX + stride > layout.width) {
+      layout.penX = 0;
+      layout.penY += layout.shelfHeight;
+      layout.shelfHeight = 0;
+    }
+    if (layout.penY + stride > layout.height) return false;
+    placeTile(atlas.image, uvRects, layout, images[tile.key], tile.key, tile.size, layout.penX, layout.penY);
+    layout.penX += stride;
+    layout.shelfHeight = Math.max(layout.shelfHeight, stride);
+  }
+  return true;
+}
+
+/** A tile's padded square, as pixels: what the renderer copies into its texture. */
+export function tilePixels(
+  atlas: GrowableAtlas,
+  key: string,
+): { x: number; y: number; width: number; height: number; pixels: Uint8Array } | null {
+  const at = atlas.layout.placed.get(key);
+  if (at === undefined) return null;
+  const side = at.size + atlas.layout.padding * 2;
+  const width = Math.min(side, atlas.image.width - at.x);
+  const height = Math.min(side, atlas.image.height - at.y);
+  const pixels = new Uint8Array(width * height * 4);
+  for (let row = 0; row < height; row += 1) {
+    const from = ((at.y + row) * atlas.image.width + at.x) * 4;
+    pixels.set(atlas.image.data.subarray(from, from + width * 4), row * width * 4);
+  }
+  return { x: at.x, y: at.y, width, height, pixels };
 }
 
 // PORT STATUS: confidence=high todos=0

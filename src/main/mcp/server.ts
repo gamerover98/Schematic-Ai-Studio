@@ -105,6 +105,8 @@ export interface McpHost {
    * `camera` is where to put the camera first; see `Lifecycle.capture`.
    */
   capture: Lifecycle["capture"];
+  /** Lights blocks up in the window; see `Lifecycle.glow`. */
+  glow: Lifecycle["glow"];
   /** Called whenever the status moves, so the window can be told. */
   onStatus(status: McpStatus): void;
 }
@@ -311,6 +313,7 @@ function lifecycleHost(): Lifecycle {
     refusalFor: (format, version) => refusalFor(format, version ?? ""),
     announce: announceDocument,
     capture: async (camera) => await requireHost().capture(camera),
+    glow: (request) => requireHost().glow(request),
     drawDistance: async () => (await getSettings()).preview.maxDrawDistance,
     versions: async () => {
       const session = currentSession();

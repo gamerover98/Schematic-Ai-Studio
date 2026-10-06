@@ -25,9 +25,11 @@ import {
   isWithinBounds,
   placePopover,
 } from "../src/renderer/src/lib/floating.js";
+import { mapFrameOf } from "../src/renderer/src/lib/map_frame.js";
 import {
   AA_LEVELS,
   blocksInDocument,
+  OPTIONS_PANEL_MIN_WIDTH,
   PANEL_SIZE,
   SHADER_MODES,
   FPS_CAPS,
@@ -48,9 +50,32 @@ import {
 import {
   antialiasSamples,
   fpsCap,
+  webglPowerPreference,
   frameDue,
   shaderPreset,
 } from "../src/renderer/src/lib/shader_modes.js";
+import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "../src/renderer/src/lib/gpu_choice.js";
+import { counterIdle, SETTLE_MS, shouldDraw, ViewWatch } from "../src/renderer/src/lib/render_demand.js";
+import * as THREE from "three";
+import {
+  allowed,
+  BAYER_4X4,
+  chunkTarget,
+  FADE_MS,
+  keepsPixel,
+  LodSelector,
+  nearestDepth,
+  packKey,
+  regionOfChunk,
+  regionTarget,
+  unpackKey,
+  worldPerPixel,
+  type LodBox,
+  type LodDraw,
+  type LodRegion,
+  type LodView,
+} from "../src/renderer/src/lib/lod.js";
+import { chunkCoords, chunkKey } from "../src/main/pipeline/chunked_mesh.js";
 import {
   continuedPlacement,
   entryFace,
@@ -68,7 +93,8 @@ import {
   inventoryBlocks,
   OVERSCAN_ROWS,
 } from "../src/renderer/src/lib/inventory.js";
-import { blocksIn } from "../src/shared/block_versions.js";
+import { blocksIn, versionRangeOf, versionTableFloor } from "../src/shared/block_versions.js";
+import { versionNameOf } from "../src/shared/mc_versions.js";
 import { buildLegacyIndex } from "../src/shared/legacy_ids.js";
 import {
   emptyTimeline,
@@ -123,6 +149,20 @@ import {
   grabGhost,
   releaseGhost,
 } from "../src/renderer/src/lib/ghost_request.js";
+import {
+  activated,
+  activeIndex,
+  areaAt,
+  areaBounds,
+  areaCells,
+  areaList,
+  mapAreas,
+  NO_AREAS,
+  single,
+  withArea,
+  withoutArea,
+} from "../src/renderer/src/lib/selection_set.js";
+import { MAX_BOXES } from "../src/shared/regions.js";
 import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
 
@@ -131,7 +171,7 @@ import { isSafeHref } from "../src/renderer/src/lib/markdown_policy.js";
 import { HOSTILE_CASES } from "./markdown_cases.js";
 import { missingKeys, translate, translatePlural } from "../src/renderer/src/lib/i18n_core.js";
 import { openedAge } from "../src/renderer/src/lib/recent_age.js";
-import { DEFAULT_PREVIEW_SETTINGS, PREVIEW_SETTING_RANGES } from "../src/shared/settings.js";
+import { DEFAULT_PREVIEW_SETTINGS, PREVIEW_SETTING_RANGES, PROVIDERS } from "../src/shared/settings.js";
 import {
   COPLANAR_OFFSET,
   depthEpsilon,
@@ -166,13 +206,66 @@ import {
 } from "../src/renderer/src/lib/look_filter.js";
 import { en } from "../src/renderer/src/lib/locales/en.js";
 import { BANNER_EDITOR_URL } from "../src/shared/banner_patterns.js";
-import { propertyRows } from "../src/renderer/src/lib/inspector_rows.js";
+import { propertyKind, propertyRows, showsAsCheckbox } from "../src/renderer/src/lib/inspector_rows.js";
+import {
+  canonicalBlock,
+  isAirBlock,
+  readSpelling,
+  withBlockAdded,
+  withBlocksAdded,
+  writeSpelling,
+} from "../src/renderer/src/lib/block_spelling.js";
+import {
+  formatCount,
+  glowPatterns,
+  materialAction,
+  materialRows,
+  nextGlow,
+} from "../src/renderer/src/lib/materials.js";
+import {
+  BLOCK_MIME,
+  decodeDragged,
+  encodeDragged,
+  isFileDrop,
+  trackPageDrags,
+} from "../src/renderer/src/lib/block_drag.js";
+import { DISTRIBUTION_KINDS, DISTRIBUTION_PARAMS, tryParseMix } from "../src/shared/block_mix.js";
+import { MAP_PLANES } from "../src/shared/distribution_map.js";
+import {
+  brushSpec,
+  columnReach,
+  cornerBox,
+  cornerClick,
+  cornerSpec,
+  creativeKey,
+  erodeGhost,
+  ghostFaces,
+  nextTool,
+  reachOf,
+  reached,
+  resized,
+  shouldTouch,
+  smoothSpec,
+  sphereReach,
+  strokeRadius,
+  strokeSpacing,
+  takesCorners,
+  takesStroke,
+  terrainGhost,
+  toolMode,
+} from "../src/renderer/src/lib/creative_tools.js";
+import { DEFAULT_CREATIVE_SETTINGS } from "../src/shared/creative.js";
+import { heightField, inFootprint } from "../src/shared/terrain.js";
+import { shapeCells } from "../src/shared/shapes.js";
+import { averageColour } from "../src/renderer/src/lib/icon_colour.js";
 import {
   arcBetween,
   axisAt,
   COMPASS_AXES,
   easeInOutCubic,
   flightAt,
+  flightDuration,
+  FLIGHT_MS,
   HANDLE_REACH,
   orbitFor,
   projectAxis,
@@ -257,6 +350,41 @@ console.log("--- i18n lookup ---");
   equal("one selects the singular", translatePlural(catalog, "thing", 1), "1 thing");
   equal("two selects the plural", translatePlural(catalog, "thing", 2), "2 things");
   equal("zero selects the plural", translatePlural(catalog, "thing", 0), "0 things");
+  // Formatted as every other count in the window, so a call site never has to
+  // pick between the right form and the thousands separator -- and in the
+  // sentence's language, not the system's: an Italian machine wrote
+  // "2.056 blocks" into English, where the dot reads as a decimal point.
+  equal("...and the count comes out formatted", translatePlural(catalog, "thing", 12345), "12,345 things");
+  equal(
+    "...in the language asked for",
+    translatePlural(catalog, "thing", 12345, undefined, "it"),
+    `${(12345).toLocaleString("it")} things`,
+  );
+
+  /*
+   * And nowhere else in the window asks the system how to write a number.
+   * Dates do, on purpose (`age_label.ts`), so only the number form is refused:
+   * a bare `toLocaleString()` on anything that is not a `Date`.
+   */
+  {
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+        entry.isDirectory()
+          ? walk(path.join(dir, entry.name))
+          : /\.(svelte|ts)$/.test(entry.name)
+            ? [path.join(dir, entry.name)]
+            : [],
+      );
+    const bare = walk(RENDERER).flatMap((file) =>
+      readFileSync(file, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .split(/\r?\n/)
+        .filter((line) => !line.trimStart().startsWith("//"))
+        .filter((line) => /\.toLocaleString\(\)/.test(line) && !/new Date\([^)]*\)\.toLocaleString\(\)/.test(line))
+        .map((line) => `${path.relative(RENDERER, file)}: ${line.trim()}`),
+    );
+    equal("no number in the window is written in the system's language", bare, []);
+  }
 
   equal("missingKeys finds the gaps", missingKeys(catalog, ["plain", "nope", "gone"]), [
     "nope",
@@ -527,6 +655,14 @@ console.log("\n--- floating panel size ---");
     width: 400,
     height: 301,
   });
+
+  // A window with a minimum of its own keeps it while being dragged, not only
+  // when its size is read back from disk.
+  equal(
+    "a panel with a minimum of its own stops at that one",
+    clampPanelSize({ width: 248, height: 300 }, pane, OPTIONS_PANEL_MIN_WIDTH).width,
+    OPTIONS_PANEL_MIN_WIDTH,
+  );
 }
 
 // --- the chat's markdown, and what it must not let through -----------------
@@ -936,8 +1072,10 @@ console.log("\n--- moving a region ---");
    * selection, its anchor and the pivot are carried there -- and each of the
    * four commits that *replace* the selection afterwards has to restate its
    * destination in the new frame, or the box lands back where the blocks used
-   * to be. Four sites, so four is the number checked: three commits translate
-   * their own destination and `commitMove` translates a `movedRegion`.
+   * to be. Each commit is named and its own body asked, rather than counting
+   * `translatedRegion` across the file: several areas brought that call into
+   * places that are not commits at all, and a count is exactly the check that
+   * goes on passing when one commit loses it and another site gains one.
    */
   const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
   const run = app.slice(app.indexOf("async function runDocument"));
@@ -949,10 +1087,21 @@ console.log("\n--- moving a region ---");
     "...before the document is redrawn from it",
     runBody.indexOf("followShift(response.shift)") < runBody.indexOf("await refreshDocument()"),
   );
-  equal(
-    "the four commits restate their destination in the new frame",
-    (app.match(/translatedRegion\(/g) ?? []).length,
-    4,
+  const bodyOf = (name: string): string => {
+    const from = app.indexOf(name);
+    if (from === -1) return "";
+    const rest = app.slice(from);
+    return rest.slice(0, rest.search(/\n {2}\}\r?\n/));
+  };
+  for (const commit of ["async function commitMove", "async function gizmoTransform", "async function gizmoScale"]) {
+    check(
+      `${commit.split(" ").pop()} restates its destination in the new frame`,
+      bodyOf(commit).includes("outcome.shift"),
+    );
+  }
+  check(
+    "...and the other areas are carried by the same edit as the active one",
+    /otherAreas = otherAreas\.map\(\(area\) => translatedRegion\(area, shift\)\)/.test(bodyOf("function followShift")),
   );
   /*
    * And the timeline is **not** carried. Its entries are in the frame the
@@ -1197,7 +1346,7 @@ console.log("\n--- the gizmo takes the press, and gives the camera back ---");
    * `clickIntent` -- which picks whatever block is behind the gizmo and
    * collapses the selection the user was about to transform.
    */
-  const grabAt = viewer.indexOf("const handle = selection === null ? null : gizmoAt(");
+  const grabAt = viewer.indexOf("const handle = gizmoBox === null ? null : gizmoAt(");
   const shiftGate = viewer.indexOf("if (!event.shiftKey) return;");
   const grab = viewer.slice(grabAt, shiftGate);
   check("the gizmo grab is found at all", grab.length > 0);
@@ -1959,7 +2108,7 @@ console.log("\n--- a camera asked for over MCP ---");
   check("...after the camera-mode effects have run", aim.indexOf("await tick()") >= 0 && aim.indexOf("await tick()") < drawn);
   check(
     "the render loop draws through the same function",
-    /frame = requestAnimationFrame\(animate\);[\s\S]{0,4000}renderFrame\(\);/.test(viewer),
+    /frame = requestAnimationFrame\(animate\);[\s\S]{0,8000}renderFrame\(\);/.test(viewer),
   );
   const subscription = app.slice(app.indexOf("api().onCameraAim("), app.indexOf("api().onDocumentChanged("));
   check(
@@ -2058,10 +2207,21 @@ console.log("\n--- a patterned banner, in the inspector ---");
   // A composed cloth grows the atlas, and the icons drawn against the old one
   // were thrown away and never asked for again: the hotbar went blank.
   const icons = readFileSync(path.join(RENDERER, "lib", "block_icons.svelte.ts"), "utf8");
-  const adopt = icons.slice(icons.indexOf("function adoptAtlas("), icons.indexOf("function adoptAtlas(") + 2000);
+  const adopt = icons.slice(icons.indexOf("function adoptAtlas("), icons.indexOf("function adoptAtlas(") + 2400);
   check(
     "an atlas that replaces another makes every icon reader ask again",
-    /if \(replacing\) generation \+= 1/.test(adopt) && /export function iconsReady\(\): boolean \{\s*void generation;/.test(icons),
+    /if \(!replacing\) return;[\s\S]*generation \+= 1;/.test(adopt) &&
+      /export function iconsReady\(\): boolean \{\s*void generation;/.test(icons),
+  );
+  /*
+   * ...and "replaces" means a new layout. A newer version of the same layout
+   * only added tiles, so every icon already drawn is still right; treating it
+   * as a replacement re-meshed nine hundred icons whenever a document lit a
+   * furnace.
+   */
+  check(
+    "a newer version of the same atlas layout keeps the icons drawn",
+    /const replacing = atlasLayout !== null && atlasLayout !== nextLayout;/.test(adopt),
   );
 }
 
@@ -2600,6 +2760,65 @@ console.log("\n--- how the viewport is drawn ---");
   check("...and so does a string", fpsCap("60") === 0);
 
   /*
+   * The context asks for the GPU the launch switch forced, and "auto" is the
+   * browser's default rather than a guess. Read once, where it is made.
+   */
+  check("auto asks for the default GPU", webglPowerPreference("auto") === "default");
+  check("high performance asks for it", webglPowerPreference("high-performance") === "high-performance");
+  check("low power asks for it", webglPowerPreference("low-power") === "low-power");
+  check("a junk preference asks for the default", webglPowerPreference("fast") === "default");
+  {
+    const viewerText = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+    check(
+      "the viewport context is created with the GPU preference",
+      /new THREE\.WebGLRenderer\(\{[^}]*powerPreference: webglPowerPreference\(/.test(viewerText),
+    );
+  }
+
+  /*
+   * One select, two settings: a preference by power, or one card by key. The
+   * option value says which, so a key can never be read as a preference and
+   * picking a preference clears the card.
+   */
+  {
+    const key = "10de:249c:151e1025:a1#0";
+    check("a stored card is the select's value", choiceValue("high-performance", key) === `adapter:${key}`);
+    check("...and a preference without one", choiceValue("low-power", null) === "low-power");
+    check("a junk card is not a value", choiceValue("auto", "the big one") === "auto");
+    const picked = parseChoiceValue(`adapter:${key}`);
+    check("picking a card stores it", picked.gpuAdapter === key && picked.gpuPreference === "auto");
+    const pref = parseChoiceValue("high-performance");
+    check("picking a preference clears the card", pref.gpuAdapter === null && pref.gpuPreference === "high-performance");
+    const launch = {
+      preference: "auto" as const,
+      adapter: key,
+      method: "luid" as const,
+      luid: "0,1",
+      adapterName: "RTX",
+      note: null,
+    };
+    check("the launched card needs no restart", !gpuNeedsRestart("auto", key, launch));
+    check("...and a different preference under it changes nothing", !gpuNeedsRestart("low-power", key, launch));
+    check("another card does", gpuNeedsRestart("auto", "1002:1638:151e1025:c5#0", launch));
+    check("...and so does going back to a preference", gpuNeedsRestart("high-performance", null, launch));
+    check("memory reads in GB", formatMemory(8405385216) === "8 GB");
+    check("...or MB under one", formatMemory(519847936) === "496 MB");
+    check("...and says nothing when unknown", formatMemory(0) === "");
+    check(
+      "the pixel load follows the viewer's own sizing",
+      pixelLoad(1707, 960, 1.5, 1.6, 2) === Math.floor(1707 * 3) * Math.floor(960 * 3),
+    );
+    check("max DPR caps the device ratio", pixelLoad(100, 100, 3, 1, 1) === 10000);
+    const pane = readFileSync(path.join(RENDERER, "lib", "SettingsModal.svelte"), "utf8");
+    check("the select's value is the stored choice", pane.includes("value={gpuSelectValue}") && pane.includes("return choiceValue(pref, gpuAdapter)"));
+    check("...and a change writes both fields", pane.includes("onpreviewchange(parseChoiceValue(event.currentTarget.value))"));
+    check("the cards are listed only where one can be chosen", pane.includes("{#if gpuChoosable && gpu?.adapters}"));
+    check("...and there they replace the two presets", pane.includes('gpuChoosable ? (["auto"] as const) : GPU_PREFERENCES'));
+    check("the restart is offered from main's launch, not from the setting alone", pane.includes("gpuNeedsRestart(settings.preview.gpuPreference, settings.preview.gpuAdapter, gpu.launch)"));
+    check("the copied report carries what main launched and what draws", /gpuLaunch: status\?\.launch/.test(pane) && /gpuActive: status\?\.active/.test(pane));
+  }
+
+  /*
    * The loop's decision, driven by a fake display. Counted over ten seconds so
    * a rate that converges slowly, or drifts, shows up as a number.
    */
@@ -2770,7 +2989,7 @@ console.log("\n--- how the viewport is drawn ---");
       "an animation nobody draws is not uploaded",
       /for \(const item of playing\) \{\s*if \(!item\.active\) continue;/.test(loop),
     );
-    const effect = viewer.slice(viewer.indexOf("applyDelta(previous, previousVoid, payload, map);"));
+    const effect = viewer.slice(viewer.indexOf("applyDelta(previous, previousVoid, previousLod, payload, map);"));
     check("the tiles drawn are recounted after a delta", /applyDelta[^]*?refreshAnimated\(\);[^]*?applied\("delta applied"\)/.test(effect));
     check("...and after a rebuild", /applyWireframe\(built\.solid, wireframe\);\s*refreshAnimated\(\);/.test(viewer));
   }
@@ -2815,11 +3034,12 @@ console.log("\n--- how the viewport is drawn ---");
   check("...and the samples go on a render target", viewer.includes("new THREE.WebGLRenderTarget("));
 
   /*
-   * The copy to the canvas happens after the compass, so the compass is inside
-   * the multisampled picture. Drawn after it, it would be the one unaliased
-   * thing on screen.
+   * The compass is drawn into its own multisampled square before the copy and
+   * laid on by it, so it is anti-aliased like the rest. A pass that landed on
+   * the canvas after the copy would be the one unaliased thing on screen.
    */
-  check("the frame is copied out after the compass is in it", viewer.indexOf("renderer.render(aaScene") > viewer.indexOf("drawCompass();"));
+  check("the compass is drawn before the frame is copied out", viewer.indexOf("renderer.render(aaScene") > viewer.indexOf("drawCompass();"));
+  check("...and laid on by the copy", viewer.indexOf("compositeCompass();") > viewer.indexOf("renderer.render(aaScene"));
 
   /*
    * The counter reports a whole frame, and a frame is three or four renders.
@@ -2972,8 +3192,13 @@ console.log("\n--- the void block ---");
    * of the fault this would be: the shadow appears only after an edit, and
    * only in the chunk the edit touched.
    */
-  const shadowed = viewer.match(/mesh\.(?:cast|receive)Shadow = !isVoid/g) ?? [];
-  equal("neither place lets the void cast a shadow", shadowed.length, 4);
+  const prepared = viewer.match(/prepareMesh\(mesh, chunk\.layer\);/g) ?? [];
+  equal("both places that build a chunk mesh prepare it in one place", prepared.length, 2);
+  const prepare = viewer.slice(viewer.indexOf("function prepareMesh("));
+  check(
+    "...where neither lets the void cast a shadow or receive one",
+    /mesh\.castShadow = layer === "solid";\s*mesh\.receiveShadow = layer !== "void";/.test(prepare),
+  );
 }
 
 // --- undo that reaches the selection ---------------------------------------
@@ -3330,8 +3555,8 @@ console.log("\n--- creative inventory ---");
   }
 
 
-  equal("a label loses its namespace and its underscores", blockLabel("minecraft:oak_planks"), "oak planks");
-  equal("...and its block states", blockLabel("minecraft:oak_stairs[facing=north]"), "oak stairs");
+  equal("a label loses its namespace and its underscores", blockLabel("minecraft:oak_planks"), "Oak planks");
+  equal("...and its block states", blockLabel("minecraft:oak_stairs[facing=north]"), "Oak stairs");
 }
 
 // --- the anchor modal does not fight the fields ------------------------------
@@ -3805,8 +4030,8 @@ console.log("\n--- a block too thin to aim at ---");
     /mesh\.userData\.thin = thinBoxes\(chunk\.positions, chunk\.normals\)/.test(viewer),
   );
   check(
-    "...and the void layer gets none, because nothing raycasts it",
-    /if \(chunk\.layer !== "void"\) \{\s*\r?\n\s*mesh\.userData\.thin/.test(viewer),
+    "...and only the solid layer gets them: nothing raycasts the void or a level of detail",
+    /if \(chunk\.layer === "solid"\) \{\s*\r?\n\s*mesh\.userData\.thin/.test(viewer),
   );
   const pick = viewer.slice(viewer.indexOf("function pickBlockAt"));
   check(
@@ -4042,6 +4267,17 @@ console.log("\n--- in flight Ctrl belongs to the camera ---");
   // Blanket, not an allowlist: the point is that no Ctrl shortcut added later
   // has to be re-judged against WASD by whoever adds it.
   check("...and Ctrl and Cmd both count", /event\.ctrlKey \|\| event\.metaKey/.test(lines[gate] ?? ""));
+  /*
+   * The gate declines the browser's answer too, not only the app's. Ctrl+A is
+   * Chromium's select-all, and the chat log opts back into selection, so a
+   * bare `return` here left every strafe under sprint highlighting the whole
+   * conversation. Reported from creative mode.
+   */
+  check(
+    "...and stops the browser's default for the chord",
+    /^\s*event\.preventDefault\(\);\s*$/.test(lines[gate + 1] ?? ""),
+    lines[gate + 1],
+  );
 
   /*
    * The other side of the same sentence: with the lock held, Ctrl must stop
@@ -4213,6 +4449,44 @@ console.log("\n--- the inspector's block-state rows ---");
   // into whichever row slid into its place.
   const order = propertyRows("minecraft:campfire", { waterlogged: "true" }).map((row) => row.name);
   equal("the rows are in name order however they are set", order, [...order].sort());
+
+  /*
+   * A true-or-false state is a checkbox, and was a text field you typed the
+   * word `true` into. The kind is decided from the legal values, so every
+   * boolean the registry knows is one -- not a list of names somebody keeps.
+   */
+  const kinds = Object.fromEntries(campfire.map((row) => [row.name, row.kind]));
+  equal("`lit` and `waterlogged` are booleans", [kinds.lit, kinds.waterlogged], ["boolean", "boolean"]);
+  equal("...and `facing` is a choice", kinds.facing, "choice");
+  equal(
+    "a fence's arms are booleans too",
+    propertyRows("minecraft:oak_fence", {}).filter((row) => row.kind === "boolean").map((row) => row.name),
+    ["east", "north", "south", "waterlogged", "west"],
+  );
+  equal("a property nobody knows the values of is free text", odd[0].kind, "free");
+  equal("...and so is anything on an unknown block", propertyRows("minecraft:nonsense", { a: "1" })[0].kind, "free");
+  equal("a two-value property that is not true/false is a choice", propertyKind(["top", "bottom"]), "choice");
+
+  // Unset is the box's third state, and a value from a file that is neither
+  // word keeps its text field: a checkbox would overwrite it on the first click.
+  const lantern = (value: string | null) => ({ name: "hanging", value, values: ["true", "false"], kind: "boolean" as const });
+  check("an unset boolean is drawn as a checkbox", showsAsCheckbox(lantern(null)));
+  check("...and a set one", showsAsCheckbox(lantern("false")));
+  check("...but not one holding something else, which keeps its text", !showsAsCheckbox(lantern("yes")));
+
+  for (const file of ["InspectorPanel.svelte", "BlockStateModal.svelte"]) {
+    const source = readFileSync(path.join(RENDERER, "lib", file), "utf8");
+    check(
+      `${file} draws a boolean as a checkbox`,
+      source.includes("showsAsCheckbox(row)") && source.includes('type="checkbox"'),
+    );
+  }
+  check(
+    "the inspector shows an unset boolean as the box's third state",
+    readFileSync(path.join(RENDERER, "lib", "InspectorPanel.svelte"), "utf8").includes(
+      "use:indeterminate={row.value === null}",
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -4942,5 +5216,2522 @@ console.log("\n--- a burst of mesh requests is one request, then one more ---");
   );
 }
 
+// A chip holds a block's spelling as text, and the state editor rewrites one
+// property of it. A banner's design is full of the commas a naive split cuts
+// on, so the round trip is stated with one in it.
+console.log("\n--- a block field that holds several blocks ---");
+{
+  const banner = 'minecraft:red_banner[rotation=4,banner_patterns=[{pattern:"mojang",color:"white"}]]';
+  const spelling = readSpelling(banner);
+  equal("a chip's spelling is taken apart", spelling, {
+    name: "minecraft:red_banner",
+    properties: { rotation: "4" },
+    bannerPatterns: '[{pattern:"mojang",color:"white"}]',
+  });
+  check("...and put back as it was", spelling !== null && writeSpelling(spelling) === banner);
+  equal(
+    "states come back in one order, whatever order they were typed in",
+    canonicalBlock("oak_stairs[half=top,facing=east]", null),
+    "minecraft:oak_stairs[facing=east,half=top]",
+  );
+  equal("half a command is kept as typed rather than lost", readSpelling("oak_stairs[facing="), null);
+
+  const table = JSON.parse(
+    readFileSync(path.join(here, "..", "resources", "legacy_blocks.json"), "utf8"),
+  ) as { blocks: Record<string, string> };
+  equal(
+    "an ID:DATA typed on a legacy document becomes the block it means",
+    canonicalBlock("35:14", buildLegacyIndex(table.blocks)),
+    "minecraft:red_wool",
+  );
+  equal("...and on a flat one stays what was typed", canonicalBlock("35:14", null), "35:14");
+
+  /*
+   * The panel reads top to bottom the way the sentence does -- replace these
+   * with those -- and that order is the whole of what was asked for. It used to
+   * be the other way round, with a button saying "Replace with the block above".
+   */
+  const tools = readFileSync(path.join(here, "..", "src", "renderer", "src", "lib", "SelectionTools.svelte"), "utf8");
+  const replaceAt = tools.indexOf('id="tool-from-block"');
+  const withAt = tools.indexOf('id="tool-to-block"');
+  check("Replace comes before With in the selection panel", replaceAt !== -1 && withAt !== -1 && replaceAt < withAt);
+  check("...with the swap between them", tools.indexOf("onclick={onswap}") > replaceAt && tools.indexOf("onclick={onswap}") < withAt);
+  check("...and the Replace field has no weights to show", /id="tool-from-block"[\s\S]{0,80}weights=\{false\}/.test(tools));
+
+  /*
+   * A mix's text is not a block. Asking main for an icon of it would intern a
+   * block called `70%stone,30%andesite`, so the bar asks for its first block.
+   */
+  const hotbar = readFileSync(path.join(here, "..", "src", "renderer", "src", "lib", "Hotbar.svelte"), "utf8");
+  check("the hotbar asks for the icon of a mix's first block", hotbar.includes("requestBlockIcons(slots.map(iconOf))"));
+
+  /*
+   * The chips are typed into through the ordinary picker, and a choice has to
+   * reach a different place from a keystroke -- or every letter would add a
+   * chip.
+   */
+  const field = readFileSync(path.join(here, "..", "src", "renderer", "src", "lib", "BlockMixField.svelte"), "utf8");
+  check("the chip field adds a chip on a choice, not on a keystroke", /onchange=\{\(text\) => \(draft = text\)\}\s*onpick=\{add\}/.test(field));
+}
+
+// --- the materials, as an inventory ------------------------------------------
+//
+// What the selection is made of, as slots with an icon and a count in the
+// corner. The count is short enough for the corner and the hover has the exact
+// one; what a click means is a table, stated here rather than found in a
+// handler.
+console.log("\n--- the materials, as an inventory ---");
+{
+  equal(
+    "a count is exact while it fits the corner",
+    [0, 7, 64, 940, 9999].map(formatCount),
+    ["0", "7", "64", "940", "9999"],
+  );
+  equal(
+    "...and shortened past it",
+    [10_000, 12_345, 100_000, 999_999, 1_000_000, 1_250_000].map(formatCount),
+    ["10k", "12.3k", "100k", "999k", "1M", "1.2M"],
+  );
+  /*
+   * Rounding would send these to the next unit up -- `100.0k`, `1000k`,
+   * `10.0M` -- which is the wrong unit as well as more than there is.
+   */
+  equal(
+    "a count is truncated, never rounded up into the next unit",
+    [99_999, 999_999, 9_999_999].map(formatCount),
+    ["99.9k", "999k", "9.9M"],
+  );
+
+  const click = (button: number, ctrl = false, shift = false) => ({ button, ctrl, shift });
+  /*
+   * A plain click used to put the block in With. It lights the block up in
+   * the viewport now, which is the question the list raises -- where is it --
+   * and With and Replace are filled by dragging a slot onto them.
+   */
+  equal(
+    "a plain click lights the block up, Ctrl lights several",
+    [materialAction(click(0), false), materialAction(click(0, true), false)],
+    ["glow", "addGlow"],
+  );
+  const foot = { block: "minecraft:red_bed[facing=north,part=foot]", pair: ["minecraft:red_bed[facing=north,part=head]"] };
+  const stone = { block: "minecraft:stone", pair: [] };
+  equal("a click lights that block alone", nextGlow([foot], stone, false), [stone]);
+  equal("...and puts it out when it was the only one lit", nextGlow([stone], stone, false), []);
+  equal("...but lights it alone when others were lit with it", nextGlow([foot, stone], stone, false), [stone]);
+  equal("Ctrl adds a block to what is lit", nextGlow([foot], stone, true), [foot, stone]);
+  equal("...and takes one out", nextGlow([foot, stone], foot, true), [stone]);
+  equal(
+    "a lit bed looks for both halves, each spelling once",
+    glowPatterns([foot, stone, { block: foot.block, pair: foot.pair }]),
+    [foot.block, foot.pair[0], "minecraft:stone"],
+  );
+  equal(
+    "Shift is Replace, Ctrl+Shift adds to it",
+    [materialAction(click(0, false, true), false), materialAction(click(0, true, true), false)],
+    ["replace", "addReplace"],
+  );
+  /*
+   * The right button read the slot by putting it in With and opening its
+   * states there: two things at once, and the second is the chip's. Now it
+   * pins the slot's reading open, and the states stay a right-click on the
+   * chip in With.
+   */
+  equal("the right button pins what there is to know about the slot", materialAction(click(2), false), "info");
+  /*
+   * Air cannot be held -- `coerceHotbar` refuses a slot of it -- so a plain
+   * click means the one thing air is for in that panel.
+   */
+  equal("a plain click on air fills Replace, rather than lighting every empty cell", materialAction(click(0), true), "replace");
+  equal("...Ctrl still adds it to With, which makes a ruin", materialAction(click(0, true), true), "addWith");
+  equal("...and air has no states to open", materialAction(click(2), true), "none");
+  // Its two-letter stand-in would read "AI", so a chip of it is an empty slot.
+  equal(
+    "a chip knows air when it holds it, and only air",
+    ["air", "minecraft:air", "minecraft:cave_air", "minecraft:stone"].map(isAirBlock),
+    [true, true, false, false],
+  );
+
+  /*
+   * A slot that is a whole bed stands for its foot and its head. Replace has
+   * to name both, or replacing the beds leaves their heads behind.
+   */
+  const bedPair = tryParseMix(
+    withBlocksAdded(
+      "",
+      ["minecraft:red_bed[facing=north,part=foot]", "minecraft:red_bed[facing=north,part=head]"],
+      null,
+    ),
+  );
+  equal(
+    "a whole bed goes into a field as both of its halves",
+    bedPair?.entries.map((entry) => entry.block),
+    ["minecraft:red_bed[facing=north,part=foot]", "minecraft:red_bed[facing=north,part=head]"],
+  );
+
+  equal("adding to an empty field gives that block alone", withBlockAdded("", "stone", null), "minecraft:stone");
+  const two = tryParseMix(withBlockAdded("minecraft:stone", "dirt", null));
+  check(
+    "adding to one block makes a mix of two, each on an equal footing",
+    two !== null &&
+      two.entries.map((entry) => `${entry.weight}%${entry.block}`).join(",") === "1%minecraft:stone,1%minecraft:dirt",
+  );
+  check("...with a seed of its own, so two mixes are not one pattern", two !== null && two.distribution.seed !== 0);
+
+  const slots = readFileSync(path.join(RENDERER, "lib", "MaterialsInventory.svelte"), "utf8");
+  check("the corner of a slot carries the short count", slots.includes("{formatCount(slot.count)}"));
+  check("...and the hover the exact one", /count=\{hoveredSlot\?\.count \?\? null\}/.test(slots));
+  check("the slots are drawn from the rows, air among them", /materialRows\(palette, air,/.test(slots));
+
+  const tools = readFileSync(path.join(RENDERER, "lib", "SelectionTools.svelte"), "utf8");
+  check(
+    "the pinned reading is a pinned tooltip that closes itself",
+    /<BlockTooltip[\s\S]{0,400}pinned\s[\s\S]{0,80}onclose=\{\(\) => \(pinned = null\)\}/.test(slots),
+  );
+  const tooltip = readFileSync(path.join(RENDERER, "lib", "BlockTooltip.svelte"), "utf8");
+  check(
+    "...and its Escape goes no further, or the window's would drop the selection",
+    /window\.addEventListener\("keydown", onKey, true\)/.test(tooltip) &&
+      /event\.stopPropagation\(\);\s*onclose\?\.\(\)/.test(tooltip),
+  );
+
+  /*
+   * A slot dragged onto a field fills it, as the slot's click on that field
+   * would, and Ctrl adds. What it carries is the block and its pair, so the
+   * field decides: With takes the foot, Replace both halves.
+   */
+  const bed = { block: "minecraft:red_bed[part=foot]", pair: ["minecraft:red_bed[part=head]"] };
+  equal("a dragged block comes back as it went", decodeDragged(encodeDragged(bed)), bed);
+  equal(
+    "...and text that is not one is no block",
+    [decodeDragged("minecraft:stone"), decodeDragged("{}"), decodeDragged('{"block":"  "}')],
+    [null, null, null],
+  );
+  check("a slot is dragged, air is not", slots.includes("draggable={!slot.air}"));
+  check(
+    "a drop on Replace adds to the list, never replaces it",
+    tools.includes('onMaterial(dragged, "addReplace")') && !tools.includes("(dragged, add)"),
+  );
+  check("...and so does a drop on With", tools.includes('onMaterial(dragged, "addWith")'));
+  const field = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
+  const fieldDrop = field.slice(field.indexOf("function drop("), field.indexOf("function edit("));
+  check(
+    "a field takes only a block, and takes it from the text box under it",
+    fieldDrop.indexOf("dragged === null) return;") !== -1 &&
+      fieldDrop.indexOf("dragged === null) return;") < fieldDrop.indexOf("event.stopPropagation();"),
+  );
+  const hotbar = readFileSync(path.join(RENDERER, "lib", "Hotbar.svelte"), "utf8");
+  check(
+    "a hotbar slot takes the block and not its pair: holding a foot places the bed",
+    hotbar.includes("onassign(index, dragged.block);"),
+  );
+  check(
+    "...and rises over the creative inventory to be dropped on",
+    /\.hotbar\.raised \{\s*z-index: var\(--z-beside-modal\);/.test(hotbar) &&
+      readFileSync(path.join(RENDERER, "lib", "CreativeInventory.svelte"), "utf8").includes("<Modal {open}"),
+  );
+  const appSource = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check("...while it is open", appSource.includes("raised={inventoryOpen}"));
+  check(
+    "air is never put in a hotbar slot by a drop",
+    /onassign=\{\(slot, block\) => \{\s*\/\/[^\n]*\n\s*if \(isAirBlock\(block\)\) return;/.test(appSource),
+  );
+  check(
+    "the creative inventory's tiles are dragged too",
+    readFileSync(path.join(RENDERER, "lib", "CreativeInventory.svelte"), "utf8").includes(
+      "startBlockDrag(event.dataTransfer, { block, pair: [] })",
+    ),
+  );
+
+  /*
+   * A face drag moves the selection many times a second, and a count is a walk
+   * over every cell of it -- so one count in flight, after the selection holds
+   * still.
+   */
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check("the selection's materials are counted one request at a time", app.includes("coalesce(fetchMaterials)"));
+  check(
+    "...once the selection has held still",
+    /setTimeout\(\(\) => \{[\s\S]{0,300}refreshMaterials\(\)/.test(app),
+  );
+  /*
+   * The list is drawn in the Selection tab of the docked panel: the
+   * selection's, or with nothing selected the whole schematic's, which main
+   * counts with a bed as one bed where `DocumentState.palette` counts the
+   * states the file holds. With the panel put away or another tab up, the
+   * list is not on screen, and nothing is asked for.
+   */
+  check(
+    "nothing is counted while the list is not on screen",
+    app.includes('if (dockCollapsed || dockTab !== "selection" || docState === null) {'),
+  );
+  check("...and nothing is read off the document's state", !app.includes("documentMaterials("));
+  const replaceArm = tools.slice(tools.indexOf('case "replace":'), tools.indexOf('case "state":'));
+  check(
+    "Replace takes a slot's other half with it",
+    (replaceArm.match(/\[material, \.\.\.slot\.pair\]/g) ?? []).length === 2,
+  );
+
+  /*
+   * The bar over the slots: states merged, a search, an order. A long list
+   * -- a redstone build is a slot per wire shape and power -- is read by
+   * name as often as by count.
+   */
+  const palette = [
+    { block: "minecraft:vine[east=true,north=false]", count: 3 },
+    { block: "minecraft:vine[east=false,north=true]", count: 2 },
+    { block: "minecraft:stone", count: 4 },
+    { block: "minecraft:piston[extended=true,facing=up]", count: 1, pair: ["minecraft:piston_head[facing=up,short=false,type=normal]"] },
+    { block: "minecraft:piston[extended=false,facing=up]", count: 1 },
+  ];
+  const listed = (options: Partial<{ unify: boolean; sort: "countDesc" | "countAsc" | "nameAsc" | "nameDesc"; query: string }>, air = 7) =>
+    materialRows(palette, air, { unify: false, sort: "countDesc", query: "", ...options }).map(
+      (row) => row.block.replace(/^minecraft:/, "") + " " + row.count,
+    );
+  equal("most first, air last", listed({}), [
+    "stone 4",
+    "vine[east=true,north=false] 3",
+    "vine[east=false,north=true] 2",
+    "piston[extended=false,facing=up] 1",
+    "piston[extended=true,facing=up] 1",
+    "air 7",
+  ]);
+  equal("fewest first, and air is still last", listed({ sort: "countAsc" }).at(-1), "air 7");
+  equal("by name, either way", [listed({ sort: "nameAsc" })[0], listed({ sort: "nameDesc" })[0]], [
+    "piston[extended=false,facing=up] 1",
+    "vine[east=true,north=false] 3",
+  ]);
+  equal("merged, a block is one slot whatever its states", listed({ unify: true }), [
+    "vine 5",
+    "stone 4",
+    "piston 2",
+    "air 7",
+  ]);
+  const mergedPiston = materialRows(palette, 0, { unify: true, sort: "countDesc", query: "" }).find(
+    (row) => row.block === "minecraft:piston",
+  );
+  equal(
+    "...and keeps a pair whose other half is another block",
+    mergedPiston?.pair,
+    ["minecraft:piston_head[facing=up,short=false,type=normal]"],
+  );
+  equal("a search matches the states too", listed({ query: "east=true" }), ["vine[east=true,north=false] 3"]);
+  equal(
+    "...reads a space as an underscore",
+    materialRows([{ block: "minecraft:oak_slab[type=top]", count: 1 }], 0, {
+      unify: false,
+      sort: "countDesc",
+      query: "oak slab",
+    }).length,
+    1,
+  );
+  equal("...ignores the namespace", listed({ query: "minecraft:stone" }), ["stone 4"]);
+  equal("...and finds air when asked for it", listed({ query: "air" }), ["air 7"]);
+  equal("no air slot when there is none", listed({}, 0).includes("air 0"), false);
+
+  const inventory = readFileSync(path.join(RENDERER, "lib", "MaterialsInventory.svelte"), "utf8");
+  check("the slots are the rows the bar asks for", inventory.includes("materialRows(palette, air, { unify, sort, query })"));
+  check(
+    "the merge and the order are settings, the search is not",
+    app.includes("patchUi({ materialsUnify: unify })") && app.includes("patchUi({ materialsSort: sort })") &&
+      !/patchUi\(\{[^}]*query/.test(app),
+  );
+}
+
+// --- a block dragged onto the viewport is not a file ----------------------------
+//
+// Chromium hands an image dragged from inside the page over as a file called
+// `download.png`, and the viewport opened what it was handed: pulling a
+// material's icon onto the canvas said "download.png cannot be opened as a
+// schematic".
+console.log("\n--- a block dragged onto the viewport is not a file ---");
+await (async () => {
+  equal(
+    "a file from outside is a file, and only that",
+    [
+      isFileDrop(["Files"], false),
+      isFileDrop(["text/plain"], false),
+      isFileDrop(["Files", BLOCK_MIME], false),
+      isFileDrop(["Files"], true),
+      isFileDrop(undefined, false),
+    ],
+    [true, false, false, false, false],
+  );
+
+  // A window stand-in: the listeners are all the tracker touches.
+  const listeners = new Map<string, (() => void)[]>();
+  const fake = {
+    addEventListener: (type: string, listener: () => void) =>
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]),
+    removeEventListener: (type: string, listener: () => void) =>
+      listeners.set(type, (listeners.get(type) ?? []).filter((each) => each !== listener)),
+  };
+  const fire = (type: string): void => (listeners.get(type) ?? []).forEach((listener) => listener());
+  const drags = trackPageDrags(fake as unknown as Window);
+  equal("no drag is from the page until one starts", drags.fromPage(), false);
+  fire("dragstart");
+  equal("a drag that starts in the page is from the page", drags.fromPage(), true);
+  fire("dragend");
+  equal("...until it ends", drags.fromPage(), false);
+  fire("dragstart");
+  fire("drop");
+  equal("a drop's own listeners still see it as the page's", drags.fromPage(), true);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  equal("...and it is over once they have run, with no dragend", drags.fromPage(), false);
+  fire("dragstart");
+  fire("pointermove");
+  equal("the next pointer move ends one that lost its dragend", drags.fromPage(), false);
+  drags.dispose();
+  fire("dragstart");
+  equal("disposed, it hears nothing", drags.fromPage(), false);
+
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8");
+  check("no picture in the window can be dragged out as a file", /img\s*\{\s*-webkit-user-drag:\s*none;/.test(css));
+  const page = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const drop = page.slice(page.indexOf("async function onDrop("), page.indexOf("async function resolveRecovery("));
+  check(
+    "the drop asks before it reads a file",
+    drop.indexOf("if (!fileDragged(event)) return;") !== -1 &&
+      drop.indexOf("if (!fileDragged(event)) return;") < drop.indexOf("dataTransfer?.files"),
+  );
+  const enter = page.slice(page.indexOf("function onDragEnter("), page.indexOf("function onDragOver("));
+  check("...and so does the highlight", enter.includes("if (!fileDragged(event)) return;"));
+})();
+
+// --- when a block arrived, as far as the table can see -------------------------
+//
+// The version table starts at the Flattening, so a block it dates to its first
+// release may be far older. The hover said oak stairs arrived in 1.13.
+console.log("\n--- when a block arrived, as far as the table can see ---");
+{
+  const floor = versionTableFloor();
+  equal("the table starts at 1.13", versionNameOf(floor), "JE_1_13");
+  equal("oak stairs come out of it at its floor", versionRangeOf("minecraft:oak_stairs")?.since, floor);
+  check(
+    "...while a block that really arrived later does not",
+    (versionRangeOf("minecraft:pale_oak_planks")?.since ?? floor) > floor,
+  );
+  const tooltip = readFileSync(path.join(RENDERER, "lib", "BlockTooltip.svelte"), "utf8");
+  check(
+    "the hover says 'or earlier' for a block at the floor",
+    /atFloor\s*\?\s*t\("blockInfo\.sinceOrEarlier"/.test(tooltip) && /atFloor\s*\?\s*t\("blockInfo\.until"/.test(tooltip),
+  );
+}
+
+// --- the distribution, in the With field -------------------------------------
+//
+// Its labels are assembled from templates -- `mix.kind.${kind}` -- which the
+// catalogue's own check above cannot see, so the table is walked here: every
+// kind, every parameter and every option has its words.
+console.log("\n--- the distribution, in the With field ---");
+{
+  const catalogue = en as Record<string, string>;
+  const wanted: string[] = [];
+  for (const kind of DISTRIBUTION_KINDS) {
+    wanted.push(`mix.kind.${kind}`, `mix.kindHint.${kind}`);
+    for (const spec of DISTRIBUTION_PARAMS[kind]) {
+      wanted.push(`mix.param.${spec.key}`, `mix.paramHint.${spec.key}`);
+      if (spec.type === "choice") for (const option of spec.options) wanted.push(`mix.option.${option}`);
+    }
+  }
+  const missing = [...new Set(wanted)].filter((key) => catalogue[key] === undefined);
+  check("every distribution, parameter and option has its words", missing.length === 0, missing.join(", "));
+
+  const field = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
+  const setKind = field.slice(field.indexOf("function setKind("), field.indexOf("function setParam("));
+  check(
+    "choosing another distribution keeps the seed and drops the old one's parameters",
+    /distribution: \{ kind, seed \}/.test(setKind),
+  );
+  check(
+    "a parameter typed in goes through the same reading as the spelling",
+    /function setParam\([\s\S]{0,400}normalizeDistribution\(/.test(field),
+  );
+
+  /*
+   * A gradient by hand runs from one end of the document to the other, which
+   * is only true if the hand is told where the ends are.
+   */
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check("a block placed by hand takes its shares over the document's box", /pickAt\(mix, at\.x, at\.y, at\.z, frame\)/.test(app));
+
+  /*
+   * The map beside the parameters. Its arithmetic is `distribution_map.ts`'s
+   * and is checked against `pickAt` in `tests/session.ts`; what is checked here
+   * is that the field draws it, over the frame a fill covers.
+   */
+  const planeWords = MAP_PLANES.flatMap((plane) => [`mix.map.plane.${plane}`, `mix.map.planeHint.${plane}`]);
+  equal("every plane of the map has its words", planeWords.filter((key) => catalogue[key] === undefined), []);
+  const mixBlock = field.slice(field.indexOf("{#if weights && mix.entries.length > 1}"), field.indexOf("<BlockTooltip"));
+  check("a mix shows the map of its distribution", /<DistributionPreview \{mix\} \{frame\}/.test(mixBlock));
+  check(
+    "...opened with the parameters, and only while there are some",
+    /expanded=\{tuning && specs\.length > 0\}/.test(mixBlock),
+  );
+  const preview = readFileSync(path.join(RENDERER, "lib", "DistributionPreview.svelte"), "utf8");
+  check(
+    "...drawn by the shared sampler over the frame it was given",
+    /distributionMap\(\{ mix, frame: box, plane, level \}\)/.test(preview),
+  );
+  const tools = readFileSync(path.join(RENDERER, "lib", "SelectionTools.svelte"), "utf8");
+  check("the With field's map is drawn over what a fill covers", /frame=\{mapFrame\}/.test(tools));
+  check("...and the schematic is the frame with nothing selected", /documentSize=\{docState\?\.size \?\? null\}/.test(app));
+
+  // A block's colour on the map is its icon's, the transparent margin left out.
+  equal("an icon's colour is the average of what is drawn", averageColour([255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 255, 255]), [128, 0, 128]);
+  equal("...weighted by how opaque each pixel is", averageColour([200, 0, 0, 255, 0, 0, 200, 85]), [150, 0, 50]);
+  equal("...and nothing for an icon with nothing in it", averageColour([9, 9, 9, 0]), null);
+}
+
+
+// --- several areas, one selection --------------------------------------------
+//
+// The active area is `selection` and the rest sit beside it, in an order that
+// does not reshuffle: making the third area active leaves it third.
+console.log("\n--- several areas, one selection ---");
+{
+  const box = (x: number, width = 1) => ({ minX: x, minY: 0, minZ: 0, maxX: x + width - 1, maxY: 0, maxZ: 0 });
+  const xs = (list: readonly { minX: number }[]) => list.map((area) => area.minX);
+
+  let set = single(box(0, 4));
+  set = withArea(set, box(10));
+  set = withArea(set, box(20));
+  equal("an added area goes at the end of the list", xs(areaList(set)), [0, 10, 20]);
+  equal("...and becomes the active one", [set.active?.minX, activeIndex(set)], [20, 2]);
+
+  const first = activated(set, 0);
+  equal("activating an area leaves the list in its order", xs(areaList(first)), [0, 10, 20]);
+  equal("...and moves only which one is active", [first.active?.minX, activeIndex(first)], [0, 0]);
+
+  // Removing the active area hands the role to the one listed before it.
+  const dropped = withoutArea(set, 2);
+  equal("removing the active area keeps the rest", xs(areaList(dropped)), [0, 10]);
+  equal("...and the one before it becomes active", dropped.active?.minX, 10);
+  const other = withoutArea(first, 1);
+  equal("removing another area leaves the active one active", [other.active?.minX, xs(areaList(other))], [
+    0,
+    [0, 20],
+  ]);
+  equal("removing the last area leaves no selection", withoutArea(single(box(0)), 0), NO_AREAS);
+
+  // Nested areas: the click means the small one drawn inside the large one.
+  const nested = withArea(single(box(0, 10)), box(3));
+  equal("a click inside nested areas finds the smallest", areaAt(nested, { x: 3, y: 0, z: 0 }), 1);
+  equal("...and one only the large area holds finds that", areaAt(nested, { x: 7, y: 0, z: 0 }), 0);
+  equal("...and a click outside every area finds none", areaAt(nested, { x: 30, y: 0, z: 0 }), -1);
+
+  equal("the bounds hold every area", areaBounds(set), { minX: 0, minY: 0, minZ: 0, maxX: 20, maxY: 0, maxZ: 0 });
+  equal("cells are counted over the union", areaCells(withArea(single(box(0, 4)), box(2, 4))), 6);
+  equal(
+    "a translation moves every area and keeps the active one",
+    [xs(areaList(mapAreas(set, (area) => ({ ...area, minX: area.minX + 1, maxX: area.maxX + 1 })))), activeIndex(set)],
+    [[1, 11, 21], 2],
+  );
+
+  // Main refuses an edit naming more than MAX_BOXES, so the set stops there.
+  let full = single(box(0));
+  for (let i = 1; i <= MAX_BOXES + 5; i += 1) full = withArea(full, box(i * 2));
+  equal("the set never holds more areas than an edit may name", areaList(full).length, MAX_BOXES);
+
+  /*
+   * A rigid map about one origin: two areas mirrored about the middle of
+   * their bounds trade places, and that is what main does with the mask.
+   */
+  const pair = [box(0, 2), box(6, 2)];
+  const bounds = { minX: 0, minY: 0, minZ: 0, maxX: 7, maxY: 0, maxZ: 0 };
+  equal(
+    "two areas mirrored about their bounds trade places",
+    xs(pair.map((area) => transformedRegion(area, gizmoOrigin(bounds, null), { kind: "mirror", axis: "x" }))),
+    [6, 0],
+  );
+
+  // Alt is about which areas, and a miss with it does nothing.
+  const intent = (hit: boolean, shift: boolean, alt: boolean) => clickIntent({ hit, shift, ctrl: false, alt });
+  equal("Shift+Alt on a block adds an area", intent(true, true, true), "add");
+  equal("Alt on a block takes one away", intent(true, false, true), "remove");
+  equal("...and a miss with Alt clears nothing", [intent(false, true, true), intent(false, false, true)], [
+    "ignore",
+    "ignore",
+  ]);
+  equal("without Alt a click is what it was", [intent(true, false, false), intent(false, true, false)], [
+    "pick",
+    "clear",
+  ]);
+
+  /*
+   * The wiring, read from the source because the gestures run from a viewport
+   * this harness cannot drive.
+   */
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  check(
+    "Alt released after an Alt+click is kept from the menu bar",
+    /event\.key === "Alt" && altClicked\)[\s\S]{0,80}event\.preventDefault\(\)/.test(viewer),
+  );
+  check("...and a press with Alt is what arms that", /if \(event\.altKey\) altClicked = true;/.test(viewer));
+  check(
+    "a sweep decides at the press whether it adds",
+    (viewer.match(/sweepAdds = event\.altKey;/g) ?? []).length === 2,
+  );
+  check(
+    "a face drag resizes the active area and leaves the others",
+    /onselectionchange\(next, "resize"\)/.test(viewer),
+  );
+
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const now = app.slice(app.indexOf("function selectionNow"), app.indexOf("function restoreSelection"));
+  check(
+    "with no active area a step records no other areas",
+    /others: selection === null \? \[\]/.test(now),
+  );
+  const dropping = app.slice(app.indexOf("if (selection !== null) return;"));
+  check(
+    "dropping the selection drops the other areas with it",
+    /if \(otherAreas\.length > 0\) otherAreas = \[\];/.test(dropping.slice(0, 900)),
+  );
+  for (const verb of ["async function fillSelection", "async function replaceInSelection", "async function deleteSelection", "async function copySelection"]) {
+    const from = app.indexOf(verb);
+    check(`${verb.split(" ").pop()} sends every area`, from !== -1 && app.slice(from, from + 600).includes("areasForIpc()"));
+  }
+}
+
+
+// --- Delete leaves the document's empty space --------------------------------
+//
+// A break has always written the empty space; Delete wrote the word air, so
+// with water chosen it left a dry pocket where breaking the same blocks one by
+// one left water. Read from the source: the fill crosses IPC, and this harness
+// makes no round trip.
+console.log("\n--- Delete leaves the document's empty space ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const from = app.indexOf("async function deleteSelection");
+  const body = from === -1 ? "" : app.slice(from, from + 700);
+  check("Delete fills with the empty space block", /parseBlock\(docState\?\.voidBlock \|\| "minecraft:air"\)/.test(body));
+  check("...and not with air written out", !body.includes('singleMix({ namespacedName: "minecraft:air" })'));
+}
+
+// --- the frame costs less ----------------------------------------------------
+//
+// The third stutter report: a still scene drew sixty frames a second, each one
+// resolving a multisampled target three times (sky, scene, compass) and
+// redrawing the shadow map, and every edit threw the shadow map away. The
+// decision is `render_demand.ts`; the rest is read from the source, because
+// the loop runs from `requestAnimationFrame`, which this harness has no
+// frames from.
+console.log("\n--- the frame costs less ---");
+{
+  const base = { now: 10_000, activeAt: 0, animated: false, pending: false, always: false };
+  check("a still scene draws nothing", !shouldDraw(base));
+  check("activity draws", shouldDraw({ ...base, activeAt: 10_000 }));
+  check("...for a little while after it", shouldDraw({ ...base, activeAt: 10_000 - SETTLE_MS + 1 }));
+  check("...and then stops", !shouldDraw({ ...base, activeAt: 10_000 - SETTLE_MS }));
+  check("an animated texture's new frame draws", shouldDraw({ ...base, animated: true }));
+  check("work left for a later frame draws", shouldDraw({ ...base, pending: true }));
+  check("always draw draws", shouldDraw({ ...base, always: true }));
+
+  const watch = new ViewWatch();
+  check("the first view counts as a move", watch.moved([1, 2, 3]));
+  check("the same view does not", !watch.moved([1, 2, 3]));
+  check("any number differing does", watch.moved([1, 2, 3.0000001]));
+  check("...once", !watch.moved([1, 2, 3.0000001]));
+  check("a view of another length does", watch.moved([1, 2]));
+
+  check("the counter is idle once nothing has drawn for its window", counterIdle(1000, 400, 500));
+  check("...not before", !counterIdle(1000, 600, 500));
+  check("...and not before the first frame", !counterIdle(1000, 0, 500));
+
+  // The working copy may be CRLF, and every pattern below spells a newline.
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const stripped = viewer.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+  const between = (from: string, to: string): string => {
+    const start = stripped.indexOf(from);
+    return start === -1 ? "" : stripped.slice(start, stripped.indexOf(to, start + from.length));
+  };
+
+  /*
+   * One resolve per frame. three resolves a multisampled target at the end of
+   * every `render()` into it, so the world -- sky included -- is one render,
+   * and the compass has a target of its own.
+   */
+  const frame = between("function renderFrame(): void {", "onMount(");
+  check("the frame binds the scene's target once", (frame.match(/setRenderTarget\(aaTarget\)/g) ?? []).length === 1);
+  check("...and draws the world in one render", (frame.match(/renderer\.render\(scene, camera\)/g) ?? []).length === 1);
+  check("...with no pass of the sky's own", frame.length > 0 && !frame.includes("render(skyScene"));
+  check("the compass draws into its own target when anti-aliased", /setRenderTarget\(compassTarget\)/.test(between("function drawCompass", "function compositeCompass")));
+  check("the targets do not resolve their depth", (stripped.match(/resolveDepthBuffer: false/g) ?? []).length === 2);
+  /*
+   * In the world's pass the sun, the moon and the stars are drawn after every
+   * opaque object, being transparent, so they are kept behind the world by
+   * depth: on the far plane, tested against what the world wrote.
+   */
+  const farPlane = between("function atFarPlane", "function buildSky");
+  check("a sky body is pushed onto the far plane", farPlane.includes("gl_Position.z = gl_Position.w;"));
+  check("...and depth-tested there", farPlane.includes("material.depthTest = true"));
+  check("...which is all three of them", (between("function buildSky", "function skyImage").match(/atFarPlane\(/g) ?? []).length === 2);
+  check("the environment is still built from the sky alone", /skyScene\.add\(skyGroup\);\s*const built = pmrem\.fromScene\(skyScene/.test(stripped));
+
+  /*
+   * The shadow map is drawn on request, through one function, and kept across
+   * edits: only a new resolution reallocates it.
+   */
+  check("the shadow map does not redraw itself", stripped.includes("renderer.shadowMap.autoUpdate = false"));
+  check(
+    "...and one function asks for it",
+    (stripped.match(/shadowMap\.needsUpdate = true/g) ?? []).length === 1 &&
+      /function shadowsStale\(\): void \{\s*if \(renderer\) renderer\.shadowMap\.needsUpdate = true;/.test(stripped),
+  );
+  check("aiming the light asks for it", /camera\.updateProjectionMatrix\(\);\s*shadowsStale\(\);\s*\}/.test(between("function placeShadow", "$effect")));
+  check("every payload asks for it", (between("const payload = mesh;", "</script>").match(/shadowsStale\(\)/g) ?? []).length === 3);
+  const shadowEffect = between("renderer.shadowMap.enabled = shadows;", "function shadowsStale");
+  check("the map is reallocated only for a new resolution", /if \(sun\.shadow\.mapSize\.x !== shadowQuality[\s\S]*sun\.shadow\.map\?\.dispose\(\);/.test(shadowEffect));
+  check("...and the effect does not follow the document's size", shadowEffect.includes("untrack(placeShadow)"));
+  check("the document's size is one array while its numbers hold", /const documentSize = \$derived\.by/.test(stripped) && stripped.includes("documentSize: documentSizeProp = null"));
+
+  const resizeBody = between("function resize(): void {", "const AA_RESIZE_MS");
+  check("a resize reallocates the targets later, not at once", resizeBody.includes("sizeAaTargetSoon();") && !resizeBody.includes("sizeAaTarget();"));
+  check(
+    "the pixel ratio follows the display it is on",
+    stripped.includes("renderer.setPixelRatio(Math.min(deviceRatio, maxDpr) * renderScale)") &&
+      stripped.includes("window.matchMedia(`(resolution: ${deviceRatio}dppx)`)"),
+  );
+  check("no vector is allocated per frame for the viewport", !between("function drawCompass", "function compositeCompass").includes("new THREE.Vector2"));
+
+  /*
+   * The loop: the interval is closed before the decision, so a refresh that
+   * draws nothing is still a short interval rather than part of one long one;
+   * and nothing that follows the pointer runs unless the frame is drawn.
+   */
+  const loop = between("const animate = () => {", "animate();");
+  const opened = loop.indexOf("profiler.beginFrame");
+  const decided = loop.indexOf("shouldDraw(");
+  check("the profiler's interval closes before the decision", opened > 0 && decided > opened);
+  check("...which comes before the hover and the frame", decided > 0 && loop.indexOf("updateHover(") > decided && loop.indexOf("renderFrame();") > decided);
+  check("the camera is compared, not announced", /view\.moved\(viewNumbers\(camera\)\)/.test(loop));
+
+  /*
+   * Every prop that is not a callback asks for a frame. A prop added and left
+   * out of the list is a picture that stops updating, which is the failure
+   * drawing on demand invites.
+   */
+  const props = viewer.slice(viewer.indexOf("  const {\n    mesh,"), viewer.indexOf("}: Props = $props();"));
+  const locals = [...props.matchAll(/^\s{4}(\w+)(?::\s*(\w+))?(?:\s*=[^,\n]*)?,$/gm)]
+    .map((match) => match[2] ?? match[1])
+    .filter((name) => !/^on[a-z]/.test(name));
+  const invalidation = between("void [\n      mesh,", "invalidate();\n  });");
+  const missing = locals.filter((name) => !new RegExp(`\\b${name}\\b`).test(invalidation));
+  check("every prop is read by the invalidation effect", locals.length > 30 && missing.length === 0, `${locals.length} props; missing: ${missing.join(", ")}`);
+
+  /*
+   * The glow: a mask drawn before the scene's target is bound, so the frame
+   * still binds that target once; an outline laid on the canvas, never into
+   * the multisampled target, under the compass; and a scene of its own that
+   * no raycast, light or shadow reaches.
+   */
+  const maskAt = frame.indexOf("drawGlowMask();");
+  check("the glow's mask is drawn before the scene's target is bound", maskAt > 0 && maskAt < frame.indexOf("setRenderTarget(aaTarget)"));
+  check(
+    "...its outline after the anti-aliased copy, under the compass",
+    /render\(aaScene, aaCamera\);\s*compositeGlow\(\);\s*compositeCompass\(\);/.test(frame),
+  );
+  const plainAt = frame.indexOf("if (aaTarget === null) {");
+  check(
+    "...and without anti-aliasing after the scene pass, under the compass",
+    plainAt > frame.indexOf("renderer.render(scene, camera)") &&
+      frame.indexOf("compositeGlow();", plainAt) > plainAt &&
+      frame.indexOf("compositeGlow();", plainAt) < frame.indexOf("drawCompass();"),
+  );
+  check(
+    "the mask has no depth buffer and no samples to resolve",
+    /new THREE\.WebGLRenderTarget\([^;]*\{\s*depthBuffer: false,\s*stencilBuffer: false,\s*\}\)/.test(
+      between("function drawGlowMask", "function compositeGlow"),
+    ),
+  );
+  check(
+    "no raycast reaches the glow",
+    !(viewer.match(/raycaster\.intersectObjects?\([^)]*\)/g) ?? []).some((cast) => /glow/i.test(cast)),
+  );
+  check(
+    "the shell is never put in the world's scene",
+    !/\bscene\.add\(glow/.test(stripped) && !/loaded\??\.add\(glow/.test(stripped),
+  );
+  check("the glow stands where the chunks stand", /glowGroup\?\.position\.set\(frame\[0\], frame\[1\], frame\[2\]\)/.test(between("function placeChunks", "function pickBlockAt")));
+  check("the mask follows a resize on the targets' delay", resizeBody.includes("sizeGlowTargetSoon();"));
+
+  const appGlow = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const escapeGlow = appGlow.indexOf('event.key === "Escape" && glow !== null');
+  check(
+    "Escape puts the glow out before it drops the selection",
+    escapeGlow > 0 && escapeGlow < appGlow.indexOf('event.key === "Escape" && selection !== null'),
+  );
+  check(
+    "a glow lit from the list goes with the selection, one a model lit stays",
+    /if \(selection !== null\) return;[\s\S]*?if \(glow !== null && glow\.scope === "selection"\) glow = null;\n {2}\}\);/.test(appGlow),
+  );
+  check("a model's glow reaches the window", appGlow.includes("api().onGlow("));
+  check(
+    "the glow's colour is in all three palettes",
+    (readFileSync(path.join(RENDERER, "app.css"), "utf8").match(/--glow: #/g) ?? []).length === 3,
+  );
+}
+
+// --- a click in creative mode is never dropped -------------------------------
+//
+// Hand placement went through `runDocument`, which holds `busy` until the new
+// mesh has arrived, and `onBuild` returns while `busy` is set: every click
+// during that round trip was lost. It has its own road now, queued and not
+// waiting for the picture. Read from the source, because the round trip is
+// main's and this harness makes none.
+console.log("\n--- a click in creative mode is never dropped ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const build = app.slice(app.indexOf("async function onBuild("), app.indexOf("function queueBuild("));
+  check("a placement by hand goes through the build queue", build.includes("await queueBuild(label, () =>"));
+  check("...and not through runDocument", !build.includes("runDocument("));
+  const apply = app.slice(app.indexOf("async function applyBuild("), app.indexOf("async function applyBuild(") + 1400);
+  check(
+    "the queue asks for the redraw without waiting for it",
+    apply.includes("void refreshDocument()") && !apply.includes("await refreshDocument()"),
+  );
+  check("...and holds no busy flag that would drop the next click", !apply.includes("busy = true"));
+  check("clicks run in order, one after another", /buildQueue = buildQueue\.then\(\(\) => applyBuild\(doing, call\)\);/.test(app));
+}
+
+
+// --- levels of detail -------------------------------------------------------
+//
+// `lod.ts` decides which level each region and chunk shows. The rule is a
+// screen-space error with a tenth of hysteresis, a change of level is crossed
+// in a quarter of a second with two complementary dithers, and up close --
+// the document as R frames it -- nothing changes at all.
+console.log("\n--- levels of detail ---");
+{
+  for (const [x, y, z] of [
+    [0, 0, 0],
+    [3, -2, 7],
+    [-5, 1, -9],
+    [100, 40, -100],
+  ] as const) {
+    equal(`the key of (${x}, ${y}, ${z}) is main's`, packKey(x, y, z), chunkKey(x, y, z));
+    equal(`...and reads back as main reads it`, unpackKey(chunkKey(x, y, z)), chunkCoords(chunkKey(x, y, z)));
+  }
+  equal("a chunk's region floors negative coordinates", unpackKey(regionOfChunk(packKey(-1, 0, 5))), [-1, 0, 1]);
+
+  // A camera at the origin looking down -z: its view matrix is the identity.
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const view = (over: Partial<LodView> = {}): LodView => ({
+    view: identity,
+    perspective: true,
+    fovDeg: 60,
+    orthoHeight: 0,
+    near: 0.1,
+    heightPx: 1000,
+    offset: [0, 0, 0],
+    ...over,
+  });
+  const box = (z0: number, z1: number): LodBox => ({ minX: -1, minY: -1, minZ: z0, maxX: 1, maxY: 1, maxZ: z1 });
+
+  equal("a box in front is as deep as its nearest corner", nearestDepth(view(), box(-20, -10)), 10);
+  equal("a camera inside a box sees it at the near plane: the full mesh", nearestDepth(view(), box(-5, 5)), 0.1);
+  equal(
+    "...and the group's offset is where the chunks stand",
+    nearestDepth(view({ offset: [0, 0, -5] }), box(-20, -10)),
+    15,
+  );
+  check(
+    "a pixel covers 2 z tan(fov / 2) / H at depth z",
+    Math.abs(worldPerPixel(view(), 100) - (2 * 100 * Math.tan(Math.PI / 6)) / 1000) < 1e-12,
+  );
+  equal(
+    "orthographic, the same at any depth",
+    [worldPerPixel(view({ perspective: false, orthoHeight: 50 }), 1), worldPerPixel(view({ perspective: false, orthoHeight: 50 }), 1000)],
+    [0.05, 0.05],
+  );
+
+  check("a level is taken a tenth before the threshold", allowed(1.79, 2, false) && !allowed(1.81, 2, false));
+  check("...and kept until a tenth past it", allowed(2.19, 2, true) && !allowed(2.21, 2, true));
+
+  const levels = { shapes: true, coarse: true };
+  const region = (z0: number, z1: number, lod2: number | null, lod3: number | null, shapes: number | null = 0.25): LodRegion => ({
+    key: packKey(0, 0, 0),
+    box: box(z0, z1),
+    lod2,
+    lod3,
+    chunks: [{ key: packKey(0, 0, 0), box: box(z0, z1), shapes }],
+  });
+  // At depth d a pixel is 0.0011547 d: level 2 (2 blocks) is taken past
+  // ~962 at two pixels, level 3 (4 blocks) past ~1925, level 1 (0.25) past ~120.
+  equal("near, a region shows its chunks", regionTarget(view(), region(-110, -100, 2, 4), 2, levels, 0), 0);
+  equal("far, level 2", regionTarget(view(), region(-1110, -1000, 2, 4), 2, levels, 0), 2);
+  equal("farther, level 3", regionTarget(view(), region(-3100, -3000, 2, 4), 2, levels, 0), 3);
+  equal("a level not held is passed over", regionTarget(view(), region(-3100, -3000, 2, null), 2, levels, 0), 2);
+  equal(
+    "coarse levels switched off leave the chunks",
+    regionTarget(view(), region(-3100, -3000, 2, 4), 2, { shapes: true, coarse: false }, 0),
+    0,
+  );
+  const chunk = { key: packKey(0, 0, 0), box: box(-140, -130), shapes: 0.25 };
+  equal("a chunk far enough shows level 1", chunkTarget(view(), chunk, 2, levels, 0), 1);
+  equal("...one nearer, the full mesh", chunkTarget(view(), { ...chunk, box: box(-60, -50) }, 2, levels, 0), 0);
+  equal("...one with no level 1, the full mesh at any distance", chunkTarget(view(), { ...chunk, shapes: null }, 2, levels, 0), 0);
+  equal("...and with level 1 switched off", chunkTarget(view(), chunk, 2, { shapes: false, coarse: true }, 0), 0);
+
+  // The crossing, in time.
+  const selector = new LodSelector();
+  const out = new Map<string, LodDraw>();
+  const solid = `solid:${packKey(0, 0, 0)}`;
+  const lod3 = `lod3:${packKey(0, 0, 0)}`;
+  selector.choose(view(), [region(-3100, -3000, 2, 4)], 2, levels, 0, out);
+  equal("the first look settles at once", [...out.entries()], [[lod3, null]]);
+  check("...with nothing crossing", !selector.fading);
+  selector.choose(view(), [region(-110, -100, 2, 4)], 2, levels, 1000, out);
+  check("coming close starts a crossing", selector.fading);
+  const start = [out.get(lod3), out.get(solid)];
+  check(
+    "...the coarse level on one side and the chunks on the other, with one t",
+    JSON.stringify(start) === JSON.stringify([{ t: 1, coarse: true }, { t: 1, coarse: false }]),
+    JSON.stringify(start),
+  );
+  selector.choose(view(), [region(-110, -100, 2, 4)], 2, levels, 1000 + FADE_MS / 2, out);
+  const half = [out.get(lod3), out.get(solid)] as LodDraw[];
+  check("halfway, both at one half", half[0]?.t === 0.5 && half[1]?.t === 0.5, JSON.stringify(half));
+  let complement = true;
+  for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+    for (let y = 0; y < 4; y += 1) {
+      for (let x = 0; x < 4; x += 1) {
+        if (keepsPixel({ t, coarse: true }, x, y) === keepsPixel({ t, coarse: false }, x, y)) complement = false;
+      }
+    }
+  }
+  check("every pixel is drawn by exactly one side of a crossing", complement);
+  check("the dither's thresholds are sixteen, none of them 0 or 1", BAYER_4X4.length === 16 && BAYER_4X4.every((v) => v > 0 && v < 1));
+  selector.choose(view(), [region(-110, -100, 2, 4)], 2, levels, 1000 + FADE_MS, out);
+  equal("a quarter of a second later only the chunks are drawn", [...out.entries()], [[solid, null]]);
+  check("...and nothing is crossing", !selector.fading);
+  selector.choose(view(), [region(-110, -100, 2, 4)], 2, levels, 5000, out);
+  check("a still camera draws one level of everything", [...out.values()].every((how) => how === null));
+
+  const gone = new LodSelector();
+  gone.choose(view(), [region(-1110, -1000, 2, null, null)], 2, levels, 0, out);
+  gone.choose(view(), [region(-1110, -1000, null, null, null)], 2, levels, 10, out);
+  equal("a level whose mesh went is left at once, not crossed from", [...out.entries()], [[solid, null]]);
+  check("...with nothing crossing", !gone.fading);
+
+  /*
+   * The report, as a check: a small build framed by R, and closer, is drawn
+   * in full -- at the default two pixels, even with every chunk holding the
+   * worst stand-in there is and a viewport only 600 pixels tall.
+   */
+  const size = { width: 21, height: 24, length: 22 };
+  const framing = documentFraming(size);
+  for (const [label, scale] of [
+    ["as R frames it", 1],
+    ["and from half as far", 0.5],
+  ] as const) {
+    const camera = new THREE.PerspectiveCamera(ORBIT_FOV, 1.6, 0.1, 2048);
+    camera.position.set(
+      framing.target.x + (framing.position.x - framing.target.x) * scale,
+      framing.target.y + (framing.position.y - framing.target.y) * scale,
+      framing.target.z + (framing.position.z - framing.target.z) * scale,
+    );
+    camera.lookAt(framing.target.x, framing.target.y, framing.target.z);
+    camera.updateMatrixWorld();
+    const chunks = [];
+    for (let cx = 0; cx < 2; cx += 1) {
+      for (let cy = 0; cy < 2; cy += 1) {
+        for (let cz = 0; cz < 2; cz += 1) {
+          chunks.push({
+            key: packKey(cx, cy, cz),
+            box: {
+              minX: cx * 16,
+              minY: cy * 16,
+              minZ: cz * 16,
+              maxX: Math.min(size.width, cx * 16 + 16),
+              maxY: Math.min(size.height, cy * 16 + 16),
+              maxZ: Math.min(size.length, cz * 16 + 16),
+            },
+            shapes: 0.2832,
+          });
+        }
+      }
+    }
+    const pavilion: LodRegion = {
+      key: packKey(0, 0, 0),
+      box: { minX: 0, minY: 0, minZ: 0, maxX: size.width, maxY: size.height, maxZ: size.length },
+      lod2: 2,
+      lod3: 4,
+      chunks,
+    };
+    const small = new LodSelector();
+    const stats = small.choose(
+      {
+        view: camera.matrixWorldInverse.elements,
+        perspective: true,
+        fovDeg: ORBIT_FOV,
+        orthoHeight: 0,
+        near: 0.1,
+        heightPx: 600,
+        offset: [0, 0, 0],
+      },
+      [pavilion],
+      2,
+      levels,
+      0,
+      out,
+    );
+    equal(`a 21x24x22 build ${label} is drawn in full`, [stats.full, stats.shapes, stats.lod2, stats.lod3], [8, 0, 0, 0]);
+  }
+
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const casts = viewer.match(/raycaster\.intersectObjects?\([^)]*\)/g) ?? [];
+  check("no raycast reaches a level of detail", casts.length > 0 && !casts.some((cast) => cast.includes("lodLoaded")));
+  const frame = viewer.slice(viewer.indexOf("function renderFrame("));
+  const probeAt = frame.indexOf("shadowsFromFullDetail()");
+  check(
+    "the shadow map is drawn from the full chunks before the scene pass",
+    probeAt > 0 && probeAt < frame.indexOf("renderer.render(scene, camera)"),
+  );
+  const probe = viewer.slice(viewer.indexOf("function shadowsFromFullDetail("));
+  check(
+    "...with every full chunk shown and every level hidden",
+    /mesh\.visible = layer === "solid";/.test(probe.slice(0, 1200)),
+  );
+  check(
+    "a delta that brings only levels leaves the shadow map as it was",
+    viewer.includes("if (moved || touchesFullMesh(payload)) shadowsStale();"),
+  );
+  check(
+    "the crossing and tint copies have programs of their own",
+    viewer.includes('variant.customProgramCacheKey = () => (fade ? "lod-fade" : "lod-tint");'),
+  );
+  check(
+    "...and dither as keepsPixel does, from its own table",
+    viewer.includes("uLodCoarse > 0.5 ? lodThreshold >= uLodFade : lodThreshold < uLodFade") &&
+      viewer.includes("BAYER_4X4.map"),
+  );
+  const demand = viewer.slice(viewer.indexOf("const pending ="), viewer.indexOf("const pending =") + 300);
+  check("a crossing keeps frames coming until it ends", demand.includes("lodSelector.fading"));
+
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check(
+    "asking for other levels reaches main",
+    ["lodMode", "lodShapes", "lodCoarse", "lodAutoTriangles"].every((field) => app.includes(`patch.${field} !== undefined`)),
+  );
+  check(
+    "...while the pixels and the tint stay the viewer's",
+    !app.includes("patch.lodPixels !== undefined") && !app.includes("patch.lodTint !== undefined"),
+  );
+  check("levels still queued in main are asked for again", app.includes('if (mesh?.lod.state !== "pending") return;'));
+
+  const modal = readFileSync(path.join(RENDERER, "lib", "SettingsModal.svelte"), "utf8");
+  check(
+    "the level-of-detail pane has every control",
+    ['id="lod-mode"', 'id="lod-pixels"', 'id="lod-auto"', "lodShapes:", "lodCoarse:", "lodTint:", "lodStatusLine"].every(
+      (part) => modal.includes(part),
+    ),
+  );
+  check("...and the threshold is disabled outside Automatic, not hidden", modal.includes('disabled={lod.mode !== "auto"}'));
+}
+
+// --- Icons are drawn, not typed ---------------------------------------------
+/*
+ * The browse button beside every block field drew its `⊞` off to the right of
+ * its own box. Two faults, and both are a glyph's: a character is laid out by
+ * the font's metrics rather than by the drawing, and a fixed-width button that
+ * kept the global `8px 14px` padding had a content box narrower than nothing.
+ *
+ * So icons are `<Icon>`s now, and this refuses the old way coming back one
+ * button at a time: no button may be labelled by a symbol character, an emoji
+ * or a character entity. Text that merely contains one -- "64×64" in a size
+ * option -- is not a button's whole label and is left alone.
+ */
+console.log("\n--- Icons ---");
+{
+  const svelteFiles = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const full = path.join(dir, name);
+      return statSync(full).isDirectory() ? svelteFiles(full) : full.endsWith(".svelte") ? [full] : [];
+    });
+  /** Drops `{...}` expressions, nested ones included, so an attribute's `>` cannot end the tag. */
+  const withoutExpressions = (text: string): string => {
+    let out = "";
+    let depth = 0;
+    for (const character of text) {
+      if (character === "{") depth += 1;
+      else if (character === "}") depth = Math.max(0, depth - 1);
+      else if (depth === 0) out += character;
+    }
+    return out;
+  };
+  const symbol = /&#x[0-9a-f]+;|&times;|[←-⯿…‹›×]|[\u{1f300}-\u{1faff}]/iu;
+  const offenders: string[] = [];
+  for (const file of svelteFiles(RENDERER)) {
+    const source = readFileSync(file, "utf8").replace(/<!--[\s\S]*?-->/g, "");
+    let at = 0;
+    while ((at = source.indexOf("<button", at)) >= 0) {
+      const end = source.indexOf("</button>", at);
+      if (end < 0) break;
+      const tag = withoutExpressions(source.slice(at, end));
+      const label = tag.slice(tag.indexOf(">") + 1).replace(/<[^>]*>/g, "").trim();
+      if (symbol.test(label)) offenders.push(`${path.relative(RENDERER, file)}: ${label.slice(0, 30)}`);
+      at = end;
+    }
+  }
+  check("no button is labelled by a glyph", offenders.length === 0, offenders.join("; "));
+
+  /*
+   * The check has to be able to fail, and a walk that matched nothing would
+   * pass forever: the button that was reported is the one it must see.
+   */
+  const seen = withoutExpressions('<button class="browse" onclick={() => x > 1}>&#x229E;</button>');
+  check(
+    "...and the walk does see a glyph through an attribute holding a `>`",
+    symbol.test(seen.slice(seen.indexOf(">") + 1).replace(/<[^>]*>/g, "")),
+  );
+
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8");
+  const rule = css.slice(css.indexOf("button.icon {"), css.indexOf("}", css.indexOf("button.icon {")));
+  check(
+    "an icon button centres what it holds and gives up the global padding",
+    rule.includes("place-items: center") && rule.includes("padding: 0"),
+  );
+
+  const mix = readFileSync(path.join(RENDERER, "lib", "BlockMixField.svelte"), "utf8");
+  const browse = mix.slice(mix.indexOf("  .browse {"), mix.indexOf("}", mix.indexOf("  .browse {")));
+  check(
+    "...and so does the browse button beside a block field, where it was reported",
+    browse.includes("place-items: center") && browse.includes("padding: 0"),
+  );
+}
+
+// --- the creative tools ----------------------------------------------------
+//
+// The rules are `creative_tools.ts`'s, a plain module because the gestures run
+// from the viewer's loop and pointer handlers, which this harness composites no
+// frames for. The geometry under them is `shapes.ts`', held to WorldEdit in
+// `tests/session.ts`; here are the counts that say the tools ask it the
+// right question.
+console.log("\n--- the creative tools ---");
+{
+  const settings = DEFAULT_CREATIVE_SETTINGS;
+  equal(
+    "B steps through the tools and comes back round",
+    [nextTool("place"), nextTool("brush"), nextTool("shape"), nextTool("walls"), nextTool("terrain"), nextTool("smooth"), nextTool("erode")],
+    ["brush", "shape", "walls", "terrain", "smooth", "erode", "place"],
+  );
+  equal(
+    "the brushes are held strokes -- paint, terrain, smooth, erode -- and the corner tools and the hand are not",
+    (["place", "brush", "shape", "walls", "terrain", "smooth", "erode"] as const).map((tool) => takesStroke(tool)),
+    [false, true, false, false, true, true, true],
+  );
+  equal(
+    "...each spaced by its own radius",
+    (["brush", "terrain", "smooth", "erode"] as const).map((tool) => strokeRadius(settings, tool)),
+    [settings.brush.radius, settings.terrain.radius, settings.smooth.radius, settings.erode.radius],
+  );
+  equal("only the shape and walls tools take corners", [takesCorners("place"), takesCorners("brush"), takesCorners("shape"), takesCorners("walls")], [false, false, true, true]);
+
+  // The brush is centred on the block aimed at, VoxelSniper's ball brush.
+  const ball = brushSpec({ shape: "sphere", radius: 3, mode: "all" }, { x: 10, y: 10, z: 10 }, false);
+  equal("a brush is centred on the block aimed at", ball.box, { minX: 7, minY: 7, minZ: 7, maxX: 13, maxY: 13, maxZ: 13 });
+  equal("...and a sphere of radius 3 is //sphere 3", shapeCells(ball).count, 179);
+  const standing = brushSpec({ shape: "sphere", radius: 3, mode: "all" }, { x: 10, y: 0, z: 10 }, true);
+  equal(
+    "on the build grid it stands on the floor, so a stroke there never reaches below the origin",
+    [standing.box.minY, standing.box.maxY],
+    [0, 6],
+  );
+  const disc = brushSpec({ shape: "disc", radius: 3, mode: "all" }, { x: 0, y: 4, z: 0 }, true);
+  equal("a disc is one layer, the one aimed at, standing or not", [disc.box.minY, disc.box.maxY, disc.kind, disc.axis], [4, 4, "cylinder", "y"]);
+  equal("...and is //cyl 3 one block tall", shapeCells(disc).count, 37);
+  const cube = brushSpec({ shape: "cube", radius: 1, mode: "all" }, { x: 0, y: 0, z: 0 }, false);
+  equal("a cube brush is every cell of its box", [cube.kind, shapeCells(cube).count], ["box", 27]);
+  equal("a brush of radius 0 is one block", shapeCells(brushSpec({ shape: "sphere", radius: 0, mode: "all" }, { x: 2, y: 2, z: 2 }, false)).count, 1);
+
+  // Half a radius between touches, never less than a block.
+  equal("the stroke's spacing is half the radius, at least one block", [strokeSpacing(0), strokeSpacing(1), strokeSpacing(4), strokeSpacing(9)], [1, 1, 2, 4.5]);
+  check("the first touch of a stroke always lands", shouldTouch(null, { x: 0, y: 0, z: 0 }, 8));
+  check("...a radius-0 brush touches every next cell", shouldTouch({ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, 0));
+  check("...but not the cell it is already on", !shouldTouch({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, 0));
+  check("...a radius-4 brush waits for two blocks", !shouldTouch({ x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 0 }, 4) && shouldTouch({ x: 0, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }, 4));
+
+  /*
+   * A stroke never lands on what it has already reached, or a held button
+   * grows spheres towards the camera off the near side of the last one --
+   * which it did, in the app, until this rule.
+   */
+  {
+    const touch = brushSpec({ shape: "sphere", radius: 2, mode: "all" }, { x: 10, y: 10, z: 10 }, false);
+    const trail = [reachOf(touch)];
+    check("the top of a sphere just painted is reached: the next touch does not land on it", reached(trail, { x: 10, y: 12, z: 10 }));
+    check("...nor does the floor of a crater just rubbed out, a block past it", reached(trail, { x: 10, y: 7, z: 10 }));
+    check("...but open ground two blocks past the edge is free", !reached(trail, { x: 10, y: 10, z: 14 }));
+    check("...and a stroke with no touches has reached nothing", !reached([], { x: 10, y: 10, z: 10 }));
+  }
+
+  // Two corners.
+  equal(
+    "corners on one level build as tall as the tool is set",
+    cornerBox({ x: 5, y: 3, z: 9 }, { x: 0, y: 3, z: 0 }, 4),
+    { minX: 0, minY: 3, minZ: 0, maxX: 5, maxY: 6, maxZ: 9 },
+  );
+  equal(
+    "a corner clicked higher up builds taller",
+    cornerBox({ x: 0, y: 3, z: 0 }, { x: 5, y: 12, z: 5 }, 4),
+    { minX: 0, minY: 3, minZ: 0, maxX: 5, maxY: 12, maxZ: 5 },
+  );
+  equal(
+    "...but ground a block uneven still builds the set height, not two blocks",
+    cornerBox({ x: 0, y: 4, z: 0 }, { x: 5, y: 3, z: 5 }, 4),
+    { minX: 0, minY: 3, minZ: 0, maxX: 5, maxY: 6, maxZ: 5 },
+  );
+  const walls = cornerSpec("walls", settings, { x: 9, y: 0, z: 0 }, { x: 0, y: 0, z: 9 });
+  equal("the walls tool builds //walls, 10x4x10 being 144 cells", [walls.kind, shapeCells(walls).count], ["walls", 144]);
+  const thick = cornerSpec("walls", { ...settings, walls: { ...settings.walls, thickness: 2 } }, { x: 0, y: 0, z: 0 }, { x: 9, y: 0, z: 9 });
+  equal("...two thick, 256", shapeCells(thick).count, 256);
+  const pyramid = cornerSpec(
+    "shape",
+    { ...settings, shape: { ...settings.shape, kind: "pyramid", height: 3 } },
+    { x: 0, y: 0, z: 0 },
+    { x: 4, y: 0, z: 4 },
+  );
+  equal("the shape tool draws its kind between the corners: //pyramid 3", shapeCells(pyramid).count, 35);
+  equal("each tool writes in its own mode", [toolMode("brush", { ...settings, brush: { ...settings.brush, mode: "empty" } }), toolMode("walls", { ...settings, walls: { ...settings.walls, mode: "filled" } })], ["empty", "filled"]);
+
+  const first = cornerClick(null, { x: 1, y: 2, z: 3 });
+  equal("the first right-click fixes a corner and builds nothing", [first.corner, first.build], [{ x: 1, y: 2, z: 3 }, null]);
+  const second = cornerClick(first.corner, { x: 4, y: 2, z: 6 });
+  equal("...the second builds between the two and starts over", [second.corner, second.build], [null, [{ x: 1, y: 2, z: 3 }, { x: 4, y: 2, z: 6 }]]);
+
+  // The keys, by physical key.
+  const key = (code: string, mods: { ctrl?: boolean; alt?: boolean; meta?: boolean } = {}, flying = true) =>
+    creativeKey({ code, ctrlKey: mods.ctrl === true, altKey: mods.alt === true, metaKey: mods.meta === true }, flying);
+  equal("[ and ] by position, with AltGr held as an Italian keyboard needs", [key("BracketLeft", { ctrl: true, alt: true }), key("BracketRight", { ctrl: true, alt: true }), key("BracketLeft")], ["smaller", "bigger", "smaller"]);
+  equal("B cycles, Ctrl held for a sprint included", [key("KeyB"), key("KeyB", { ctrl: true })], ["cycle", "cycle"]);
+  equal("...but Ctrl+B is the sidebar's while the keyboard is not flying", key("KeyB", { ctrl: true }, false), null);
+  equal("...and nothing else is a tool key", [key("KeyZ"), key("Tab"), key("KeyB", { meta: true })], [null, null, null]);
+  equal("[ and ] size the brush, and how tall a shape or a wall stands", [resized(settings, "brush", 1).brush.radius, resized(settings, "shape", -1).shape.height, resized(settings, "walls", 2).walls.height], [3, 4, 6]);
+  equal("...inside their ranges", [resized({ ...settings, brush: { ...settings.brush, radius: 0 } }, "brush", -1).brush.radius, resized({ ...settings, walls: { ...settings.walls, height: 1 } }, "walls", -1).walls.height], [0, 1]);
+  equal("...and the block in your hand has no size", resized(settings, "place", 1), settings);
+  equal("[ and ] size the terrain brush's radius", resized(settings, "terrain", 2).terrain.radius, settings.terrain.radius + 2);
+  equal(
+    "...and the smooth and erode brushes', each its own",
+    [resized(settings, "smooth", -1).smooth.radius, resized(settings, "erode", 1).erode.radius],
+    [settings.smooth.radius - 1, settings.erode.radius + 1],
+  );
+
+  /*
+   * The erode brush is VoxelSniper's sphere, which is not WorldEdit's: radius
+   * 1 is the cell and its six faces, where //sphere 1 is nineteen.
+   */
+  {
+    const one = erodeGhost({ x: 0, y: 0, z: 0 }, 1).cells()!;
+    const two = erodeGhost({ x: 5, y: 5, z: 5 }, 2).cells()!;
+    equal("the erode brush's ghost is VoxelSniper's sphere: 7 cells at radius 1, 33 at 2", [one.count, two.count], [7, 33]);
+    equal("...the same geometry wherever it stands", erodeGhost({ x: 9, y: 1, z: -4 }, 2).key, erodeGhost({ x: 0, y: 0, z: 0 }, 2).key);
+    const reach = sphereReach({ x: 0, y: 10, z: 0 }, 2);
+    check("...and a touch has reached its sphere and a block round it, not two", reach(0, 13, 0) && !reach(0, 14, 0));
+    const flat = smoothSpec({ radius: 3, footprint: "disc", iterations: 4 }, { x: 4, y: 7, z: 4 });
+    equal("the smooth brush's ghost is its columns, one layer on the cell aimed at", [flat.box.minY, flat.box.maxY, shapeCells(flat).count], [7, 7, 37]);
+  }
+
+  /*
+   * The terrain: a stroke reaches the columns it laid, at every height --
+   * the next aim is on the ground just laid, which may be far above or below
+   * the cell the touch was aimed at.
+   */
+  {
+    const reach = columnReach({ x: 10, y: 5, z: 10 }, 3, "disc");
+    check("a terrain touch has reached its columns at any height", reach(10, 200, 10) && reach(12, -40, 11));
+    check("...and a block past its footprint", reach(14, 5, 10));
+    check("...but not two blocks past it", !reach(15, 5, 10));
+    check("...and a square reaches its corners where a disc does not", columnReach({ x: 0, y: 0, z: 0 }, 3, "square")(4, 0, 4) && !reach(14, 5, 14));
+
+    const terrain = { ...settings.terrain, radius: 3, footprint: "disc" as const };
+    const ghost = terrainGhost(terrain, { x: 40, y: 9, z: -7 }, [0, 0, 0]);
+    const cells = ghost.cells()!;
+    equal("the terrain's ghost is one cell a column, //cyl 3's 37 columns", cells.count, 37);
+    const top = heightField(terrain.field);
+    let misplaced = 0;
+    const w = 7;
+    const h = ghost.box.maxY - ghost.box.minY + 1;
+    for (let dx = -3; dx <= 3; dx += 1) {
+      for (let dz = -3; dz <= 3; dz += 1) {
+        if (!inFootprint("disc", dx, dz, 3)) continue;
+        const y = top(40 + dx, -7 + dz) - ghost.box.minY;
+        if (cells.mask[(dx + 3) * h * w + y * w + (dz + 3)] !== 1) misplaced += 1;
+      }
+    }
+    equal("...each at the height the edit will lay it", misplaced, 0);
+    const moved = terrainGhost(terrain, { x: 45, y: 9, z: -7 }, [5, 0, 0]);
+    equal(
+      "...read in the content, so a growth below the origin moves the landscape with it",
+      [moved.box.minY, moved.box.maxY, [...moved.cells()!.mask]],
+      [ghost.box.minY, ghost.box.maxY, [...cells.mask]],
+    );
+    check("...and a ghost that moved is a ghost rebuilt", ghost.key !== terrainGhost(terrain, { x: 41, y: 9, z: -7 }, [0, 0, 0]).key);
+  }
+
+  /*
+   * The ghost is the outside of the cells, wound so its front faces outwards:
+   * every triangle's normal has to point from a cell in the shape to a cell
+   * that is not. A face wound backwards, or an inner face left in, fails here.
+   */
+  const ghostOf = (cells: ReturnType<typeof shapeCells>) => {
+    const faces = ghostFaces(cells);
+    const win = cells.window!;
+    const h = win.maxY - win.minY + 1;
+    const l = win.maxZ - win.minZ + 1;
+    const w = win.maxX - win.minX + 1;
+    const inside = (x: number, y: number, z: number) =>
+      x >= 0 && y >= 0 && z >= 0 && x < w && y < h && z < l && cells.mask[x * h * l + y * l + z] === 1;
+    let wrong = 0;
+    for (let i = 0; i < faces.length; i += 9) {
+      const a = [faces[i], faces[i + 1], faces[i + 2]];
+      const b = [faces[i + 3], faces[i + 4], faces[i + 5]];
+      const c = [faces[i + 6], faces[i + 7], faces[i + 8]];
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const centre = [0, 1, 2].map((k) => (a[k] + b[k] + c[k]) / 3);
+      const behind = centre.map((p, k) => Math.floor(p - n[k] * 0.25));
+      const front = centre.map((p, k) => Math.floor(p + n[k] * 0.25));
+      if (!inside(behind[0], behind[1], behind[2]) || inside(front[0], front[1], front[2])) wrong += 1;
+    }
+    return { triangles: faces.length / 9, wrong };
+  };
+  const one = ghostOf(shapeCells({ kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 } }));
+  equal("a ghost of one cell is its six faces", one, { triangles: 12, wrong: 0 });
+  const pair = ghostOf(shapeCells({ kind: "box", box: { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 } }));
+  equal("...two cells side by side are ten, the shared face is not drawn", pair, { triangles: 20, wrong: 0 });
+  const hollow = ghostOf(shapeCells({ kind: "sphere", box: { minX: 0, minY: 0, minZ: 0, maxX: 8, maxY: 8, maxZ: 8 }, hollow: true }));
+  check("...and every face of a hollow sphere faces out of it, inside and out", hollow.triangles > 0 && hollow.wrong === 0, JSON.stringify(hollow));
+  const surface = ghostOf(terrainGhost({ ...settings.terrain, radius: 6 }, { x: 3, y: 0, z: 3 }, [0, 0, 0]).cells()!);
+  check("...and so does every face of a terrain's stepped surface", surface.triangles > 0 && surface.wrong === 0, JSON.stringify(surface));
+  const sphere = ghostOf(erodeGhost({ x: 0, y: 0, z: 0 }, 4).cells()!);
+  check("...and of the erode brush's sphere", sphere.triangles > 0 && sphere.wrong === 0, JSON.stringify(sphere));
+
+  // Wired where it has to be, which only the source can say.
+  const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  const casts = viewer.match(/raycaster\.intersectObjects?\([^)]*\)/g) ?? [];
+  check("no raycast reaches the creative ghost", casts.every((cast) => !cast.includes("creative")), casts.join(" | "));
+  check("a stroke begins at the press", /onstroke\(\{ phase: "begin"/.test(viewer));
+  check(
+    "...for every tool that strokes, the terrain as well as the brush",
+    /takesStroke\(creative\.settings\.tool\) &&[\s\S]{0,200}stroke === null/.test(viewer),
+  );
+  check(
+    "...and ends when the pointer is let go of, whatever let go of it",
+    /fly\.addEventListener\("unlock", \(\) => \{[^}]*endStroke\(\)/s.test(viewer),
+  );
+  check("in flight the camera follows a growth below the origin", viewer.includes('moved && cameraMode === "fly" && camera'));
+  check(
+    "the bar is flight's alone",
+    /\{#if docState && cameraMode === "fly"\}\s*<CreativeToolBar/.test(app),
+  );
+  check(
+    "...and so is the tool the viewer is told about",
+    /creative=\{docState && cameraMode === "fly"\s*\?\s*\{ settings: creative, corner: cornerAt, frame: docState\.frame \}\s*:\s*null\}/.test(app),
+  );
+  check(
+    "leaving flight forgets a first corner, not only Escape",
+    /const onPointerLock = \(\) => \{[^}]*if \(!pointerLocked\) cornerAt = null;/s.test(app),
+  );
+  const escapeCorner = app.indexOf('event.key === "Escape" && cornerAt !== null');
+  check("...and Escape does too, before the glow and the selection", escapeCorner >= 0 && escapeCorner < app.indexOf('event.key === "Escape" && glow !== null'));
+}
+
+// --- the design system: one palette per theme, scales, base components -----
+console.log("\n--- design system ---");
+{
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  /** The custom properties declared directly in the block that opens at `opener`. */
+  const tokens = (opener: string): Map<string, string> => {
+    const start = css.indexOf(opener);
+    const body = css.slice(start + opener.length, css.indexOf("\n}", start));
+    return new Map([...body.matchAll(/^\s*(--[\w-]+):\s*([^;]+);/gm)].map((m) => [m[1], m[2].trim()]));
+  };
+  const dark = tokens(":root {");
+  const light = tokens(':root[data-theme="light"] {');
+  const system = tokens(':root:not([data-theme="dark"]) {');
+
+  check("the dark palette was found", dark.size > 40, String(dark.size));
+  equal("the system light palette is the explicit one, value for value", [...system], [...light]);
+  const colour = (value: string): boolean => /^(#|rgb)/.test(value);
+  const unthemed = [...dark].filter(([name, value]) => colour(value) && !light.has(name)).map(([name]) => name);
+  equal("every colour the dark palette names, the light one names too", unthemed, []);
+
+  const scales = [
+    ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => `--space-${n}`),
+    ...["xs", "sm", "md", "lg", "xl", "2xl"].map((n) => `--text-${n}`),
+    "--radius",
+    "--control-h",
+    "--bevel",
+    "--z-overlay",
+    "--z-window",
+    "--z-popover",
+    "--z-modal",
+    "--z-beside-modal",
+    "--z-toast",
+    "--z-top",
+    "--shadow-raised",
+    "--shadow-float",
+    "--shadow-modal",
+    "--font-body",
+    "--font-pixel",
+  ];
+  equal("the scales are all declared", scales.filter((name) => !dark.has(name)), []);
+  check("a control is at least WCAG 2.2's 24px target", parseFloat(dark.get("--control-h") ?? "0") >= 24);
+
+  /*
+   * Contrast, computed from the palette rather than claimed in a comment: a
+   * token edited tomorrow fails here by name. 4.5:1 for text, 3:1 for the
+   * edges that tell a control apart and for the focus ring (WCAG 1.4.3,
+   * 1.4.11).
+   */
+  const luminance = (hex: string): number => {
+    const [r, g, b] = [1, 3, 5].map((i) => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a: string, b: string): number => {
+    const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p);
+    return (x + 0.05) / (y + 0.05);
+  };
+  const pairs: [string, string, number][] = [
+    ["--text", "--bg-panel", 4.5],
+    ["--text", "--bg", 4.5],
+    ["--text", "--bg-input", 4.5],
+    ["--text", "--bg-raised", 4.5],
+    ["--text-dim", "--bg-panel", 4.5],
+    ["--text-dim", "--bg", 4.5],
+    ["--text-dim", "--bg-input", 4.5],
+    ["--accent-contrast", "--accent", 4.5],
+    ["--text", "--accent-dim", 4.5],
+    ["--danger", "--bg-panel", 4.5],
+    ["--warn", "--bg-panel", 4.5],
+    ["--ok", "--bg-panel", 4.5],
+    // Emerald as words: a name in the chat, a link, the selection chip. The
+    // accent itself is 4.3:1 on the light theme's stone, which is why this
+    // token exists.
+    ["--accent-text", "--bg-panel", 4.5],
+    ["--accent-text", "--bg-input", 4.5],
+    // A trace's failure and a receipt's counts sit in a well, not on the slab.
+    ["--danger", "--bg-input", 4.5],
+    ["--ok", "--bg-input", 4.5],
+    ["--field-edge", "--bg-panel", 3],
+    ["--accent", "--bg-panel", 3],
+    ["--accent", "--bg", 3],
+  ];
+  for (const [name, palette] of [["dark", dark], ["light", light]] as const) {
+    const weak = pairs
+      .map(([fg, bg, need]) => [fg, bg, need, ratio(palette.get(fg)!, palette.get(bg)!)] as const)
+      .filter(([, , need, got]) => !(got >= need))
+      .map(([fg, bg, need, got]) => `${fg} on ${bg} ${got.toFixed(2)} < ${need}`);
+    equal(`every pair reads in the ${name} theme`, weak, []);
+    check(`...and the white count on a slot, in the ${name} theme`, ratio(palette.get("--slot-text")!, palette.get("--slot")!) >= 4.5);
+  }
+
+  const rule = (selector: string): string => {
+    const start = css.indexOf(`\n${selector} {`);
+    return start < 0 ? "" : css.slice(start, css.indexOf("\n}", start));
+  };
+  const raised = "border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi)";
+  const pressed = "border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo)";
+  check("a button is a raised slab", rule("button").includes(raised) && rule("button").includes("min-height: var(--control-h)"));
+  check("...that sinks while it is held down", rule("button:active:not(:disabled)").includes(pressed));
+  check("every dialog is drawn by app.css's .modal", rule(".modal").includes(raised));
+  const drawnLocally = readdirSync(path.join(RENDERER, "lib"))
+    .filter((name) => name.endsWith(".svelte"))
+    .filter((name) => {
+      const source = readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+      const start = source.indexOf("\n  .modal {\n");
+      if (start < 0) return false;
+      const block = source.slice(start, source.indexOf("\n  }\n", start));
+      return /\n    (border|border-radius|background|box-shadow): /.test(block);
+    });
+  equal("...and no component draws its own", drawnLocally, []);
+
+  // app.css's `button` rules are one element above a component's single
+  // class: `button:hover:not(:disabled)` is (0,2,1) and `.compass`, once
+  // Svelte has scoped it, is (0,2,0). So a button that draws itself -- a
+  // transparent hit area, a red dot, a slot -- is painted `--bg-hover` under
+  // the pointer unless it says otherwise, and a `height` below the control
+  // height is overruled by the `min-height` beside it. Both arrived with the
+  // design system and were reported as a grey disc over the compass.
+  const scopedSpecificity = (selector: string): [number, number, number] => {
+    const score: [number, number, number] = [0, 0, 0];
+    for (const part of selector.split(/\s*[\s>+~]\s*/).filter(Boolean)) {
+      if (part.startsWith(":global")) continue;
+      const flat = part.replace(/:not\(([^)]*)\)/g, " $1");
+      score[0] += (flat.match(/#[\w-]+/g) ?? []).length;
+      score[1] += (flat.match(/\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+/g) ?? []).length + 1;
+      score[2] += (flat.match(/(^|[\s(])[a-z][\w-]*/g) ?? []).length;
+    }
+    return score;
+  };
+  const beatsHover = ([a, b, c]: [number, number, number]): boolean => a > 0 || b > 2 || (b === 2 && c > 1);
+  const repaintedOnHover: string[] = [];
+  const stretchedToControl: string[] = [];
+  const svelteFiles = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const full = path.join(dir, name);
+      return statSync(full).isDirectory() ? svelteFiles(full) : name.endsWith(".svelte") ? [full] : [];
+    });
+  for (const file of svelteFiles(RENDERER)) {
+    const source = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+    const at = source.indexOf("<style>");
+    if (at < 0) continue;
+    const name = path.basename(file, ".svelte");
+    // What each button in the markup is called, and whether it is also an
+    // `icon`, whose global rules already own its hover and its height.
+    const buttons = [...source.slice(0, at).matchAll(/<button\b[\s\S]*?>/g)].map((tag) => {
+      const names = new Set<string>();
+      for (const flag of tag[0].matchAll(/class:([\w-]+)/g)) names.add(flag[1]);
+      const list = tag[0].match(/class=["{`]([^"}`]*)/)?.[1] ?? "";
+      for (const word of list.split(/\s+/)) if (/^[\w-]+$/.test(word)) names.add(word);
+      return names;
+    });
+    const wearing = (classes: string[]): Set<string>[] =>
+      buttons.filter((names) => classes.length > 0 && classes.every((c) => names.has(c)));
+    const rules = [...source.slice(at).replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^}]*)\}/g)].map(
+      (match) => ({ selector: match[1].trim(), body: match[2] }),
+    );
+    const elsewhere = (classes: string[], test: (selector: string, body: string) => boolean): boolean =>
+      rules.some((other) =>
+        other.selector.split(",").some((one) => classes.every((c) => one.includes(`.${c}`)) && test(one, other.body)),
+      );
+    for (const { selector, body } of rules) {
+      if (/:hover|:active|:disabled/.test(selector)) continue;
+      for (const one of selector.split(",").map((s) => s.trim())) {
+        const last = one.split(/\s+|>/).pop() ?? "";
+        const classes = [...last.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+        const worn = wearing(classes);
+        if (worn.length === 0 || beatsHover(scopedSpecificity(one))) continue;
+        if (worn.every((names) => names.has("icon"))) continue;
+        if (/(^|[;\s])background(-color)?:/.test(body) && !worn.every((names) => names.has("primary"))) {
+          if (!elsewhere(classes, (s, b) => s.includes(":hover") && /background/.test(b))) {
+            repaintedOnHover.push(`${name} ${one}`);
+          }
+        }
+        const height = body.match(/(?:^|[;\s])height:\s*([\d.]+)px/);
+        if (height && Number(height[1]) < 28 && !elsewhere(classes, (_s, b) => /min-height/.test(b))) {
+          stretchedToControl.push(`${name} ${one}`);
+        }
+      }
+    }
+  }
+  equal("a button that draws its own background keeps it under the pointer", repaintedOnHover, []);
+  equal("...and one drawn smaller than a control is not stretched back to it", stretchedToControl, []);
+
+  const main = readFileSync(path.join(RENDERER, "main.ts"), "utf8");
+  check(
+    "both faces ship with the app, imported before the sheet that names them",
+    main.indexOf("@fontsource/atkinson-hyperlegible") >= 0 &&
+      main.indexOf("@fontsource/pixelify-sans") >= 0 &&
+      main.indexOf("@fontsource/pixelify-sans") < main.indexOf('"./app.css"'),
+  );
+  // An inlined font is a data: URL, and the CSP refuses data: for fonts.
+  check(
+    "...and no font is inlined as a data: URL",
+    /assetsInlineLimit: \(file\) => \(\/\\\.\(woff2\?/.test(readFileSync(path.join(here, "..", "electron.vite.config.ts"), "utf8")),
+  );
+}
+
+// --- what the UX audit found, each pinned where a tidy-up would undo it -----
+console.log("\n--- audit fixes ---");
+{
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8");
+  const lib = (name: string): string => readFileSync(path.join(RENDERER, "lib", name), "utf8");
+  check(
+    "the keyboard's focus ring is the app's, in the accent, for every control",
+    /^:focus-visible \{\s*outline: 2px solid var\(--accent\);/m.test(css),
+  );
+  check(
+    "a slot is dark in all three palettes, so the white count reads on it",
+    (css.match(/--slot: #/g) ?? []).length === 3 && /background: var\(--slot\);/.test(lib("MaterialsInventory.svelte")),
+  );
+  check(
+    "empty space as air over air has words of its own, not \"holds .\"",
+    /sources\.length === 0\s*\?\s*t\("void\.replaceAir"\)/.test(lib("VoidBlockModal.svelte")),
+  );
+  const scrims = ["ConvertModal", "DimensionsModal", "VoidBlockModal", "VersionsModal", "NbtModal", "AnchorModal"].filter(
+    (name) => !lib(`${name}.svelte`).includes("<Modal"),
+  );
+  equal("every modal's scrim is on the modal tier, over the bar and the chat", scrims, []);
+  check(
+    "the format select is as wide as its words, not as the row",
+    /\.format \{[^}]*width: auto;/.test(lib("ChatComposer.svelte")),
+  );
+  const viewer = lib("Viewer.svelte");
+  check(
+    "the floor fades into the horizon last, where the dome's colour lands",
+    /#include <dithering_fragment>[\s\S]{0,200}mix\(gl_FragColor\.rgb, uHorizon, fade\)/.test(viewer),
+  );
+  // Interpolated across one quad twenty thousand blocks wide, a distance is
+  // the same ten thousand everywhere, and the whole floor came out as sky.
+  check(
+    "...measuring the distance per fragment, not interpolating it",
+    viewer.includes("distance(vGroundPosition, cameraPosition)") && !/varying float vGround/.test(viewer),
+  );
+  check(
+    "the bounds caption is a line of the diagnostics, not a strip under the hotbar",
+    !readFileSync(path.join(RENDERER, "App.svelte"), "utf8").includes("viewport.bounds") &&
+      /\{#if meshBounds\}[\s\S]{0,200}viewport\.bounds/.test(viewer),
+  );
+}
+
+// --- the shell: docked panels, a bar in three thirds, a status bar ----------
+console.log("\n--- shell ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+
+  // The tools dock to the edges; the settings-like windows float. The user's
+  // choice in the UX audit, and the one floating tool window left is settings.
+  equal("one floating tool window is left", (app.match(/<ToolWindow\n/g) ?? []).length, 1);
+  check("...and it is the creative tool's options", /<ToolWindow\n\s*title=\{t\("creative\.optionsTitle"/.test(app));
+  check(
+    "the selection, the inspector and the terrain are tabs of the docked panel",
+    /<DockPanel[\s\S]*\{#snippet selectionTab\(\)\}[\s\S]*<SelectionTools[\s\S]*\{#snippet inspectorTab\(\)\}[\s\S]*<InspectorPanel[\s\S]*\{#snippet terrainTab\(\)\}[\s\S]*<TerrainPanel/.test(
+      app,
+    ),
+  );
+  // A snippet binds its name in the parent's markup, so one called
+  // `selection` would shadow the selection every prop inside it is passed.
+  check("no tab's snippet is named after something the app holds", !/\{#snippet (selection|inspector|terrain)\(\)/.test(app));
+  check(
+    "the terrain is a tab of its own, not a section at the foot of the selection's tools",
+    !lib("SelectionTools.svelte").includes("TerrainOptions") && lib("TerrainPanel.svelte").includes("<TerrainOptions"),
+  );
+
+  // The gesture brings the tab up, as it used to bring the windows back.
+  check("a click asks for the inspector's tab", app.includes('if (inspection !== null) dockTab = "inspector";'));
+  check(
+    "a region brings up the tools' tab, only on the way into one",
+    /if \(region && !hadRegion\) dockTab = "selection";\s*hadRegion = region;/.test(app),
+  );
+
+  // The bar: the document, how you look at it, what you can do about it.
+  check(
+    "the bar is three thirds, the middle one in the middle of the window",
+    /\.navbar \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto minmax\(0, 1fr\);/.test(app),
+  );
+  check(
+    "the document's own settings are one menu beside its name, not five buttons",
+    !app.includes('class="nbt-open"') && lib("DocumentBar.svelte").includes("<DocumentMenu"),
+  );
+  const opens: [string, RegExp][] = [
+    ["version", /case "version":\s*mcVersionOpen = true;/],
+    ["dimensions", /case "dimensions":\s*dimensionsOpen = true;/],
+    ["void", /case "void":[\s\S]{0,200}voidOpen = true;/],
+    ["anchor", /case "anchor":\s*anchorOpen = true;/],
+    ["nbt", /case "nbt":\s*void openNbtPanel\(\);/],
+  ];
+  equal(
+    "...and each of its items opens its own dialog",
+    opens.filter(([, pattern]) => !pattern.test(app)).map(([item]) => item),
+    [],
+  );
+  const menu = lib("DocumentMenu.svelte");
+  check(
+    "the menu is a menu to a screen reader, and Escape stays its own",
+    menu.includes('aria-haspopup="menu"') &&
+      menu.includes('role="menuitem"') &&
+      /event\.key === "Escape"[\s\S]{0,200}event\.stopPropagation\(\)/.test(menu),
+  );
+  check(
+    "Convert is reached from File and from the start screen",
+    app.includes("api().onMenuConvert(() => (convertOpen = true))") &&
+      app.includes("onconvert={() => (convertOpen = true)}") &&
+      /<button class="action" onclick=\{onconvert\}>/.test(lib("StartScreen.svelte")),
+  );
+  // Every scrim is on the modal tier and the start screen comes later in the
+  // document, so it painted over the dialogs it had just opened.
+  check(
+    "the start screen steps aside for the dialogs it opens",
+    /const startVisible = \$derived\(\s*docState === null && recovery === null && !startDismissed && schematicDialog === null && !convertOpen,/.test(
+      app,
+    ),
+  );
+
+  // The status bar is a row of the window, not an overlay of the viewport.
+  check(
+    "the status bar is the grid's third row",
+    /main :global\(\.status-bar\) \{\s*grid-column: 1 \/ -1;\s*grid-row: 3;/.test(app) &&
+      !/position: (absolute|fixed)/.test(lib("StatusBar.svelte")),
+  );
+
+  // Two docked panels, two splitters, each the other's mirror.
+  check(
+    "a panel on the left is as wide as the pointer is far from the left edge",
+    lib("SidebarSplitter.svelte").includes('side === "left" ? event.clientX : window.innerWidth - event.clientX'),
+  );
+  check(
+    "...and each splitter leaves room for the other panel",
+    app.includes("reserve={sidebarCollapsed ? 0 : sidebarWidth}") && app.includes("reserve={docked ? dockWidth : 0}"),
+  );
+
+  // A menu at the leading end of a bar lines up with its button.
+  const window1440 = { viewportWidth: 1440, viewportHeight: 900, popoverWidth: 300, popoverHeight: 200, margin: 8, gap: 4 };
+  equal(
+    "a popover aligned to the start hangs from the control's left edge",
+    placePopover({ left: 60, top: 8, width: 90, height: 28 }, window1440, "below", "start"),
+    { x: 60, y: 40 },
+  );
+  equal(
+    "...where hanging leftwards would only have pinned it to the margin",
+    placePopover({ left: 60, top: 8, width: 90, height: 28 }, window1440, "below").x,
+    8,
+  );
+
+  // One frame for the With field's map and the Terrain tab's picture.
+  const box = (minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number) =>
+    ({ minX, minY, minZ, maxX, maxY, maxZ });
+  equal("with nothing selected, the frame is the schematic", mapFrameOf(null, [], [10, 4, 6]), box(0, 0, 0, 9, 3, 5));
+  equal(
+    "...and with areas selected, the box round all of them",
+    mapFrameOf(box(2, 0, 2, 4, 1, 4), [box(2, 0, 2, 4, 1, 4), box(8, 3, 0, 9, 5, 1)], [10, 6, 6]),
+    box(2, 0, 0, 9, 5, 4),
+  );
+  equal("...and nothing at all without a schematic", mapFrameOf(null, [], null), null);
+}
+
+// --- the chat: the right-hand docked panel, in the inventory's material -----
+console.log("\n--- chat ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string => source.slice(source.indexOf("<style>"));
+  const chat = lib("ChatPanel.svelte");
+  const composer = lib("ChatComposer.svelte");
+  const conversations = lib("ConversationPicker.svelte");
+  const models = lib("ModelPicker.svelte");
+
+  // The two edges of the window are one piece of furniture.
+  check(
+    "both docked panels stand on app.css's strip",
+    css.includes("\n.panel-head {") &&
+      chat.includes('<header class="panel-head">') &&
+      lib("DockPanel.svelte").includes('<div class="panel-head">'),
+  );
+  check(
+    "...the tools' three tabs and the conversation are one kind of tab",
+    css.includes("\n.panel-tab {") &&
+      lib("DockPanel.svelte").includes('class="panel-tab"') &&
+      conversations.includes('class="panel-tab current trigger"'),
+  );
+  check(
+    "the chat is put away from its own strip, as the tools' panel is",
+    chat.includes("onclick={oncollapse}") && app.includes("oncollapse={toggleSidebar}"),
+  );
+
+  // Every surface of the chat picks from the scales: no rounded corner, no
+  // colour of its own, no font size outside the type scale.
+  const files = ["ChatPanel", "ChatComposer", "ConversationPicker", "TraceView", "ModelPicker", "Markdown"];
+  const offScale = files.flatMap((name) => {
+    const style = styleOf(lib(`${name}.svelte`));
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius\))/.test(style)) faults.push(`${name}: a radius`);
+    if (/#[0-9a-fA-F]{3,8}\b/.test(style)) faults.push(`${name}: a colour`);
+    if (/font-size:\s*\d/.test(style)) faults.push(`${name}: a font size`);
+    return faults;
+  });
+  equal("the chat draws with the design system's scales and nothing else", offScale, []);
+  check(
+    "emerald words take the text green, which reads on the light stone",
+    (css.match(/--accent-text: #/g) ?? []).length === 3 &&
+      /\.chip \{[^}]*color: var\(--accent-text\);/.test(composer) &&
+      /\.markdown :global\(a\) \{\s*color: var\(--accent-text\);/.test(lib("Markdown.svelte")),
+  );
+
+  // The box is what you type into, so the ring goes round the box.
+  check(
+    "the composer's focus ring is drawn round the whole field",
+    /\.composer:has\(textarea:focus-visible\) \{\s*outline: 2px solid var\(--accent\);/.test(composer),
+  );
+  const stop = composer.match(/<button class="send danger"[^>]*>/)?.[0] ?? "";
+  check("Stop is the redstone slab, and never disabled", stop.includes("onclick={onstop}") && !stop.includes("disabled"));
+
+  // A turn: the name, the machinery under it, what changed.
+  check(
+    "going back sits on the name's line and takes no room of its own",
+    /<div class="who">[\s\S]*?class="icon restore"[\s\S]*?<\/div>/.test(chat),
+  );
+  check(
+    "a receipt shows the blocks in slots, asking for their pictures",
+    chat.includes('<span class="slot">') &&
+      chat.includes("requestBlockIcons(receiptBlocks)") &&
+      chat.includes(".filter((block) => !isAir(block))"),
+  );
+  check("the trace is a well in the slab", lib("TraceView.svelte").includes('<div class="trace sunken" class:live>'));
+  // An opened step is a snippet under its heading. It came out beside it,
+  // squeezed against the right edge, because the step was called `.row` and
+  // app.css had a global `.row` laying out columns of 160px.
+  check(
+    "an opened trace step goes under its heading, the width of the well",
+    lib("TraceView.svelte").includes('<div class="step" class:running={item.running}>') &&
+      /\.step \{\s*display: flex;\s*flex-direction: column;/.test(styleOf(lib("TraceView.svelte"))),
+  );
+  check("...and app.css lays out no `.row` for a component that never asked", !/\n\.row \{/.test(css));
+
+  // The two popovers: on their tier, said to a screen reader, and Escape
+  // stays theirs -- the window's own drops the selection.
+  for (const [name, source] of [
+    ["the conversation list", conversations],
+    ["the model picker", models],
+  ] as const) {
+    check(
+      `${name} is on the popover tier`,
+      /\.popover \{[^}]*z-index: var\(--z-popover\);/.test(source),
+    );
+    check(
+      `...says it opens and whether it is open`,
+      source.includes('aria-haspopup="dialog"') && source.includes("aria-expanded={open}"),
+    );
+    check(
+      `...and keeps its Escape from the window`,
+      /event\.key === "Escape"[\s\S]{0,160}event\.stopPropagation\(\)/.test(source) ||
+        /event\.key !== "Escape"[\s\S]{0,160}event\.stopPropagation\(\)/.test(source),
+    );
+  }
+  check(
+    "...from the button as well, where a click leaves the focus",
+    /event\.key === "Escape" && open/.test(conversations) &&
+      models
+        .slice(models.indexOf('class="trigger"'), models.indexOf("</button>", models.indexOf('class="trigger"')))
+        .includes("onkeydown={onPanelKey}"),
+  );
+  // Measured: the effect that focuses the list ran before the popover's
+  // `visibility: hidden` came off, and the browser refused it in silence.
+  check(
+    "the list takes the focus only once it is visible",
+    /focused = true;[\s\S]{0,80}void tick\(\)\.then\(/.test(conversations),
+  );
+}
+
+// --- the tool panels: the left dock's three tabs, in the inventory's material -
+console.log("\n--- tool panels ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+
+  // Every surface of the three tabs, and of the window the creative options
+  // float in, picks from the scales: no corner, colour, size or stacking
+  // level of its own, and emerald as words is the text green.
+  const panels = [
+    "DockPanel",
+    "SelectionTools",
+    "MaterialsInventory",
+    "BlockMixField",
+    "BlockPicker",
+    "DistributionPreview",
+    "BlockTooltip",
+    "BannerPatternHint",
+    "InspectorPanel",
+    "BannerPatternEditor",
+    "TerrainPanel",
+    "TerrainOptions",
+    "TerrainPreview",
+    "CreativeOptions",
+    "ToolWindow",
+  ];
+  const offScale = panels.flatMap((name) => {
+    const style = styleOf(lib(`${name}.svelte`));
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(`${name}: a radius`);
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(`${name}: a colour`);
+    if (/font-size:\s*\d/.test(style)) faults.push(`${name}: a font size`);
+    if (/z-index:\s*\d/.test(style)) faults.push(`${name}: a stacking level`);
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(`${name}: the accent as text`);
+    return faults;
+  });
+  equal("the tool panels draw with the design system's scales and nothing else", offScale, []);
+
+  // The count on a slot, as the game prints a stack.
+  const inventory = lib("MaterialsInventory.svelte");
+  check(
+    "a slot's count is in figures, in the slot's own white with its hard shadow",
+    inventory.includes('<span class="count figures"') &&
+      /\.count \{[^}]*color: var\(--slot-text\);[^}]*text-shadow: [^;]*var\(--slot-text-shadow\);/.test(inventory),
+  );
+  check(
+    "...and that white is a token in all three palettes",
+    (css.match(/--slot-text: #/g) ?? []).length === 3 && (css.match(/--slot-text-shadow: #/g) ?? []).length === 3,
+  );
+
+  // Four choices of a few, one control.
+  check("a choice of a few is app.css's one segmented control", css.includes("\n.segmented {"));
+  for (const [name, source] of [
+    ["the camera switch", app],
+    ["a creative tool's options", lib("CreativeOptions.svelte")],
+    ["the terrain's options", lib("TerrainOptions.svelte")],
+    ["a map's plane", lib("DistributionPreview.svelte")],
+  ] as const) {
+    check(
+      `...worn by ${name}, with no look of its own`,
+      /class="[^"]*\bsegmented\b/.test(source) && !/\n\s*\.segmented[\s{]/.test(styleOf(source)),
+    );
+  }
+
+  // With nothing selected the list is the whole schematic's: how you find
+  // the one stray block, in a panel that is always there.
+  const tools = lib("SelectionTools.svelte");
+  check(
+    "with nothing selected the list is the schematic's",
+    /regions: scope === "selection" \? areasForIpc\(\) : null/.test(app) &&
+      !/dockTab !== "selection" \|\| selection === null/.test(app),
+  );
+  check(
+    "...drawn with or without a selection, ahead of the fields that need one",
+    tools.indexOf("<MaterialsInventory") > 0 && tools.indexOf("<MaterialsInventory") < tools.indexOf("{#if !none}"),
+  );
+  check(
+    "...and an answer is shown only for the question it answered",
+    /selectionMaterials\.scope !== materialsScope/.test(app),
+  );
+  const click = (button: number, ctrl = false, shift = false) => ({ button, ctrl, shift });
+  equal(
+    "with no fields beside the list a click only lights a block, Shift included",
+    [materialAction(click(0, false, true), false, false), materialAction(click(0, true, true), false, false)],
+    ["glow", "addGlow"],
+  );
+  equal(
+    "...air does nothing, having no field to go to",
+    [materialAction(click(0), true, false), materialAction(click(0, true), true, false)],
+    ["none", "none"],
+  );
+  equal("...and the right button still reads the slot", materialAction(click(2), false, false), "info");
+  check(
+    "...and the hint under it says so",
+    inventory.includes('fields ? t("materials.hint") : t("materials.hintDocument")'),
+  );
+  check(
+    "a glow lit from the schematic's list lights the whole schematic",
+    /wanted\.scope === "document" \? null/.test(app) && /const scope = materialsScope;/.test(app),
+  );
+  check(
+    "...and goes when a selection takes the list's place",
+    /if \(selection !== null && glow !== null && glow\.scope === "document"\) glow = null;/.test(app),
+  );
+
+  // A block is shown as a block wherever the panels name one.
+  const inspector = lib("InspectorPanel.svelte");
+  check(
+    "the inspector shows the block in a slot, with a name to read and the id to type",
+    inspector.includes('<span class="slot">') &&
+      inspector.includes("blockLabel(inspection.block)") &&
+      inspector.includes("requestBlockIcons([block])"),
+  );
+  check(
+    "...and so does a block's hover",
+    lib("BlockTooltip.svelte").includes('<span class="slot">') && lib("BlockTooltip.svelte").includes("blockLabel(block)"),
+  );
+  check(
+    "a field's blocks sit in slots, and the ring goes round the whole field",
+    /\.tile \{[^}]*background: var\(--slot\);/.test(lib("BlockMixField.svelte")) &&
+      /\.chips:has\(:global\(input:focus-visible\)\) \{\s*outline: 2px solid var\(--accent\);/.test(lib("BlockMixField.svelte")),
+  );
+  check(
+    "the floating options window is on the window tier, over the hotbar and the bars",
+    /\.tool-window \{[^}]*z-index: var\(--z-window\);/.test(lib("ToolWindow.svelte")),
+  );
+}
+
+// --- dialogs and settings ----------------------------------------------------
+console.log("\n--- dialogs and settings ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+  const scriptOf = (source: string): string => source.slice(0, source.indexOf("</script>"));
+
+  // One component does what a dialog does. Ten skeletons had drifted: three
+  // ways of handling Escape, the pointer-lock release in six of them, a
+  // backdrop that closed on any click in some.
+  const modal = lib("Modal.svelte");
+  check("the dialog's scrim is the modal tier", /\.scrim \{[^}]*z-index: var\(--z-modal\);/.test(modal));
+  check("...it lets go of the pointer lock on the way in", modal.includes("document.exitPointerLock()"));
+  check(
+    "...takes the keyboard, so the window's shortcuts never fire from inside it",
+    /function onKey\(event: KeyboardEvent\): void \{\s*\/\/[^\n]*\n\s*event\.stopPropagation\(\);/.test(modal),
+  );
+  check(
+    "...leaves an Escape something inside already took",
+    /if \(event\.key === "Escape"\) \{\s*if \(event\.defaultPrevented\) return;/.test(modal),
+  );
+  check(
+    "...keeps Tab inside itself",
+    /else if \(event\.key === "Tab" && dialog !== null\) \{\s*keepFocusInside\(dialog, event\);/.test(modal),
+  );
+  check("...gives the focus back to what opened it", /opener\.focus\(\{ preventScroll: true \}\)/.test(modal));
+  check(
+    "...and closes from the backdrop only for a press that began there",
+    modal.includes("pressedOnScrim = event.target === event.currentTarget") &&
+      modal.includes("if (pressedOnScrim && event.target === event.currentTarget) onclose();"),
+  );
+
+  const dialogs = [
+    "AboutModal",
+    "AnchorModal",
+    "ConvertModal",
+    "DimensionsModal",
+    "NbtModal",
+    "SchematicDialog",
+    "SettingsModal",
+    "VersionModal",
+    "VersionsModal",
+    "VoidBlockModal",
+    "CreativeInventory",
+  ];
+  const ownSkeleton = dialogs.filter((name) => {
+    const source = lib(name + ".svelte");
+    return (
+      !source.includes('import Modal from "./Modal.svelte";') ||
+      !source.includes("<Modal") ||
+      source.includes('class="scrim"') ||
+      source.includes("exitPointerLock") ||
+      /event\.key === "Escape"/.test(scriptOf(source))
+    );
+  });
+  equal("every dialog is a Modal, with no scrim, Escape or pointer lock of its own", ownSkeleton, []);
+
+  // A local ".primary" painted the accent flat over app.css's bevelled one.
+  const libDir = path.join(RENDERER, "lib");
+  const flatPrimary = readdirSync(libDir)
+    .filter((name) => name.endsWith(".svelte"))
+    .filter((name) => /\n\s*(button)?\.primary\s*\{/.test(styleOf(lib(name))));
+  equal("no component paints its own confirming button", flatPrimary, []);
+
+  // The dialogs pick from the scales, as the tool panels do.
+  const surfaces = [...dialogs, "Modal", "BlockStateModal", "CommandPalette", "VersionList", "ApiKeysSection"];
+  const offScale = surfaces.flatMap((name) => {
+    const style = styleOf(lib(name + ".svelte"));
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(name + ": a radius");
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(name + ": a colour");
+    if (/font-size:\s*\d/.test(style)) faults.push(name + ": a font size");
+    if (/z-index:\s*\d/.test(style)) faults.push(name + ": a stacking level");
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(name + ": the accent as text");
+    return faults;
+  });
+  equal("the dialogs draw with the design system's scales and nothing else", offScale, []);
+  check(
+    "the block-state editor is a popover, on the popover tier",
+    /\.modal \{[^}]*z-index: var\(--z-popover\);/.test(lib("BlockStateModal.svelte")),
+  );
+  check(
+    "the command palette wears the dialogs' slab",
+    /class="palette modal"/.test(lib("CommandPalette.svelte")),
+  );
+
+  // The start screen opens dialogs, and Ctrl+, opens Settings over it: both
+  // have to land on top of it.
+  const tier = (name: string): number => Number(new RegExp(name + ": (\\d+);").exec(css)?.[1] ?? NaN);
+  check("the start screen is a tier of its own, under every dialog", tier("--z-screen") < tier("--z-modal"));
+  check("...and the screens wear it", /\.screen \{[^}]*z-index: var\(--z-screen\);/.test(lib("Screen.svelte")));
+  check(
+    "the empty space field chooses a block when one is picked, not on every keystroke",
+    lib("VoidBlockModal.svelte").includes("onchange={(next) => (typed = next)}") &&
+      /onpick=\{\(next\) => \{\s*typed = null;\s*onblock\(next\);/.test(lib("VoidBlockModal.svelte")),
+  );
+  check(
+    "an Escape that closes a block list stays with the list, not the dialog around it",
+    /event\.key === "Escape" && open\) \{\s*\/\/[^\n]*\n\s*event\.preventDefault\(\);\s*open = false;/.test(
+      lib("BlockPicker.svelte"),
+    ),
+  );
+
+  // Settings: ten panes in four groups, each control in one of them.
+  const settings = lib("SettingsModal.svelte");
+  const panes = [...settings.matchAll(/\{ id: "(\w+)", key: "settings\.\w+" \}/g)].map((match) => match[1]);
+  equal(
+    "the settings are ten panes in a fixed order",
+    panes,
+    ["general", "updates", "scene", "lighting", "textures", "performance", "lod", "diagnostics", "providers", "mcp"],
+  );
+  equal(
+    "...in four groups",
+    [...settings.matchAll(/key: "(settings\.group\.\w+)"/g)].map((match) => match[1]),
+    ["settings.group.app", "settings.group.viewport", "settings.group.performance", "settings.group.connections"],
+  );
+  const drawn = panes.filter((id) => id !== "providers" && !settings.includes('category === "' + id + '"'));
+  equal("...and every pane has something in it", drawn, []);
+  for (const key of ["preview.ambientOcclusion", "preview.showGrid", "preview.wireframe", "preview.showFps"]) {
+    equal("..." + key + " is in exactly one place", settings.split('t("' + key + '")').length - 1, 1);
+  }
+  check(
+    "the frame counter and the stutter report are diagnostics, not graphics",
+    settings.indexOf('t("preview.showFps")') > settings.indexOf('category === "diagnostics"') &&
+      settings.indexOf('t("preview.copyStutterReport")') > settings.indexOf('category === "diagnostics"'),
+  );
+
+  // What rebuilds says so beside its name -- and the list is App's, so a
+  // setting that starts rebuilding there and is not badged here fails.
+  const from = app.indexOf("const rebuilds =");
+  const rebuilding = [...app.slice(from, app.indexOf(";", from)).matchAll(/patch\.(\w+) !== undefined/g)]
+    .map((match) => match[1])
+    .filter((field) => !field.startsWith("lod"));
+  check("App's rebuild list was found", rebuilding.length >= 6, rebuilding.join(", "));
+  const badged = (field: string): boolean =>
+    field === "biomeColor" || field === "waterColor"
+      ? settings.includes('t("preview.biomeColors")} {@render mesh()}')
+      : new RegExp("\\(" + field + "\\) => onpreviewchange\\(\\{ " + field + " \\}\\),[\\s\\S]{0,160}?false,\\s*true,\\s*\\)\\}").test(
+          settings,
+        );
+  equal("every setting that rebuilds the preview carries the badge", rebuilding.filter((field) => !badged(field)), []);
+  check("...and so does the resource pack", settings.includes('t("preview.resourcePack")} {@render mesh()}'));
+  check(
+    "the level-of-detail legend is painted from the viewport's own table",
+    settings.includes('style:background={tintColour("lod1")}') &&
+      lib("Viewer.svelte").includes("LOD_TINT_AMOUNT,") &&
+      !/const LOD_TINT\b/.test(lib("Viewer.svelte")),
+  );
+  check(
+    "the open schematic's level-of-detail state comes first, not under six controls",
+    settings.indexOf("lodStatusLine}") < settings.indexOf('id="lod-mode"'),
+  );
+}
+
+// --- the start screen --------------------------------------------------------
+console.log("\n--- the start screen ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+  const scriptOf = (source: string): string => source.slice(0, source.indexOf("</script>"));
+  const screen = lib("Screen.svelte");
+  const start = lib("StartScreen.svelte");
+
+  // The window's resting state, so the app's commands work from it: Ctrl+K
+  // and Ctrl+, are the window's, a plain key stays on the screen. A dialog
+  // stops every key, and a start screen that did would lose both.
+  check(
+    "a Ctrl chord goes through a screen to the window, a plain key stays on it",
+    /\} else if \(!\(event\.ctrlKey \|\| event\.metaKey\)\) \{\s*\/\/[^\n]*\n\s*event\.stopPropagation\(\);/.test(screen) &&
+      !/function onKey\(event: KeyboardEvent\): void \{\s*event\.stopPropagation\(\);/.test(screen),
+  );
+  check(
+    "...keeps Tab inside itself, as a dialog does",
+    /if \(event\.key === "Tab"\) \{\s*event\.stopPropagation\(\);\s*if \(card !== null\) keepFocusInside\(card, event\);/.test(screen),
+  );
+  check(
+    "...and one that cannot be put away has no close button and ignores Escape and the backdrop",
+    /\{#if ondismiss !== undefined\}\s*<button class="icon close"/.test(screen) &&
+      /if \(ondismiss === undefined \|\| event\.defaultPrevented\) return;/.test(screen) &&
+      screen.includes("if (ondismiss !== undefined && pressedOnScrim && event.target === event.currentTarget) ondismiss();"),
+  );
+  check(
+    "the start screen is a screen, with no scrim or Escape of its own",
+    start.includes('import Screen from "./Screen.svelte";') &&
+      /<Screen title=\{t\("app\.title"\)\}[^>]*\{ondismiss\}/.test(start) &&
+      !/event\.key === "Escape"/.test(scriptOf(start)) &&
+      !start.includes('class="start"'),
+  );
+  // The question about lost work is what launch shows in the start screen's
+  // place. It was a card in the middle of the viewport with the bar, the chat
+  // and the gear all live around it.
+  const recovery = /\{#if recovery\}[\s\S]*?\{\/if\}/.exec(app)?.[0] ?? "";
+  check(
+    "the recovery question is a screen too, with two answers and no way to dismiss it",
+    /<Screen\s+role="alertdialog"/.test(recovery) &&
+      !recovery.includes("ondismiss") &&
+      recovery.includes("resolveRecovery(true)") &&
+      recovery.includes("resolveRecovery(false)"),
+  );
+  check("...and its old card is gone from the viewport", !/\.recovery \{/.test(styleOf(app)));
+
+  // Four ways in, each a tile. The chat's was a sentence asking the reader to
+  // close the screen and go and type; pressing the tile does both.
+  const tile = (handler: string): string => new RegExp('<button class="action( primary)?" onclick=\\{' + handler + "\\}[^>]*>").exec(start)?.[0] ?? "";
+  check(
+    "New, Open, Convert and the chat are four tiles, New the lit one",
+    tile("onnew").includes("primary") && [tile("onopen"), tile("onconvert"), tile("ondescribe")].every((tag) => tag !== "" && !tag.includes("primary")),
+  );
+  check(
+    "...New and Open wait for the app, Convert and the chat never do",
+    tile("onnew").includes("disabled={busy}") &&
+      tile("onopen").includes("disabled={busy}") &&
+      !tile("onconvert").includes("disabled") &&
+      !tile("ondescribe").includes("disabled"),
+  );
+  check(
+    "the chat's tile puts the screen away, brings the chat back and puts the caret in it",
+    /function describeInChat\(\): void \{\s*startDismissed = true;\s*if \(sidebarCollapsed\) toggleSidebar\(\);\s*composerFocus \+= 1;/.test(app) &&
+      app.includes("ondescribe={describeInChat}") &&
+      app.includes("focusRequest={composerFocus}") &&
+      lib("ChatPanel.svelte").includes("{focusRequest}") &&
+      /\$effect\(\(\) => \{\s*if \(focusRequest > 0\) input\?\.focus\(\);/.test(lib("ChatComposer.svelte")),
+  );
+  // The hint said ".schem or .schematic" for two releases after a drop
+  // learned to open four formats.
+  const opened = [...(/const SCHEMATIC_EXTENSIONS = \[([^\]]*)\]/.exec(app)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  equal(
+    "the start screen, the drop overlay and the refusal name every format a drop opens",
+    opened.filter((extension) =>
+      (["start.openHint", "viewport.dropTypes", "status.notASchematic"] as const).some((key) => !en[key].includes(extension)),
+    ),
+    [],
+  );
+  check("...and there are four of them to name", opened.length === 4);
+  check(
+    "the bar offers no way back to the start screen while the recovery question holds its place",
+    app.includes("startvisible={startVisible || recovery !== null}"),
+  );
+  // Ctrl+K from the start screen, then Escape: the focus was left on the
+  // page, and the screen's own keys with it.
+  const palette = lib("CommandPalette.svelte");
+  check(
+    "the command palette gives the focus back to what had it, unless something has taken it since",
+    /const opener = document\.activeElement instanceof HTMLElement \? document\.activeElement : null;\s*return \(\) => \{/.test(palette) &&
+      palette.includes("(now === null || now === document.body || now === input)") &&
+      palette.indexOf("const opener = document.activeElement") < palette.indexOf("input?.focus();"),
+  );
+  check(
+    "the loading screen is the top tier, over the start screen",
+    /\.startup \{[^}]*z-index: var\(--z-top\);/.test(lib("StartupScreen.svelte")),
+  );
+
+  const offScale = ["Screen", "StartScreen", "StartupScreen"].flatMap((name) => {
+    const style = styleOf(lib(name + ".svelte"));
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(name + ": a radius");
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(name + ": a colour");
+    if (/font-size:\s*\d/.test(style)) faults.push(name + ": a font size");
+    if (/z-index:\s*\d/.test(style)) faults.push(name + ": a stacking level");
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(name + ": the accent as text");
+    if (/backdrop-filter/.test(style)) faults.push(name + ": a blur");
+    return faults;
+  });
+  equal("the launch screens draw with the design system's scales and nothing else", offScale, []);
+}
+
+// --- the viewport's overlays -------------------------------------------------
+console.log("\n--- the viewport's overlays ---");
+{
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8").replace(/\r\n/g, "\n");
+  const css = readFileSync(path.join(RENDERER, "app.css"), "utf8").replace(/\r\n/g, "\n");
+  const lib = (name: string): string =>
+    readFileSync(path.join(RENDERER, "lib", name), "utf8").replace(/\r\n/g, "\n");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+  const token = (name: string): number => parseFloat(new RegExp(`\\n  ${name}: ([\\d.]+)(px)?;`).exec(css)?.[1] ?? "NaN");
+  const hotbar = lib("Hotbar.svelte");
+  const gizmo = lib("GizmoBar.svelte");
+  const creative = lib("CreativeToolBar.svelte");
+  const viewer = lib("Viewer.svelte");
+  const statusBar = lib("StatusBar.svelte");
+
+  // They were 4, 5, 100 and 101, written in each file; the toast's 4 put it
+  // under the start screen and every dialog.
+  const order = ["--z-overlay", "--z-window", "--z-popover", "--z-screen", "--z-modal", "--z-beside-modal", "--z-toast", "--z-top"];
+  const levels = order.map(token);
+  check(
+    "the tiers stack in their stated order, the viewport's overlays at the bottom",
+    levels.every((level, at) => Number.isFinite(level) && (at === 0 || level > levels[at - 1])),
+    order.map((name, at) => `${name}=${levels[at]}`).join(" "),
+  );
+  for (const [name, source, selector] of [
+    ["the hotbar", hotbar, "hotbar"],
+    ["the gizmo's bar", gizmo, "gizmo-bar"],
+    ["the creative tools' bar", creative, "creative-bar"],
+  ] as const) {
+    check(`${name} is on the overlay tier`, new RegExp(`\\.${selector} \\{[^}]*z-index: var\\(--z-overlay\\);`).test(styleOf(source)));
+  }
+  check(
+    "the hotbar rises beside the creative inventory, over its scrim",
+    /\.hotbar\.raised \{\s*z-index: var\(--z-beside-modal\);/.test(styleOf(hotbar)),
+  );
+  check(
+    "a notification is on the toast tier, over a dialog and over the start screen",
+    /\.status \{[^}]*z-index: var\(--z-toast\);/.test(styleOf(app)),
+  );
+
+  // The bars above the hotbar clear it from the pair of tokens, and the pair
+  // is what the hotbar's own rules add up to: change the slot and this says so.
+  for (const [name, source] of [["the gizmo's bar", gizmo], ["the creative tools' bar", creative]] as const) {
+    check(
+      `${name} stands clear of the hotbar`,
+      /bottom: calc\(var\(--hotbar-inset\) \+ var\(--hotbar-height\) \+ var\(--space-3\)\);/.test(styleOf(source)),
+    );
+  }
+  const hotbarStyle = styleOf(hotbar);
+  const slotSide = Number(/\.slot,[\s\S]*?\{[^}]*height: (\d+)px;/.exec(hotbarStyle)?.[1] ?? NaN);
+  check(
+    "...measured off the hotbar's own rules",
+    /\.hotbar \{[^}]*gap: var\(--space-2\);/.test(hotbarStyle) &&
+      /\.held \{[^}]*padding: var\(--space-2\) var\(--space-3\);[^}]*font-size: var\(--text-sm\);[^}]*line-height: 1;/.test(hotbarStyle) &&
+      /\.slots \{[^}]*padding: var\(--space-1\);/.test(hotbarStyle) &&
+      hotbar.includes('<div class="slots slab">'),
+  );
+  const held = token("--text-sm") + 2 * token("--space-2");
+  equal(
+    "...which come to the height the token claims",
+    token("--hotbar-height"),
+    held + token("--space-2") + slotSide + 2 * token("--space-1") + 2 * token("--bevel"),
+  );
+
+  // The game's hotbar: slots in a slab, the one in hand framed, the name of
+  // what is held over it -- and every slot still named to a screen reader.
+  check(
+    "the name of what is held is over the slots, and each slot says its own",
+    hotbar.includes('<p class="held pixel" aria-hidden="true">{label(slots[active] ?? "")}</p>') &&
+      hotbar.includes("aria-label={label(id)}"),
+  );
+  check(
+    "...the slot in hand framed with a shadow, so the focus ring stays the keyboard's",
+    /\.slot\.active \{\s*box-shadow: 0 0 0 var\(--bevel\) var\(--accent\);/.test(hotbarStyle) &&
+      !/\.slot\.active \{[^}]*outline/.test(hotbarStyle),
+  );
+  check(
+    "...and the name is written slot-dark, so it reads over any sky in either theme",
+    /\.held \{[^}]*background: var\(--slot\);[^}]*color: var\(--slot-text\);/.test(hotbarStyle),
+  );
+
+  // A choice of one is the design system's segmented control, in both bars.
+  check(
+    "the gizmo's modes and the creative tools are segmented controls",
+    gizmo.includes('<div class="segmented modes">') && creative.includes('<div class="segmented">'),
+  );
+  check(
+    "...and the gizmo's other buttons are the icon buttons every toolbar has",
+    !/\n  button \{/.test(styleOf(gizmo)) && !/\n  button \{/.test(styleOf(creative)),
+  );
+
+  // What the buttons do went to the status bar: in the viewport's corner it
+  // sat under every notification the app raised.
+  check(
+    "what the buttons do is said in the status bar, not over the scene",
+    !viewer.includes("viewport.hud") &&
+      app.includes("hint={viewportHint}") &&
+      statusBar.includes('{#if hint !== null}') &&
+      ["hudOrbit", "hudClickToFly", "hudFlyingTool", "hudFlying"].every((key) =>
+        app.slice(app.indexOf("const viewportHint"), app.indexOf("const viewportHint") + 700).includes(`"viewport.${key}"`),
+      ),
+  );
+
+  // The compass has the corner. The frame counter stands under it and the
+  // toast clear of it, both from the two numbers the gizmo is drawn with.
+  const compassSize = Number(/const COMPASS_PX = (\d+);/.exec(viewer)?.[1] ?? NaN);
+  const compassMargin = Number(/const COMPASS_MARGIN = (\d+);/.exec(viewer)?.[1] ?? NaN);
+  check(
+    "the frame counter stands under the compass, from the compass's own numbers",
+    viewer.includes("style:--compass-size={`${COMPASS_PX}px`}") &&
+      viewer.includes("style:--compass-margin={`${COMPASS_MARGIN}px`}") &&
+      /\.fps \{[^}]*top: calc\(var\(--compass-margin\) \+ var\(--compass-size\) \+ var\(--space-3\)\);/.test(styleOf(viewer)),
+  );
+  const toastClearance = Number(/max-width: min\(680px, max\(240px, calc\(100% - 2 \* (\d+)px\)\)\);/.exec(styleOf(app))?.[1] ?? NaN);
+  equal("...and a notification clears it on both sides", toastClearance, compassMargin + compassSize + token("--space-3"));
+
+  // The drop target is one element, on the start screen's tier and after it,
+  // because that screen says to drop a file anywhere on it.
+  check(
+    "the drop target is one element, drawn over the start screen that asks for it",
+    /\.drop \{[^}]*z-index: var\(--z-screen\);/.test(styleOf(app)) &&
+      app.indexOf('<div class="drop" aria-hidden="true">') > app.indexOf("<StartScreen") &&
+      !app.includes("drop-active"),
+  );
+
+  // Every overlay picks from the scales. Viewer's style is only overlays;
+  // App's is checked for the overlay rules alone.
+  const overlayRules = (source: string, names: string[]): string =>
+    names
+      .map((name) => new RegExp(`\\n  \\.${name}(\\s|[.:,])[^{]*\\{[^}]*\\}`, "g"))
+      .flatMap((pattern) => [...styleOf(source).matchAll(pattern)].map((match) => match[0]))
+      .join("\n");
+  const surfaces: [string, string][] = [
+    ["Hotbar", styleOf(hotbar)],
+    ["GizmoBar", styleOf(gizmo)],
+    ["CreativeToolBar", styleOf(creative)],
+    ["CreativeInventory", styleOf(lib("CreativeInventory.svelte"))],
+    ["Viewer", styleOf(viewer)],
+    ["StatusBar", styleOf(statusBar)],
+    ["App's overlays", overlayRules(app, ["status", "drop", "drop-hint"])],
+  ];
+  check("...the App overlay rules were found to check", surfaces[surfaces.length - 1][1].length > 400);
+  const offScale = surfaces.flatMap(([name, style]) => {
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(name + ": a radius");
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(name + ": a colour");
+    if (/font-size:\s*\d/.test(style)) faults.push(name + ": a font size");
+    if (/z-index:\s*\d/.test(style)) faults.push(name + ": a stacking level");
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(name + ": the accent as text");
+    if (/backdrop-filter/.test(style)) faults.push(name + ": a blur");
+    return faults;
+  });
+  equal("the viewport's overlays draw with the design system's scales and nothing else", offScale, []);
+}
+
+// --- accessibility and copy: the last pass of the redesign ------------------
+console.log("\n--- accessibility and copy ---");
+{
+  const read = (relative: string): string =>
+    readFileSync(path.join(RENDERER, relative), "utf8").replace(/\r\n/g, "\n");
+  const app = read("App.svelte");
+  const css = read("app.css");
+  const styleOf = (source: string): string =>
+    source.slice(source.indexOf("<style>")).replace(/\/\*[\s\S]*?\*\//g, "");
+
+  /*
+   * A number on a slot is figures, not pixels. In the pixel face at a slot's
+   * size a 5 is an S and a 2 is a Z -- measured in the app, on the hotbar's
+   * fifth slot -- and a count is the one thing that must not be misread.
+   */
+  check(
+    "a number on a slot is bold in the body face, every digit one width",
+    /\.figures \{[^}]*font-family: var\(--font-body\);[^}]*font-weight: 700;[^}]*font-variant-numeric: tabular-nums;/.test(css),
+  );
+  const figures: [string, string][] = [
+    ["lib/Hotbar.svelte", '<span class="key figures"'],
+    ["lib/MaterialsInventory.svelte", '<span class="count figures"'],
+    ["lib/CreativeInventory.svelte", '<span class="legacy figures"'],
+  ];
+  for (const [file, markup] of figures) check(`...${file}'s numbers are figures`, read(file).includes(markup));
+  check(
+    "...and a chat receipt's counts too",
+    /\.count \{[^}]*font-family: var\(--font-body\);/.test(styleOf(read("lib/ChatPanel.svelte"))),
+  );
+
+  /*
+   * A slider says its value beside its name, never inside it. "Render scale —
+   * 1.0" was one label that changed under the pointer, read as one sentence.
+   */
+  const labelsWithValues = Object.entries(en).filter(([, value]) => /^[^{}]+ — \{\w+\}[^ ]*( [^ ]+)?$/.test(value));
+  equal(
+    "no message is a name with its value written into it",
+    labelsWithValues.map(([key]) => key),
+    [],
+  );
+  const settingsModal = read("lib/SettingsModal.svelte");
+  const slider = settingsModal.slice(settingsModal.indexOf("{#snippet slider("), settingsModal.indexOf("{/snippet}", settingsModal.indexOf("{#snippet slider(")));
+  check(
+    "the settings' slider shows its value in an output for the control",
+    slider.includes("<output for={id}>{shown}</output>") && slider.includes("aria-valuetext={shown}"),
+  );
+  // Markup only: a stylesheet saying `input[type="range"]` is not a slider.
+  const markup = (source: string): string => source.split("<style>")[0];
+  const ranges = (source: string): number => (markup(source).match(/type="range"/g) ?? []).length;
+  const outputs = (source: string): number => (markup(source).match(/<output\b/g) ?? []).length;
+  const lib = readdirSync(path.join(RENDERER, "lib")).filter((name) => name.endsWith(".svelte"));
+  equal(
+    "...and every slider in the window has its value beside it",
+    lib.filter((name) => ranges(read(`lib/${name}`)) > outputs(read(`lib/${name}`))),
+    [],
+  );
+
+  /*
+   * Less motion. The compass cuts to the view rather than swinging round the
+   * build, and an infinite animation runs once: shortened alone, it flickers
+   * at the display's rate instead of stopping.
+   */
+  check("a flight for somebody who asked for less motion is an arrival", flightDuration(true) === 0);
+  check("...and anybody else's is the flight it always was", flightDuration(false) === FLIGHT_MS);
+  check(
+    "...and the viewer asks the system every flight",
+    read("lib/Viewer.svelte").includes("flightAt(flight, performance.now(), flightDuration(prefersReducedMotion()))"),
+  );
+  check(
+    "an animation runs once under reduced motion, rather than flickering",
+    /@media \(prefers-reduced-motion: reduce\) \{[^}]*animation-iteration-count: 1 !important;/.test(css),
+  );
+
+  /*
+   * A notification is announced. The toast is created holding its sentence,
+   * and a live region born full is one most screen readers never read; the
+   * regions are always in the document and their words change.
+   */
+  const toastAt = app.indexOf("{#if status}");
+  const politeAt = app.indexOf('<div class="sr-only" role="status" aria-live="polite" aria-atomic="true">');
+  const alertAt = app.indexOf('<div class="sr-only" role="alert" aria-atomic="true">');
+  check("notifications are spoken from a region that is always there", politeAt > 0 && politeAt < toastAt);
+  check("...a failure from one that interrupts", alertAt > 0 && alertAt < toastAt);
+  check("...and the toast itself is no second region", !/class=\{`status slab \$\{status\.tone\}`\} role=/.test(app));
+  check("...drawn nowhere", /\.sr-only \{[^}]*clip-path: inset\(50%\);/.test(css));
+
+  /*
+   * Every component picks from the scales, not only the surfaces each
+   * sub-phase walked: no corner, colour, size or stacking level of its own,
+   * and emerald as words is the text green. This is the walk that found the
+   * dirty marker, the panel toggles and the update button.
+   */
+  const offScale = ["App.svelte", ...lib.map((name) => `lib/${name}`)].flatMap((file) => {
+    const style = styleOf(read(file));
+    if (!read(file).includes("<style>")) return [];
+    const faults: string[] = [];
+    if (/border-radius:(?!\s*var\(--radius(-round)?\))/.test(style)) faults.push(`${file}: a radius`);
+    if (/#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(style)) faults.push(`${file}: a colour`);
+    if (/font-size:\s*\d/.test(style)) faults.push(`${file}: a font size`);
+    if (/z-index:\s*\d/.test(style)) faults.push(`${file}: a stacking level`);
+    if (/(^|[;\s{])color: var\(--accent\)/.test(style)) faults.push(`${file}: the accent as text`);
+    return faults;
+  });
+  equal("every component draws with the design system's scales", offScale, []);
+
+  /*
+   * One line of help per control. Nineteen messages ran past 200 characters
+   * and the settings explained the renderer to the person using it; what is
+   * worth more than a line sits behind a «More».
+   */
+  const messages = Object.entries(en);
+  equal(
+    "no message runs past 200 characters",
+    messages.filter(([, value]) => value.length > 200).map(([key, value]) => `${key} (${value.length})`),
+    [],
+  );
+  equal(
+    "...and no hint past 170",
+    messages
+      .filter(([key, value]) => /hint$/i.test(key) && value.length > 170)
+      .map(([key, value]) => `${key} (${value.length})`),
+    [],
+  );
+  equal(
+    "the engine's words stay out of the help",
+    messages.filter(([, value]) => /\b(mesh|atlas|multisampl\w*)\b/i.test(value)).map(([key]) => key),
+    [],
+  );
+  const materials = read("lib/MaterialsInventory.svelte");
+  check(
+    "the materials list says one line, and its shortcuts are a press away",
+    /<details class="more">\s*<summary>\{t\("materials\.shortcuts"\)\}<\/summary>\s*<dl class="keys">/.test(materials),
+  );
+  // Dropping onto a field always adds since it stopped needing Ctrl, and the
+  // hint went on saying it did.
+  check("...and no longer says Ctrl adds", !Object.values(en).some((value) => value.includes("(Ctrl adds)")));
+  check(
+    "the anchor's dialog opens with one paragraph, not four",
+    /<p>\{t\("anchor\.infoWhat"\)\}<\/p>\s*(<!--[\s\S]*?-->\s*)?<details class="more">/.test(read("lib/AnchorModal.svelte")),
+  );
+
+  /*
+   * A provider is shown by its name, not by the value \`settings.json\` keeps:
+   * "OpenCode Zen", not "OpenCode"; "OpenAI-compatible", with its hyphen.
+   */
+  const providers = read("lib/provider_label.ts");
+  check(
+    "every provider has a name in the catalogue",
+    PROVIDERS.every((provider) =>
+      [`${JSON.stringify(provider)}: "provider.name.`, `${provider}: "provider.name.`].some((row) => providers.includes(row)),
+    ),
+  );
+  check("...and the picker shows the name", read("lib/ModelPicker.svelte").includes("<option value={provider}>{providerLabel(provider)}</option>"));
+
+  // The creative inventory says what it is for: "Hold" was a verb with no
+  // object, in the title bar of the biggest dialog in the app.
+  check("the inventory's title says what choosing does", (en["inventory.for.hand"] as string) !== "Hold");
+}
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

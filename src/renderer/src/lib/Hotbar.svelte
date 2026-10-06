@@ -22,12 +22,22 @@
    * `onchange`. They live in `UiSettings`, so the component holding its own copy
    * would mean two answers to "what am I holding" — and the one on screen would
    * be the one that failed to persist.
+   *
+   * ## A block dropped on a slot goes in it
+   *
+   * From the materials list or the creative inventory, by dragging, which is
+   * how the game fills its hotbar. The inventory is a modal over the window,
+   * so while it is open the bar is lifted above its scrim (`raised`): the
+   * game draws the hotbar inside its inventory for the same reason.
    */
   import { HOTBAR_SLOTS } from "../../../shared/settings.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
+  import { describeMix, tryParseMix } from "../../../shared/block_mix.js";
   import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
   import { isTyping } from "./typing.js";
+  import { carriesBlock, droppedBlock } from "./block_drag.js";
 
   interface Props {
     /** Exactly `HOTBAR_SLOTS` block ids; `coerceUi` guarantees the length. */
@@ -49,9 +59,48 @@
     onedit?: (slot: number) => void;
     /** The button past the ninth slot: open the full block list. */
     onopeninventory?: () => void;
+    /** A block dropped on a slot. Without it a slot takes no drop. */
+    onassign?: (slot: number, block: string) => void;
+    /** Above the modal tier, for the creative inventory to drop onto. */
+    raised?: boolean;
   }
 
-  const { slots, active, visible, ownsWheel, onselect, onedit, onopeninventory }: Props = $props();
+  const {
+    slots,
+    active,
+    visible,
+    ownsWheel,
+    onselect,
+    onedit,
+    onopeninventory,
+    onassign,
+    raised = false,
+  }: Props = $props();
+
+  /** The slot a dragged block is over. */
+  let dropTarget = $state<number | null>(null);
+
+  function dragOver(index: number, event: DragEvent): void {
+    if (onassign === undefined || !carriesBlock(event.dataTransfer ? [...event.dataTransfer.types] : undefined)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    dropTarget = index;
+  }
+
+  /*
+   * The block alone, never its pair: a slot is what the hand holds, and
+   * holding a bed's foot places the whole bed.
+   */
+  function drop(index: number, event: DragEvent): void {
+    dropTarget = null;
+    const dragged = droppedBlock(event.dataTransfer);
+    if (onassign === undefined || dragged === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onassign(index, dragged.block);
+  }
 
   /**
    * `minecraft:oak_planks` → `oak planks`, which is what fits under a tile.
@@ -61,6 +110,10 @@
    * that is `/give @p m…` under every one of them.
    */
   function label(id: string): string {
+    const mix = tryParseMix(id);
+    if (mix !== null && mix.entries.length > 1) {
+      return t("hotbar.mix", { first: label(mix.entries[0].block), more: mix.entries.length - 1 });
+    }
     let block = id;
     try {
       block = splitBlockInput(id).block;
@@ -81,11 +134,24 @@
    */
   const icons = $derived(blockIcons());
 
+  /**
+   * The block a slot is drawn as: itself, or the first block of a mix. The
+   * mix's text is not a block, and asking for an icon of it would intern a
+   * block called `70%stone,30%andesite` on the way.
+   */
+  function iconOf(id: string): string {
+    return tryParseMix(id)?.entries[0]?.block ?? id;
+  }
+
+  function isMix(id: string): boolean {
+    return (tryParseMix(id)?.entries.length ?? 1) > 1;
+  }
+
   $effect(() => {
     if (!visible) return;
     // Read, so the warm-up landing re-draws these rather than leaving them wrong.
     void iconsReady();
-    requestBlockIcons(slots);
+    requestBlockIcons(slots.map(iconOf));
   });
 
   function step(by: number): void {
@@ -141,134 +207,208 @@
 </script>
 
 {#if visible}
-  <div class="hotbar" role="toolbar" aria-label={t("hotbar.label")}>
-    {#each slots as id, index (index)}
-      <button
-        class="slot"
-        class:active={index === active}
-        onclick={() => onselect(index)}
-        oncontextmenu={(event) => {
-          event.preventDefault();
-          onedit?.(index);
-        }}
-        title={`${id} — ${t("hotbar.slotHint", { key: String(index + 1) })}`}
-        aria-pressed={index === active}
-      >
-        {#if icons.get(id)}
-          <img src={icons.get(id)} alt="" width="26" height="26" />
-        {:else}
-          <span class="pending" aria-hidden="true"></span>
-        {/if}
-        <span class="key" aria-hidden="true">{index + 1}</span>
-        <span class="name">{label(id)}</span>
-      </button>
-    {/each}
+  <!--
+    The game's hotbar: nine slots sunk into a slab, the one in hand framed,
+    and over it the name of what is held, where the game prints it. The names
+    used to sit under every slot at nine pixels, cut to a few letters each;
+    every slot still says its own in its hover and to a screen reader.
+  -->
+  <div class="hotbar" class:raised role="toolbar" aria-label={t("hotbar.label")}>
+    <p class="held pixel" aria-hidden="true">{label(slots[active] ?? "")}</p>
+    <div class="slots slab">
+      {#each slots as id, index (index)}
+        <button
+          class="slot"
+          class:active={index === active}
+          class:dropping={index === dropTarget}
+          onclick={() => onselect(index)}
+          ondragenter={(event) => dragOver(index, event)}
+          ondragover={(event) => dragOver(index, event)}
+          ondragleave={() => {
+            if (dropTarget === index) dropTarget = null;
+          }}
+          ondrop={(event) => drop(index, event)}
+          oncontextmenu={(event) => {
+            event.preventDefault();
+            onedit?.(index);
+          }}
+          title={`${isMix(id) ? describeMix(tryParseMix(id)!) : id} — ${t("hotbar.slotHint", { key: String(index + 1) })}`}
+          aria-label={label(id)}
+          aria-pressed={index === active}
+        >
+          {#if icons.get(iconOf(id))}
+            <img src={icons.get(iconOf(id))} alt="" width="32" height="32" />
+          {:else}
+            <span class="pending" aria-hidden="true"></span>
+          {/if}
+          <span class="key figures" aria-hidden="true">{index + 1}</span>
+          {#if isMix(id)}
+            <span class="mix pixel" aria-hidden="true">{t("hotbar.mixBadge")}</span>
+          {/if}
+        </button>
+      {/each}
 
-    <!--
-      Past the ninth slot, because that is where a tenth would be and there is
-      no tenth. `E` opens the same list; this is for the hand that is already
-      on the mouse.
-    -->
-    <button
-      class="slot browse"
-      onclick={() => onopeninventory?.()}
-      title={t("hotbar.browse")}
-      aria-label={t("hotbar.browse")}
-    >
-      <span class="glyph" aria-hidden="true">&#x229E;</span>
-      <span class="name">{t("hotbar.browseShort")}</span>
-    </button>
+      <!--
+        Past the ninth slot, because that is where a tenth would be and there
+        is no tenth. `E` opens the same list; this is for the hand that is
+        already on the mouse. A raised slab rather than a slot: it holds
+        nothing, it opens something.
+      -->
+      <button
+        class="browse"
+        onclick={() => onopeninventory?.()}
+        title={t("hotbar.browse")}
+        aria-label={t("hotbar.browse")}
+      >
+        <Icon name="browse" size={18} weight={1.7} />
+      </button>
+    </div>
   </div>
 {/if}
 
 <style>
+  /*
+   * A column -- the name, then the slab -- and only the slab takes the
+   * pointer: the room beside the name is the canvas's, and a click there is
+   * a click on the build.
+   */
   .hotbar {
     position: absolute;
     /* Shared with whatever stacks above it. See `app.css`. */
     bottom: var(--hotbar-inset);
     left: 50%;
     transform: translateX(-50%);
-    z-index: 5;
-    display: flex;
-    gap: 3px;
-    padding: 4px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg-panel);
-    box-shadow: 0 6px 20px var(--shadow);
-  }
-
-  .slot {
-    position: relative;
+    z-index: var(--z-overlay);
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 2px;
-    width: 62px;
-    padding: 4px 2px 3px;
-    border: 2px solid transparent;
-    border-radius: 6px;
-    background: var(--bg-input);
-    color: var(--text-dim);
-    cursor: pointer;
+    gap: var(--space-2);
+    max-width: calc(100% - 2 * var(--space-5));
+    pointer-events: none;
   }
 
+  /* Over the creative inventory's scrim, which the game draws it inside. */
+  .hotbar.raised {
+    z-index: var(--z-beside-modal);
+  }
+
+  /*
+   * Slot-dark in every theme, with the game's white words and their hard
+   * shadow: over a sky, a floor or a build, in either theme, it reads.
+   */
+  .held {
+    max-width: 100%;
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    background: var(--slot);
+    color: var(--slot-text);
+    text-shadow: 1px 1px 0 var(--slot-text-shadow);
+    font-size: var(--text-sm);
+    line-height: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .slots {
+    display: flex;
+    gap: var(--space-1);
+    padding: var(--space-1);
+    box-shadow: var(--shadow-float);
+    pointer-events: auto;
+  }
+
+  /* `.inset`'s well, as a button: sunk into the slab, under the pointer too. */
+  .slot,
+  .slot:hover:not(:disabled),
+  .slot:active:not(:disabled) {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    min-height: 0;
+    padding: 0;
+    background: var(--slot);
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+  }
+
+  /* The game lightens the slot under the pointer rather than outlining it. */
+  .slot:hover:not(:disabled)::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--slot-text);
+    opacity: 0.15;
+    pointer-events: none;
+  }
+
+  /*
+   * The slot in hand, framed. A shadow rather than an outline, because the
+   * outline is the keyboard's focus ring and the two have to be told apart;
+   * two pixels wide, which is exactly the gap to the next slot.
+   */
   .slot.active {
-    border-color: var(--accent);
-    color: var(--text);
+    box-shadow: 0 0 0 var(--bevel) var(--accent);
+  }
+
+  .slot.dropping {
+    outline: var(--bevel) dashed var(--selection);
+    outline-offset: 0;
   }
 
   img {
-    width: 26px;
-    height: 26px;
+    width: 32px;
+    height: 32px;
     /* The atlas is 16px art; anything but nearest turns a face into mush. */
     image-rendering: pixelated;
   }
 
-  /* Held open at the icon's size, so a slot does not resize when one arrives. */
+  /* Held open at the icon's size, so a slot does not change when one arrives. */
   .pending {
-    width: 26px;
-    height: 26px;
-    border-radius: 4px;
-    background: var(--bg-panel);
+    width: 32px;
+    height: 32px;
+    background: var(--bg-raised);
+    opacity: 0.35;
   }
 
-  .browse {
-    width: 44px;
-    margin-left: 4px;
-    border-left: 1px solid var(--border);
-    border-radius: 0 6px 6px 0;
-  }
-
-  .glyph {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 26px;
-    font-size: 17px;
+  /* Written on the slot the way the game writes a stack's count. */
+  .key,
+  .mix {
+    position: absolute;
+    font-size: var(--text-xs);
     line-height: 1;
+    pointer-events: none;
   }
 
   .key {
-    position: absolute;
-    top: 2px;
-    left: 4px;
-    font-size: 9px;
-    opacity: 0.6;
+    top: var(--space-1);
+    left: var(--space-1);
+    color: var(--slot-text);
+    text-shadow: 1px 1px 0 var(--slot-text-shadow);
   }
 
-  /*
-   * One line, cut rather than wrapped. Nine tiles that each grow to fit their
-   * own name turn the row into a ragged strip that moves every time the
-   * contents change.
-   */
-  .name {
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 9px;
-    line-height: 1.1;
+  /* A slot holding several blocks says so, where the count would be. */
+  .mix {
+    right: 0;
+    bottom: 0;
+    padding: var(--space-1);
+    background: var(--accent);
+    color: var(--accent-contrast);
+  }
+
+  .browse {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    min-height: 0;
+    margin-left: var(--space-2);
+    padding: 0;
+    color: var(--text-dim);
+  }
+
+  .browse:hover:not(:disabled) {
+    color: var(--text);
   }
 </style>

@@ -51,10 +51,14 @@
    * clean -- the same reasoning that keeps `waterlogged` out of the defaults.
    */
   import type { BlockInspection } from "../../../shared/ipc.js";
-  import { propertyRows } from "./inspector_rows.js";
+  import { propertyRows, showsAsCheckbox } from "./inspector_rows.js";
+  import { indeterminate } from "./indeterminate.js";
   import BannerPatternEditor from "./BannerPatternEditor.svelte";
+  import Icon from "./Icon.svelte";
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
+  import { blockIcons, iconsReady, requestBlockIcons } from "./block_icons.svelte.js";
   import { t } from "./i18n.svelte.js";
+  import { blockLabel, isAir } from "./inventory.js";
 
   interface Props {
     inspection: BlockInspection | null;
@@ -84,6 +88,18 @@
 
   /** Raw NBT is worth showing, but not by default — it is long and wrapped. */
   let showRaw = $state(false);
+
+  /*
+   * The block's picture, as the materials list and the hotbar draw it: the
+   * first thing to know about a block is what it looks like. Air has none and
+   * is never asked for; its slot stays empty.
+   */
+  const icons = $derived(blockIcons());
+  $effect(() => {
+    void iconsReady();
+    const block = inspection?.block;
+    if (block !== undefined && !isAir(block)) requestBlockIcons([block]);
+  });
 
   /**
    * Every property this block could carry, and what it carries now.
@@ -169,8 +185,18 @@
     heading inside the first.
   -->
   <div class="panel">
-    <p class="id">{inspection.block}</p>
-    <p class="hint">{t("inspector.at", { x: at.x, y: at.y, z: at.z })}</p>
+    <div class="head">
+      <span class="slot">
+        {#if icons.get(inspection.block)}
+          <img src={icons.get(inspection.block)} alt="" width="40" height="40" />
+        {/if}
+      </span>
+      <div class="names">
+        <span class="name">{blockLabel(inspection.block)}</span>
+        <code class="id selectable">{inspection.block}</code>
+        <span class="at">{t("inspector.at", { x: at.x, y: at.y, z: at.z })}</span>
+      </div>
+    </div>
 
     {#if rows.length > 0}
       <div class="field">
@@ -179,14 +205,35 @@
           {#each rows as row (row.name)}
             <li>
               <span class="key" class:unset={row.value === null}>{row.name}</span>
-              <input
-                value={row.value ?? ""}
-                placeholder={row.value === null ? t("inspector.unset") : undefined}
-                list={row.values ? `values-${row.name}` : undefined}
-                disabled={busy}
-                spellcheck="false"
-                onchange={(event) => onchangeproperty(row.name, event.currentTarget.value)}
-              />
+              <!--
+                A true-or-false state is a checkbox: `waterlogged`, `lit`,
+                `open`, a fence's arms. Unset is the box's third state rather
+                than "false", because the property is absent and the game
+                decides it -- and a value from a file that is neither word keeps
+                its text field, which a checkbox would overwrite on first click.
+              -->
+              {#if showsAsCheckbox(row)}
+                <label class="bool" class:unset={row.value === null}>
+                  <input
+                    type="checkbox"
+                    checked={row.value === "true"}
+                    use:indeterminate={row.value === null}
+                    disabled={busy}
+                    aria-label={row.name}
+                    onchange={(event) => onchangeproperty(row.name, event.currentTarget.checked ? "true" : "false")}
+                  />
+                  <span>{row.value ?? t("inspector.unset")}</span>
+                </label>
+              {:else}
+                <input
+                  value={row.value ?? ""}
+                  placeholder={row.value === null ? t("inspector.unset") : undefined}
+                  list={row.values ? `values-${row.name}` : undefined}
+                  disabled={busy}
+                  spellcheck="false"
+                  onchange={(event) => onchangeproperty(row.name, event.currentTarget.value)}
+                />
+              {/if}
               <!--
                 Only on a row that has something to remove. The column is a
                 fixed width either way, so the fields stay lined up rather than
@@ -200,10 +247,10 @@
                   aria-label={t("inspector.removeProperty", { name: row.name })}
                   onclick={() => onchangeproperty(row.name, "")}
                 >
-                  ×
+                  <Icon name="close" size={12} weight={2.4} />
                 </button>
               {/if}
-              {#if row.values}
+              {#if row.values && !showsAsCheckbox(row)}
                 <datalist id={`values-${row.name}`}>
                   {#each row.values as option (option)}
                     <option value={option}></option>
@@ -269,17 +316,61 @@
   .panel {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-3);
   }
 
   .empty {
-    padding: 20px 2px;
+    padding: var(--space-5) 0;
+  }
+
+  /* The block in a slot, its name to read, the id to type, where it stands. */
+  .head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .slot {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    background: var(--slot);
+  }
+
+  .slot img {
+    width: 40px;
+    height: 40px;
+    image-rendering: pixelated;
+  }
+
+  .names {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .name {
+    font-size: var(--text-lg);
+    font-weight: 700;
+    overflow-wrap: anywhere;
   }
 
   .id {
-    margin: 0;
-    font-weight: 600;
-    word-break: break-all;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    overflow-wrap: anywhere;
+  }
+
+  .at {
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
 
   .props {
@@ -293,10 +384,10 @@
     /* Three columns, the last a fixed width: the remove button is only drawn on
        a row that carries something, and a column that sized itself to its
        contents would make every set row's field narrower than the rest. */
-    grid-template-columns: minmax(70px, 34%) 1fr 18px;
+    grid-template-columns: minmax(70px, 34%) 1fr 24px;
     align-items: center;
-    gap: 8px;
-    padding: 2px 0;
+    gap: var(--space-3);
+    padding: var(--space-1) 0;
   }
 
   /* A property the block can hold and does not. Present, nameable, and visibly
@@ -305,19 +396,39 @@
     opacity: 0.55;
   }
 
+  .props .bool {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  .props .bool.unset {
+    color: var(--text-dim);
+  }
+
+  .props input {
+    font-size: var(--text-sm);
+  }
+
   .props li button.remove {
+    display: grid;
+    place-items: center;
     background: none;
     border: none;
     padding: 0;
-    width: 18px;
-    line-height: 1;
-    font-size: 15px;
+    width: 24px;
+    height: 24px;
+    min-height: 0;
     color: var(--text-dim);
-    cursor: pointer;
   }
 
   .props li button.remove:hover:not(:disabled) {
     color: var(--text);
+    background: none;
   }
 
   .props li button.remove:disabled {
@@ -326,7 +437,7 @@
   }
 
   .key {
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -343,36 +454,24 @@
     grid-template-columns: minmax(90px, 55%) 1fr;
   }
 
-
   .key em {
     font-style: normal;
     opacity: 0.65;
-    margin-left: 4px;
-    font-size: 10px;
+    margin-left: var(--space-2);
+    font-size: var(--text-xs);
   }
 
-  button.link {
-    background: none;
-    border: none;
-    padding: 4px 0 0;
-    color: var(--accent);
-    cursor: pointer;
-    font: inherit;
-    font-size: 12px;
-  }
-
-  button.link:hover {
-    text-decoration: underline;
-  }
-
+  /* The raw tree: a well, as every block of code here is. */
   pre {
-    margin: 0;
+    margin: var(--space-2) 0 0;
     max-height: 220px;
     overflow: auto;
-    padding: 8px;
+    padding: var(--space-3);
     background: var(--bg-input);
-    border-radius: 6px;
-    font-size: 12px;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
+    font-family: var(--mono);
+    font-size: var(--text-sm);
     line-height: 1.4;
     white-space: pre-wrap;
     word-break: break-word;

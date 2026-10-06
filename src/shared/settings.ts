@@ -8,6 +8,7 @@
  */
 
 import { isPrereleaseVersion } from "./app_version.js";
+import { DEFAULT_CREATIVE_SETTINGS, type CreativeSettings } from "./creative.js";
 
 export const PROVIDERS = [
   "OpenAI",
@@ -123,6 +124,105 @@ export const AA_LEVELS = [0, 2, 4, 8] as const;
  */
 export const FPS_CAPS = [0, 30, 60, 90, 120, 144] as const;
 
+/**
+ * Which GPU draws the window, on a machine with more than one.
+ *
+ * Applied as a Chromium switch before the app is ready, so a change takes
+ * effect at the next launch and never while running. A particular adapter is
+ * chosen with `gpuAdapter` instead, which outranks this. See
+ * `services/gpu_preference.ts`.
+ */
+export const GPU_PREFERENCES = ["auto", "high-performance", "low-power"] as const;
+export type GpuPreference = (typeof GPU_PREFERENCES)[number];
+
+/**
+ * Whether simpler meshes may stand in for the real one at a distance.
+ *
+ * `off` draws every chunk in full at every distance, and main builds no
+ * levels at all. `auto` builds them only for a document whose full mesh
+ * reaches `lodAutoTriangles`: a small build is cheap to draw and has to look
+ * exactly as it is. `always` builds them for any document. Either way the
+ * viewer shows a level only where what it leaves out is smaller on screen
+ * than `lodPixels` -- see `renderer/lib/lod.ts`.
+ */
+export const LOD_MODES = ["off", "auto", "always"] as const;
+export type LodMode = (typeof LOD_MODES)[number];
+
+/**
+ * The screen-space errors offered, in pixels: how much a level of detail may
+ * leave out, measured on screen, before the full mesh is drawn instead.
+ */
+export const LOD_PIXELS = [1, 2, 4, 8] as const;
+
+/** Bounds of the automatic threshold, in triangles of the full mesh. */
+export const LOD_AUTO_TRIANGLES = { min: 250_000, max: 10_000_000, step: 250_000 } as const;
+
+/** The levels-of-detail settings, read; see `lodSettings`. */
+export interface LodSettings {
+  readonly mode: LodMode;
+  readonly pixels: number;
+  readonly autoTriangles: number;
+  /** The simplified shapes of complex blocks: level 1. */
+  readonly shapes: boolean;
+  /** The coarse blocks of a whole region: levels 2 and 3. */
+  readonly coarse: boolean;
+  /** Tint each level so where it is shown can be seen. */
+  readonly tint: boolean;
+}
+
+/**
+ * The levels-of-detail settings, every field total.
+ *
+ * `projection`'s rule for `projection`'s reason: `preview` is spread over the
+ * defaults without validation, so a junk value has to read exactly like an
+ * absent one. Main and the viewer both read the settings through here, so
+ * they cannot disagree about what a stored value means.
+ */
+export function lodSettings(preview: Partial<Record<keyof PreviewSettings, unknown>>): LodSettings {
+  const defaults = DEFAULT_PREVIEW_SETTINGS;
+  const mode = (LOD_MODES as readonly unknown[]).includes(preview.lodMode)
+    ? (preview.lodMode as LodMode)
+    : defaults.lodMode;
+  const pixels = (LOD_PIXELS as readonly unknown[]).includes(preview.lodPixels)
+    ? (preview.lodPixels as number)
+    : defaults.lodPixels;
+  const raw = preview.lodAutoTriangles;
+  const { min, max, step } = LOD_AUTO_TRIANGLES;
+  const autoTriangles =
+    typeof raw === "number" && Number.isFinite(raw)
+      ? Math.min(max, Math.max(min, Math.round(raw / step) * step))
+      : defaults.lodAutoTriangles;
+  return {
+    mode,
+    pixels,
+    autoTriangles,
+    // `!== false`: on unless somebody turned it off, `autoGrow`'s reading.
+    shapes: preview.lodShapes !== false,
+    coarse: preview.lodCoarse !== false,
+    tint: preview.lodTint === true,
+  };
+}
+
+/** Total: anything that is not a known preference is `"auto"`. */
+export function gpuPreference(value: unknown): GpuPreference {
+  return (GPU_PREFERENCES as readonly unknown[]).includes(value)
+    ? (value as GpuPreference)
+    : "auto";
+}
+
+/**
+ * The adapter key a stored `gpuAdapter` names, or `null`.
+ *
+ * Total, `projection`'s rule: `preview` is spread over the defaults without
+ * validation, so a junk value has to read exactly like an absent one. A key
+ * is short and printable (`10de:249c:151e1025:a1#0`); anything else is `null`.
+ */
+export function gpuAdapterKey(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+#\d+$/.test(value)
+    ? value
+    : null;
+}
+
 export interface PreviewSettings {
   projection: Projection;
   /**
@@ -143,6 +243,16 @@ export interface PreviewSettings {
    * smoothness for GPU time, and that is a choice rather than an upgrade.
    */
   maxFps: number;
+  /** Which GPU to ask for at the next launch. See `GPU_PREFERENCES`. */
+  gpuPreference: GpuPreference;
+  /**
+   * One adapter, named by its stable key, to draw with at the next launch; or
+   * `null` to go by `gpuPreference`.
+   *
+   * A key and never a LUID: Windows hands an adapter a new LUID at every boot,
+   * so the LUID is looked up at launch. See `services/gpu_adapters.ts`.
+   */
+  gpuAdapter: string | null;
   /**
    * Whether the sky lights the build.
    *
@@ -167,6 +277,29 @@ export interface PreviewSettings {
    * next to a frame. See `frame_profiler.ts`.
    */
   frameDiagnostics: boolean;
+  /**
+   * Draw on every display refresh, as the viewport did before it drew on
+   * demand. A diagnostic beside `frameDiagnostics`, off by default: a picture
+   * that stops updating where it should not is a missed invalidation, and
+   * this is how to tell one from anything else. See `render_demand.ts`.
+   */
+  alwaysDraw: boolean;
+  /**
+   * Whether simpler meshes may stand in for the real one at a distance. See
+   * `LOD_MODES`. All six `lod*` fields are read through `lodSettings`, which
+   * is total.
+   */
+  lodMode: LodMode;
+  /** The screen-space error a level of detail may cost; see `LOD_PIXELS`. */
+  lodPixels: number;
+  /** In `auto`, the full mesh's triangles from which levels are built. */
+  lodAutoTriangles: number;
+  /** Level 1: complex blocks drawn by a simplified shape. */
+  lodShapes: boolean;
+  /** Levels 2 and 3: a whole region drawn in blocks two and four wide. */
+  lodCoarse: boolean;
+  /** Tint each level -- green, yellow, red -- to see where it is shown. */
+  lodTint: boolean;
   /** Which look the viewport is drawn with. See `SHADER_MODES`. */
   shaderMode: ShaderMode;
   sunAzimuthDeg: number;
@@ -300,9 +433,20 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   projection: "perspective",
   antialias: 4,
   maxFps: 0,
+  gpuPreference: "auto",
+  gpuAdapter: null,
   globalIllumination: false,
   showFps: false,
   frameDiagnostics: false,
+  alwaysDraw: false,
+  // Automatic: only a document heavy enough to need levels gets them, and a
+  // small build is always drawn exactly as it is.
+  lodMode: "auto",
+  lodPixels: 2,
+  lodAutoTriangles: 1_000_000,
+  lodShapes: true,
+  lodCoarse: true,
+  lodTint: false,
   shaderMode: "vanilla",
   sunAzimuthDeg: 60,
   sunElevationDeg: 35,
@@ -393,32 +537,48 @@ export interface UiSettings {
   /** UI language. The renderer's strings only; main's errors are not translated. */
   language: Language;
   /**
-   * Where the floating tool window sits, in pixels from the viewport's
-   * top-left corner.
+   * The docked panel on the left -- the selection's tools, the inspector and
+   * the terrain as tabs -- in CSS pixels, clamped to `DOCK_WIDTH`.
    *
-   * Clamped on read the way the sidebar width is, and again against the live
-   * window at drag time: a position saved on a second monitor is otherwise a
-   * panel nobody can reach.
+   * It replaced two floating windows, each with four numbers here (where it
+   * sat and how big it was). Those are gone rather than kept unread: a stored
+   * file that still carries them loses them on the next write, which is what
+   * `coerceUi` naming every field is for.
    */
-  toolWindowX: number;
-  toolWindowY: number;
+  dockWidth: number;
+  dockCollapsed: boolean;
   /**
-   * And how big it is. The panel was a hard-coded 232px, which is what sent
-   * the version history off to a modal and what left the inspector showing
-   * `Items[0].tag.display.Name` three characters at a time.
+   * The materials list with every state of a block merged into one slot:
+   * vines on four walls are one slot of vines rather than four.
    */
-  toolWindowW: number;
-  toolWindowH: number;
+  materialsUnify: boolean;
+  /** The order the materials list is in. */
+  materialsSort: MaterialsSort;
   /**
-   * The inspector's own floating window.
-   *
-   * A separate pair rather than one shared position, because both windows can
-   * be open at once and a single stored position would stack them.
+   * The creative tools: which one the right button is in flight, and each
+   * one's size and shape. See `shared/creative.ts`.
    */
-  inspectorWindowX: number;
-  inspectorWindowY: number;
-  inspectorWindowW: number;
-  inspectorWindowH: number;
+  creative: CreativeSettings;
+  /**
+   * The creative tool's options window: the one tool window that still
+   * floats, because it is settings for what the right button does in flight
+   * and the user asked for those to float.
+   */
+  creativeWindowX: number;
+  creativeWindowY: number;
+  creativeWindowW: number;
+  creativeWindowH: number;
+}
+
+/**
+ * The orders a materials list can be in: most of first, least of first, and
+ * by name either way. Most first is the default and was the only order.
+ */
+export const MATERIALS_SORTS = ["countDesc", "countAsc", "nameAsc", "nameDesc"] as const;
+export type MaterialsSort = (typeof MATERIALS_SORTS)[number];
+
+export function isMaterialsSort(value: unknown): value is MaterialsSort {
+  return typeof value === "string" && (MATERIALS_SORTS as readonly string[]).includes(value);
 }
 
 /*
@@ -493,6 +653,17 @@ export const DEFAULT_HOTBAR: readonly string[] = [
 export const SIDEBAR_WIDTH = { min: 320, max: 720, minViewport: 360 } as const;
 
 /**
+ * The docked tools' panel. Narrower than the chat at both ends: its rows are
+ * label-and-field pairs and a slot grid, which gain nothing past 560 but a
+ * wider gap between the label and the field. The floor is the three tabs: at
+ * 260 "Selection", "Inspector" and "Terrain" no longer fitted on the strip in
+ * the pixel face, and either the collapse chevron fell off its end or every
+ * name ended in an ellipsis. The live window is the second clamp, with the
+ * chat's width reserved, as for the chat.
+ */
+export const DOCK_WIDTH = { min: 280, max: 560 } as const;
+
+/**
  * What a resizable floating panel may become, in CSS pixels.
  *
  * A minimum because a panel dragged to nothing cannot be dragged back -- the
@@ -506,24 +677,33 @@ export const SIDEBAR_WIDTH = { min: 320, max: 720, minViewport: 360 } as const;
  */
 export const PANEL_SIZE = { minWidth: 232, minHeight: 160 } as const;
 
+/**
+ * The narrowest the creative tool's options may be.
+ *
+ * Wider than `PANEL_SIZE.minWidth` because those options are label-and-field
+ * rows with a noise picker and a map in them: at 248 the picker read "Perlin
+ * nois" and the heightmap was cut off.
+ */
+export const OPTIONS_PANEL_MIN_WIDTH = 300;
+
 export const DEFAULT_UI_SETTINGS: UiSettings = {
   sidebarWidth: 420,
   sidebarCollapsed: false,
   theme: "system",
   language: "en",
-  // Below the viewport's HUD line rather than on top of it: both were at 16,
-  // in the same containing block, so the panel opened over the text telling
-  // you how to fly.
-  toolWindowX: 16,
-  toolWindowY: 64,
-  toolWindowW: 232,
-  toolWindowH: 420,
-  // Below the tool window rather than beside it: the viewport is wider than it
-  // is tall, and two panels down the same edge leave the middle clear.
-  inspectorWindowX: 16,
-  inspectorWindowY: 500,
-  inspectorWindowW: 300,
-  inspectorWindowH: 320,
+  dockWidth: 300,
+  dockCollapsed: false,
+  materialsUnify: false,
+  materialsSort: "countDesc",
+  creative: DEFAULT_CREATIVE_SETTINGS,
+  // Below the viewport's HUD line rather than on top of it, against the
+  // docked panel: in flight the middle of the view is where the crosshair is.
+  // Not against the right edge -- `ToolWindow` keeps only a margin of a panel
+  // inside the pane, so a panel pushed past it hangs over the chat.
+  creativeWindowX: 16,
+  creativeWindowY: 64,
+  creativeWindowW: 300,
+  creativeWindowH: 340,
 };
 
 /**

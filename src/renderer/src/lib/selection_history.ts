@@ -41,8 +41,16 @@ export interface Anchor {
 
 /** Everything a selection is, so a step can put it all back. */
 export interface SelectionState {
+  /** The active area. */
   selection: RegionSpec | null;
   anchor: Anchor | null;
+  /**
+   * The other areas and where the active one sits among them -- see
+   * `selection_set.ts`. Part of the step, so one Ctrl+Z takes back an area
+   * added, removed or carried by the gizmo along with the rest.
+   */
+  others?: RegionSpec[];
+  slot?: number;
 }
 
 export interface SelectionStep {

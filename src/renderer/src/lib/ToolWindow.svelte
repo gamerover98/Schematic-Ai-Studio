@@ -16,6 +16,7 @@
   import { PANEL_SIZE } from "../../../shared/settings.js";
   import { clampPanelSize, clampToBounds, isWithinBounds, type Bounds } from "./floating.js";
   import { t } from "./i18n.svelte.js";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     title: string;
@@ -32,6 +33,8 @@
      */
     width: number;
     height: number;
+    /** The narrowest it may be dragged; `PANEL_SIZE.minWidth` unless said. */
+    minWidth?: number;
     /** Fired continuously while dragging — cheap, renderer-local. */
     onmove: (x: number, y: number) => void;
     /** Fired once when the gesture ends; this is what gets persisted. */
@@ -50,6 +53,7 @@
     y,
     width,
     height,
+    minWidth = PANEL_SIZE.minWidth,
     onmove,
     oncommit,
     onresize,
@@ -167,7 +171,7 @@
     const pane = parent
       ? { width: parent.clientWidth, height: parent.clientHeight }
       : { width: Number.MAX_SAFE_INTEGER, height: Number.MAX_SAFE_INTEGER };
-    return clampPanelSize({ width: nextW, height: nextH }, pane);
+    return clampPanelSize({ width: nextW, height: nextH }, pane, minWidth);
   }
 
   function onResizeMove(event: PointerEvent): void {
@@ -269,10 +273,10 @@
     onpointercancel={endDrag}
     onkeydown={onKeyDown}
   >
-    <span class="grip" aria-hidden="true">⠿</span>
+    <span class="grip"><Icon name="grip" size={12} /></span>
     <span class="title">{title}</span>
     <button class="icon" onclick={onclose} aria-label={closeLabel} title={closeLabel}>
-      &#x00d7;
+      <Icon name="close" size={12} weight={2.4} />
     </button>
   </header>
 
@@ -294,7 +298,7 @@
     tabindex="0"
     aria-label={t("toolwindow.resize")}
     aria-valuenow={Math.round(width)}
-    aria-valuemin={PANEL_SIZE.minWidth}
+    aria-valuemin={minWidth}
     onpointerdown={onResizeDown}
     onpointermove={onResizeMove}
     onpointerup={endResize}
@@ -313,13 +317,14 @@
    */
   .tool-window {
     position: absolute;
-    z-index: 5;
+    z-index: var(--z-window);
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--bevel) solid;
+    border-color: var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+    border-radius: var(--radius);
     background: var(--bg-panel);
-    box-shadow: 0 8px 28px var(--shadow);
+    box-shadow: var(--shadow-float);
     overflow: hidden;
   }
 
@@ -331,10 +336,10 @@
   header {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 5px 6px 5px 8px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    border-bottom: var(--bevel) solid var(--bevel-lo);
+    background: var(--bg-panel);
     cursor: grab;
     touch-action: none;
   }
@@ -349,34 +354,35 @@
   }
 
   .grip {
+    display: grid;
+    place-items: center;
     color: var(--text-dim);
-    font-size: 11px;
-    letter-spacing: -1px;
   }
 
+  /* The title in the pixel face, as an inventory names its window. */
   .title {
     flex: 1;
     min-width: 0;
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-dim);
+    font-family: var(--font-pixel);
+    font-size: var(--text-md);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   header .icon {
-    width: 20px;
-    height: 20px;
-    font-size: 14px;
+    width: 24px;
+    height: 24px;
   }
 
   /* No `max-height`: the panel's own height is the limit now, and it is the
      user's to set. */
   .body {
     min-height: 0;
-    padding: 10px;
+    padding: var(--space-3) var(--space-4) var(--space-4);
     overflow-y: auto;
   }
 

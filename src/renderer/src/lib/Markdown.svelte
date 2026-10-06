@@ -99,7 +99,6 @@
 <style>
   .markdown {
     margin: 0;
-    font-size: 13px;
     line-height: 1.5;
     /* The container itself must never scroll sideways -- individual wide
        children do that for themselves, below. */
@@ -112,7 +111,7 @@
    * time, and there is nothing to add it to.
    */
   .markdown :global(p) {
-    margin: 0 0 8px;
+    margin: 0 0 var(--space-3);
   }
 
   .markdown :global(> *:last-child) {
@@ -125,63 +124,70 @@
   .markdown :global(h4),
   .markdown :global(h5),
   .markdown :global(h6) {
-    margin: 12px 0 6px;
-    font-size: 13px;
-    font-weight: 600;
+    margin: var(--space-4) 0 var(--space-2);
+    font-size: var(--text-md);
+    font-weight: 700;
     line-height: 1.3;
   }
 
   .markdown :global(h1) {
-    font-size: 15px;
-  }
-
-  .markdown :global(h2) {
-    font-size: 14px;
+    font-size: var(--text-lg);
   }
 
   .markdown :global(ul),
   .markdown :global(ol) {
-    margin: 0 0 8px;
-    padding-left: 20px;
+    margin: 0 0 var(--space-3);
+    padding-left: var(--space-6);
   }
 
   .markdown :global(li) {
-    margin: 2px 0;
+    margin: var(--space-1) 0;
+  }
+
+  /* The game's own bullet: a square, not a disc. */
+  .markdown :global(ul) {
+    list-style: square;
+  }
+
+  .markdown :global(li::marker) {
+    color: var(--accent-text);
   }
 
   .markdown :global(blockquote) {
-    margin: 0 0 8px;
-    padding: 2px 0 2px 10px;
-    border-left: 2px solid var(--border);
+    margin: 0 0 var(--space-3);
+    padding: var(--space-1) 0 var(--space-1) var(--space-4);
+    border-left: var(--bevel) solid var(--border);
     color: var(--text-dim);
   }
 
+  /* A groove cut into the slab, as the chat's boundary is. */
   .markdown :global(hr) {
-    margin: 12px 0;
+    margin: var(--space-4) 0;
     border: none;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--bevel-lo);
+    border-bottom: 1px solid var(--bevel-hi);
   }
 
   .markdown :global(code) {
-    padding: 1px 4px;
-    border-radius: 4px;
+    padding: 0 var(--space-1);
     background: var(--bg-input);
-    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-    font-size: 12px;
+    font-family: var(--mono);
+    font-size: var(--text-sm);
   }
 
   /* The wrapper the effect adds, so the button has something to sit against. */
   .markdown :global(.code) {
     position: relative;
-    margin: 0 0 8px;
+    margin: 0 0 var(--space-3);
   }
 
+  /* A well sunk into the slab, as `.sunken` is in app.css. */
   .markdown :global(pre) {
     margin: 0;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    padding: var(--space-3) var(--space-4);
     background: var(--bg-input);
+    border: var(--bevel) solid;
+    border-color: var(--bevel-lo) var(--bevel-hi) var(--bevel-hi) var(--bevel-lo);
     /* A long line scrolls inside the block rather than widening the panel. */
     overflow-x: auto;
   }
@@ -191,19 +197,18 @@
     background: none;
   }
 
+  /* A small slab in the corner of the well: app.css's button, a size down. */
   .markdown :global(.copy) {
     position: absolute;
-    top: 6px;
-    right: 6px;
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-panel);
+    top: var(--space-2);
+    right: var(--space-2);
+    min-height: 24px;
+    padding: 0 var(--space-3);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--text-xs);
     /* Out of the way until wanted: the code is what you came to read. */
     opacity: 0;
-    transition: opacity 0.12s ease;
+    transition: opacity var(--duration-fast) var(--ease);
   }
 
   .markdown :global(.code:hover .copy),
@@ -221,22 +226,22 @@
     display: block;
     width: max-content;
     max-width: 100%;
-    margin: 0 0 8px;
+    margin: 0 0 var(--space-3);
     overflow-x: auto;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
 
   .markdown :global(th),
   .markdown :global(td) {
-    padding: 3px 8px;
+    padding: var(--space-1) var(--space-3);
     border: 1px solid var(--border);
     text-align: left;
   }
 
   .markdown :global(th) {
     background: var(--bg-input);
-    font-weight: 600;
+    font-weight: 700;
   }
 
   /* `marked` writes the GFM alignment row as an attribute, not a class. */
@@ -249,6 +254,6 @@
   }
 
   .markdown :global(a) {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 </style>

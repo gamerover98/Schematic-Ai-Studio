@@ -13,15 +13,36 @@
    * of the truth and it is in the main process.
    */
   import type { LegacyIndex } from "../../../shared/legacy_ids.js";
-  import type { ClipboardInfo, PaletteCount, RegionSpec, TransformRequest } from "../../../shared/ipc.js";
-  import BlockPicker from "./BlockPicker.svelte";
+  import type { PaletteCount, RegionSpec } from "../../../shared/ipc.js";
+  import type { MaterialsSort } from "../../../shared/settings.js";
+  import type { Box } from "../../../shared/regions.js";
+  import BlockMixField from "./BlockMixField.svelte";
   import BannerPatternHint from "./BannerPatternHint.svelte";
+  import Icon from "./Icon.svelte";
+  import MaterialsInventory from "./MaterialsInventory.svelte";
+  import { mapFrameOf } from "./map_frame.js";
   import { isBannerBlock } from "../../../shared/banner_patterns.js";
   import { splitBlockInput } from "../../../shared/block_input.js";
-  import { t } from "./i18n.svelte.js";
+  import { tryParseMix } from "../../../shared/block_mix.js";
+  import { canonicalBlock, withBlockAdded, withBlocksAdded } from "./block_spelling.js";
+  import type { MaterialAction } from "./materials.js";
+  import type { DraggedBlock } from "./block_drag.js";
+  import { t, tn } from "./i18n.svelte.js";
 
   interface Props {
+    /** The active area: the one the readout below describes. */
     selection: RegionSpec | null;
+    /**
+     * Every selected area in order, the active one among them. Listed only
+     * when there are several -- one area is what the readout already says.
+     */
+    areas?: readonly RegionSpec[];
+    /** Which of `areas` is active. */
+    activeArea?: number;
+    /** Blocks the areas cover together, a block in two of them counted once. */
+    cells?: number;
+    onactivatearea?: (index: number) => void;
+    onremovearea?: (index: number) => void;
     busy: boolean;
     /** The registry to search — the same set the agent is judged against. */
     blocks: readonly string[];
@@ -37,14 +58,37 @@
     block: string;
     onblockchange: (block: string) => void;
     /**
-     * What the open document is actually made of, most common first.
+     * What the selection is made of, or the whole schematic with nothing
+     * selected; `null` while the first count is on its way.
      *
-     * It used to sit in the sidebar's document panel, which is where it was
-     * least useful: clicking a material means "use this one", and the field it
-     * fills is here. It is also only ever meaningful while a document is open,
-     * which is exactly when this window exists.
+     * It used to be the whole document's always, beside tools that act on the
+     * selection -- so it offered blocks the selection did not hold and gave no
+     * count for the ones it did. With nothing selected the whole schematic is
+     * still the useful answer: it is how you find the one stray block.
      */
-    palette: readonly PaletteCount[];
+    materials: {
+      palette: readonly PaletteCount[];
+      air: number;
+      outside: number;
+      cells: number;
+    } | null;
+    /** How the materials list is read: `UiSettings.materialsUnify` and `materialsSort`. */
+    materialsUnify?: boolean;
+    onmaterialsunifychange?: (unify: boolean) => void;
+    materialsSort?: MaterialsSort;
+    onmaterialssortchange?: (sort: MaterialsSort) => void;
+    /**
+     * What the viewport is lighting up: the slots by their block, and how
+     * many cells that came to. The set is the app's, because Escape and a
+     * model over MCP put it out as well as the list does.
+     */
+    glowing?: readonly string[];
+    glowTotal?: number | null;
+    glowCapped?: boolean;
+    glowCoarse?: boolean;
+    /** A slot was clicked to light it, or Ctrl-clicked to add or take it out. */
+    onglow?: (slot: DraggedBlock, add: boolean) => void;
+    onglowclear?: () => void;
     /**
      * The block Replace looks for.
      *
@@ -62,6 +106,13 @@
      * tiles behind a different scrollbar.
      */
     onbrowse: (purpose: "fill" | "replace") => void;
+    /**
+     * The schematic's size, for the map of a mix with nothing selected: the
+     * box the hand takes its shares over (`pickAt`'s frame in `App.svelte`).
+     */
+    documentSize?: readonly [number, number, number] | null;
+    /** Exchanges the two fields, weights and all. */
+    onswap: () => void;
     onfill: (block: string) => void;
     onreplace: (from: string, to: string) => void;
     /**
@@ -79,16 +130,33 @@
 
   const {
     selection,
+    areas = [],
+    activeArea = 0,
+    cells = 0,
+    onactivatearea,
+    onremovearea,
     busy,
     blocks,
     placeable = null,
     legacy = null,
     block,
     onblockchange,
-    palette,
+    materials,
+    materialsUnify = false,
+    onmaterialsunifychange = () => {},
+    materialsSort = "countDesc",
+    onmaterialssortchange = () => {},
+    glowing = [],
+    glowTotal = null,
+    glowCapped = false,
+    glowCoarse = false,
+    onglow = () => {},
+    onglowclear = () => {},
     replaceFrom,
     onreplacefromchange,
     onbrowse,
+    documentSize = null,
+    onswap,
     onfill,
     onreplace,
     ondelete,
@@ -96,11 +164,46 @@
     onselectall,
   }: Props = $props();
 
-  /** A palette key is `name[a=b,c=d]`; the base name is enough to type back. */
-  function baseName(entry: string): string {
-    return entry.split("[")[0];
+  /**
+   * A slot of the inventory, clicked: `materialAction` decides what the click
+   * means, and this is where each meaning lands. Lighting a block up is the
+   * app's (`onglow`), because Escape and a model over MCP put it out too. The state comes along -- the
+   * count on the slot is of exactly that state, and a replace naming it finds
+   * exactly those.
+   *
+   * A slot that is a whole bed is the foot's state with the head's as `pair`.
+   * In the hand the foot alone is right, because placing a foot places the
+   * bed; Replace takes both, or replacing the beds would leave their heads.
+   *
+   * A slot dropped on a field lands here too, as the click on that field
+   * would: plain fills it, Ctrl adds. One place deciding what With and
+   * Replace take from a slot, however the slot got there.
+   */
+  function onMaterial(slot: DraggedBlock, action: MaterialAction): void {
+    const material = slot.block;
+    switch (action) {
+      case "glow":
+      case "addGlow":
+        onglow(slot, action === "addGlow");
+        break;
+      case "with":
+        onblockchange(canonicalBlock(material, legacy));
+        break;
+      case "addWith":
+        onblockchange(withBlockAdded(block, material, legacy));
+        break;
+      case "replace":
+        onreplacefromchange(withBlocksAdded("", [material, ...slot.pair], legacy));
+        break;
+      case "addReplace":
+        onreplacefromchange(withBlocksAdded(replaceFrom, [material, ...slot.pair], legacy));
+        break;
+      // Read in the inventory itself, which pins the slot's reading open.
+      case "info":
+      case "none":
+        break;
+    }
   }
-
 
   const volume = $derived(
     selection === null
@@ -112,23 +215,28 @@
 
   const none = $derived(selection === null);
 
+  /** What the map of a mix is drawn over: see `mapFrameOf`. */
+  const mapFrame = $derived(mapFrameOf(selection, areas, documentSize));
+
   /*
-   * Whether the field names a banner, however it was spelled: a bare id, one
-   * with a design already in it, or a pasted `/give` command. A half-typed or
-   * malformed one is not a banner yet, and the hint waits.
+   * Whether any block in With is a banner, however it was spelled: a bare id,
+   * one with a design already in it, or a pasted `/give` command. A half-typed
+   * or malformed one is not a banner yet, and the hint waits.
    */
-  const holdsBanner = $derived.by(() => {
-    try {
-      return isBannerBlock(splitBlockInput(block).block.split("[", 1)[0]);
-    } catch {
-      return false;
-    }
-  });
+  const holdsBanner = $derived.by(() =>
+    (tryParseMix(block)?.entries ?? []).some((entry) => {
+      try {
+        return isBannerBlock(splitBlockInput(entry.block).block.split("[", 1)[0]);
+      } catch {
+        return false;
+      }
+    }),
+  );
 </script>
 
 <div class="tools">
   {#if selection}
-    <p class="readout">
+    <p class="readout pixel">
       {t("selection.size", {
         width: selection.maxX - selection.minX + 1,
         height: selection.maxY - selection.minY + 1,
@@ -143,143 +251,212 @@
         maxX: selection.maxX,
         maxY: selection.maxY,
         maxZ: selection.maxZ,
-        volume: volume.toLocaleString(),
-      })}
+      })} · {tn("count.blocks", volume)}
     </p>
-  {:else}
-    <p class="hint">{t("selection.hint")}</p>
-  {/if}
-
-  {#if palette.length > 0}
-    <div class="group">
-      <label for="tool-materials">{t("doc.materials")}</label>
-      <ul id="tool-materials" class="palette">
-        {#each palette as entry (entry.block)}
-          <li>
+    {#if areas.length > 1}
+      <!--
+        The areas, in a fixed order: activating one leaves it where it is in
+        the list, so the numbers mean the same boxes from one click to the next.
+      -->
+      <p class="coords">{t("selection.areas", { count: areas.length })} · {tn("selection.inAll", cells)}</p>
+      <ul class="areas">
+        {#each areas as area, index (index)}
+          <li class:active={index === activeArea}>
             <button
-              class="link"
-              onclick={() => onblockchange(baseName(entry.block))}
-              title={t("doc.useAsBlock", { block: entry.block })}
+              type="button"
+              class="area"
+              onclick={() => onactivatearea?.(index)}
+              aria-pressed={index === activeArea}
+              title={t("selection.areaActivate")}
             >
-              {entry.block}
+              {t("selection.area", { n: index + 1 })}
+              <span class="dim">
+                {t("selection.size", {
+                  width: area.maxX - area.minX + 1,
+                  height: area.maxY - area.minY + 1,
+                  length: area.maxZ - area.minZ + 1,
+                })}
+              </span>
             </button>
-            <span class="count">{entry.count.toLocaleString()}</span>
+            <button
+              type="button"
+              class="remove"
+              onclick={() => onremovearea?.(index)}
+              title={t("selection.areaRemove")}
+              aria-label={t("selection.areaRemove")}
+            >
+              <Icon name="close" size={10} weight={2.6} />
+            </button>
           </li>
         {/each}
       </ul>
+    {/if}
+    <p class="hint">{t("selection.areasHint")}</p>
+  {:else}
+    <!--
+      Nothing to act on. The panel is docked and stays, so it says how to make
+      a selection and offers the one way that needs no gesture, rather than a
+      column of greyed buttons explaining themselves one tooltip at a time.
+    -->
+    <p class="hint">{t("selection.hint")}</p>
+    <div class="row">
+      <button onclick={onselectall} disabled={busy}>{t("selection.all")}</button>
     </div>
   {/if}
 
-  <div class="group">
-    <label for="tool-to-block">{t("selection.block")}</label>
-    <div class="field">
-      <BlockPicker
+  <!--
+    The whole schematic's materials with nothing selected: it is how you find
+    the one stray block, and a click lights it wherever it is. Replace and the
+    buttons below wait for a selection, because they act on one.
+  -->
+  {#if materials !== null && (materials.palette.length > 0 || materials.air > 0 || materials.outside > 0)}
+    <div class="group materials">
+      <MaterialsInventory
+        title={selection ? t("materials.ofSelection") : t("materials.ofDocument")}
+        palette={materials.palette}
+        air={materials.air}
+        outside={materials.outside}
+        cells={materials.cells}
+        scope={selection ? "selection" : "document"}
+        {legacy}
+        unify={materialsUnify}
+        onunifychange={onmaterialsunifychange}
+        sort={materialsSort}
+        onsortchange={onmaterialssortchange}
+        onaction={onMaterial}
+        {glowing}
+        {glowTotal}
+        {glowCapped}
+        {glowCoarse}
+        {onglowclear}
+      />
+    </div>
+  {/if}
+
+  {#if !none}
+    <!--
+      Replace first, then With, so the panel reads top to bottom the way the
+      sentence does: replace these with those. It used to read the other way --
+      "Block", then "Replace" with a button saying "Replace with the block
+      above" -- which made the field nearest the button the one it did *not*
+      write.
+
+      With is also what Fill writes and what the hand places, because it is the
+      active hotbar slot: one answer to "what am I holding".
+    -->
+    <div class="group">
+      <label for="tool-from-block">{t("selection.replace")}</label>
+      <BlockMixField
+        id="tool-from-block"
+        value={replaceFrom}
+        weights={false}
+        placeholder="minecraft:cobblestone"
+        {blocks}
+        {placeable}
+        {legacy}
+        onchange={onreplacefromchange}
+        onbrowse={() => onbrowse("replace")}
+        ondropblock={(dragged) => onMaterial(dragged, "addReplace")}
+      />
+    </div>
+
+    <div class="swap-row">
+      <button
+        class="swap"
+        type="button"
+        onclick={onswap}
+        disabled={replaceFrom.trim() === "" && block.trim() === ""}
+        title={t("selection.swap")}
+        aria-label={t("selection.swap")}
+      >
+        <Icon name="swapVertical" size={14} weight={1.8} />
+      </button>
+    </div>
+
+    <div class="group">
+      <label for="tool-to-block">{t("selection.with")}</label>
+      <BlockMixField
         id="tool-to-block"
         value={block}
         placeholder="minecraft:stone"
         {blocks}
         {placeable}
         {legacy}
+        frame={mapFrame}
         onchange={onblockchange}
+        onbrowse={() => onbrowse("fill")}
+        ondropblock={(dragged) => onMaterial(dragged, "addWith")}
       />
+      {#if holdsBanner}
+        <BannerPatternHint where="place" />
+      {/if}
+    </div>
+
+    <div class="row">
       <button
-        class="icon browse"
-        onclick={() => onbrowse("fill")}
-        title={t("selection.browse")}
-        aria-label={t("selection.browse")}
+        class="primary"
+        onclick={() => onfill(block)}
+        disabled={busy || none || block.trim() === ""}
+        title={none ? t("selection.selectFirst") : t("selection.fillHint")}
       >
-        &#x229E;
+        {t("selection.fill")}
+      </button>
+      <button
+        onclick={() => onreplace(replaceFrom, block)}
+        disabled={busy || none || replaceFrom.trim() === "" || block.trim() === ""}
+        title={none ? t("selection.selectFirst") : t("selection.replaceHint")}
+      >
+        {t("selection.replaceButton")}
       </button>
     </div>
-    {#if holdsBanner}
-      <BannerPatternHint where="place" />
-    {/if}
-    <button
-      class="primary wide"
-      onclick={() => onfill(block)}
-      disabled={busy || none || block.trim() === ""}
-      title={none ? t("selection.selectFirst") : t("selection.fillHint")}
-    >
-      {t("selection.fill")}
-    </button>
-  </div>
 
-  <div class="group">
-    <label for="tool-from-block">{t("selection.replace")}</label>
-    <div class="field">
-      <BlockPicker
-        id="tool-from-block"
-        value={replaceFrom}
-        placeholder="minecraft:cobblestone"
-        {blocks}
-        {placeable}
-        {legacy}
-        onchange={onreplacefromchange}
-      />
+    <!--
+      Cut, copy, paste, move, turn and mirror used to be nine buttons here.
+
+      They are handles on the gizmo in the viewport now, which is where the
+      thing they act on actually is -- a button that turns a region you are
+      looking at somewhere else is a worse version of grabbing it. What stays
+      is what has no handle to hang on: the block operations, and the three
+      that are about the selection rather than about its contents.
+
+      The keyboard kept all of them: Ctrl+C, Ctrl+X, Ctrl+V and Delete are in
+      `App.svelte`, and the command palette lists the rest.
+    -->
+    <div class="row">
+      <button onclick={onselectall} disabled={busy}>{t("selection.all")}</button>
+      <button onclick={onclearselection} disabled={busy || none} title={t("selection.clearHint")}>
+        {t("selection.clear")}
+      </button>
       <button
-        class="icon browse"
-        onclick={() => onbrowse("replace")}
-        title={t("selection.browse")}
-        aria-label={t("selection.browse")}
+        class="danger"
+        onclick={ondelete}
+        disabled={busy || none}
+        title={t("selection.deleteHint")}
       >
-        &#x229E;
+        {t("selection.delete")}
       </button>
     </div>
-    <button
-      class="wide"
-      onclick={() => onreplace(replaceFrom, block)}
-      disabled={busy || none || replaceFrom.trim() === "" || block.trim() === ""}
-      title={none ? t("selection.selectFirst") : t("selection.replaceHint")}
-    >
-      {t("selection.replaceButton")}
-    </button>
-  </div>
 
-  <!--
-    Cut, copy, paste, move, turn and mirror used to be nine buttons here.
-
-    They are handles on the gizmo in the viewport now, which is where the
-    thing they act on actually is -- a button that turns a region you are
-    looking at somewhere else is a worse version of grabbing it. What stays
-    is what has no handle to hang on: the block operations, and the three
-    that are about the selection rather than about its contents.
-
-    The keyboard kept all of them: Ctrl+C, Ctrl+X, Ctrl+V and Delete are in
-    `App.svelte`, and the command palette lists the rest.
-  -->
-  <div class="row">
-    <button onclick={onselectall} disabled={busy}>{t("selection.all")}</button>
-    <button onclick={onclearselection} disabled={busy || none} title={t("selection.clearHint")}>
-      {t("selection.clear")}
-    </button>
-    <button
-      class="danger"
-      onclick={ondelete}
-      disabled={busy || none}
-      title={t("selection.deleteHint")}
-    >
-      {t("selection.delete")}
-    </button>
-  </div>
+  {/if}
 </div>
 
 <style>
   .tools {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    font-size: 12px;
+    gap: var(--space-3);
   }
 
+  /* The size, in the pixel face: the one number this tab is about. */
   .readout {
     margin: 0;
-    font-weight: 600;
+    font-size: var(--text-lg);
     font-variant-numeric: tabular-nums;
   }
 
   .coords {
-    margin: -4px 0 0;
-    font-size: 11px;
+    margin: calc(-1 * var(--space-2)) 0 0;
+    font-size: var(--text-sm);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
@@ -288,7 +465,63 @@
   .group {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: var(--space-2);
+  }
+
+  /* A groove above the list, as between two exchanges in the chat. */
+  .materials {
+    padding-top: var(--space-3);
+    border-top: var(--bevel) solid var(--bevel-lo);
+    box-shadow: inset 0 var(--bevel) 0 var(--bevel-hi);
+  }
+
+  .areas {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .areas li {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .areas li.active {
+    border-color: var(--selection);
+  }
+
+  .areas button {
+    min-height: 24px;
+    border: 0;
+    padding: 0 var(--space-3);
+    font-size: var(--text-sm);
+    background: transparent;
+  }
+
+  .areas button:hover {
+    background: var(--bg-hover);
+  }
+
+  .areas li.active .area {
+    font-weight: 700;
+  }
+
+  .areas .dim {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .areas .remove {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    padding: 0;
+    color: var(--text-dim);
   }
 
   .group label {
@@ -297,97 +530,31 @@
 
   .row {
     display: flex;
-    gap: 5px;
+    gap: var(--space-2);
   }
 
   .row button {
     flex: 1;
     min-width: 0;
-    padding: 5px 6px;
-    font-size: 12px;
+    padding: 0 var(--space-2);
   }
 
-  /* The one button here that destroys blocks rather than moving or copying
-     them, coloured like the risk it carries. */
-  .danger {
-    border-color: var(--danger);
-    color: var(--danger);
-  }
-
-  /* The picker takes the room; the browse button is a fixed square beside it. */
-  .field {
+  .swap-row {
     display: flex;
-    align-items: stretch;
-    gap: 4px;
+    justify-content: center;
+    margin: calc(-1 * var(--space-2)) 0;
   }
 
-  .field :global(> *:first-child) {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-
-  .browse {
-    flex: none;
-    width: 26px;
-  }
-
-  .wide {
-    width: 100%;
-    padding: 6px 8px;
-    font-size: 12px;
+  .swap {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 24px;
+    min-height: 0;
+    padding: 0;
   }
 
   .tools :global(.hint) {
     margin: 0;
-  }
-
-  /*
-   * Scrolls inside itself rather than growing the window, and the whole palette
-   * is in it now.
-   *
-   * It used to show eight and say "…and N more", over a `DocumentState` that
-   * had already been cut to 64 without saying anything -- so on any schematic
-   * with more distinct states than that, the sentence understated the palette.
-   * "The window has nowhere to grow" was the reason for the cap, and the window
-   * can be resized now, so the height is a share of it: drag the panel taller
-   * and the list gets taller with it.
-   */
-  .palette {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    max-height: max(132px, 22vh);
-    overflow-y: auto;
-    font-size: 11px;
-  }
-
-  .palette li {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 1px 0;
-  }
-
-  .palette .count {
-    flex: none;
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
-
-  button.link {
-    overflow: hidden;
-    padding: 0;
-    border: none;
-    background: none;
-    color: var(--accent);
-    cursor: pointer;
-    font: inherit;
-    text-align: left;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  button.link:hover {
-    text-decoration: underline;
   }
 </style>

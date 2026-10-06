@@ -25,6 +25,7 @@
   import { MC_VERSIONS, formatSupportsVersion, mcVersion, refusalFor } from "../../../shared/mc_versions.js";
   import { SCHEMATIC_FORMAT_LABEL, type SchematicFormat } from "../../../shared/schematic.js";
   import { t } from "./i18n.svelte.js";
+  import Modal from "./Modal.svelte";
 
   interface Props {
     open: boolean;
@@ -52,7 +53,6 @@
     $props();
 
   let version = $state("");
-  let dialog = $state<HTMLDivElement | null>(null);
 
   /**
    * Re-seeded every time it opens, not once at construction.
@@ -64,9 +64,6 @@
   $effect(() => {
     if (!open) return;
     version = current;
-    // Over the viewport, where the canvas may hold the pointer.
-    document.exitPointerLock();
-    dialog?.focus();
   });
 
   const refused = $derived(version === "" ? null : refusalFor(format, version));
@@ -91,165 +88,79 @@
       (mcVersion(current)?.dataVersion ?? 0) > (target.dataVersion ?? 0),
   );
 
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onclose();
-    }
-  }
 </script>
 
-{#if open}
-  <div
-    class="scrim"
-    role="presentation"
-    onkeydown={onKeydown}
-    onclick={(event) => {
-      if (event.target === event.currentTarget) onclose();
-    }}
-  >
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <div
-      class="modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("mcversion.title")}
-      tabindex="-1"
-      bind:this={dialog}
-    >
-      <h2>{t("mcversion.title")}</h2>
+<Modal {open} title={t("mcversion.title")} {onclose} width={440}>
+  <p class="callout fact">
+    {t("mcversion.container", { format: SCHEMATIC_FORMAT_LABEL[format] })}
+  </p>
 
-      <p class="hint fact">
-        {t("mcversion.container", { format: SCHEMATIC_FORMAT_LABEL[format] })}
-      </p>
-
-      <label class="row">
-        <span>{t("doc.version")}</span>
-        <select bind:value={version} disabled={busy}>
-          {#if current === ""}
-            <option value="">{t("mcversion.unstated")}</option>
-          {/if}
-          {#each MC_VERSIONS as option (option.name)}
-            <!--
-              Disabled rather than absent. The list is the same in every
-              container, so what is missing from one is a fact about the
-              container and needs saying, not hiding.
-            -->
-            <option value={option.name} disabled={!formatSupportsVersion(format, option.name)}>
-              {option.label}{option.era === "legacy" ? ` — ${t("doc.legacyEra")}` : ""}
-            </option>
-          {/each}
-        </select>
-      </label>
-
-      {#if refused}
-        <p class="hint warn">{refused}</p>
-        <p class="hint">{t("mcversion.useSaveAs")}</p>
-      {:else if backport}
-        <p class="hint">{t("mcversion.backport")}</p>
-      {:else if target?.era === "legacy"}
-        <p class="hint">{t("mcversion.toLegacy")}</p>
+  <label class="pair">
+    <span>{t("doc.version")}</span>
+    <select bind:value={version} disabled={busy}>
+      {#if current === ""}
+        <option value="">{t("mcversion.unstated")}</option>
       {/if}
+      {#each MC_VERSIONS as option (option.name)}
+        <!--
+          Disabled rather than absent. The list is the same in every
+          container, so what is missing from one is a fact about the
+          container and needs saying, not hiding.
+        -->
+        <option value={option.name} disabled={!formatSupportsVersion(format, option.name)}>
+          {option.label}{option.era === "legacy" ? ` — ${t("doc.legacyEra")}` : ""}
+        </option>
+      {/each}
+    </select>
+  </label>
 
-      {#if error}
-        <p class="hint warn">{error}</p>
-      {/if}
+  {#if refused}
+    <p class="callout warn">{refused}</p>
+    <p class="hint">{t("mcversion.useSaveAs")}</p>
+  {:else if backport}
+    <p class="hint">{t("mcversion.backport")}</p>
+  {:else if target?.era === "legacy"}
+    <p class="hint">{t("mcversion.toLegacy")}</p>
+  {/if}
 
-      <div class="buttons">
-        <button onclick={onclose} disabled={busy}>{t("common.cancel")}</button>
-        {#if needsConfirmation}
-          <!--
-            Only after a refusal, and only ever the second press. The count in
-            the message above is what this is agreeing to, and it could not be
-            known before main looked.
-          -->
-          <button class="primary" onclick={() => onapply(version, true)} disabled={busy}>
-            {t("mcversion.applyAnyway")}
-          </button>
-        {:else}
-          <button
-            class="primary"
-            onclick={() => onapply(version, false)}
-            disabled={busy || !changed || refused !== null}
-          >
-            {t("mcversion.apply")}
-          </button>
-        {/if}
-      </div>
-    </div>
-  </div>
-{/if}
+  {#if error}
+    <p class="callout bad" role="alert">{error}</p>
+  {/if}
+
+  {#snippet footer()}
+    <button onclick={onclose} disabled={busy}>{t("common.cancel")}</button>
+    {#if needsConfirmation}
+      <!--
+        Only after a refusal, and only ever the second press. The count in
+        the message above is what this is agreeing to, and it could not be
+        known before main looked.
+      -->
+      <button class="primary" onclick={() => onapply(version, true)} disabled={busy}>
+        {t("mcversion.applyAnyway")}
+      </button>
+    {:else}
+      <button class="primary" onclick={() => onapply(version, false)} disabled={busy || !changed || refused !== null}>
+        {t("mcversion.apply")}
+      </button>
+    {/if}
+  {/snippet}
+</Modal>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--scrim);
-    backdrop-filter: blur(2px);
+  .fact {
+    margin-bottom: var(--space-4);
   }
 
-  .modal {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    width: min(420px, calc(100vw - 48px));
-    padding: 18px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-panel);
-    box-shadow: 0 16px 48px var(--shadow);
-    outline: none;
-  }
-
-  h2 {
-    margin: 0;
-    font-size: 15px;
-  }
-
-  .row {
+  /* The label beside its control, as the New dialog lays it out. */
+  .pair {
     display: grid;
-    grid-template-columns: 90px minmax(0, 1fr);
+    grid-template-columns: 96px minmax(0, 1fr);
     align-items: center;
-    gap: 8px;
-    font-size: 12px;
-  }
-
-  select {
-    width: 100%;
-    min-width: 0;
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-input);
-    color: var(--text);
-    font: inherit;
-  }
-
-  .hint {
+    gap: var(--space-3);
     margin: 0;
-    font-size: 11px;
-    color: var(--text-dim);
   }
 
-  .hint.warn,
-  .hint.fact {
-    padding: 6px 8px;
-    border-radius: 6px;
-    background: var(--bg-input);
-  }
-
-  .hint.warn {
-    color: var(--text);
-  }
-
-  .buttons {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 2px;
+  .pair ~ p {
+    margin-top: var(--space-3);
   }
 </style>

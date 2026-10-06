@@ -29,9 +29,18 @@
 
 import { createDocument, setBlock, type SchematicDocument } from "../domain/document.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import type { PaletteEntry } from "../pipeline/types.js";
 import { splitBlockInput } from "../../shared/block_input.js";
+import { wholeOf, type BlockState } from "../../shared/two_part.js";
 import type { ChunkGeometry, MeshAtlas } from "../../shared/ipc.js";
-import { buildDocumentPreview, warmBaker, type DocumentPreviewOptions } from "./preview.js";
+import {
+  buildDocumentPreview,
+  currentAtlas,
+  fullAtlas,
+  warmBaker,
+  type AtlasSource,
+  type DocumentPreviewOptions,
+} from "./preview.js";
 import { breathe } from "./breathing.js";
 
 export interface BlockIcon {
@@ -44,6 +53,14 @@ export interface BlockIcon {
    * invisible tile that looks like a failure to load.
    */
   geometry: ChunkGeometry | null;
+  /** The cells the picture is of; see `BlockIcon.size` in `shared/ipc.ts`. */
+  size: [number, number, number];
+}
+
+/** What is cached per block: the picture's geometry and the cells it spans. */
+interface IconMesh {
+  geometry: ChunkGeometry | null;
+  size: [number, number, number];
 }
 
 export interface BlockIconsResult {
@@ -51,10 +68,19 @@ export interface BlockIconsResult {
   /** Omitted when the caller already holds this version — same rule as the viewport. */
   atlas: MeshAtlas | null;
   atlasVersion: number;
+  /** See `MeshAtlas.layout`: icons drawn against this layout are still right. */
+  atlasLayout: number;
 }
 
-/** Icons already built, by `${atlasVersion}:${block}`. */
-const cache = new Map<string, ChunkGeometry | null>();
+/**
+ * Icons already built, by `${layout}:${block}`.
+ *
+ * The layout and not the version: a tile added to the atlas's reserve moves no
+ * UV, so an icon meshed before it is as right after it. Keyed on the version,
+ * every texture a document added -- a lit furnace, a sign's letters -- threw
+ * away every icon, and the renderer asked for all nine hundred again.
+ */
+const cache = new Map<string, IconMesh>();
 
 /**
  * Enough for several screens of scrolling and nowhere near enough to matter.
@@ -64,11 +90,48 @@ const cache = new Map<string, ChunkGeometry | null>();
  */
 const MAX_CACHED_ICONS = 4096;
 
-/** A one-block document, which is what an icon is a picture of. */
-function documentFor(block: string): SchematicDocument {
-  const doc = createDocument({ width: 1, height: 1, length: 1, format: "sponge3" });
-  setBlock(doc, 0, 0, 0, parsePaletteEntry(iconBlock(block)));
-  return doc;
+/**
+ * The cells an icon is a picture of: one, or two for a block that is two.
+ *
+ * A bed's icon was its foot, a door's its lower half and a sunflower's its
+ * stalk -- half a block, in the inventory, the hotbar, the block picker and the
+ * materials list, which read as a broken model rather than as half of one.
+ * `wholeOf` is the reading placement uses, so the picture is of exactly what a
+ * click with it in hand puts down: a bare bed or a foot is both halves, a head
+ * on its own is a head.
+ *
+ * The far half goes where placing puts it, so the two cells are shifted to
+ * start at zero: a bed facing north has its head at `z = 0` and its foot at
+ * `z = 1`.
+ */
+function iconCells(block: string): {
+  cells: { x: number; y: number; z: number; entry: PaletteEntry }[];
+  size: [number, number, number];
+} {
+  const entry = parsePaletteEntry(iconBlock(block));
+  const whole = wholeOf(entry);
+  if (whole === null) return { cells: [{ x: 0, y: 0, z: 0, entry }], size: [1, 1, 1] };
+  const [dx, dy, dz] = whole.step;
+  const near = { x: Math.max(0, -dx), y: Math.max(0, -dy), z: Math.max(0, -dz) };
+  const plain = (state: BlockState): PaletteEntry => ({
+    namespacedName: state.namespacedName,
+    properties: { ...state.properties },
+  });
+  return {
+    cells: [
+      { ...near, entry: plain(whole.near) },
+      { x: near.x + dx, y: near.y + dy, z: near.z + dz, entry: plain(whole.far) },
+    ],
+    size: [1 + Math.abs(dx), 1 + Math.abs(dy), 1 + Math.abs(dz)],
+  };
+}
+
+/** The document an icon is a picture of. */
+function documentFor(block: string): { doc: SchematicDocument; size: [number, number, number] } {
+  const { cells, size } = iconCells(block);
+  const doc = createDocument({ width: size[0], height: size[1], length: size[2], format: "sponge3" });
+  for (const cell of cells) setBlock(doc, cell.x, cell.y, cell.z, cell.entry);
+  return { doc, size };
 }
 
 /**
@@ -89,14 +152,6 @@ function iconBlock(block: string): string {
 }
 
 /**
- * The atlas the cached geometry addresses, once it has stopped moving.
- *
- * Held because a caller that already has this version needs no pixels back,
- * and because a cache key without it would be a lie -- see `buildBlockIcons`.
- */
-let settled: { version: number; atlas: MeshAtlas } | null = null;
-
-/**
  * Meshes one block and reports which atlas its UVs address.
  *
  * `null` geometry for anything the mesher declines to draw, which is a tile
@@ -106,14 +161,11 @@ let settled: { version: number; atlas: MeshAtlas } | null = null;
 async function meshOne(
   block: string,
   options: DocumentPreviewOptions,
-): Promise<{ geometry: ChunkGeometry | null; atlas: MeshAtlas | null; version: number } | null> {
+): Promise<{ mesh: IconMesh; source: AtlasSource } | null> {
   try {
-    const preview = await buildDocumentPreview(documentFor(block), options);
-    return {
-      geometry: preview.mesh.chunks[0] ?? null,
-      atlas: preview.mesh.atlas,
-      version: preview.mesh.atlasVersion,
-    };
+    const { doc, size } = documentFor(block);
+    const preview = await buildDocumentPreview(doc, options);
+    return { mesh: { geometry: preview.mesh.chunks[0] ?? null, size }, source: preview.atlas };
   } catch {
     return null;
   }
@@ -123,40 +175,67 @@ async function meshOne(
  * Decodes what a set of blocks needs, so the atlas stops growing under them.
  *
  * This exists because of a bug that was not in the renderer. The baker decodes
- * a texture the first time a block asks for it, and `atlasVersion` *is* the
- * texture count -- so meshing sixty blocks in a row produced sixty geometries,
- * each with UVs addressing a different atlas layout, and one atlas to draw them
- * all with. Fifty-nine of them were wrong. Scrolling away and back looked like
- * a fix because by then everything had been decoded and the count had stopped
- * changing.
+ * a texture the first time a block asks for it, and the atlas grows with it --
+ * so meshing sixty blocks in a row, each into a freshly packed sheet, produced
+ * sixty geometries addressing sixty layouts and one atlas to draw them all
+ * with. Fifty-nine of them were wrong.
  *
  * It used to prime by *meshing* every block and throwing the geometry away,
  * on the grounds that a 1x1x1 document is a handful of triangles and the
  * expensive half is the decoding. The triangles were indeed free. What was not
- * free was that each of those meshes asked for an atlas, and the atlas is
- * repacked whenever the texture set has grown -- so priming nine hundred blocks
+ * free was that each of those meshes asked for an atlas, and the atlas was
+ * repacked whenever the texture set had grown -- so priming nine hundred blocks
  * packed the atlas nine hundred times over an ever-larger set. That was 38.7 of
  * the 39 seconds this took.
  *
  * So it decodes directly and packs once. Same guarantee, two orders of
  * magnitude cheaper, and `warmBaker` carries the measurements.
+ *
+ * **Both halves of a block that is two**, for the same reason: a bed's head
+ * has textures its foot does not, and left to the mesh they would be decoded
+ * in the middle of a batch -- the sixty-layouts fault, one block at a time.
  */
 async function prime(
   blocks: readonly string[],
   options: DocumentPreviewOptions,
   onProgress?: (done: number, total: number) => void,
 ): Promise<void> {
-  await warmBaker(blocks.map((block) => parsePaletteEntry(iconBlock(block))), options, onProgress);
+  const entries = blocks.flatMap((block) => iconCells(block).cells.map((cell) => cell.entry));
+  // Reported against the blocks, not the halves: the caller's bar counts blocks.
+  const scale = entries.length === 0 ? 1 : blocks.length / entries.length;
+  await warmBaker(entries, options, (done) => onProgress?.(Math.round(done * scale), blocks.length));
+}
+
+/**
+ * The atlas as it stands, for the reply: the sheet unless the caller holds
+ * exactly this version of it.
+ *
+ * Whole, never patched: the icon renderer is a single texture rebuilt on
+ * arrival, and this happens when a document has added tiles since the last
+ * request -- rare enough that a patch path would be code with no use.
+ */
+function reply(
+  icons: BlockIcon[],
+  source: AtlasSource,
+  knownVersion: number | null,
+  knownLayout: number | null,
+): BlockIconsResult {
+  const current = knownVersion === source.version && knownLayout === source.layout;
+  return {
+    icons,
+    atlas: current ? null : fullAtlas(source),
+    atlasVersion: source.version,
+    atlasLayout: source.layout,
+  };
 }
 
 /**
  * Meshes every block there is, so the atlas reaches its final size once.
  *
- * Without this the atlas keeps growing as someone scrolls, and every growth
- * invalidates every icon already drawn -- correct, and visible as the whole
- * grid blanking and refilling. Nine hundred one-block documents is a few
- * seconds in the main process, spent once, off the renderer's thread; the
- * geometry is kept, so afterwards every request is a cache hit.
+ * Without this the atlas keeps growing as someone scrolls. Nine hundred
+ * one-block documents is a few seconds in the main process, spent once, off
+ * the renderer's thread; the geometry is kept, so afterwards every request is
+ * a cache hit.
  */
 export async function warmBlockIcons(
   blocks: readonly string[],
@@ -172,71 +251,58 @@ export async function warmBlockIcons(
   const total = blocks.length * 2;
   await prime(blocks, options, (done) => onProgress(done, total));
 
-  let version = settled?.version ?? 0;
-  let atlas = settled?.atlas ?? null;
   for (const [index, block] of blocks.entries()) {
     const built = await meshOne(block, options);
-    if (built !== null) {
-      version = built.version;
-      if (built.atlas !== null) atlas = built.atlas;
-      cache.set(`${built.version}:${block}`, built.geometry);
-    }
+    if (built !== null) cache.set(`${built.source.layout}:${block}`, built.mesh);
     await breathe(blocks.length + index, total, onProgress);
   }
-  if (atlas !== null) settled = { version, atlas };
 
   evict();
-  return version;
+  return (await currentAtlas(options)).version;
 }
 
 export async function buildBlockIcons(
   blocks: readonly string[],
   options: DocumentPreviewOptions,
   knownAtlasVersion: number | null,
+  knownAtlasLayout: number | null = null,
 ): Promise<BlockIconsResult> {
   const wanted = [...new Set(blocks)];
 
   /*
    * The fast path, and after a warm-up it is the only one: every block already
-   * meshed against the atlas that is still in force.
+   * meshed against the layout that is still in force.
    */
-  if (settled !== null && wanted.every((block) => cache.has(`${settled!.version}:${block}`))) {
-    return {
-      icons: wanted.map((block) => ({
-        block,
-        geometry: cache.get(`${settled!.version}:${block}`) ?? null,
-      })),
-      atlas: knownAtlasVersion === settled.version ? null : settled.atlas,
-      atlasVersion: settled.version,
-    };
+  const now = await currentAtlas(options);
+  if (wanted.every((block) => cache.has(`${now.layout}:${block}`))) {
+    return reply(
+      wanted.map((block) => {
+        const cached = cache.get(`${now.layout}:${block}`);
+        return { block, geometry: cached?.geometry ?? null, size: cached?.size ?? [1, 1, 1] };
+      }),
+      now,
+      knownAtlasVersion,
+      knownAtlasLayout,
+    );
   }
 
   await prime(wanted, options);
 
   const icons: BlockIcon[] = [];
-  let version = settled?.version ?? 0;
-  let atlas = settled?.atlas ?? null;
   for (const block of wanted) {
     const built = await meshOne(block, options);
     if (built === null) {
-      icons.push({ block, geometry: null });
+      icons.push({ block, geometry: null, size: [1, 1, 1] });
       continue;
     }
-    version = built.version;
-    if (built.atlas !== null) atlas = built.atlas;
-    cache.set(`${built.version}:${block}`, built.geometry);
-    icons.push({ block, geometry: built.geometry });
+    cache.set(`${built.source.layout}:${block}`, built.mesh);
+    icons.push({ block, ...built.mesh });
   }
-  if (atlas !== null) settled = { version, atlas };
 
   evict();
-  return {
-    icons,
-    // Only when the caller does not already hold it: the pixels are the large
-    // part of this message and re-sending them is most of its cost.
-    atlas: knownAtlasVersion === version ? null : atlas,
-    atlasVersion: version,
-  };
+  // Only when the caller does not already hold it: the pixels are the large
+  // part of this message and re-sending them is most of its cost.
+  return reply(icons, await currentAtlas(options), knownAtlasVersion, knownAtlasLayout);
 }
 
 /** Oldest-first eviction, which `Map` gives for free by insertion order. */
@@ -251,5 +317,4 @@ function evict(): void {
 /** Drops every cached icon. Called when the resource pack changes. */
 export function forgetBlockIcons(): void {
   cache.clear();
-  settled = null;
 }
