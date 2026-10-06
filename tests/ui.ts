@@ -180,6 +180,7 @@ import {
 } from "../src/renderer/src/lib/depth.js";
 import {
   documentFraming,
+  framingReach,
   GRID_CELL,
   gridCentre,
   ORBIT_FOV,
@@ -2051,6 +2052,42 @@ console.log("\n--- framing ---");
    * the Ctrl gate and the coplanar epsilons are, by reading the source.
    */
   const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  /*
+   * A large build opened as nothing but sky: 384 wide was framed from about
+   * 970 blocks with the far plane at 512, so every vertex was clipped. With a
+   * draw distance the whole bounding sphere has to fit in front of it.
+   */
+  const span = (f: { target: { x: number; y: number; z: number }; position: { x: number; y: number; z: number } }) =>
+    Math.hypot(f.position.x - f.target.x, f.position.y - f.target.y, f.position.z - f.target.z);
+  const terrain = box(384, 72, 384);
+  const unclamped = documentFraming(terrain);
+  check("the terrain's old framing was past the default far plane", span(unclamped) > 512, String(span(unclamped)));
+  const clamped = documentFraming(terrain, 512);
+  const radius = Math.hypot(384, 72, 384) / 2;
+  check(
+    "...and is now inside it, bounding sphere and all",
+    span(clamped) + radius <= 512,
+    String(span(clamped)),
+  );
+  check("...and says so", clamped.note !== null && clamped.note.includes("512"));
+  equal("...aimed at the same middle", clamped.target, unclamped.target);
+  check(
+    "...from the same direction",
+    Math.abs(
+      (clamped.position.y - clamped.target.y) / (clamped.position.x - clamped.target.x) -
+        (unclamped.position.y - unclamped.target.y) / (unclamped.position.x - unclamped.target.x),
+    ) < 1e-9,
+  );
+  const ordinary = documentFraming(box(32, 16, 48), 512);
+  equal("an ordinary document is framed exactly as before", ordinary.position, framed.position);
+  check("...and says nothing", ordinary.note === null);
+  const huge = box(4096, 256, 4096);
+  check(
+    "a box bigger than the draw distance keeps its middle in front of the far plane",
+    Math.abs(span(documentFraming(huge, 512)) - framingReach(huge, 512)) < 1e-6 && framingReach(huge, 512) < 512,
+  );
+  check("the viewer frames inside its far plane", /documentFraming\([^;]*camera\.far/s.test(viewer));
+
   check("the viewer asks this module where its grid goes", viewer.includes("gridCentre("));
   /*
    * And then *moves* it. Checking only for the call proves the call is there

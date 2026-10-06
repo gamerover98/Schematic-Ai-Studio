@@ -3281,11 +3281,12 @@ import { isTyping } from "./typing.js";
    */
   function frameDocument(size: readonly [number, number, number] | null): void {
     if (!camera || !controls || size === null) return;
-    const { target, position } = documentFraming({
-      width: size[0],
-      height: size[1],
-      length: size[2],
-    });
+    // Inside the far plane, or a large build opens as nothing but sky.
+    const { target, position, note } = documentFraming(
+      { width: size[0], height: size[1], length: size[2] },
+      camera.far,
+    );
+    if (note !== null) console.info(`[viewer] ${note}`);
     camera.position.set(position.x, position.y, position.z);
     camera.lookAt(target.x, target.y, target.z);
     controls.target.set(target.x, target.y, target.z);
