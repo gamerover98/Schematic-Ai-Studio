@@ -4035,6 +4035,29 @@ which is `replace`'s stated reason for not growing at all. `includeAir` is the
 exception rather than an oversight: it clears the destination box first, so
 under it the box genuinely is what lands.
 
+**Importing another schematic is a stamp, not an edit.** File → Import
+Schematic…, or a file dropped on the viewport **with Shift**, reads it onto the
+clipboard (`importToClipboard`) and arms the stamp at the corner of the
+selection, or at the origin; Ctrl+V is the edit, so the growth and the one
+Ctrl+Z come from `pasteSelection` and nothing is written by the import itself.
+A plain drop still opens the file.
+
+- **It arrives in the open document's version**, through `setDocumentVersion`
+  itself on a scratch session nobody sees: rename, restate, drop. A 1.20 build
+  stamped into 1.12.2 would otherwise carry names the file cannot be saved
+  with, and the failure would arrive at Ctrl+S. The scratch document takes the
+  open one's container first, because that pair is what `refusalFor` judges.
+- **What a backport drops becomes air**, not the open document's empty space:
+  a paste writes nothing for air, and a dropped block should leave the ground
+  under it alone. The count is in the notes, beside the renames.
+- **Cells decide, never palette entries.** The palette is append-only, so the
+  entries a backport just emptied are still in it; asking the block list about
+  them reported "0 blocks left out". Entities are not carried, and are counted.
+- **`import_schematic` over MCP pastes at once and leaves the clipboard
+  alone** (`readImport` + `pasteHeld`): the clipboard is the user's, and a tool
+  that stamped a file in should not replace their last copy. It reads under
+  the root, like every verb that touches a file.
+
 **The gizmo's bar carries copy and paste, because the stamp made them a
 loop.** Two one-off commands became «copy, carry the box, paste, carry it
 again», which is worth having under the pointer rather than only on the

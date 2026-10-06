@@ -1819,6 +1819,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       };
       return;
     }
+    // Shift with a schematic open stamps the file into it rather than opening
+    // it in its place; without one there is nothing to import into.
+    if (event.shiftKey && docState !== null) {
+      await importSchematicAt(filePath);
+      return;
+    }
     await openDocumentAt(filePath);
   }
 
@@ -2189,6 +2195,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       }),
       api().onMenuClose(() => void closeDocument()),
       api().onMenuConvert(() => (convertOpen = true)),
+      api().onMenuImport(() => void importSchematic()),
       api().onMenuUndo(() => void undoAnything()),
       api().onMenuRedo(() => void redoAnything()),
       api().onMenuAbout(() => {
@@ -4442,6 +4449,70 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     }
   }
 
+  /** File → Import Schematic…: choose a file, then stamp it in. */
+  async function importSchematic(): Promise<void> {
+    if (!docState) return;
+    let picked: Awaited<ReturnType<ReturnType<typeof api>["pickFile"]>>;
+    try {
+      picked = await api().pickFile({ kind: "schem" });
+    } catch (err) {
+      failed(err, t("task.openingChooser"));
+      return;
+    }
+    if (picked.error) {
+      status = { tone: "error", text: picked.error };
+      return;
+    }
+    if (picked.path) await importSchematicAt(picked.path);
+  }
+
+  /**
+   * Another schematic, as a stamp: it lands on the clipboard and from there it
+   * is Ctrl+C's own gesture -- the ghost, the gizmo's arrows carrying the box,
+   * Ctrl+V writing it as one step. Nothing is written by the import itself.
+   *
+   * The box is the clipboard's size at the corner of the current selection, or
+   * at the origin, which is where a paste would land without moving anything.
+   * It may reach past the document: the paste grows it.
+   */
+  async function importSchematicAt(filePath: string): Promise<void> {
+    if (!docState) return;
+    busy = true;
+    try {
+      const response = await api().importSchematic(filePath);
+      if (!response.ok) {
+        status = { tone: "error", text: response.message };
+        return;
+      }
+      clipboard = response.clipboard;
+      docState = response.state;
+      const corner = selectionBounds
+        ? { x: selectionBounds.minX, y: selectionBounds.minY, z: selectionBounds.minZ }
+        : { x: 0, y: 0, z: 0 };
+      anchor = corner;
+      setAreas(
+        single({
+          minX: corner.x,
+          minY: corner.y,
+          minZ: corner.z,
+          maxX: corner.x + response.clipboard.width - 1,
+          maxY: corner.y + response.clipboard.height - 1,
+          maxZ: corner.z + response.clipboard.length - 1,
+        }),
+      );
+      const said = tn("status.imported", response.clipboard.blocks);
+      status = {
+        tone: response.notes.length > 0 ? "warn" : "ok",
+        text: [said, ...response.notes].join(" "),
+      };
+      void armStamp();
+    } catch (err) {
+      failed(err, t("task.importing"));
+    } finally {
+      busy = false;
+    }
+  }
+
   /**
    * Pastes at the selection's corner.
    *
@@ -6011,6 +6082,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         <div class="drop-hint slab">
           <strong class="pixel">{t("viewport.dropTitle")}</strong>
           <span>{t("viewport.dropTypes")}</span>
+          {#if docState}<span>{t("viewport.dropImport")}</span>{/if}
         </div>
       </div>
     {/if}

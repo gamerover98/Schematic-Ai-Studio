@@ -57,6 +57,7 @@ import {
   type RenameResponse,
   type SetKeyRequest,
   type ClipboardResponse,
+  type ImportResponse,
   type PasteRequest,
   type MoveRegionRequest,
   type RegionMeshResponse,
@@ -176,6 +177,7 @@ const api: BgptApi = {
     ipcRenderer.invoke(IPC.docTransform, request) as Promise<EditResponse>,
   copyRegion: (regions) => ipcRenderer.invoke(IPC.docCopy, regions) as Promise<ClipboardResponse>,
   cutRegion: (regions) => ipcRenderer.invoke(IPC.docCut, regions) as Promise<ClipboardResponse>,
+  importSchematic: (filePath) => ipcRenderer.invoke(IPC.docImport, filePath) as Promise<ImportResponse>,
   pasteClipboard: (request: PasteRequest) =>
     ipcRenderer.invoke(IPC.docPaste, request) as Promise<EditResponse>,
   moveRegion: (request: MoveRegionRequest) =>
@@ -293,6 +295,7 @@ const api: BgptApi = {
   onMenuSaveAs: (listener) => subscribe(IPC.menuSaveAs, listener),
   onMenuClose: (listener) => subscribe(IPC.menuClose, listener),
   onMenuConvert: (listener) => subscribe(IPC.menuConvert, listener),
+  onMenuImport: (listener) => subscribe(IPC.menuImport, listener),
   onMenuUndo: (listener) => subscribe(IPC.menuUndo, listener),
   onMenuRedo: (listener) => subscribe(IPC.menuRedo, listener),
   onMenuAbout: (listener) => subscribe(IPC.menuAbout, listener),

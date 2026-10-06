@@ -82,6 +82,8 @@ import {
   inspect,
   MAX_EDIT_VOLUME,
   newDocument,
+  importToClipboard,
+  ImportError,
   NoBlockEntityError,
   NoDocumentError,
   NoSaveTargetError,
@@ -7645,6 +7647,118 @@ console.log("\n--- a region edit leaves the document's empty space ---");
   cutSelection(session, { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 });
   equal("...and with no empty space chosen a cut leaves air", at(session, 0), "minecraft:air");
   closeDocument();
+}
+
+// --- importing another schematic, as a stamp ------------------------------
+//
+// The file goes onto the clipboard in the open document's version, and from
+// there it is a paste: grown into, one Ctrl+Z. Real files both ways, because
+// the version step is what this is about and a hand-built clipboard skips it.
+console.log("\n--- importing a schematic ---");
+{
+  const importDir = await mkdtemp(path.join(tmpdir(), "sas-stamp-"));
+  try {
+    // A 1.20.4 file: stone, deepslate (1.17, so nothing 1.12.2 has) and a
+    // chest with something in its block entity.
+    const modern = newDocument({ width: 3, height: 1, length: 1 }, "sponge3", dataVersionOf("JE_1_20_4"));
+    setBlock(modern.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(modern.doc, 1, 0, 0, { namespacedName: "minecraft:deepslate", properties: { axis: "y" } });
+    setBlock(modern.doc, 2, 0, 0, {
+      namespacedName: "minecraft:chest",
+      properties: { facing: "north", type: "single" },
+    });
+    setBlockEntity(modern.doc, 2, 0, 0, {
+      id: "minecraft:chest",
+      pos: [2, 0, 0],
+      nbt: { Lock: { type: "string", value: "key" } },
+    });
+    const modernFile = (
+      await saveSession(modern, { filePath: path.join(importDir, "modern.schem"), format: "sponge3" })
+    ).filePath;
+    closeDocument();
+
+    let session = newDocument({ width: 4, height: 2, length: 2 }, "mcedit", null);
+    const old = await importToClipboard(session, modernFile, { legacyBlocksPath: LEGACY_BLOCKS });
+    equal("a 1.20 file stamped into 1.12.2 leaves out what 1.12.2 lacks", old.clipboard.blocks, 2);
+    check(
+      "...and says so",
+      old.notes.some((note) => note.includes("replaced with air")),
+      old.notes.join(" | "),
+    );
+    // The emptied deepslate entry is still in the palette; it holds no cells
+    // and must not read as a block the app refused.
+    check(
+      "...and claims nothing else was left out",
+      !old.notes.some((note) => note.includes("cannot place")),
+      old.notes.join(" | "),
+    );
+    check("...on the clipboard, which Ctrl+V reads", currentClipboard() === old.clipboard);
+    equal("nothing is written by the import itself", documentState(session).blockCount, 0);
+
+    // Ctrl+V past the edge grows, as any paste does, and is one step back.
+    const changed = pasteSelection(session, { x: 3, y: 0, z: 0 });
+    equal("the stamp writes what it carries", changed, 2);
+    equal("...growing the schematic to hold it", documentState(session).size, [6, 2, 2]);
+    equal("...the chest keeps its block entity", inspect(session, 5, 0, 0).blockEntity?.id, "minecraft:chest");
+    check(
+      "...and what is in it",
+      (inspect(session, 5, 0, 0).blockEntity?.nbt ?? "").includes("key"),
+      inspect(session, 5, 0, 0).blockEntity?.nbt ?? "(none)",
+    );
+    undoEdit(session);
+    equal("one Ctrl+Z takes back the paste and the growth", documentState(session).size, [4, 2, 2]);
+    closeDocument();
+
+    // A 1.12.2 file into 26.2: a sign is renamed, nothing lost.
+    const legacy = newDocument({ width: 2, height: 1, length: 1 }, "mcedit", null);
+    setBlock(legacy.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(legacy.doc, 1, 0, 0, { namespacedName: "minecraft:sign", properties: { rotation: "0" } });
+    const legacyFile = (
+      await saveSession(legacy, {
+        filePath: path.join(importDir, "legacy.schematic"),
+        format: "mcedit",
+        legacyBlocksPath: LEGACY_BLOCKS,
+      })
+    ).filePath;
+    closeDocument();
+
+    session = newDocument({ width: 4, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_26_2"));
+    const flat = await importToClipboard(session, legacyFile, { legacyBlocksPath: LEGACY_BLOCKS });
+    equal("a legacy file into a modern one keeps every block", flat.clipboard.blocks, 2);
+    equal(
+      "...under the name the modern version uses",
+      flat.clipboard.cells.map((cell) => cell.entry.namespacedName).sort(),
+      ["minecraft:oak_sign", "minecraft:stone"],
+    );
+    check("...and says it renamed", flat.notes.some((note) => note.includes("renamed")), flat.notes.join(" | "));
+
+    // A block the app cannot place is left out, and counted.
+    const narrow = await importToClipboard(session, legacyFile, {
+      legacyBlocksPath: LEGACY_BLOCKS,
+      allowedBlocks: new Set(["minecraft:air", "minecraft:stone"]),
+    });
+    equal("a block the app cannot place is left out", narrow.clipboard.blocks, 1);
+    check("...and counted", narrow.notes.some((note) => note.includes("cannot place")), narrow.notes.join(" | "));
+    closeDocument();
+
+    // A file of nothing is an answer, not an empty stamp.
+    const blank = newDocument({ width: 2, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_26_2"));
+    setBlock(blank.doc, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    const blankFile = path.join(importDir, "blank.schem");
+    await saveSession(blank, { filePath: blankFile, format: "sponge3" });
+    closeDocument();
+    session = newDocument({ width: 4, height: 2, length: 2 }, "sponge3", dataVersionOf("JE_26_2"));
+    let refused: unknown = null;
+    try {
+      await importToClipboard(session, blankFile, { allowedBlocks: new Set(["minecraft:air"]) });
+    } catch (err) {
+      refused = err;
+    }
+    check("a file with nothing placeable is refused by name", refused instanceof ImportError, String(refused));
+    closeDocument();
+  } finally {
+    await rm(importDir, { recursive: true, force: true });
+  }
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

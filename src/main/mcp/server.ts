@@ -71,6 +71,7 @@ import {
   currentSession,
   newDocument,
   openDocument,
+  readImport,
   saveSession,
 } from "../services/session.js";
 import { listSnapshots, readSnapshot, takeSnapshot } from "../services/snapshots.js";
@@ -306,6 +307,11 @@ function lifecycleHost(): Lifecycle {
       if (moved.from !== moved.to) await rememberRenamed(moved.from, moved.to);
       return moved;
     },
+    readImport: async (session, filePath) =>
+      await readImport(session, filePath, {
+        legacyBlocksPath: legacyBlocksPath(),
+        allowedBlocks: (await host?.allowedBlocks()) ?? null,
+      }),
     close: closeDocument,
     recents: async () =>
       (await getRecentDocuments()).map((entry) => ({

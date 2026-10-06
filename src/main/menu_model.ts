@@ -30,6 +30,7 @@ export type MenuCommand =
   | "saveAs"
   | "close"
   | "convert"
+  | "import"
   | "undo"
   | "redo"
   | "about"
@@ -195,6 +196,12 @@ export function menuModel(state: MenuState): MenuItemModel[] {
           enabled: state.hasDocument,
         },
         { separator: true },
+        /*
+         * Into the open document, as a stamp: the file lands on the clipboard
+         * and the gizmo carries it. So it needs a document, where Convert
+         * beside it does not.
+         */
+        { command: "import", label: "Import Schematic…", enabled: state.hasDocument },
         /*
          * A verb about files, not about the open document -- it reads one
          * file and writes another without opening either -- so it belongs

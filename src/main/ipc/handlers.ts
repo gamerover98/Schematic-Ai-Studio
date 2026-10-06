@@ -68,6 +68,7 @@ import {
   type SaveResponse,
   type RenameResponse,
   type ClipboardResponse,
+  type ImportResponse,
   type PasteRequest,
   type RegionSpec,
   type DocumentMeshRequest,
@@ -127,6 +128,8 @@ import {
   closeDocument,
   copySelection,
   currentSession,
+  importToClipboard,
+  ImportError,
   cutSelection,
   documentMesh,
   documentState,
@@ -1265,7 +1268,7 @@ ${report.stack}`),
     if (err instanceof SchematicFormatError || err instanceof EmptyPreviewError) {
       return { ok: false, kind: "invalid-input", message: err.message };
     }
-    if (err instanceof EmptyClipboardError) {
+    if (err instanceof EmptyClipboardError || err instanceof ImportError) {
       return { ok: false, kind: "invalid-input", message: err.message };
     }
     if (err instanceof NotSquareError) {
@@ -1870,6 +1873,28 @@ ${report.stack}`),
     try {
       const session = requireSession();
       return { ok: true, clipboard: clipboardInfo(cutSelection(session, regions)), state: shellState(session) };
+    } catch (err) {
+      return failure(err);
+    }
+  });
+
+  /*
+   * Another schematic onto the clipboard, in the open document's version. It
+   * writes nothing: the window arms the stamp with it, and Ctrl+V is the edit.
+   */
+  ipcMain.handle(IPC.docImport, async (_event, filePath: string): Promise<ImportResponse> => {
+    try {
+      const session = requireSession();
+      const result = await importToClipboard(session, filePath, {
+        legacyBlocksPath: legacyBlocksPath(),
+        allowedBlocks: await loadAllowedBlocks(resourcesDir()),
+      });
+      return {
+        ok: true,
+        clipboard: clipboardInfo(result.clipboard),
+        notes: [...result.notes],
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }

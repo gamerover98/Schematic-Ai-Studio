@@ -82,7 +82,7 @@ export { NotSquareError, type RegionTransform };
 import { loadStructure } from "../pipeline/loader.js";
 import type { PaletteEntry } from "../pipeline/types.js";
 import { matchesBlockPattern, paletteEntryCacheKey } from "../pipeline/types.js";
-import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { loadLegacyBlockTable, parsePaletteEntry } from "../pipeline/loader_formats.js";
 import { resolveEmptySpaceWith } from "../domain/connect.js";
 import {
   hasProperty,
@@ -95,7 +95,7 @@ import { FACING_STEP, twoPartFamily } from "../../shared/two_part.js";
 import { standsOn, type SupportBelow } from "../../shared/block_support.js";
 import { coversFace } from "../pipeline/block_shapes.js";
 import { normaliseVoidBlock, voidSources } from "../../shared/settings.js";
-import { mcVersion, refusalFor } from "../../shared/mc_versions.js";
+import { documentVersionName, eraOf, mcVersion, refusalFor } from "../../shared/mc_versions.js";
 import {
   blockExistsIn,
   propertyExistsIn,
@@ -110,7 +110,7 @@ import {
   type DocumentPreviewOptions,
 } from "./preview.js";
 import type { ChunkMeshCache } from "../pipeline/chunked_mesh.js";
-import { saveDocument, type WriteResult } from "./writers.js";
+import { legacyBlockNames, saveDocument, type WriteResult } from "./writers.js";
 import { cropToContent, type CropSummary } from "../domain/crop.js";
 import {
   extentVolume,
@@ -2572,6 +2572,138 @@ export function cutSelection(
   return clipboard;
 }
 
+export class ImportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ImportError";
+  }
+}
+
+export interface ImportResult {
+  readonly clipboard: Clipboard;
+  /** What changed on the way in, one sentence each: nothing is dropped silently. */
+  readonly notes: readonly string[];
+}
+
+/**
+ * Reads another schematic onto the clipboard, as the open document's version
+ * would hold it -- the import is a stamp, so from here it is a paste.
+ *
+ * Loaded the way `convert.ts` loads, so a file imports exactly as it would
+ * open. Then it is put into the open document's version by
+ * `setDocumentVersion` itself, on a session of its own that nobody sees:
+ * rename, restate, drop, in that order and for that function's reasons. A
+ * 1.20 build stamped into a 1.12.2 schematic would otherwise carry names the
+ * file cannot be saved with, and the failure would arrive at Ctrl+S, a long
+ * way from the import that caused it. What a backport drops becomes **air**,
+ * not the open document's empty space, because a paste writes nothing for air
+ * and a dropped block should leave the ground under it alone.
+ *
+ * The temporary document takes the open one's container, because that is the
+ * pair `refusalFor` judges: a Sponge file going into an MCEdit document is
+ * not refused, it is converted.
+ *
+ * Entities are not carried, because a clipboard carries none; the count is
+ * said rather than left out. Block entities come along with their cells.
+ */
+export async function importToClipboard(
+  session: DocumentSession,
+  filePath: string,
+  options: ImportOptions = {},
+): Promise<ImportResult> {
+  const result = await readImport(session, filePath, options);
+  clipboard = result.clipboard;
+  return result;
+}
+
+export interface ImportOptions {
+  readonly legacyBlocksPath?: string | null;
+  /** The block list; `null` asks only the version. */
+  readonly allowedBlocks?: ReadonlySet<string> | null;
+}
+
+/**
+ * `importToClipboard` without touching the clipboard, for a caller that pastes
+ * at once -- `import_schematic` over MCP. The clipboard is the user's, and a
+ * tool that stamped a file in should not leave their last copy replaced by it.
+ */
+export async function readImport(
+  session: DocumentSession,
+  filePath: string,
+  options: ImportOptions = {},
+): Promise<ImportResult> {
+  const legacyBlocksPath = options.legacyBlocksPath ?? null;
+  const loaded = await loadStructure(filePath, { legacyBlocksPath });
+  const imported = documentFromLoaded(loaded, null);
+  imported.format = session.doc.format;
+  const notes: string[] = [...(loaded.notes ?? [])];
+
+  const target = documentVersionName(session.doc.format, session.doc.dataVersion);
+  const legacy = target !== null && eraOf(target) === "legacy";
+  const legacyNames =
+    legacy && legacyBlocksPath !== null
+      ? legacyBlockNames(await loadLegacyBlockTable(legacyBlocksPath))
+      : null;
+  const scratch: DocumentSession = {
+    doc: imported,
+    history: createHistory(),
+    mesh: null,
+    voidBlock: "",
+  };
+  if (target !== null) {
+    const changed = setDocumentVersion(scratch, target, {
+      dropUnrepresentable: true,
+      placeableNames: legacyNames,
+    });
+    if (changed.notes !== "") notes.push(changed.notes);
+  }
+
+  /*
+   * What the version left that this app still cannot place. After the step
+   * above that is normally nothing -- the registry and the block list are one
+   * set -- so this is the net under it rather than a second rule.
+   */
+  const allowed = options.allowedBlocks ?? null;
+  const AIR: PaletteEntry = { namespacedName: "minecraft:air", properties: {} };
+  const refused = new Set<string>();
+  for (const entry of imported.palette) {
+    const name = entry.namespacedName;
+    if (name === AIR.namespacedName) continue;
+    if ((allowed !== null && !allowed.has(name)) || (legacyNames !== null && !legacyNames.has(name))) {
+      refused.add(paletteEntryCacheKey(entry));
+    }
+  }
+  /*
+   * Counted in cells, and only cells decide: the palette is append-only, so the
+   * entries a backport just emptied are still in it, holding nothing.
+   */
+  let cells = 0;
+  if (refused.size > 0) {
+    for (const [key, count] of paletteHistogram(imported)) if (refused.has(key)) cells += count;
+  }
+  if (cells > 0) {
+    runTransaction(imported, scratch.history, "Drop what cannot be placed", (tx) =>
+      tx.remap(
+        { minX: 0, minY: 0, minZ: 0, maxX: imported.width - 1, maxY: imported.height - 1, maxZ: imported.length - 1 },
+        (entry) => (refused.has(paletteEntryCacheKey(entry)) ? AIR : null),
+      ),
+    );
+    notes.push(`${cells.toLocaleString()} block(s) this app cannot place were left out.`);
+  }
+
+  if (imported.entities.length > 0) {
+    notes.push(`${imported.entities.length.toLocaleString()} entit(ies) not imported: a stamp carries blocks only.`);
+  }
+
+  const held = copyRegions(imported, [
+    { minX: 0, minY: 0, minZ: 0, maxX: imported.width - 1, maxY: imported.height - 1, maxZ: imported.length - 1 },
+  ]);
+  if (held.blocks === 0) {
+    throw new ImportError(`${path.basename(filePath)} holds no blocks to import`);
+  }
+  return { clipboard: held, notes };
+}
+
 export class EmptyClipboardError extends Error {
   constructor() {
     super("Nothing has been copied yet");
@@ -2598,7 +2730,16 @@ export function pasteSelection(
   if (clipboard === null) {
     throw new EmptyClipboardError();
   }
-  const held = clipboard;
+  return pasteHeld(session, clipboard, at, options);
+}
+
+/** `pasteSelection` with the blocks named, rather than read off the clipboard. */
+export function pasteHeld(
+  session: DocumentSession,
+  held: Clipboard,
+  at: { x: number; y: number; z: number },
+  options: RegionEditOptions & { includeAir?: boolean; skipEmpty?: boolean } = {},
+): number {
   const { doc, history } = session;
   /*
    * The boolean is the renderer's -- "leave the empty space where it falls" --

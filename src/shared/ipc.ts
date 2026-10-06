@@ -202,6 +202,8 @@ export const IPC = {
   /** Copy the selection out; cut also clears it. */
   docCopy: "bgpt:doc:copy",
   docCut: "bgpt:doc:cut",
+  /** Read another schematic onto the clipboard, in the open one's version: a stamp. */
+  docImport: "bgpt:doc:import",
   /** Write the clipboard in, with its corner at a coordinate. */
   docPaste: "bgpt:doc:paste",
   /** Pick a region up and put it down elsewhere, as one step. */
@@ -353,6 +355,8 @@ export const IPC = {
   menuClose: "bgpt:menu:close",
   /** File → Convert…: one schematic file into another, without opening it. */
   menuConvert: "bgpt:menu:convert",
+  /** File → Import Schematic…: another file onto the clipboard, as a stamp. */
+  menuImport: "bgpt:menu:import",
   menuUndo: "bgpt:menu:undo",
   menuRedo: "bgpt:menu:redo",
   /**
@@ -1803,6 +1807,16 @@ export interface ClipboardInfo {
 
 export type ClipboardResponse = Result<{ clipboard: ClipboardInfo; state: DocumentState }>;
 
+/**
+ * Another schematic read onto the clipboard. `notes` says what the open
+ * document's version renamed, restated or left out on the way in.
+ */
+export type ImportResponse = Result<{
+  clipboard: ClipboardInfo;
+  notes: string[];
+  state: DocumentState;
+}>;
+
 export interface PasteRequest {
   x: number;
   y: number;
@@ -2511,6 +2525,11 @@ export interface BgptApi {
    */
   copyRegion(regions: RegionSpec[]): Promise<ClipboardResponse>;
   cutRegion(regions: RegionSpec[]): Promise<ClipboardResponse>;
+  /**
+   * Reads another schematic onto the clipboard, converted to the open
+   * document's version, so the stamp can carry it. Writes nothing.
+   */
+  importSchematic(filePath: string): Promise<ImportResponse>;
   /** Write the clipboard in. Undoable as one step. */
   pasteClipboard(request: PasteRequest): Promise<EditResponse>;
   saveDocument(request: SaveRequest): Promise<SaveResponse>;
@@ -2630,6 +2649,7 @@ export interface BgptApi {
   onMenuSaveAs(listener: () => void): () => void;
   onMenuClose(listener: () => void): () => void;
   onMenuConvert(listener: () => void): () => void;
+  onMenuImport(listener: () => void): () => void;
   onMenuUndo(listener: () => void): () => void;
   onMenuRedo(listener: () => void): () => void;
   onMenuAbout(listener: () => void): () => void;
