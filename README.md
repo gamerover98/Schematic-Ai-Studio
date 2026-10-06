@@ -42,8 +42,8 @@ files and converts between all of them.
           Search for "<i>AI Minecraft schematic generator</i>" and you will find websites and
           tools that ask for a subscription just to produce a structure; this project is
           the opposite of that offer!<br><br>
-          <strong style="color: #2f8f3f">Schematic AI Studio is, and always will be, completely free.</strong><br><br>
-          No subscription, no credits, no paid tier, no account.<br>
+          <strong style="color: #2f8f3f">Schematic AI Studio is, and always will be, completely free and open-source.</strong><br><br>
+          No subscription, no credits, no paid tier, no account for self-hosted.<br>
           100% open source under the Apache 2.0 license, and it is for any Minecraft player who wants it.
         </blockquote>
       </td>
