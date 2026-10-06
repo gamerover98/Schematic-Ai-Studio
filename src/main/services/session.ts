@@ -800,31 +800,78 @@ function hangingVineTarget(
   return { x: clicked.x, y, z: clicked.z, against: "down" };
 }
 
+/**
+ * Where a slab placed by hand becomes a double slab, or `null` when it does not.
+ *
+ * Vanilla's `SlabBlock.canBeReplaced` and `getStateForPlacement`, in their two
+ * halves:
+ *
+ * - **the slab that was clicked**, one step back along `against`. A bottom slab
+ *   takes a click on its top, or on a side in its upper half; a top slab takes
+ *   a click on its underside, or on a side in its lower half;
+ * - **the cell the block would go in**, when that already holds the same slab.
+ *   Vanilla merges there whichever half the new one would have been, because
+ *   `canBeReplaced` answers `true` for a slab that was not the block clicked.
+ *
+ * Same name, never a different material: a stone slab on an oak slab is two
+ * slabs. The double slab keeps the existing one's other properties, so a
+ * waterlogged slab stays waterlogged, as in the game.
+ *
+ * **This rejected every merge from the hand for as long as it existed.** It
+ * required the held slab's `type` to differ from the one wanted, and
+ * `orientPlacement` gives a slab clicked onto a top face `type=bottom` -- which
+ * is exactly the wanted half. The check that should have caught it built the
+ * request by hand, with no `type`, and passed.
+ *
+ * Which half of a *side* was clicked is `upperHalf`, sent by the renderer from
+ * `placedInUpperHalf`; without it, the held slab's own `type` says the same
+ * thing, because that is where `orientPlacement` got it.
+ */
 function doubleSlabTarget(
   doc: SchematicDocument,
-  request: { x: number; y: number; z: number; against?: string },
+  request: { x: number; y: number; z: number; against?: string; upperHalf?: boolean },
   entry: PaletteEntry,
 ): { x: number; y: number; z: number; entry: PaletteEntry } | null {
   if (!entry.namespacedName.endsWith("_slab")) return null;
-  const below = request.against === "up";
-  if (!below && request.against !== "down") return null;
-
-  const y = below ? request.y - 1 : request.y + 1;
-  const existing = getBlock(doc, request.x, y, request.z);
-  if (existing.namespacedName !== entry.namespacedName) return null;
-
-  // The clicked slab must be the half nearest the click: a bottom slab clicked
-  // on its top, or a top slab clicked on its underside.
-  const wanted = below ? "bottom" : "top";
-  if ((existing.properties.type ?? "bottom") !== wanted) return null;
-  if ((entry.properties.type ?? "bottom") === wanted) return null;
-
-  return {
-    x: request.x,
-    y,
-    z: request.z,
+  const inside = (at: { x: number; y: number; z: number }): boolean =>
+    at.x >= 0 && at.y >= 0 && at.z >= 0 && at.x < doc.width && at.y < doc.height && at.z < doc.length;
+  const doubled = (
+    at: { x: number; y: number; z: number },
+    existing: PaletteEntry,
+  ): { x: number; y: number; z: number; entry: PaletteEntry } => ({
+    x: at.x,
+    y: at.y,
+    z: at.z,
     entry: { ...existing, properties: { ...existing.properties, type: "double" } },
-  };
+  });
+
+  const clicked = clickedCell(request);
+  if (clicked !== null && inside(clicked)) {
+    const existing = getBlock(doc, clicked.x, clicked.y, clicked.z);
+    if (existing.namespacedName === entry.namespacedName) {
+      const type = existing.properties.type ?? "bottom";
+      const side = request.against !== "up" && request.against !== "down";
+      const upper = request.upperHalf ?? entry.properties.type === "top";
+      const takes =
+        type === "bottom"
+          ? request.against === "up" || (side && upper)
+          : type === "top"
+            ? request.against === "down" || (side && !upper)
+            : false;
+      if (takes) return doubled(clicked, existing);
+    }
+  }
+
+  if (inside(request)) {
+    const there = getBlock(doc, request.x, request.y, request.z);
+    if (
+      there.namespacedName === entry.namespacedName &&
+      (there.properties.type ?? "bottom") !== "double"
+    ) {
+      return doubled(request, there);
+    }
+  }
+  return null;
 }
 
 /**
@@ -1307,6 +1354,33 @@ export function applyEdit(
     if (layers !== null) checkBannerPatterns(doc, entry, layers);
 
     /*
+     * Two slabs meeting in one cell are one double slab.
+     *
+     * In the game a slab placed against the top of a matching bottom slab does
+     * not go in the cell above -- it fills the one that is already there, and
+     * the pair becomes a single full block. Without this the editor stacked
+     * them, which is a shape the game cannot hold and a file the game will not
+     * paste back the way it looks here.
+     *
+     * `against` is the only thing the renderer can contribute: `x/y/z` is the
+     * empty cell the click landed in, and the mesh has no per-block identity,
+     * so neither side can find the clicked slab on its own. `upperHalf` is the
+     * other half of a side click, and the rules are `doubleSlabTarget`'s.
+     *
+     * **Ahead of the refusal below.** One of vanilla's two cases is a slab
+     * already standing in the cell the block would go in, and a slab is not
+     * replaceable -- so placed after it, that case would be refused before it
+     * was ever asked. Ahead of the growth too: the merged cell is always one the
+     * document already has.
+     */
+    const merged = doubleSlabTarget(doc, target, entry);
+    if (merged !== null) {
+      return runTransaction(doc, history, `Place ${entry.namespacedName}`, (tx) =>
+        tx.setBlock(merged.x, merged.y, merged.z, merged.entry) ? 1 : 0,
+      );
+    }
+
+    /*
      * **The refusal**, and three boundaries on it.
      *
      * *Silently, and only from the hand*: this arm is the click, and a fill, a
@@ -1338,25 +1412,6 @@ export function applyEdit(
     }
 
     /*
-     * Two slabs meeting in one cell are one double slab.
-     *
-     * In the game a slab placed against the top of a matching bottom slab does
-     * not go in the cell above -- it fills the one that is already there, and
-     * the pair becomes a single full block. Without this the editor stacked
-     * them, which is a shape the game cannot hold and a file the game will not
-     * paste back the way it looks here.
-     *
-     * `against` is the only thing the renderer can contribute: `x/y/z` is the
-     * empty cell the click landed in, and the mesh has no per-block identity,
-     * so neither side can find the clicked slab on its own.
-     *
-     * Vertical faces only. The game also merges when you click the upper half
-     * of a slab's *side*, and that needs where on the face the cursor was --
-     * `placedInUpperHalf`'s question, which does not travel. Left out rather
-     * than guessed: merging on a side click that meant "place beside it" would
-     * destroy the slab already there.
-     */
-    /*
      * Redstone dust is refused in mid-air and on a pond.
      *
      * Silently, and only here. Silently because that is already what this
@@ -1375,12 +1430,6 @@ export function applyEdit(
       return 0;
     }
 
-    const merged = doubleSlabTarget(doc, target, entry);
-    if (merged !== null) {
-      return runTransaction(doc, history, `Place ${entry.namespacedName}`, (tx) =>
-        tx.setBlock(merged.x, merged.y, merged.z, merged.entry) ? 1 : 0,
-      );
-    }
     /*
      * A bed is two blocks, a door is two blocks, and both were being placed as
      * one.

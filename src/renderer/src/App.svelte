@@ -98,7 +98,11 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { hasTextSelection, isTyping } from "./lib/typing.js";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
   import { blocksIn } from "../../shared/block_versions.js";
-  import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
+  import {
+    placedInUpperHalf,
+    placementState,
+    type PlacementLook,
+  } from "../../shared/block_orientation.js";
   import { continuedPlacement } from "./lib/block_hover.js";
   import { translatedRegion } from "./lib/selection_drag.js";
   import {
@@ -1002,6 +1006,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // and so does `use`: the block that might open is one step back along
         // this face from the cell a placement would fill.
         ...(facing.against === null ? {} : { against: facing.against }),
+        // Which half of the face: a slab clicked on its side merges only from
+        // the half it does not already fill.
+        ...(action === "break" ? {} : { upperHalf: placedInUpperHalf(facing) }),
       }),
     );
   }

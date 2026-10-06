@@ -23,6 +23,7 @@ import {
   setBlockEntity,
 } from "../src/main/domain/document.js";
 import { DOCUMENT_SIZE } from "../src/shared/settings.js";
+import { placedInUpperHalf, placementState } from "../src/shared/block_orientation.js";
 import { singleMix, type MixSpec } from "../src/shared/ipc.js";
 import {
   addToMix,
@@ -1341,60 +1342,111 @@ console.log("\n--- the right button opens what it lands on ---");
 // go in the cell above -- it fills the one already there, and the pair becomes a
 // single full block. The editor stacked them instead, which is a shape the game
 // cannot hold: the file pastes back looking nothing like it did here.
+//
+// **Every request here is built the way the renderer builds it**, through
+// `placementState` and `placedInUpperHalf`. The section used to hand-write the
+// held slab's `type`, and wrote the half a click never produces -- so the merge
+// passed here and was refused for every click in the app, because a slab
+// clicked onto a top face is born `type=bottom` and that is what the old rule
+// turned away. It asserted "two bottom slabs do not merge", which is the bug.
 console.log("\n--- two slabs are one block ---");
 {
-  const session = newDocument({ width: 4, height: 4, length: 4 });
-  const slab = (type: string) => ({
-    namespacedName: "minecraft:oak_slab",
-    properties: { type },
-  });
-  const at = (y: number) => getBlock(session.doc, 1, y, 1);
+  type Face = "up" | "down" | "north" | "south" | "east" | "west";
+  /** A right-click as `App.svelte`'s `onBuild` sends it. */
+  const click = (
+    session: DocumentSession,
+    at: [number, number, number],
+    against: Face,
+    name = "minecraft:oak_slab",
+    cursorY = 0.25,
+  ): number => {
+    const look = { direction: { x: 0, y: -1, z: 0 }, against, cursorY, run: null };
+    return applyEdit(session, {
+      kind: "use",
+      x: at[0],
+      y: at[1],
+      z: at[2],
+      block: { namespacedName: name, properties: placementState(name, look) },
+      against,
+      upperHalf: placedInUpperHalf(look),
+    });
+  };
+  const slab = (type: string, name = "minecraft:oak_slab") => ({ namespacedName: name, properties: { type } });
+  const typeAt = (session: DocumentSession, x: number, y: number, z: number) =>
+    getBlock(session.doc, x, y, z).properties.type;
 
-  applyEdit(session, { kind: "setBlock", x: 1, y: 0, z: 1, block: slab("bottom") });
-  // Clicking the top of that slab targets the cell above, and `against: "up"`
-  // is the only thing that lets main find the slab that was clicked -- the
-  // renderer holds no schematic and the mesh has no per-block identity.
-  const changed = applyEdit(session, {
-    kind: "setBlock",
-    x: 1,
-    y: 1,
-    z: 1,
-    block: slab("top"),
-    against: "up",
-  });
-  equal("the second slab merges into the first", at(0).properties.type, "double");
-  equal("...leaving the cell above empty", at(1).namespacedName, "minecraft:air");
-  equal("...and reporting the one block it changed", changed, 1);
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 0, 1, slab("bottom"));
+    // Clicking the top of that slab targets the cell above, and `against: "up"`
+    // is the only thing that lets main find the slab that was clicked.
+    const changed = click(session, [1, 1, 1], "up");
+    equal("a slab clicked onto a bottom slab's top makes a double slab", typeAt(session, 1, 0, 1), "double");
+    equal("...leaving the cell above empty", getBlock(session.doc, 1, 1, 1).namespacedName, "minecraft:air");
+    equal("...and reporting the one block it changed", changed, 1);
+    undoEdit(session);
+    equal("...and one undo takes it back to a slab", typeAt(session, 1, 0, 1), "bottom");
+  }
 
-  // Same material only: an oak slab does not merge into a stone one.
-  applyEdit(session, { kind: "setBlock", x: 2, y: 0, z: 1, block: slab("bottom") });
-  applyEdit(session, {
-    kind: "setBlock",
-    x: 2,
-    y: 1,
-    z: 1,
-    block: { namespacedName: "minecraft:stone_slab", properties: { type: "top" } },
-    against: "up",
-  });
-  equal(
-    "a different material stacks instead",
-    getBlock(session.doc, 2, 0, 1).properties.type,
-    "bottom",
-  );
-  equal("...in its own cell", getBlock(session.doc, 2, 1, 1).namespacedName, "minecraft:stone_slab");
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 2, 1, slab("top"));
+    click(session, [1, 1, 1], "down");
+    equal("a slab clicked onto a top slab's underside makes a double slab", typeAt(session, 1, 2, 1), "double");
+    equal("...leaving the cell below empty", getBlock(session.doc, 1, 1, 1).namespacedName, "minecraft:air");
+  }
 
-  // Two bottom slabs are not a full block and never become one.
-  applyEdit(session, { kind: "setBlock", x: 3, y: 0, z: 1, block: slab("bottom") });
-  applyEdit(session, {
-    kind: "setBlock",
-    x: 3,
-    y: 1,
-    z: 1,
-    block: slab("bottom"),
-    against: "up",
-  });
-  equal("two bottom slabs do not merge", getBlock(session.doc, 3, 0, 1).properties.type, "bottom");
-  equal("...they stack", getBlock(session.doc, 3, 1, 1).properties.type, "bottom");
+  // A side: the half the clicked slab does not fill merges, the half it fills
+  // places beside it. Vanilla's `canBeReplaced`, both ways round.
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 0, 1, slab("bottom"));
+    setBlock(session.doc, 1, 0, 2, slab("bottom"));
+    setBlock(session.doc, 1, 1, 3, slab("top"));
+    click(session, [2, 0, 1], "east", "minecraft:oak_slab", 0.75);
+    equal("a bottom slab's side clicked high makes a double slab", typeAt(session, 1, 0, 1), "double");
+    equal("...placing nothing beside it", getBlock(session.doc, 2, 0, 1).namespacedName, "minecraft:air");
+    click(session, [2, 0, 2], "east", "minecraft:oak_slab", 0.25);
+    equal("a bottom slab's side clicked low does not merge", typeAt(session, 1, 0, 2), "bottom");
+    equal("...it places a slab beside it", typeAt(session, 2, 0, 2), "bottom");
+    click(session, [2, 1, 3], "east", "minecraft:oak_slab", 0.25);
+    equal("a top slab's side clicked low makes a double slab", typeAt(session, 1, 1, 3), "double");
+  }
+
+  // The cell the block would go in already holds the same slab: vanilla merges
+  // there, whichever half the new one would have been. A slab is not
+  // replaceable, so this was refused before the merge was ever asked.
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 0, 1, { namespacedName: "minecraft:stone", properties: {} });
+    setBlock(session.doc, 1, 1, 1, slab("top"));
+    click(session, [1, 1, 1], "up");
+    equal("a slab placed into a cell holding a top slab makes a double slab", typeAt(session, 1, 1, 1), "double");
+  }
+
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 2, 0, 1, slab("bottom"));
+    click(session, [2, 1, 1], "up", "minecraft:stone_slab");
+    equal("a different material stacks instead", typeAt(session, 2, 0, 1), "bottom");
+    equal("...in its own cell", getBlock(session.doc, 2, 1, 1).namespacedName, "minecraft:stone_slab");
+  }
+
+  // A waterlogged slab stays waterlogged: the double slab keeps the rest of
+  // the existing slab's state.
+  {
+    const session = newDocument({ width: 4, height: 4, length: 4 });
+    setBlock(session.doc, 1, 0, 1, {
+      namespacedName: "minecraft:oak_slab",
+      properties: { type: "bottom", waterlogged: "true" },
+    });
+    click(session, [1, 1, 1], "up");
+    equal(
+      "a merged slab keeps the rest of its state",
+      getBlock(session.doc, 1, 0, 1).properties,
+      { type: "double", waterlogged: "true" },
+    );
+  }
 
   // A fill carries no `against`, which is what keeps this a click gesture: a
   // region filled with slabs is a region of slabs, not half as many doubles.
@@ -1406,6 +1458,46 @@ console.log("\n--- two slabs are one block ---");
   });
   equal("a fill never merges", getBlock(filled.doc, 0, 0, 0).properties.type, "bottom");
   equal("...at either level", getBlock(filled.doc, 0, 1, 0).properties.type, "bottom");
+
+  /*
+   * And in a 1.12.2 document, where a double slab is a block id of its own:
+   * `legacy_blocks.json` spells `43:0` as `stone_slab[type=double]` and `125:0`
+   * as `oak_slab[type=double]`, and the MCEdit writer matches the whole state.
+   * So the merge has to land on exactly that spelling, with nothing added.
+   */
+  const dir = await mkdtemp(path.join(tmpdir(), "sas-slab-"));
+  try {
+    const legacy = newDocument({ width: 2, height: 1, length: 1 }, "mcedit", dataVersionOf("JE_1_12_2"));
+    click(legacy, [0, 0, 0], "up", "minecraft:stone_slab");
+    click(legacy, [0, 1, 0], "up", "minecraft:stone_slab");
+    click(legacy, [1, 0, 0], "up", "minecraft:oak_slab");
+    click(legacy, [1, 1, 0], "up", "minecraft:oak_slab");
+    equal(
+      "a legacy document merges both slabs",
+      [typeAt(legacy, 0, 0, 0), typeAt(legacy, 1, 0, 0)],
+      ["double", "double"],
+    );
+    equal("...without growing to hold them", legacy.doc.height, 1);
+    const saved = await saveSession(legacy, {
+      filePath: path.join(dir, "slabs.schematic"),
+      format: "mcedit",
+      legacyBlocksPath: LEGACY_BLOCKS,
+    });
+    equal("...nothing is degraded on the way out", saved.degraded, []);
+    const { parsed } = await parseNbt(await readFile(saved.filePath));
+    const root = parsed.value as unknown as NbtCompound;
+    const bytes = (key: string) => (root[key] as { value: number[] }).value;
+    equal(
+      "...and the file holds 43:0 and 125:0",
+      [0, 1].map((i) => [bytes("Blocks")[i] & 0xff, bytes("Data")[i]]),
+      [
+        [43, 0],
+        [125, 0],
+      ],
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 // --- a block put on the build grid stays on it -----------------------------

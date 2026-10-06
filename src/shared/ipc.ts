@@ -1388,6 +1388,13 @@ export type EditRequest =
        * merge is a click gesture and not something a fill can trigger.
        */
       against?: "up" | "down" | "north" | "south" | "east" | "west";
+      /**
+       * Whether the click landed in the upper half of the face, which is
+       * `placedInUpperHalf`'s answer. A slab clicked on its *side* becomes a
+       * double slab only from the half it does not fill, and the renderer is
+       * the only side that knows where on the face the cursor was.
+       */
+      upperHalf?: boolean;
     }
   /**
    * The inspector's block-state editor: write exactly this state, and derive
@@ -1432,6 +1439,7 @@ export type EditRequest =
       z: number;
       block: BlockSpec;
       against?: "up" | "down" | "north" | "south" | "east" | "west";
+      upperHalf?: boolean;
     }
   /**
    * Write a mix into every cell of the regions.

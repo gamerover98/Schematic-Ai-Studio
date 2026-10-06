@@ -178,11 +178,31 @@ cannot hold: the file pastes back looking nothing like it did here.
 `x/y/z` is the *empty* cell the click landed in, and the mesh has no per-block
 identity, so **neither side can find the clicked slab alone** — main has the
 document but not the direction, the renderer has the direction but not the
-document. Vertical faces only: the game also merges on a side click, and that
-needs where on the face the cursor was, which does not travel. Merging on a side
-click that meant "place beside it" would destroy the slab already there. A fill
-carries no `against`, which is what keeps this a click gesture rather than
-something that halves a filled region.
+document. A fill carries no `against`, which is what keeps this a click gesture
+rather than something that halves a filled region.
+
+**It merged nothing from the hand for as long as it existed.** The rule required
+the held slab's `type` to differ from the clicked one's, and `orientPlacement`
+gives a slab clicked onto a top face `type=bottom` — the clicked one's half
+exactly. The section in `tests/session.ts` built its requests by hand with the
+other half and asserted «two bottom slabs do not merge», which is the real
+gesture stated as forbidden. It builds them through `placementState` and
+`placedInUpperHalf` now, as `onBuild` does.
+
+`doubleSlabTarget` is vanilla's `SlabBlock.canBeReplaced`, both halves of it:
+
+- **the slab that was clicked** takes a click on the face it does not fill — a
+  bottom slab its top, or a side in the upper half; a top slab its underside, or
+  a side in the lower half. Which half of a side is `EditRequest.upperHalf`,
+  sent from `placedInUpperHalf`: that is what used to "not travel";
+- **the cell the block would go in**, when it already holds the same slab, is
+  merged whichever half the new one would have been. A slab is not replaceable,
+  so the merge runs **ahead of** the refusal, or this case is refused unasked.
+
+Same name only, and the double slab keeps the rest of the existing state
+(`waterlogged`). A 1.12.2 document needs nothing more: `legacy_blocks.json`
+spells `43:x`, `125:x`, `181:0` and `204:0` as `<slab>[type=double]`, and
+`tests/session.ts` saves the merge as MCEdit and reads `43:0` and `125:0` back.
 
 **A cell outside the document was never clicked.** The build grid sends
 `against: "up"` with nothing under it, `getBlock` answers air outside the box,
