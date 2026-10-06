@@ -159,6 +159,7 @@ async function main() {
       if (response.status === 202) return;
 
       if (!response.ok) {
+        if (response.status === 404) sessionId = null;
         fail(message.id, `Schematic AI Studio answered ${response.status}: ${await response.text()}`);
         return;
       }
