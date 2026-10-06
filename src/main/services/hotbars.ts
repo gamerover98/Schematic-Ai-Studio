@@ -24,7 +24,7 @@
  * at startup so the suites can point it at a temporary one.
  */
 
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import path from "path";
 
 import { DEFAULT_HOTBAR, type Hotbar } from "../../shared/settings.js";
@@ -63,6 +63,28 @@ export async function readHotbar(filePath: string): Promise<Hotbar> {
   } catch {
     return FRESH_HOTBAR;
   }
+}
+
+/**
+ * Takes a schematic's hotbar to another path, for a rename or a Save As.
+ *
+ * It replaces whatever bar the destination had: the document arriving there
+ * is this one, and so is what was being held to build it. Nothing to take is
+ * not a failure -- most schematics never had a bar written.
+ */
+export async function carryHotbar(from: string, to: string, mode: "move" | "copy"): Promise<void> {
+  const source = fileFor(from);
+  const target = fileFor(to);
+  if (source === null || target === null || source === target) return;
+  let text: string;
+  try {
+    text = await readFile(source, "utf8");
+  } catch {
+    return;
+  }
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, text, "utf8");
+  if (mode === "move") await rm(source, { force: true });
 }
 
 /**

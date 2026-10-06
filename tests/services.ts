@@ -51,6 +51,7 @@ import {
   openConversation,
   resetConversation,
   saveConversation,
+  stampCheckpoint,
   useConversationDirectory,
 } from "../src/main/services/conversation.js";
 import {
@@ -58,6 +59,12 @@ import {
   useHotbarDirectory,
   writeHotbar,
 } from "../src/main/services/hotbars.js";
+import {
+  carryDocumentStores,
+} from "../src/main/services/document_move.js";
+import { listSnapshots, takeSnapshot, useSnapshotDirectory } from "../src/main/services/snapshots.js";
+import { checkpointExists, takeCheckpoint, useCheckpointDirectory } from "../src/main/services/checkpoints.js";
+import { createHistory } from "../src/main/domain/history.js";
 import {
   abridgeTrace,
   coerceProject,
@@ -3004,6 +3011,102 @@ console.log("\n--- what a trace costs on disk ---");
   check("the original is not modified", long.length === MAX_STORED_TRACE_TEXT * 3);
 }
 
+// --- a schematic changes its path -------------------------------------------
+//
+// Its conversations, its versions and its hotbar are kept under its path, so a
+// file renamed outside the app arrived with none of them -- reported as the
+// chats with the AI being lost. And Save As left the chat behind: it saved the
+// conversation under the old path and loaded the new one, empty. Real files,
+// in all four stores.
+console.log("\n--- a schematic changes its path ---");
+{
+  const base = path.join(workDir, "moving");
+  const conversations = path.join(base, "conversations");
+  useConversationDirectory(conversations);
+  useSnapshotDirectory(path.join(base, "versions"));
+  useHotbarDirectory(path.join(base, "hotbars"));
+  useCheckpointDirectory(path.join(base, "checkpoints"));
+  const files = path.join(base, "files");
+  await mkdir(files, { recursive: true });
+  const castle = path.join(files, "castle.schem");
+  await writeFile(castle, "the file");
+
+  const doc = createDocument({ width: 2, height: 2, length: 2, format: "sponge3" });
+  doc.filePath = castle;
+  const session = { doc, history: createHistory(), mesh: null, voidBlock: "" };
+  const stored = async (filePath: string): Promise<{ conversations: { id: string; entries: ChatEntry[] }[] } | null> => {
+    try {
+      return JSON.parse(await readFile(path.join(conversations, storeFileName(filePath)), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+  const checkpointOf = async (filePath: string): Promise<string | undefined> =>
+    (await stored(filePath))?.conversations[0]?.entries.find((entry) => entry.checkpoint)?.checkpoint;
+
+  resetConversation(null);
+  await adoptSubject(castle);
+  appendEntry({ role: "user", text: "dig a moat" });
+  stampCheckpoint((await takeCheckpoint(session, [])) ?? "none");
+  appendEntry({ role: "agent", text: "Dug one." });
+  await saveConversation();
+  await takeSnapshot(session, "manual", "with the moat");
+  await writeHotbar(castle, { slots: [...DEFAULT_HOTBAR], slot: 3 });
+
+  // --- move: everything goes, nothing is left behind
+  const fortress = path.join(files, "fortress.schem");
+  await carryDocumentStores(castle, fortress, "move");
+  equal("the chat on screen stays", conversationState().entries.length, 2);
+  resetConversation(null);
+  await adoptSubject(fortress);
+  equal("...and the new path brings it back", conversationState().entries.map((e) => e.text), [
+    "dig a moat",
+    "Dug one.",
+  ]);
+  equal("the versions went with it", (await listSnapshots(fortress)).map((one) => one.label), ["with the moat"]);
+  equal("the hotbar went with it", (await readHotbar(fortress)).slot, 3);
+  equal("nothing is left under the old name: chats", await stored(castle), null);
+  equal("...versions", await listSnapshots(castle), []);
+  equal("...hotbar", (await readHotbar(castle)).slot, 0);
+
+  // --- Save As: a copy each, and the chat on screen follows the new file
+  const copy = path.join(files, "fortress-copy.schem");
+  await carryDocumentStores(fortress, copy, "copy");
+  equal("Save As keeps the chat on screen", conversationState().entries.length, 2);
+  for (const [where, filePath] of [["the new file", copy], ["the old file", fortress]]) {
+    resetConversation(null);
+    await adoptSubject(filePath);
+    equal(`${where} has the chat`, conversationState().entries.length, 2);
+    equal(`${where} has the versions`, (await listSnapshots(filePath)).length, 1);
+    equal(`${where} has the hotbar`, (await readHotbar(filePath)).slot, 3);
+  }
+  const oldCheckpoint = await checkpointOf(fortress);
+  const newCheckpoint = await checkpointOf(copy);
+  check(
+    "each copy has a checkpoint of its own, so deleting one keeps the other's",
+    oldCheckpoint !== undefined && newCheckpoint !== undefined && oldCheckpoint !== newCheckpoint &&
+      (await checkpointExists(oldCheckpoint)) && (await checkpointExists(newCheckpoint)),
+    `${oldCheckpoint} ${newCheckpoint}`,
+  );
+
+  // --- a destination that already had a history keeps it, beside what arrives
+  const merged = path.join(files, "merged.schem");
+  resetConversation(null);
+  await adoptSubject(merged);
+  appendEntry({ role: "user", text: "an older chat" });
+  await saveConversation();
+  resetConversation(null);
+  await adoptSubject(fortress);
+  await carryDocumentStores(fortress, merged, "copy");
+  equal("a destination with chats of its own keeps them", (await stored(merged))?.conversations.length, 2);
+
+  useConversationDirectory(path.join(workDir, "conversations"));
+  // The other three were unset before this section, and stay so after it.
+  useSnapshotDirectory(null as unknown as string);
+  useHotbarDirectory(null as unknown as string);
+  useCheckpointDirectory(null as unknown as string);
+}
+
 // --- saving is working on it -------------------------------------------------
 //
 // A schematic created and then saved -- from the window or over MCP -- never
@@ -3030,9 +3133,10 @@ console.log("\n--- saving is working on it ---");
     windowSave.includes("rememberDocument(result.filePath)"),
   );
   check("...and so does a save over MCP", mcpSave.includes("rememberDocument(result.filePath)"));
+  // Save As copies what is kept under the old path, on both roads.
   check(
-    "...as opening does, on both roads",
-    windowOpen.includes("rememberDocument(filePath)") && mcpOpen.includes("rememberDocument(filePath)"),
+    "a Save As from the window and over MCP carries the chats",
+    [windowSave, mcpSave].every((source) => source.includes('carryDocumentStores(before, result.filePath, "copy")')),
   );
   // Half of it is how the two came apart: the app's list without the OS's, or
   // the other way round. Nothing outside `menu.ts` may call either on its own.

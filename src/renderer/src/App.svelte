@@ -521,6 +521,36 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     hotbarSlot = held === null ? 0 : held.slot;
   }
 
+  /**
+   * The open file has moved -- renamed, or saved under a new name -- and what
+   * is in hand moves with it.
+   *
+   * Main has already taken the chats, the versions and the bar to the new
+   * path, so this is the window catching up: the bar's subject is the new
+   * file *before* `docState` says so, which leaves `adoptHotbar` nothing to
+   * do -- it would write the bar under the old path and read the new one,
+   * and a rename would leave a stray bar behind. A first save of an untitled
+   * schematic takes the bar in hand to its file too, rather than starting
+   * over from the factory nine.
+   */
+  function followFile(next: string): boolean {
+    if (hotbarAdopted && hotbarSubject === next) return false;
+    hotbarAdopted = true;
+    hotbarSubject = next;
+    return true;
+  }
+
+  /** What `followFile` leaves to do once `docState` names the new file. */
+  async function caughtUpWithFile(): Promise<void> {
+    await flushHotbar();
+    await refreshVersions();
+    // The copy's checkpoints are new ids on Save As, so the log is main's again.
+    if (bridgeAvailable) {
+      adoptChat(await api().getChatState());
+      await refreshConversations();
+    }
+  }
+
   /** Reaches for a different slot. */
   function holdSlot(slot: number): void {
     hotbarSlot = slot;
@@ -4922,6 +4952,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     }
     busy = true;
     try {
+      // Written first, so the bar main copies to a new file is the one in hand.
+      await flushHotbar();
       const response = await api().saveDocument({
         filePath: filePath ?? null,
         format,
@@ -4931,7 +4963,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         status = { tone: "error", text: response.message };
         return;
       }
+      const moved = followFile(response.filePath);
       docState = response.state;
+      if (moved) await caughtUpWithFile();
       // A schematic made here and then saved joins the recents on this save.
       void refreshRecents();
       status = {

@@ -86,6 +86,7 @@ import {
   setMcpToken,
 } from "../services/settings-store.js";
 import { rememberDocument } from "../menu.js";
+import { carryDocumentStores } from "../services/document_move.js";
 import { type Lifecycle } from "./lifecycle.js";
 
 /** How many calls the activity log remembers. */
@@ -279,6 +280,7 @@ function lifecycleHost(): Lifecycle {
       return session;
     },
     save: async (session, options) => {
+      const before = session.doc.filePath;
       const result = await saveSession(session, {
         filePath: options.filePath,
         format: options.format,
@@ -289,6 +291,9 @@ function lifecycleHost(): Lifecycle {
           : { dataVersion: dataVersionOf(options.version) }),
         legacyBlocksPath: legacyBlocksPath(),
       });
+      // The window's Save As does the same: the new file gets a copy of the
+      // chats, the versions and the hotbar, and the old file keeps its own.
+      if (before !== null) await carryDocumentStores(before, result.filePath, "copy");
       await adoptSubject(result.filePath);
       // `create_document` then `save_document_as` is how a client makes a
       // schematic, and a file it made was never opened: without this it never

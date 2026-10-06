@@ -272,6 +272,7 @@ import {
   writeHotbar,
 } from "../services/hotbars.js";
 import { refreshShell, rememberDocument, setKeysToCamera } from "../menu.js";
+import { carryDocumentStores } from "../services/document_move.js";
 import { shellState, useWindow } from "../services/broadcast.js";
 import {
   mcpActivity,
@@ -1932,6 +1933,7 @@ ${report.stack}`),
   ipcMain.handle(IPC.docSave, async (_event, request: SaveRequest): Promise<SaveResponse> => {
     try {
       const session = requireSession();
+      const before = session.doc.filePath;
       const stamped =
         request.version === undefined ? undefined : resolveVersionName(request.version);
       if (stamped === null) {
@@ -1957,11 +1959,16 @@ ${report.stack}`),
         legacyBlocksPath: legacyBlocksPath(),
       });
       /*
-       * A conversation started with nothing open has no key to be stored under
-       * -- this is the moment it gets one. A *Save As* onto a different path is
-       * the same call and does the same thing: the conversation follows the
-       * document to where the document went.
+       * A Save As onto a different path copies the chats, the versions and
+       * the hotbar to the new file and leaves the old one its own -- the
+       * user's choice. This comment used to say the conversation followed the
+       * document, and it did not: `adoptSubject` saved it under the old path
+       * and loaded the new one, empty.
+       *
+       * A conversation started with nothing open has no key to be stored
+       * under, and `adoptSubject` is the moment it gets one.
        */
+      if (before !== null) await carryDocumentStores(before, result.filePath, "copy");
       await adoptSubject(result.filePath);
       // A schematic made here and saved was never opened, so without this it
       // never reached the recents at all.
