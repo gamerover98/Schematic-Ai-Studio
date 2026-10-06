@@ -7744,5 +7744,46 @@ console.log("\n--- accessibility and copy ---");
   // object, in the title bar of the biggest dialog in the app.
   check("the inventory's title says what choosing does", (en["inventory.for.hand"] as string) !== "Hold");
 }
+// --- the loading bar --------------------------------------------------------
+//
+// `lib/load_progress.ts` is where on the bar each phase sits, and the rule that
+// the bar never goes back: opening is two operations in main -- reading, then
+// meshing -- and the second starts its own count.
+console.log("\n--- loading bar ---");
+{
+  const { PHASE_SPAN, SHOW_AFTER_MS, advance, loadVisible, phaseFraction } = await import(
+    "../src/renderer/src/lib/load_progress.js"
+  );
+  const phases = Object.keys(PHASE_SPAN) as (keyof typeof PHASE_SPAN)[];
+  check(
+    "the phases tile the bar from empty to full, in order",
+    PHASE_SPAN[phases[0]][0] === 0 &&
+      PHASE_SPAN[phases[phases.length - 1]][1] === 1 &&
+      phases.every((phase, index) => index === 0 || PHASE_SPAN[phases[index - 1]][1] === PHASE_SPAN[phase][0]),
+  );
+  check("every phase has a label", phases.every((phase) => typeof en[`loading.${phase}` as keyof typeof en] === "string"));
+  equal("halfway through meshing is halfway through its share", phaseFraction("meshing", 5, 10), 0.53);
+
+  let state = advance(null, "reading", 0, 1, 1000);
+  state = advance(state, "meshing", 8, 10, 1100);
+  const ahead = state.fraction;
+  state = advance(state, "lighting", 0, 1, 1200);
+  check("a phase reported late never moves the bar back", state.fraction === ahead && state.phase === "lighting");
+  equal("...and the clock starts when the window first heard", state.since, 1000);
+  check("the bar waits before it is drawn", !loadVisible(state, 1000 + SHOW_AFTER_MS - 1));
+  check("...and is drawn once the work has run a while", loadVisible(state, 1000 + SHOW_AFTER_MS));
+  check("...and is never drawn for nothing", !loadVisible(null, 1e9));
+
+  // The window's halves: listened to, ended when every mesh request ends, and
+  // started by an open, since main cannot report the read.
+  const app = readFileSync(path.join(RENDERER, "App.svelte"), "utf8");
+  check("the window listens for main's progress", /api\(\)\.onDocProgress\(/.test(app));
+  check(
+    "...and puts the bar away whenever a mesh request ends",
+    /async function fetchDocumentMesh\(\): Promise<void> \{\s*try \{\s*await fetchDocumentMeshOnce\(\);\s*\} finally \{\s*endLoad\(\);/.test(app),
+  );
+  check("an open starts the bar itself", /reportLoad\("reading"\);\s*(\/\/[^\n]*\n\s*)*try \{\s*const response = await api\(\)\.openDocument/.test(app) || /reportLoad\("reading"\);[\s\S]{0,80}const response = await api\(\)\.openDocument/.test(app));
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exit(failures === 0 ? 0 : 1);

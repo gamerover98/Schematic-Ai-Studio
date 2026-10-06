@@ -282,6 +282,7 @@ import {
   renameDocumentFile,
 } from "../services/document_move.js";
 import { shellState, useWindow } from "../services/broadcast.js";
+import { setProgressSink } from "../services/progress.js";
 import {
   mcpActivity,
   mcpStatus,
@@ -477,6 +478,11 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   useWindow(getWindow);
   // And where the updater pushes its status, for the same reason.
   useUpdateWindow(getWindow);
+  // And where the loading bar hears from: `services/progress.ts`.
+  setProgressSink((progress) => {
+    const window = getWindow();
+    if (window !== null && !window.isDestroyed()) window.webContents.send(IPC.docProgress, progress);
+  });
 
 
   /*

@@ -3859,6 +3859,68 @@ console.log("\n--- ipc channels ---");
   equal("every channel in IPC is handled or sent by main", unserved.join(", "), "");
 }
 
+// --- the loading bar: when main says anything ------------------------------
+//
+// `services/progress.ts` decides when a long piece of work speaks. It is
+// silent for work that ends quickly -- every edit is a mesh build -- sends at
+// most one event per interval within a phase, always sends a new phase, and
+// says "done" only about work it had already spoken of.
+console.log("\n--- loading bar: progress events ---");
+{
+  const { PROGRESS_EVERY_MS, PROGRESS_QUIET_MS, setProgressSink, startProgress } = await import(
+    "../src/main/services/progress.js"
+  );
+  const sent: string[] = [];
+  setProgressSink((progress) => void sent.push(`${progress.phase}:${progress.done}/${progress.total}`));
+  let clock = 0;
+  const now = (): number => clock;
+
+  const quick = startProgress(now);
+  for (let chunk = 0; chunk < 20; chunk += 1) {
+    clock += 5;
+    quick.report("meshing", chunk, 20);
+  }
+  quick.abandon();
+  equal("work that ends inside the quiet says nothing at all", sent, []);
+
+  clock = 0;
+  const long = startProgress(now);
+  long.report("lighting");
+  clock = PROGRESS_QUIET_MS;
+  long.report("lighting");
+  for (let chunk = 0; chunk < 10; chunk += 1) {
+    clock += PROGRESS_EVERY_MS / 5;
+    long.report("meshing", chunk, 10);
+  }
+  equal(
+    "past the quiet it speaks, a new phase at once and the same phase sparingly",
+    sent,
+    ["lighting:0/1", "meshing:0/10", "meshing:5/10"],
+  );
+  check("...and knows it spoke", long.spoke);
+  long.abandon();
+  equal("work it spoke of ends with done", sent.at(-1), "done:1/1");
+
+  setProgressSink(null);
+  const unheard = startProgress(now);
+  clock += PROGRESS_QUIET_MS * 2;
+  unheard.report("meshing", 1, 2);
+  check("with no window to tell, nothing is sent and nothing is claimed", !unheard.spoke);
+
+  // A build reports; opening reports and takes the bar down on failure.
+  const session = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "services", "session.ts"),
+    "utf8",
+  );
+  const start = session.indexOf("export async function documentMesh(");
+  const meshBody = session.slice(start, session.indexOf("\nexport ", start + 1));
+  check("a mesh build reports its progress", /progress = startProgress\(\);[\s\S]{0,700}progress \}/.test(meshBody));
+  // A "done" from main would take the bar down while the mesh is still being
+  // cloned across, the longest wait after the meshing itself.
+  check("...and never says done: the window ends the bar when the mesh lands", !meshBody.includes("abandon("));
+  check("an open that fails takes the bar down", /catch \(err\) \{\s*progress\.abandon\(\);\s*throw err;/.test(session));
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 
 // `exitCode` rather than `exit()`, unlike the other suites, and not by taste.

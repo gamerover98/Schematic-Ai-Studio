@@ -141,6 +141,13 @@ export const IPC = {
    * closed, which is a state the window has to be able to be told about.
    */
   docChanged: "bgpt:doc:changed",
+  /**
+   * How far a long piece of work on the document has got: reading a file,
+   * lighting it, meshing it. An event, never a request, and only for work that
+   * has already run for a while -- see `services/progress.ts`. The window draws
+   * the loading bar from it and puts the bar away when the mesh arrives.
+   */
+  docProgress: "bgpt:doc:progress",
   docMesh: "bgpt:doc:mesh",
   docApply: "bgpt:doc:apply",
   /**
@@ -1811,6 +1818,21 @@ export type ClipboardResponse = Result<{ clipboard: ClipboardInfo; state: Docume
  * Another schematic read onto the clipboard. `notes` says what the open
  * document's version renamed, restated or left out on the way in.
  */
+/**
+ * One step of a long piece of work on the document, for the loading bar.
+ *
+ * `done` of `total` within the phase; a phase with no steps of its own says
+ * `0` of `1`. `done` is the only other answer and means the work ended
+ * without a mesh for the window to wait for -- an open that failed.
+ */
+export type DocProgressPhase = "reading" | "decoding" | "lighting" | "meshing" | "sending";
+
+export interface DocProgress {
+  phase: DocProgressPhase | "done";
+  done: number;
+  total: number;
+}
+
 export type ImportResponse = Result<{
   clipboard: ClipboardInfo;
   notes: string[];
@@ -2618,6 +2640,8 @@ export interface BgptApi {
    * started it. `null` means it was closed.
    */
   onDocumentChanged(listener: (state: DocumentState | null) => void): () => void;
+  /** How far a long piece of work on the document has got; see `IPC.docProgress`. */
+  onDocProgress(listener: (progress: DocProgress) => void): () => void;
 
   /** What the MCP server is doing right now. */
   getMcpStatus(): Promise<McpStatus>;

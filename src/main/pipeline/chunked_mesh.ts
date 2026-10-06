@@ -373,6 +373,8 @@ export interface ChunkHint {
    * Changing it re-meshes no chunk: it is not part of `key`.
    */
   lod?: LodRequest | null;
+  /** Told after each chunk meshed; see `services/progress.ts`. */
+  progress?: { report(phase: "meshing", done: number, total: number): void } | null;
 }
 
 /** The bias that lets a chunk coordinate be negative inside a packed key. */
@@ -1015,7 +1017,10 @@ export async function buildChunkedMesh(
    * queued below rather than built here: on a field of statues it is half as
    * many faces again, and placing a block must cost what the block costs.
    */
+  const progress = hint?.progress ?? null;
+  let meshed = 0;
   for (const dirtyKey of dirty) {
+    progress?.report("meshing", meshed++, dirty.size);
     const layers = await meshChunk(dirtyKey, false);
     if (layers.solid.indices.length === 0 && layers.filler.indices.length === 0) {
       // An all-air chunk holds nothing; dropping it keeps the concatenation

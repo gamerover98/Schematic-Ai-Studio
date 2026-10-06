@@ -69,6 +69,7 @@ import { DYE_COLOURS } from "../pipeline/block_shapes.js";
 import { bannerBlockColor, bannerFormat, isBannerBlock } from "../../shared/banner_patterns.js";
 import { documentEra } from "../../shared/mc_versions.js";
 import { breathe } from "./breathing.js";
+import type { Progress } from "./progress.js";
 import {
   buildChunkedMesh,
   createChunkMeshCache,
@@ -791,6 +792,11 @@ export interface DocumentPreviewOptions {
    * the default -- is an edit's own build, which must not wait for one.
    */
   lodBudgetMs?: number;
+  /**
+   * Where the loading bar hears how far the build has got. Not part of any
+   * key: it changes nothing about what is built.
+   */
+  progress?: Progress | null;
 
   /*
    * Both are part of the mesh cache key, for the same reason the two tints
@@ -1037,6 +1043,7 @@ export async function buildDocumentPreview(
     meshCache.width + shift[0] <= doc.width &&
     meshCache.height + shift[1] <= doc.height &&
     meshCache.length + shift[2] <= doc.length;
+  options.progress?.report("lighting");
   let light: LightGrid | null = null;
   let changed: number[] | null = listed !== null && (sameGrid || grown) ? [...listed] : null;
   if (options.blockLight !== false) {
@@ -1107,6 +1114,7 @@ export async function buildDocumentPreview(
       key,
       epoch: taken.epoch,
       lod: options.lod ? { ...options.lod, budgetMs: options.lodBudgetMs ?? 0 } : null,
+      progress: options.progress ?? null,
     },
   );
   at = performance.now();

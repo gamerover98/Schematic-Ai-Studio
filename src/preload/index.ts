@@ -27,6 +27,7 @@ import {
   type CameraAimReply,
   type CameraAimRequest,
   type DocumentMeshResponse,
+  type DocProgress,
   type DocumentState,
   type DocumentStateResponse,
   type EditRequest,
@@ -275,6 +276,12 @@ const api: BgptApi = {
     const wrapped = (_event: unknown, payload: DocumentState | null) => listener(payload);
     ipcRenderer.on(IPC.docChanged, wrapped);
     return () => ipcRenderer.removeListener(IPC.docChanged, wrapped);
+  },
+
+  onDocProgress(listener) {
+    const wrapped = (_event: unknown, payload: DocProgress) => listener(payload);
+    ipcRenderer.on(IPC.docProgress, wrapped);
+    return () => ipcRenderer.removeListener(IPC.docProgress, wrapped);
   },
 
   /*

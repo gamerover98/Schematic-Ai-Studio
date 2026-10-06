@@ -60,6 +60,8 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { api, bridgeAvailable, forIpc, bridgeMissingMessage } from "./lib/bridge.svelte.js";
   import { diagnosing, recordEvent } from "./lib/frame_profiler.js";
   import { coalesce } from "./lib/coalesce.js";
+  import LoadingOverlay from "./lib/LoadingOverlay.svelte";
+  import { advance, loadVisible, SHOW_AFTER_MS, type LoadPhase, type LoadState } from "./lib/load_progress.js";
   import { glowPatterns, nextGlow, type GlowSlot } from "./lib/materials.js";
   import { isFileDrop, trackPageDrags } from "./lib/block_drag.js";
   import { applyTraceEvent } from "./lib/trace.js";
@@ -2170,6 +2172,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        */
       void refreshRecents();
     });
+    // How far main has got with a large schematic; `services/progress.ts`.
+    const unsubscribeProgress = api().onDocProgress((progress) => {
+      if (progress.phase === "done") endLoad();
+      else reportLoad(progress.phase, progress.done, progress.total);
+    });
     /*
      * The application menu, one subscription per verb.
      *
@@ -2216,6 +2223,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       unsubscribeStartup();
       unsubscribeTrace();
       unsubscribeDocument();
+      unsubscribeProgress();
       unsubscribeCamera();
       unsubscribeGlow();
       unsubscribeMcp();
@@ -3566,7 +3574,69 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     return out;
   }
 
+  /**
+   * The loading bar: what main says it is doing with a large schematic, and
+   * the window's own two phases either side -- reading, which main cannot
+   * report because the parse holds its thread, and drawing, which is here.
+   *
+   * Put away when a mesh lands, whatever the answer: that is the end of every
+   * long piece of work on the document, and main never says "done" about a
+   * build (`services/progress.ts`). Raw, because it is replaced whole.
+   */
+  let loading = $state.raw<LoadState | null>(null);
+  let loadingShown = $state(false);
+
+  function reportLoad(phase: LoadPhase, done = 0, total = 1): void {
+    loading = advance(loading, phase, done, total, performance.now());
+  }
+
+  function endLoad(): void {
+    loading = null;
+  }
+
+  // Drawn only once the work has run for a while, so a small schematic opens
+  // without the bar flashing up, and an ordinary edit never shows one.
+  $effect(() => {
+    const since = loading?.since;
+    if (since === undefined) {
+      loadingShown = false;
+      return;
+    }
+    const wait = SHOW_AFTER_MS - (performance.now() - since);
+    if (wait <= 0) {
+      loadingShown = true;
+      return;
+    }
+    const timer = setTimeout(() => (loadingShown = loadVisible(loading, performance.now())), wait);
+    return () => clearTimeout(timer);
+  });
+
+  /**
+   * Resolves once the browser has painted, so a label set before it is on
+   * screen before what follows takes the thread. A timer backs the frame up,
+   * because a window behind another draws no frames at all.
+   */
+  function nextPaint(): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, 100);
+      requestAnimationFrame(() =>
+        setTimeout(() => {
+          clearTimeout(timer);
+          resolve();
+        }),
+      );
+    });
+  }
+
   async function fetchDocumentMesh(): Promise<void> {
+    try {
+      await fetchDocumentMeshOnce();
+    } finally {
+      endLoad();
+    }
+  }
+
+  async function fetchDocumentMeshOnce(): Promise<void> {
     if (docState === null) {
       mesh = null;
       bounds = null;
@@ -3617,11 +3687,22 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       meshToken = null;
       return;
     }
+    /*
+     * Building the geometry of a whole large schematic holds this thread for a
+     * moment, so the bar says so first and is painted before it starts, then
+     * stays up until the scene has it.
+     */
+    const drawing = loadingShown && !response.mesh.partial;
+    if (drawing) {
+      reportLoad("drawing");
+      await nextPaint();
+    }
     mesh = response.mesh;
     bounds = { center: response.center, size: response.size };
     meshToken = response.mesh.token;
     heldAtlas = response.mesh.atlasVersion;
     heldAtlasLayout = response.mesh.atlasLayout;
+    if (drawing) await nextPaint();
   }
 
   /**
@@ -3815,6 +3896,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     // File menu all end up on this line.
     if (!(await mayDiscard("open"))) return;
     busy = true;
+    // Main cannot say it is reading -- the parse holds its thread -- so the
+    // window starts the bar, and main carries it on from decoding.
+    reportLoad("reading");
     try {
       const response = await api().openDocument(filePath);
       // Re-read either way: main adds the file on success and drops it on
@@ -3870,6 +3954,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     } catch (err) {
       failed(err, t("task.opening"));
     } finally {
+      // An open that failed brings no mesh to put the bar away.
+      endLoad();
       busy = false;
     }
   }
@@ -6069,6 +6155,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         legacyProfile={keyStatus?.legacyProfile ?? null}
         onrevealpath={(target) => void api().revealPath(target)}
       />
+    {/if}
+
+    {#if loading !== null && loadingShown}
+      <LoadingOverlay load={loading} />
     {/if}
 
     {#if dropActive}

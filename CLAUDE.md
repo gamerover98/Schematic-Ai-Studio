@@ -5636,6 +5636,37 @@ A step that throws does not stop the rest: up with less beats not up, and
 whatever failed will fail again where it is asked for, with a message about
 what it was.
 
+**Opening a large schematic shows a loading bar, and main reports to it
+without yielding.** A 384x72x384 terrain is 0.7 s of reading and 14 s of
+meshing, chunk after chunk, and the window used to sit through it saying
+nothing. `services/progress.ts` decides when to speak, and `IPC.docProgress`
+carries it: `openDocument` reports decoding, `buildDocumentPreview` lighting,
+`buildChunkedMesh` every chunk, `documentMesh` sending. The renderer's
+`lib/load_progress.ts` places each phase on the bar, weighted by where the
+time goes, and `LoadingOverlay` draws it over the viewport.
+
+- **The events cross while main is busy.** `webContents.send` hands the
+  message to the IPC thread, so a report from inside the mesh loop reaches the
+  window at once, verified in the app: 268 events over a 15 s build. Yielding
+  with `breathe` would also have worked, and would have let an MCP edit change
+  the voxels under the loop. The report is a plain call and must stay one.
+- **Silence is the default.** Main says nothing about work under 150 ms, and
+  the window waits until 300 ms after it first heard. Every edit is a mesh
+  build, and none of them sends anything.
+- **Main never says "done" about a build.** The mesh is still being cloned
+  across when `documentMesh` returns, so the window takes the bar down when
+  the answer lands (`fetchDocumentMesh`'s `finally`). Only an open that fails
+  sends `done`, because no mesh follows it.
+- **The window owns both ends.** The read is a synchronous parse, so main
+  cannot report during it and the window starts the bar itself. Applying the
+  mesh holds the renderer for about 1.5 s on that terrain, so a full payload
+  first shows "Drawing" and waits a paint.
+- **The bar never goes back.** Opening is two operations in main, and the
+  second starts its own count, so `advance` keeps the furthest point.
+
+A CDP `Page.captureScreenshot` taken during the build waits for main and
+returns the frame after it. To see the bar, capture the screen instead.
+
 **Block geometry is hand-described in `pipeline/block_shapes.ts`, not loaded.**
 The Python original only ever produced full cubes — its model-driven path was
 dead code (DEV-008) — so stairs, fences and slabs all rendered as solid blocks.

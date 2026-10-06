@@ -327,6 +327,14 @@ export const en = {
   "viewport.dropTypes": ".schem, .schematic, .litematic or .mcfunction",
   "viewport.dropImport": "Hold Shift to import it into this schematic instead",
 
+  "loading.announce": "Loading the schematic",
+  "loading.reading": "Reading the file",
+  "loading.decoding": "Decoding blocks",
+  "loading.lighting": "Lighting",
+  "loading.meshing": "Building the model",
+  "loading.sending": "Sending to the viewport",
+  "loading.drawing": "Drawing",
+
   "doc.new": "New…",
   "doc.open": "Open…",
   "doc.undo": "Undo",

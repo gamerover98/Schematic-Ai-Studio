@@ -1196,5 +1196,42 @@ console.log("\n--- levels of detail ---");
   check("one against the wall carries the corner shading the ground there has", shaded);
 }
 
+// --- the loading bar is told, and changes nothing ---------------------------
+//
+// A large schematic reports each chunk as it is meshed, for the loading bar.
+// The reporting must be a bystander: the same geometry with or without it,
+// and one report per chunk meshed, counting up to the number there are.
+console.log("\n--- progress while meshing ---");
+{
+  const doc = seeded();
+  const plain = await fromScratch(doc);
+  const reports: { done: number; total: number }[] = [];
+  const structure = toStructureData(doc);
+  const atlas = buildAtlas(baker.textures);
+  const told = await buildChunkedMesh(structure, baker, atlas.uvRects, 1, createChunkMeshCache(), null, null, null, null, null, {
+    frame: [0, 0, 0],
+    changed: null,
+    progress: { report: (_phase, done, total) => void reports.push({ done, total }) },
+  });
+  equal(
+    "a build that reports meshes exactly what one that does not would",
+    told.pieces.map(fingerprint),
+    plain.pieces.map(fingerprint),
+  );
+  const total = reports[0]?.total ?? 0;
+  check("it reports every chunk it meshes", reports.length === total && total >= told.pieces.length, `${reports.length} of ${total}`);
+  check(
+    "...counting up, one at a time, from nothing",
+    reports.every((report, index) => report.done === index && report.total === total),
+  );
+  const again: number[] = [];
+  await buildChunkedMesh(structure, baker, atlas.uvRects, 1, told.cache, null, null, null, null, null, {
+    frame: [0, 0, 0],
+    changed: [],
+    progress: { report: (_phase, done) => void again.push(done) },
+  });
+  equal("...and an edit that touched nothing reports nothing", again.length, 0);
+}
+
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);
 process.exitCode = failures === 0 ? 0 : 1;

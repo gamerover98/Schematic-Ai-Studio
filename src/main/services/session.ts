@@ -109,6 +109,7 @@ import {
   type AtlasSource,
   type DocumentPreviewOptions,
 } from "./preview.js";
+import { PROGRESS_QUIET_MS, startProgress } from "./progress.js";
 import type { ChunkMeshCache } from "../pipeline/chunked_mesh.js";
 import { legacyBlockNames, saveDocument, type WriteResult } from "./writers.js";
 import { cropToContent, type CropSummary } from "../domain/crop.js";
@@ -308,9 +309,27 @@ export async function openDocument(
   filePath: string,
   options: OpenOptions = {},
 ): Promise<DocumentSession> {
-  const loaded = await loadStructure(filePath, {
-    legacyBlocksPath: options.legacyBlocksPath ?? null,
-  });
+  /*
+   * Reading says so only once it has taken a while, and a failure takes the
+   * bar back down. Success leaves it up: the window asks for the mesh next,
+   * and puts the bar away when that arrives.
+   */
+  const progress = startProgress();
+  // Reading is file I/O, so a timer gets a turn during it -- which is the only
+  // way a phase with no steps of its own can say it is under way.
+  const reading = setTimeout(() => progress.report("reading"), PROGRESS_QUIET_MS);
+  let loaded: Awaited<ReturnType<typeof loadStructure>>;
+  try {
+    loaded = await loadStructure(filePath, {
+      legacyBlocksPath: options.legacyBlocksPath ?? null,
+    });
+  } catch (err) {
+    progress.abandon();
+    throw err;
+  } finally {
+    clearTimeout(reading);
+  }
+  progress.report("decoding");
   /*
    * A `.mcfunction` is read but never *becomes* the document's format: it has
    * no metadata, no anchor tag, no DataVersion and no NBT root. So the document
@@ -3306,14 +3325,18 @@ export async function documentMesh(
      */
     const from = session.meshCache;
     session.meshCache = undefined;
+    // The window puts the bar away when this answer arrives, so nothing here
+    // says "done": the last word is "sending", and the clone is what follows.
+    const progress = startProgress();
     const built = await buildDocumentPreview(
       session.doc,
       // An edit's own build spends nothing on queued levels; asking again with
       // nothing changed -- which is what the window does while some are
       // queued -- spends a slice. See `LodRequest.budgetMs`.
-      { ...options, lodBudgetMs: same ? LOD_SLICE_MS : 0 },
+      { ...options, lodBudgetMs: same ? LOD_SLICE_MS : 0, progress },
       from,
     );
+    progress.report("sending");
     timings = built.timings;
     session.meshCache = built.meshCache;
     meshSerial += 1;
