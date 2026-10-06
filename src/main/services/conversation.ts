@@ -37,7 +37,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import path from "path";
 
 import type { ChatEntry, ChatState, ConversationList } from "../../shared/ipc.js";
-import { removeCheckpoints } from "./checkpoints.js";
+import { copyCheckpoint, removeCheckpoints } from "./checkpoints.js";
 import { pathsMatch } from "./recent_documents.js";
 import { rememberedFromIndex } from "./conversation_core.js";
 import {
@@ -492,6 +492,90 @@ export async function adoptSubject(filePath: string | null): Promise<void> {
     return;
   }
   await loadFor(filePath);
+}
+
+/**
+ * Takes a schematic's conversations to another path, and the chat on screen
+ * with them when it is about that schematic.
+ *
+ * `move` is a rename: the record is rewritten under the new path's name --
+ * `coerceRecord` refuses one whose `filePath` names another file -- and the
+ * old one is removed. `copy` is Save As, by the user's choice: the new file
+ * gets every conversation and the old one keeps its own, so each copy's
+ * checkpoints are copied too, or deleting a conversation in one file would
+ * delete the other's.
+ *
+ * Merged with whatever was already recorded for the destination, and pruned
+ * to the usual cap. The live conversation carries on under the same id in
+ * the new file. This is not `adoptSubject`, which saves the chat under the
+ * old path and *loads* the new one -- that is how Save As used to leave the
+ * chat behind.
+ */
+export async function carryConversations(from: string, to: string, mode: "move" | "copy"): Promise<void> {
+  const live = current.subject !== null && pathsMatch(current.subject, from, caseSensitive);
+  if (live) await saveConversation();
+  const source = await readRecord(from);
+  const target = await readRecord(to);
+  if (source === null) {
+    if (live) current.subject = to;
+    return;
+  }
+  const incoming = new Set(source.conversations.map((one) => one.id));
+  const others = (target?.conversations ?? []).filter((one) => !incoming.has(one.id));
+  let kept = pruneConversations([...source.conversations, ...others]);
+  const keptIds = new Set(kept.map((one) => one.id));
+  // What fell off the destination's end is gone from everywhere.
+  const dropped = others.filter((one) => !keptIds.has(one.id));
+  if (dropped.length > 0) await removeCheckpoints(dropped.flatMap((one) => checkpointsIn(one.entries)));
+  if (mode === "copy") {
+    kept = await Promise.all(
+      kept.map(async (one) => (incoming.has(one.id) ? await withOwnCheckpoints(one) : one)),
+    );
+  }
+  const project = { ...target?.project, ...source.project };
+  const record: ConversationRecord = {
+    version: CONVERSATION_FORMAT,
+    filePath: to,
+    conversations: kept,
+    ...(Object.keys(project).length > 0 ? { project } : {}),
+  };
+  const file = fileFor(to);
+  if (file === null) return;
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify(record), "utf8");
+  if (mode === "move") {
+    const old = fileFor(from);
+    if (old !== null && old !== file) await rm(old, { force: true });
+  }
+  if (!live) return;
+  current.subject = to;
+  // The copy's checkpoints are new ids, and the chat on screen has to offer
+  // those: going back to a checkpoint of the old file's would work until the
+  // old file pruned it.
+  const mine = kept.find((one) => one.id === current.id);
+  if (mine !== undefined) current.entries = [...mine.entries];
+}
+
+/** A conversation with a copy of every checkpoint it points at. */
+async function withOwnCheckpoints(one: StoredConversation): Promise<StoredConversation> {
+  const copies = new Map<string, string | null>();
+  const entries: ChatEntry[] = [];
+  for (const entry of one.entries) {
+    if (typeof entry.checkpoint !== "string") {
+      entries.push(entry);
+      continue;
+    }
+    if (!copies.has(entry.checkpoint)) copies.set(entry.checkpoint, await copyCheckpoint(entry.checkpoint));
+    const copy = copies.get(entry.checkpoint) ?? null;
+    if (copy !== null) {
+      entries.push({ ...entry, checkpoint: copy });
+    } else {
+      // Gone already: the button would only fail.
+      const { checkpoint: _gone, ...rest } = entry;
+      entries.push(rest);
+    }
+  }
+  return { ...one, entries };
 }
 
 /**

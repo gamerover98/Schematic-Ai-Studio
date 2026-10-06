@@ -61,7 +61,7 @@ export function gridCentre(size: BoxSize | null): { x: number; z: number } {
  * framing the same build two different ways would be the first thing anybody
  * comparing a screenshot with the window noticed.
  */
-export { documentFraming } from "../../../shared/camera_aim.js";
+export { documentFraming, framingReach } from "../../../shared/camera_aim.js";
 
 /**
  * The viewport's vertical field of view, in degrees.

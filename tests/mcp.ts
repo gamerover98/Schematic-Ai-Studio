@@ -76,10 +76,13 @@ import { paletteEntryCacheKey } from "../src/main/pipeline/types.js";
 import {
   applyEdit,
   closeDocument,
+  currentClipboard,
   currentSession,
   newDocument,
   undoEdit,
 } from "../src/main/services/session.js";
+import { copyRegions } from "../src/main/domain/clipboard.js";
+import { createDocument } from "../src/main/domain/document.js";
 import type { DocumentSession } from "../src/main/services/session.js";
 import { heightField, normalizeHeightField } from "../src/shared/terrain.js";
 
@@ -158,6 +161,28 @@ function fakeLifecycle(over: Partial<Lifecycle> & { log?: string[] } = {}): Life
         degraded: [],
     dropped: [],
         cropped: null,
+      };
+    },
+    rename: async (session, name) => {
+      log.push(`rename:${name}`);
+      const from = session.doc.filePath ?? "";
+      const to = path.join(path.dirname(from), `${name}${path.extname(from)}`);
+      session.doc.filePath = to;
+      return { from, to };
+    },
+    /*
+     * A two-block row of stone, whatever the file. The conversion is
+     * `readImport`'s and `tests/session.ts` drives it against real files;
+     * what is under test here is the tool around it.
+     */
+    readImport: async (_session, filePath) => {
+      log.push(`import:${filePath}`);
+      const row = createDocument({ width: 2, height: 1, length: 1, format: "sponge3", dataVersion: null });
+      setBlock(row, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+      setBlock(row, 1, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+      return {
+        clipboard: copyRegions(row, [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 0, maxZ: 0 }]),
+        notes: ["2 renamed."],
       };
     },
     close: () => {
@@ -1153,6 +1178,73 @@ try {
       raised !== null && raised.includes("save_document_as"),
       String(raised),
     );
+
+    // Renaming needs a file, and keeps to the root like every other verb
+    // that touches one. The rename itself is `document_move.ts`'s, and
+    // `tests/services.ts` drives it against real files.
+    let unsavedRename: string | null = null;
+    try {
+      await callTool("rename_document", { name: "castle" }, options(sink));
+    } catch (err) {
+      unsavedRename = err instanceof Error ? err.message : String(err);
+    }
+    check(
+      "renaming an unsaved document points at save_document_as",
+      unsavedRename !== null && unsavedRename.includes("save_document_as"),
+      String(unsavedRename),
+    );
+    const renaming = currentSession();
+    if (renaming !== null) renaming.doc.filePath = abs("elsewhere", "x.schem");
+    let outside: string | null = null;
+    try {
+      await callTool("rename_document", { name: "castle" }, options(sink));
+    } catch (err) {
+      outside = err instanceof Error ? err.message : String(err);
+    }
+    check("a file outside the root is not renamed", outside !== null && outside.includes("outside"), String(outside));
+    if (renaming !== null) renaming.doc.filePath = abs("builds", "x.schem");
+    const renamed = (await callTool("rename_document", { name: "castle" }, options(sink))).result as {
+      from: string;
+      filePath: string;
+    };
+    equal("rename_document answers where the file is now", renamed.filePath, abs("builds", "castle.schem"));
+
+    // Importing stamps another file in at a corner, grows to hold it, and
+    // leaves the user's clipboard alone -- and reads only under the root.
+    open();
+    const clipboardBefore = currentClipboard();
+    const importLog: string[] = [];
+    let importOutside: string | null = null;
+    try {
+      await callTool(
+        "import_schematic",
+        { path: abs("elsewhere", "tower.schem"), x: 0, y: 0, z: 0 },
+        { ...options(sink), lifecycle: fakeLifecycle({ log: importLog }) },
+      );
+    } catch (err) {
+      importOutside = err instanceof Error ? err.message : String(err);
+    }
+    check(
+      "a file outside the root is not imported",
+      importOutside !== null && importOutside.includes("outside") && importLog.length === 0,
+      String(importOutside),
+    );
+    const stamped = (
+      await callTool(
+        "import_schematic",
+        { path: abs("builds", "tower.schem"), x: 7, y: 0, z: 0 },
+        { ...options(sink), lifecycle: fakeLifecycle({ log: importLog }) },
+      )
+    ).result as { changed: number; size: number[]; notes: string[] };
+    equal("import_schematic writes every block it read", stamped.changed, 2);
+    equal("...growing the schematic to hold them", stamped.size, [9, 8, 8]);
+    equal("...and says what the conversion did", stamped.notes, ["2 renamed."]);
+    equal(
+      "...at the corner it was given",
+      getBlock(currentSession()!.doc, 8, 0, 0).namespacedName,
+      "minecraft:stone",
+    );
+    check("...and the user's clipboard is left as it was", currentClipboard() === clipboardBefore);
 
     // A block tool with nothing open is a refusal, not a crash -- and it names
     // the way forward.

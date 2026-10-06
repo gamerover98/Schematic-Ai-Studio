@@ -399,6 +399,12 @@ export function coerceSettings(raw: unknown): Settings {
     version: typeof source.version === "string" ? source.version : DEFAULT_SETTINGS.version,
     exportType: source.exportType === "mcfunction" ? "mcfunction" : "schem",
     outputDir: typeof source.outputDir === "string" ? source.outputDir : DEFAULT_SETTINGS.outputDir,
+    // A path or nothing: an empty string would be a pack nobody chose, opened
+    // as the working directory.
+    resourcePack:
+      typeof source.resourcePack === "string" && source.resourcePack.trim() !== ""
+        ? source.resourcePack
+        : null,
     preview,
     ui,
     mcp,

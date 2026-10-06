@@ -71,6 +71,7 @@ import {
   currentSession,
   newDocument,
   openDocument,
+  readImport,
   saveSession,
 } from "../services/session.js";
 import { listSnapshots, readSnapshot, takeSnapshot } from "../services/snapshots.js";
@@ -85,7 +86,8 @@ import {
   getSettings,
   setMcpToken,
 } from "../services/settings-store.js";
-import { rememberDocument } from "../menu.js";
+import { rememberDocument, rememberRenamed } from "../menu.js";
+import { carryDocumentStores, renameDocumentFile } from "../services/document_move.js";
 import { type Lifecycle } from "./lifecycle.js";
 
 /** How many calls the activity log remembers. */
@@ -279,6 +281,7 @@ function lifecycleHost(): Lifecycle {
       return session;
     },
     save: async (session, options) => {
+      const before = session.doc.filePath;
       const result = await saveSession(session, {
         filePath: options.filePath,
         format: options.format,
@@ -289,6 +292,9 @@ function lifecycleHost(): Lifecycle {
           : { dataVersion: dataVersionOf(options.version) }),
         legacyBlocksPath: legacyBlocksPath(),
       });
+      // The window's Save As does the same: the new file gets a copy of the
+      // chats, the versions and the hotbar, and the old file keeps its own.
+      if (before !== null) await carryDocumentStores(before, result.filePath, "copy");
       await adoptSubject(result.filePath);
       // `create_document` then `save_document_as` is how a client makes a
       // schematic, and a file it made was never opened: without this it never
@@ -296,6 +302,16 @@ function lifecycleHost(): Lifecycle {
       await rememberDocument(result.filePath);
       return result;
     },
+    rename: async (session, name) => {
+      const moved = await renameDocumentFile(session, name);
+      if (moved.from !== moved.to) await rememberRenamed(moved.from, moved.to);
+      return moved;
+    },
+    readImport: async (session, filePath) =>
+      await readImport(session, filePath, {
+        legacyBlocksPath: legacyBlocksPath(),
+        allowedBlocks: (await host?.allowedBlocks()) ?? null,
+      }),
     close: closeDocument,
     recents: async () =>
       (await getRecentDocuments()).map((entry) => ({

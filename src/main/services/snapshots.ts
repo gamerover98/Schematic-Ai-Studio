@@ -32,7 +32,7 @@
  * follow.
  */
 
-import { mkdir, readFile, rm, writeFile } from "fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "fs/promises";
 import path from "path";
 
 import {
@@ -48,6 +48,8 @@ import type { DocumentSession } from "./session.js";
 import {
   addSnapshot,
   coerceSnapshots,
+  MAX_SNAPSHOTS,
+  order,
   removeSnapshot,
   snapshotId,
   snapshotLabel,
@@ -179,6 +181,42 @@ export async function readSnapshot(
   } catch {
     return null;
   }
+}
+
+/**
+ * Takes a schematic's versions to another path: all of them for a rename
+ * (`move`), or a copy each for Save As, which leaves the old file its own.
+ *
+ * Merged with whatever the destination already had, newest first, to the
+ * usual cap -- a record left at that path by an earlier file is history too,
+ * and the cap is what keeps the two from growing past what the panel shows.
+ */
+export async function carrySnapshots(
+  from: string,
+  to: string,
+  mode: "move" | "copy",
+): Promise<void> {
+  const fromFolder = folderFor(from);
+  const toFolder = folderFor(to);
+  if (fromFolder === null || toFolder === null || fromFolder === toFolder) return;
+  const incoming = await readIndex(from);
+  if (incoming.length > 0) {
+    await mkdir(toFolder, { recursive: true });
+    const carried: Snapshot[] = [];
+    for (const entry of incoming) {
+      try {
+        await copyFile(path.join(fromFolder, `${entry.id}.schem`), path.join(toFolder, `${entry.id}.schem`));
+        carried.push(entry);
+      } catch {
+        // A row whose file has gone restores nothing; it is not carried.
+      }
+    }
+    const existing = (await readIndex(to)).filter((one) => !carried.some((two) => two.id === one.id));
+    const all = order([...carried, ...existing]);
+    await writeIndex(to, all.slice(0, MAX_SNAPSHOTS));
+    await removeFiles(to, all.slice(MAX_SNAPSHOTS).map((entry) => entry.id));
+  }
+  if (mode === "move") await rm(fromFolder, { recursive: true, force: true });
 }
 
 /** Throws one away for good, file and row together. */

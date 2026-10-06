@@ -82,7 +82,7 @@ export { NotSquareError, type RegionTransform };
 import { loadStructure } from "../pipeline/loader.js";
 import type { PaletteEntry } from "../pipeline/types.js";
 import { matchesBlockPattern, paletteEntryCacheKey } from "../pipeline/types.js";
-import { parsePaletteEntry } from "../pipeline/loader_formats.js";
+import { loadLegacyBlockTable, parsePaletteEntry } from "../pipeline/loader_formats.js";
 import { resolveEmptySpaceWith } from "../domain/connect.js";
 import {
   hasProperty,
@@ -95,7 +95,7 @@ import { FACING_STEP, twoPartFamily } from "../../shared/two_part.js";
 import { standsOn, type SupportBelow } from "../../shared/block_support.js";
 import { coversFace } from "../pipeline/block_shapes.js";
 import { normaliseVoidBlock, voidSources } from "../../shared/settings.js";
-import { mcVersion, refusalFor } from "../../shared/mc_versions.js";
+import { documentVersionName, eraOf, mcVersion, refusalFor } from "../../shared/mc_versions.js";
 import {
   blockExistsIn,
   propertyExistsIn,
@@ -109,8 +109,9 @@ import {
   type AtlasSource,
   type DocumentPreviewOptions,
 } from "./preview.js";
+import { PROGRESS_QUIET_MS, startProgress } from "./progress.js";
 import type { ChunkMeshCache } from "../pipeline/chunked_mesh.js";
-import { saveDocument, type WriteResult } from "./writers.js";
+import { legacyBlockNames, saveDocument, type WriteResult } from "./writers.js";
 import { cropToContent, type CropSummary } from "../domain/crop.js";
 import {
   extentVolume,
@@ -308,9 +309,27 @@ export async function openDocument(
   filePath: string,
   options: OpenOptions = {},
 ): Promise<DocumentSession> {
-  const loaded = await loadStructure(filePath, {
-    legacyBlocksPath: options.legacyBlocksPath ?? null,
-  });
+  /*
+   * Reading says so only once it has taken a while, and a failure takes the
+   * bar back down. Success leaves it up: the window asks for the mesh next,
+   * and puts the bar away when that arrives.
+   */
+  const progress = startProgress();
+  // Reading is file I/O, so a timer gets a turn during it -- which is the only
+  // way a phase with no steps of its own can say it is under way.
+  const reading = setTimeout(() => progress.report("reading"), PROGRESS_QUIET_MS);
+  let loaded: Awaited<ReturnType<typeof loadStructure>>;
+  try {
+    loaded = await loadStructure(filePath, {
+      legacyBlocksPath: options.legacyBlocksPath ?? null,
+    });
+  } catch (err) {
+    progress.abandon();
+    throw err;
+  } finally {
+    clearTimeout(reading);
+  }
+  progress.report("decoding");
   /*
    * A `.mcfunction` is read but never *becomes* the document's format: it has
    * no metadata, no anchor tag, no DataVersion and no NBT root. So the document
@@ -800,31 +819,78 @@ function hangingVineTarget(
   return { x: clicked.x, y, z: clicked.z, against: "down" };
 }
 
+/**
+ * Where a slab placed by hand becomes a double slab, or `null` when it does not.
+ *
+ * Vanilla's `SlabBlock.canBeReplaced` and `getStateForPlacement`, in their two
+ * halves:
+ *
+ * - **the slab that was clicked**, one step back along `against`. A bottom slab
+ *   takes a click on its top, or on a side in its upper half; a top slab takes
+ *   a click on its underside, or on a side in its lower half;
+ * - **the cell the block would go in**, when that already holds the same slab.
+ *   Vanilla merges there whichever half the new one would have been, because
+ *   `canBeReplaced` answers `true` for a slab that was not the block clicked.
+ *
+ * Same name, never a different material: a stone slab on an oak slab is two
+ * slabs. The double slab keeps the existing one's other properties, so a
+ * waterlogged slab stays waterlogged, as in the game.
+ *
+ * **This rejected every merge from the hand for as long as it existed.** It
+ * required the held slab's `type` to differ from the one wanted, and
+ * `orientPlacement` gives a slab clicked onto a top face `type=bottom` -- which
+ * is exactly the wanted half. The check that should have caught it built the
+ * request by hand, with no `type`, and passed.
+ *
+ * Which half of a *side* was clicked is `upperHalf`, sent by the renderer from
+ * `placedInUpperHalf`; without it, the held slab's own `type` says the same
+ * thing, because that is where `orientPlacement` got it.
+ */
 function doubleSlabTarget(
   doc: SchematicDocument,
-  request: { x: number; y: number; z: number; against?: string },
+  request: { x: number; y: number; z: number; against?: string; upperHalf?: boolean },
   entry: PaletteEntry,
 ): { x: number; y: number; z: number; entry: PaletteEntry } | null {
   if (!entry.namespacedName.endsWith("_slab")) return null;
-  const below = request.against === "up";
-  if (!below && request.against !== "down") return null;
-
-  const y = below ? request.y - 1 : request.y + 1;
-  const existing = getBlock(doc, request.x, y, request.z);
-  if (existing.namespacedName !== entry.namespacedName) return null;
-
-  // The clicked slab must be the half nearest the click: a bottom slab clicked
-  // on its top, or a top slab clicked on its underside.
-  const wanted = below ? "bottom" : "top";
-  if ((existing.properties.type ?? "bottom") !== wanted) return null;
-  if ((entry.properties.type ?? "bottom") === wanted) return null;
-
-  return {
-    x: request.x,
-    y,
-    z: request.z,
+  const inside = (at: { x: number; y: number; z: number }): boolean =>
+    at.x >= 0 && at.y >= 0 && at.z >= 0 && at.x < doc.width && at.y < doc.height && at.z < doc.length;
+  const doubled = (
+    at: { x: number; y: number; z: number },
+    existing: PaletteEntry,
+  ): { x: number; y: number; z: number; entry: PaletteEntry } => ({
+    x: at.x,
+    y: at.y,
+    z: at.z,
     entry: { ...existing, properties: { ...existing.properties, type: "double" } },
-  };
+  });
+
+  const clicked = clickedCell(request);
+  if (clicked !== null && inside(clicked)) {
+    const existing = getBlock(doc, clicked.x, clicked.y, clicked.z);
+    if (existing.namespacedName === entry.namespacedName) {
+      const type = existing.properties.type ?? "bottom";
+      const side = request.against !== "up" && request.against !== "down";
+      const upper = request.upperHalf ?? entry.properties.type === "top";
+      const takes =
+        type === "bottom"
+          ? request.against === "up" || (side && upper)
+          : type === "top"
+            ? request.against === "down" || (side && !upper)
+            : false;
+      if (takes) return doubled(clicked, existing);
+    }
+  }
+
+  if (inside(request)) {
+    const there = getBlock(doc, request.x, request.y, request.z);
+    if (
+      there.namespacedName === entry.namespacedName &&
+      (there.properties.type ?? "bottom") !== "double"
+    ) {
+      return doubled(request, there);
+    }
+  }
+  return null;
 }
 
 /**
@@ -1269,7 +1335,25 @@ export function applyEdit(
      * the moment the redirect landed.
      */
     const held = toEntry(request.block);
-    const clicked = emptiness(held) ? null : clickedCell(request);
+    /*
+     * **A cell outside the document was not clicked.** The build grid is a
+     * floor and sends `against: "up"` with nothing under it, and `getBlock`
+     * answers air outside the box -- which is replaceable. So every block put
+     * on the grid at the floor was redirected one cell *down*, out of the box:
+     * the document grew below the origin, the content moved up, and the block
+     * landed under the floor it had been placed on.
+     */
+    const stepped = emptiness(held) ? null : clickedCell(request);
+    const clicked =
+      stepped !== null &&
+      stepped.x >= 0 &&
+      stepped.y >= 0 &&
+      stepped.z >= 0 &&
+      stepped.x < doc.width &&
+      stepped.y < doc.height &&
+      stepped.z < doc.length
+        ? stepped
+        : null;
     // Ahead of the redirect, which would otherwise write a vine over the vine.
     const hanging = emptiness(held) ? null : hangingVineTarget(doc, request, held);
     const target =
@@ -1287,6 +1371,33 @@ export function applyEdit(
      */
     const layers = layersOf(request.block);
     if (layers !== null) checkBannerPatterns(doc, entry, layers);
+
+    /*
+     * Two slabs meeting in one cell are one double slab.
+     *
+     * In the game a slab placed against the top of a matching bottom slab does
+     * not go in the cell above -- it fills the one that is already there, and
+     * the pair becomes a single full block. Without this the editor stacked
+     * them, which is a shape the game cannot hold and a file the game will not
+     * paste back the way it looks here.
+     *
+     * `against` is the only thing the renderer can contribute: `x/y/z` is the
+     * empty cell the click landed in, and the mesh has no per-block identity,
+     * so neither side can find the clicked slab on its own. `upperHalf` is the
+     * other half of a side click, and the rules are `doubleSlabTarget`'s.
+     *
+     * **Ahead of the refusal below.** One of vanilla's two cases is a slab
+     * already standing in the cell the block would go in, and a slab is not
+     * replaceable -- so placed after it, that case would be refused before it
+     * was ever asked. Ahead of the growth too: the merged cell is always one the
+     * document already has.
+     */
+    const merged = doubleSlabTarget(doc, target, entry);
+    if (merged !== null) {
+      return runTransaction(doc, history, `Place ${entry.namespacedName}`, (tx) =>
+        tx.setBlock(merged.x, merged.y, merged.z, merged.entry) ? 1 : 0,
+      );
+    }
 
     /*
      * **The refusal**, and three boundaries on it.
@@ -1320,25 +1431,6 @@ export function applyEdit(
     }
 
     /*
-     * Two slabs meeting in one cell are one double slab.
-     *
-     * In the game a slab placed against the top of a matching bottom slab does
-     * not go in the cell above -- it fills the one that is already there, and
-     * the pair becomes a single full block. Without this the editor stacked
-     * them, which is a shape the game cannot hold and a file the game will not
-     * paste back the way it looks here.
-     *
-     * `against` is the only thing the renderer can contribute: `x/y/z` is the
-     * empty cell the click landed in, and the mesh has no per-block identity,
-     * so neither side can find the clicked slab on its own.
-     *
-     * Vertical faces only. The game also merges when you click the upper half
-     * of a slab's *side*, and that needs where on the face the cursor was --
-     * `placedInUpperHalf`'s question, which does not travel. Left out rather
-     * than guessed: merging on a side click that meant "place beside it" would
-     * destroy the slab already there.
-     */
-    /*
      * Redstone dust is refused in mid-air and on a pond.
      *
      * Silently, and only here. Silently because that is already what this
@@ -1357,12 +1449,6 @@ export function applyEdit(
       return 0;
     }
 
-    const merged = doubleSlabTarget(doc, target, entry);
-    if (merged !== null) {
-      return runTransaction(doc, history, `Place ${entry.namespacedName}`, (tx) =>
-        tx.setBlock(merged.x, merged.y, merged.z, merged.entry) ? 1 : 0,
-      );
-    }
     /*
      * A bed is two blocks, a door is two blocks, and both were being placed as
      * one.
@@ -2505,6 +2591,138 @@ export function cutSelection(
   return clipboard;
 }
 
+export class ImportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ImportError";
+  }
+}
+
+export interface ImportResult {
+  readonly clipboard: Clipboard;
+  /** What changed on the way in, one sentence each: nothing is dropped silently. */
+  readonly notes: readonly string[];
+}
+
+/**
+ * Reads another schematic onto the clipboard, as the open document's version
+ * would hold it -- the import is a stamp, so from here it is a paste.
+ *
+ * Loaded the way `convert.ts` loads, so a file imports exactly as it would
+ * open. Then it is put into the open document's version by
+ * `setDocumentVersion` itself, on a session of its own that nobody sees:
+ * rename, restate, drop, in that order and for that function's reasons. A
+ * 1.20 build stamped into a 1.12.2 schematic would otherwise carry names the
+ * file cannot be saved with, and the failure would arrive at Ctrl+S, a long
+ * way from the import that caused it. What a backport drops becomes **air**,
+ * not the open document's empty space, because a paste writes nothing for air
+ * and a dropped block should leave the ground under it alone.
+ *
+ * The temporary document takes the open one's container, because that is the
+ * pair `refusalFor` judges: a Sponge file going into an MCEdit document is
+ * not refused, it is converted.
+ *
+ * Entities are not carried, because a clipboard carries none; the count is
+ * said rather than left out. Block entities come along with their cells.
+ */
+export async function importToClipboard(
+  session: DocumentSession,
+  filePath: string,
+  options: ImportOptions = {},
+): Promise<ImportResult> {
+  const result = await readImport(session, filePath, options);
+  clipboard = result.clipboard;
+  return result;
+}
+
+export interface ImportOptions {
+  readonly legacyBlocksPath?: string | null;
+  /** The block list; `null` asks only the version. */
+  readonly allowedBlocks?: ReadonlySet<string> | null;
+}
+
+/**
+ * `importToClipboard` without touching the clipboard, for a caller that pastes
+ * at once -- `import_schematic` over MCP. The clipboard is the user's, and a
+ * tool that stamped a file in should not leave their last copy replaced by it.
+ */
+export async function readImport(
+  session: DocumentSession,
+  filePath: string,
+  options: ImportOptions = {},
+): Promise<ImportResult> {
+  const legacyBlocksPath = options.legacyBlocksPath ?? null;
+  const loaded = await loadStructure(filePath, { legacyBlocksPath });
+  const imported = documentFromLoaded(loaded, null);
+  imported.format = session.doc.format;
+  const notes: string[] = [...(loaded.notes ?? [])];
+
+  const target = documentVersionName(session.doc.format, session.doc.dataVersion);
+  const legacy = target !== null && eraOf(target) === "legacy";
+  const legacyNames =
+    legacy && legacyBlocksPath !== null
+      ? legacyBlockNames(await loadLegacyBlockTable(legacyBlocksPath))
+      : null;
+  const scratch: DocumentSession = {
+    doc: imported,
+    history: createHistory(),
+    mesh: null,
+    voidBlock: "",
+  };
+  if (target !== null) {
+    const changed = setDocumentVersion(scratch, target, {
+      dropUnrepresentable: true,
+      placeableNames: legacyNames,
+    });
+    if (changed.notes !== "") notes.push(changed.notes);
+  }
+
+  /*
+   * What the version left that this app still cannot place. After the step
+   * above that is normally nothing -- the registry and the block list are one
+   * set -- so this is the net under it rather than a second rule.
+   */
+  const allowed = options.allowedBlocks ?? null;
+  const AIR: PaletteEntry = { namespacedName: "minecraft:air", properties: {} };
+  const refused = new Set<string>();
+  for (const entry of imported.palette) {
+    const name = entry.namespacedName;
+    if (name === AIR.namespacedName) continue;
+    if ((allowed !== null && !allowed.has(name)) || (legacyNames !== null && !legacyNames.has(name))) {
+      refused.add(paletteEntryCacheKey(entry));
+    }
+  }
+  /*
+   * Counted in cells, and only cells decide: the palette is append-only, so the
+   * entries a backport just emptied are still in it, holding nothing.
+   */
+  let cells = 0;
+  if (refused.size > 0) {
+    for (const [key, count] of paletteHistogram(imported)) if (refused.has(key)) cells += count;
+  }
+  if (cells > 0) {
+    runTransaction(imported, scratch.history, "Drop what cannot be placed", (tx) =>
+      tx.remap(
+        { minX: 0, minY: 0, minZ: 0, maxX: imported.width - 1, maxY: imported.height - 1, maxZ: imported.length - 1 },
+        (entry) => (refused.has(paletteEntryCacheKey(entry)) ? AIR : null),
+      ),
+    );
+    notes.push(`${cells.toLocaleString()} block(s) this app cannot place were left out.`);
+  }
+
+  if (imported.entities.length > 0) {
+    notes.push(`${imported.entities.length.toLocaleString()} entit(ies) not imported: a stamp carries blocks only.`);
+  }
+
+  const held = copyRegions(imported, [
+    { minX: 0, minY: 0, minZ: 0, maxX: imported.width - 1, maxY: imported.height - 1, maxZ: imported.length - 1 },
+  ]);
+  if (held.blocks === 0) {
+    throw new ImportError(`${path.basename(filePath)} holds no blocks to import`);
+  }
+  return { clipboard: held, notes };
+}
+
 export class EmptyClipboardError extends Error {
   constructor() {
     super("Nothing has been copied yet");
@@ -2531,7 +2749,16 @@ export function pasteSelection(
   if (clipboard === null) {
     throw new EmptyClipboardError();
   }
-  const held = clipboard;
+  return pasteHeld(session, clipboard, at, options);
+}
+
+/** `pasteSelection` with the blocks named, rather than read off the clipboard. */
+export function pasteHeld(
+  session: DocumentSession,
+  held: Clipboard,
+  at: { x: number; y: number; z: number },
+  options: RegionEditOptions & { includeAir?: boolean; skipEmpty?: boolean } = {},
+): number {
   const { doc, history } = session;
   /*
    * The boolean is the renderer's -- "leave the empty space where it falls" --
@@ -3098,14 +3325,18 @@ export async function documentMesh(
      */
     const from = session.meshCache;
     session.meshCache = undefined;
+    // The window puts the bar away when this answer arrives, so nothing here
+    // says "done": the last word is "sending", and the clone is what follows.
+    const progress = startProgress();
     const built = await buildDocumentPreview(
       session.doc,
       // An edit's own build spends nothing on queued levels; asking again with
       // nothing changed -- which is what the window does while some are
       // queued -- spends a slice. See `LodRequest.budgetMs`.
-      { ...options, lodBudgetMs: same ? LOD_SLICE_MS : 0 },
+      { ...options, lodBudgetMs: same ? LOD_SLICE_MS : 0, progress },
       from,
     );
+    progress.report("sending");
     timings = built.timings;
     session.meshCache = built.meshCache;
     meshSerial += 1;

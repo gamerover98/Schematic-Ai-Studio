@@ -178,11 +178,37 @@ cannot hold: the file pastes back looking nothing like it did here.
 `x/y/z` is the *empty* cell the click landed in, and the mesh has no per-block
 identity, so **neither side can find the clicked slab alone** — main has the
 document but not the direction, the renderer has the direction but not the
-document. Vertical faces only: the game also merges on a side click, and that
-needs where on the face the cursor was, which does not travel. Merging on a side
-click that meant "place beside it" would destroy the slab already there. A fill
-carries no `against`, which is what keeps this a click gesture rather than
-something that halves a filled region.
+document. A fill carries no `against`, which is what keeps this a click gesture
+rather than something that halves a filled region.
+
+**It merged nothing from the hand for as long as it existed.** The rule required
+the held slab's `type` to differ from the clicked one's, and `orientPlacement`
+gives a slab clicked onto a top face `type=bottom` — the clicked one's half
+exactly. The section in `tests/session.ts` built its requests by hand with the
+other half and asserted «two bottom slabs do not merge», which is the real
+gesture stated as forbidden. It builds them through `placementState` and
+`placedInUpperHalf` now, as `onBuild` does.
+
+`doubleSlabTarget` is vanilla's `SlabBlock.canBeReplaced`, both halves of it:
+
+- **the slab that was clicked** takes a click on the face it does not fill — a
+  bottom slab its top, or a side in the upper half; a top slab its underside, or
+  a side in the lower half. Which half of a side is `EditRequest.upperHalf`,
+  sent from `placedInUpperHalf`: that is what used to "not travel";
+- **the cell the block would go in**, when it already holds the same slab, is
+  merged whichever half the new one would have been. A slab is not replaceable,
+  so the merge runs **ahead of** the refusal, or this case is refused unasked.
+
+Same name only, and the double slab keeps the rest of the existing state
+(`waterlogged`). A 1.12.2 document needs nothing more: `legacy_blocks.json`
+spells `43:x`, `125:x`, `181:0` and `204:0` as `<slab>[type=double]`, and
+`tests/session.ts` saves the merge as MCEdit and reads `43:0` and `125:0` back.
+
+**A cell outside the document was never clicked.** The build grid sends
+`against: "up"` with nothing under it, `getBlock` answers air outside the box,
+and air is replaceable — so the redirect below moved every block put on the
+grid at the floor one cell down, growing the document under the origin.
+`clickedCell` is used only when it lands inside the box.
 
 **A placement writes over a *replaceable* block and never over anything else,
 and this app had no such concept at all.** `replaceable`, `canBeReplaced`,
@@ -1374,6 +1400,46 @@ agent has no memory of. `runAgent` therefore takes `history` and returns
 `messages` rather than reaching through the session, which also makes the memory
 a value the tests can see instead of something inferred from what the model was
 sent.
+
+**A schematic that changes its path takes what is kept under it, and for a long
+time nothing did.** The conversations with the project notes, the version
+history and the hotbar are all keyed on `storeFileName(path)`, so a file renamed
+outside the app came back with none of them -- reported as the chats with the AI
+being lost -- and **Save As left the chat behind** while a comment beside the
+call said it followed: `adoptSubject` with a new path saves the chat under the
+*old* one and loads the new one, empty.
+
+`services/document_move.ts` is the one place, Electron-free, with two modes:
+
+- **move**, for the Document menu's Rename and `rename_document`. Same folder,
+  same extension (the format's), and **refused** rather than moved aside over a
+  file that exists: renaming must not touch somebody else's file, which is the
+  one way it differs from `save_document_as`. Unsaved changes stay unsaved.
+- **copy**, for Save As, by the user's choice: the new file starts with the
+  chats, the versions and the bar, and the old one keeps its own. Each copied
+  conversation gets **copies of its checkpoints** (`copyCheckpoint`), because
+  pruning or deleting a conversation removes its checkpoints and two files
+  sharing one would lose it through the other.
+
+Three things are easy to get wrong:
+
+- **the record is rewritten, never renamed on disk.** `coerceRecord` refuses a
+  record whose `filePath` names another file, so a file moved to the new hash
+  reads as a hash collision and the chats vanish all the same;
+- **the live conversation carries on under its id** (`carryConversations`),
+  which is not `adoptSubject`. On a copy the chat on screen takes the copied
+  entries, whose checkpoint ids are the new file's;
+- **the window moves the bar's subject before `docState` says so**
+  (`followFile`). Left to the path effect, `adoptHotbar` writes the bar under
+  the old path and reads the new one, so a rename left a stray bar behind and a
+  first save of an untitled schematic started over from the factory nine. A
+  rename or a Save As over MCP still goes through that effect, which costs a
+  stray bar file under the old name and nothing else.
+
+Each store is carried on its own and a failure is a warning: by then the file
+has been renamed or written, and refusing would report a failure about an act
+that happened. The recents take the new path and drop the old one
+(`rememberRenamed`); `tests/services.ts` requires it and the copy on both roads.
 
 **Recovering is opening, and every way of putting a file on screen has to say
 so.** A conversation is stored under the file *path*, so a document that arrives
@@ -3907,6 +3973,14 @@ cannot overwrite a newer copy either: the fill is guarded on the **identity**
 of the object the arming created, which is `chunked_mesh.ts`'s rule for
 deciding that a chunk moved.
 
+**And identity needs `stamp` to be `$state.raw`, which for a long time it was
+not.** A deep `$state` stores a *proxy* of the object assigned, so
+`stamp !== armed` was true on every answer and every picture was thrown away:
+the stamp moved as an empty box and nothing anywhere said so. The check on the
+guard went on passing, because it looked for the comparison and not for what
+the comparison compares; `tests/ui.ts` now requires the declaration too. Found
+by importing a schematic, where the ghost is the only way to see what is held.
+
 **A stamped move writes nothing**, and `commitMove` decides that before it
 calls main. The selection step it records is an ordinary one, because no
 transaction was pushed — `adoptEditedSelection` works that out by comparing the
@@ -3960,6 +4034,29 @@ will never be written — a resize nobody asked for and would have to undo,
 which is `replace`'s stated reason for not growing at all. `includeAir` is the
 exception rather than an oversight: it clears the destination box first, so
 under it the box genuinely is what lands.
+
+**Importing another schematic is a stamp, not an edit.** File → Import
+Schematic…, or a file dropped on the viewport **with Shift**, reads it onto the
+clipboard (`importToClipboard`) and arms the stamp at the corner of the
+selection, or at the origin; Ctrl+V is the edit, so the growth and the one
+Ctrl+Z come from `pasteSelection` and nothing is written by the import itself.
+A plain drop still opens the file.
+
+- **It arrives in the open document's version**, through `setDocumentVersion`
+  itself on a scratch session nobody sees: rename, restate, drop. A 1.20 build
+  stamped into 1.12.2 would otherwise carry names the file cannot be saved
+  with, and the failure would arrive at Ctrl+S. The scratch document takes the
+  open one's container first, because that pair is what `refusalFor` judges.
+- **What a backport drops becomes air**, not the open document's empty space:
+  a paste writes nothing for air, and a dropped block should leave the ground
+  under it alone. The count is in the notes, beside the renames.
+- **Cells decide, never palette entries.** The palette is append-only, so the
+  entries a backport just emptied are still in it; asking the block list about
+  them reported "0 blocks left out". Entities are not carried, and are counted.
+- **`import_schematic` over MCP pastes at once and leaves the clipboard
+  alone** (`readImport` + `pasteHeld`): the clipboard is the user's, and a tool
+  that stamped a file in should not replace their last copy. It reads under
+  the root, like every verb that touches a file.
 
 **The gizmo's bar carries copy and paste, because the stamp made them a
 loop.** Two one-off commands became «copy, carry the box, paste, carry it
@@ -5538,6 +5635,37 @@ arrangement — it was already unusable for those seconds, it just did not say s
 A step that throws does not stop the rest: up with less beats not up, and
 whatever failed will fail again where it is asked for, with a message about
 what it was.
+
+**Opening a large schematic shows a loading bar, and main reports to it
+without yielding.** A 384x72x384 terrain is 0.7 s of reading and 14 s of
+meshing, chunk after chunk, and the window used to sit through it saying
+nothing. `services/progress.ts` decides when to speak, and `IPC.docProgress`
+carries it: `openDocument` reports decoding, `buildDocumentPreview` lighting,
+`buildChunkedMesh` every chunk, `documentMesh` sending. The renderer's
+`lib/load_progress.ts` places each phase on the bar, weighted by where the
+time goes, and `LoadingOverlay` draws it over the viewport.
+
+- **The events cross while main is busy.** `webContents.send` hands the
+  message to the IPC thread, so a report from inside the mesh loop reaches the
+  window at once, verified in the app: 268 events over a 15 s build. Yielding
+  with `breathe` would also have worked, and would have let an MCP edit change
+  the voxels under the loop. The report is a plain call and must stay one.
+- **Silence is the default.** Main says nothing about work under 150 ms, and
+  the window waits until 300 ms after it first heard. Every edit is a mesh
+  build, and none of them sends anything.
+- **Main never says "done" about a build.** The mesh is still being cloned
+  across when `documentMesh` returns, so the window takes the bar down when
+  the answer lands (`fetchDocumentMesh`'s `finally`). Only an open that fails
+  sends `done`, because no mesh follows it.
+- **The window owns both ends.** The read is a synchronous parse, so main
+  cannot report during it and the window starts the bar itself. Applying the
+  mesh holds the renderer for about 1.5 s on that terrain, so a full payload
+  first shows "Drawing" and waits a paint.
+- **The bar never goes back.** Opening is two operations in main, and the
+  second starts its own count, so `advance` keeps the furthest point.
+
+A CDP `Page.captureScreenshot` taken during the build waits for main and
+returns the frame after it. To see the bar, capture the screen instead.
 
 **Block geometry is hand-described in `pipeline/block_shapes.ts`, not loaded.**
 The Python original only ever produced full cubes — its model-driven path was
@@ -8033,6 +8161,34 @@ has a render loop, and a second one running at the display's rate would advance
 the clock faster on a 144Hz screen; "sixty game minutes per real second" is a
 claim about wall-clock time. It writes a mirror in `App.svelte` rather than the
 setting, because the setting is on disk and this moves ten times a second.
+
+**The chosen resource pack is `Settings.resourcePack`, and for a long time it
+reached nothing.** It was a variable of `App.svelte`'s, read only by
+`IPC.preview`, which nothing calls; every handler that meshes, draws an icon
+or reads the sky passed `resourcePackPath: null`. So choosing a pack changed no
+pixel, and the choice was gone at the next launch.
+
+`packPaths()` in `ipc/handlers.ts` is the one answer now: the setting laid over
+the bundled pack, which fills in whatever it lacks. `tests/services.ts` refuses
+a `resourcePackPath: null` left in that file, and draws a stone from a folder
+pack in a colour no bundled texture has. Three things are load-bearing:
+
+- **a new pack is a new atlas layout, and that is what invalidates
+  everything.** The baker cache is keyed on the pack and `layouts` counts every
+  packing in the process, so the chunk cache, the window's atlas and the icons
+  all see a layout they do not hold and start again. Nothing else has to
+  remember to;
+- **the window asks for everything again** (`setResourcePack`): main restarts
+  the icon warm-up on the new baker when the setting is saved
+  (`packChanged`), and the renderer throws its icons away
+  (`resetBlockIcons`), refetches the sun, the moon and the anchor's axe, and
+  re-requests the mesh. The icons alone would stay in the old pack, because
+  every block is already in `requested`;
+- **a pack that will not open draws the bundled one rather than failing.**
+  `resourcePackProblem` refuses it at the picker by name (no
+  `assets/minecraft/textures/`, or not a zip); a file that went bad later is
+  skipped by `ResourcePackTextures.create`. The setting outlives the file, and
+  a throw there would take every mesh and every icon down with it.
 
 **`biomeColor` and `waterColor` are the two preview settings that rebuild the
 GLB.** Foliage and water both ship greyscale and are tinted per biome — from

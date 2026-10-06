@@ -51,6 +51,7 @@ import {
   openConversation,
   resetConversation,
   saveConversation,
+  stampCheckpoint,
   useConversationDirectory,
 } from "../src/main/services/conversation.js";
 import {
@@ -58,6 +59,16 @@ import {
   useHotbarDirectory,
   writeHotbar,
 } from "../src/main/services/hotbars.js";
+import {
+  carryDocumentStores,
+  RenameRefusedError,
+  renameDocumentFile,
+  renamedPath,
+  renameProblem,
+} from "../src/main/services/document_move.js";
+import { listSnapshots, takeSnapshot, useSnapshotDirectory } from "../src/main/services/snapshots.js";
+import { checkpointExists, takeCheckpoint, useCheckpointDirectory } from "../src/main/services/checkpoints.js";
+import { createHistory } from "../src/main/domain/history.js";
 import {
   abridgeTrace,
   coerceProject,
@@ -105,6 +116,8 @@ import {
 } from "../src/main/domain/document.js";
 import { SpongeSchematicWriter } from "../src/main/services/schematic.js";
 import { loadSkyTextures } from "../src/main/services/sky_textures.js";
+import { resourcePackProblem } from "../src/main/services/pack_reader.js";
+import { PNG } from "pngjs";
 import { dataVersionFor, VERSION_NAMES, VERSION_TABLE } from "../src/main/services/versions.js";
 import {
   coerceEditing,
@@ -429,6 +442,53 @@ try {
       "editing a block changes the render",
       meshDigest(fromDocument.mesh) !== meshDigest(afterEdit.mesh),
     );
+
+    /*
+     * The chosen resource pack is the one drawn. Every caller in
+     * `handlers.ts` passed `null` for it, so choosing a pack changed nothing:
+     * the path lived in a variable of the window's. A folder pack with one
+     * stone texture in a colour no bundled texture has, laid over the
+     * bundled pack, has to reach the atlas, and as a layout of its own --
+     * the chunk cache and the window both tell atlases apart by layout.
+     */
+    const packDir = path.join(workDir, "red-pack");
+    await mkdir(path.join(packDir, "assets/minecraft/textures/block"), { recursive: true });
+    const tile = new PNG({ width: 16, height: 16 });
+    for (let i = 0; i < tile.data.length; i += 4) tile.data.set([1, 254, 3, 255], i);
+    await writeFile(path.join(packDir, "assets/minecraft/textures/block/stone.png"), PNG.sync.write(tile));
+    const stone = createDocument({ width: 1, height: 1, length: 1, format: "sponge3" });
+    setBlock(stone, 0, 0, 0, { namespacedName: "minecraft:stone", properties: {} });
+    const marked = (pixels: Uint8Array): number => {
+      let count = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if (pixels[i] === 1 && pixels[i + 1] === 254 && pixels[i + 2] === 3) count += 1;
+      }
+      return count;
+    };
+    const bundledStone = await buildDocumentPreview(stone, {
+      resourcePackPath: null,
+      fallbackResourcePackPath: bundledPack,
+    });
+    const packStone = await buildDocumentPreview(stone, {
+      resourcePackPath: packDir,
+      fallbackResourcePackPath: bundledPack,
+    });
+    equal("the bundled pack has no texture in the test pack's colour", marked(fullAtlas(bundledStone.atlas).pixels), 0);
+    check("a chosen pack's stone is the stone drawn", marked(fullAtlas(packStone.atlas).pixels) >= 16 * 16);
+    check("...on an atlas of its own layout", packStone.atlas.layout !== bundledStone.atlas.layout);
+    check(
+      "every handler draws from the chosen pack",
+      !readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "ipc", "handlers.ts"), "utf8").includes("resourcePackPath: null"),
+    );
+    equal("a folder with textures is a resource pack", await resourcePackProblem(packDir), null);
+    check("a folder without them is refused by name", (await resourcePackProblem(workDir))?.includes("not a resource pack") === true);
+    const notZip = path.join(workDir, "not-a-pack.zip");
+    await writeFile(notZip, "hello");
+    check("a file that is not a zip is refused", (await resourcePackProblem(notZip)) !== null);
+    check("an unreadable pack draws the bundled one instead of failing", marked(fullAtlas((await buildDocumentPreview(stone, {
+      resourcePackPath: notZip,
+      fallbackResourcePackPath: bundledPack,
+    })).atlas).pixels) === 0);
 
     /*
      * Block icons, and the property that was broken: every geometry in one
@@ -2313,6 +2373,7 @@ console.log("\n--- settings coercion ---");
     version: "JE_1_20_1",
     exportType: "mcfunction",
     outputDir: "C:/builds",
+    resourcePack: "C:/packs/faithful.zip",
     preview: { ...DEFAULT_SETTINGS.preview, wireframe: true, maxDrawDistance: 1024 },
     ui,
     mcp,
@@ -2321,6 +2382,11 @@ console.log("\n--- settings coercion ---");
   } satisfies Settings;
 
   equal("every settings field survives a round-trip", coerceSettings(settings), settings);
+  equal(
+    "an empty resource pack is the bundled one, not a path",
+    [coerceSettings({ resourcePack: "" }).resourcePack, coerceSettings({ resourcePack: 3 }).resourcePack, coerceSettings({}).resourcePack],
+    [null, null, null],
+  );
 
   /*
    * The levels of detail, read the way main and the viewer both read them.
@@ -2949,6 +3015,127 @@ console.log("\n--- what a trace costs on disk ---");
   check("the original is not modified", long.length === MAX_STORED_TRACE_TEXT * 3);
 }
 
+// --- a schematic changes its path -------------------------------------------
+//
+// Its conversations, its versions and its hotbar are kept under its path, so a
+// file renamed outside the app arrived with none of them -- reported as the
+// chats with the AI being lost. And Save As left the chat behind: it saved the
+// conversation under the old path and loaded the new one, empty. Real files,
+// in all four stores.
+console.log("\n--- a schematic changes its path ---");
+{
+  const base = path.join(workDir, "moving");
+  const conversations = path.join(base, "conversations");
+  useConversationDirectory(conversations);
+  useSnapshotDirectory(path.join(base, "versions"));
+  useHotbarDirectory(path.join(base, "hotbars"));
+  useCheckpointDirectory(path.join(base, "checkpoints"));
+  const files = path.join(base, "files");
+  await mkdir(files, { recursive: true });
+  const castle = path.join(files, "castle.schem");
+  await writeFile(castle, "the file");
+
+  const doc = createDocument({ width: 2, height: 2, length: 2, format: "sponge3" });
+  doc.filePath = castle;
+  const session = { doc, history: createHistory(), mesh: null, voidBlock: "" };
+  const stored = async (filePath: string): Promise<{ conversations: { id: string; entries: ChatEntry[] }[] } | null> => {
+    try {
+      return JSON.parse(await readFile(path.join(conversations, storeFileName(filePath)), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+  const checkpointOf = async (filePath: string): Promise<string | undefined> =>
+    (await stored(filePath))?.conversations[0]?.entries.find((entry) => entry.checkpoint)?.checkpoint;
+
+  resetConversation(null);
+  await adoptSubject(castle);
+  appendEntry({ role: "user", text: "dig a moat" });
+  stampCheckpoint((await takeCheckpoint(session, [])) ?? "none");
+  appendEntry({ role: "agent", text: "Dug one." });
+  await saveConversation();
+  await takeSnapshot(session, "manual", "with the moat");
+  await writeHotbar(castle, { slots: [...DEFAULT_HOTBAR], slot: 3 });
+
+  // --- rename: everything goes, nothing is left behind
+  const moved = await renameDocumentFile(session, "fortress");
+  const fortress = path.join(files, "fortress.schem");
+  equal("a rename keeps the folder and the extension", moved, { from: castle, to: fortress });
+  check("...moves the file", existsSync(fortress) && !existsSync(castle));
+  equal("...and the document is that file now", session.doc.filePath, fortress);
+  equal("the chat on screen stays", conversationState().entries.length, 2);
+  resetConversation(null);
+  await adoptSubject(fortress);
+  equal("...and reopening the renamed file brings it back", conversationState().entries.map((e) => e.text), [
+    "dig a moat",
+    "Dug one.",
+  ]);
+  equal("the versions went with it", (await listSnapshots(fortress)).map((one) => one.label), ["with the moat"]);
+  equal("the hotbar went with it", (await readHotbar(fortress)).slot, 3);
+  equal("nothing is left under the old name: chats", await stored(castle), null);
+  equal("...versions", await listSnapshots(castle), []);
+  equal("...hotbar", (await readHotbar(castle)).slot, 0);
+
+  // --- refusals, with nothing touched
+  const refusal = async (name: string): Promise<string | null> => {
+    try {
+      await renameDocumentFile(session, name);
+      return null;
+    } catch (err) {
+      return err instanceof RenameRefusedError ? err.message : `not a refusal: ${String(err)}`;
+    }
+  };
+  await writeFile(path.join(files, "keep.schem"), "somebody else's");
+  check("a name that is taken is refused", (await refusal("keep"))?.includes("already exists") === true);
+  equal("...and the file there is untouched", await readFile(path.join(files, "keep.schem"), "utf8"), "somebody else's");
+  check("a name with a separator is refused", (await refusal("a/b")) !== null);
+  check("an empty name is refused", (await refusal("  ")) !== null);
+  check("a name Windows keeps is refused", (await refusal("CON")) !== null);
+  check("a name ending in a dot is refused", (await refusal("fort.")) !== null);
+  equal("...and none of them moved anything", session.doc.filePath, fortress);
+  equal("the extension typed is not doubled", renamedPath(fortress, "keep.schem"), path.join(files, "keep.schem"));
+  equal("a fine name has no problem", renameProblem("Castle 2 (final)"), null);
+  const unsaved = { doc: createDocument({ width: 1, height: 1, length: 1, format: "sponge3" }), history: createHistory(), mesh: null, voidBlock: "" };
+  check("an unsaved schematic has nothing to rename", await renameDocumentFile(unsaved, "x").then(() => false, (err) => err instanceof RenameRefusedError));
+
+  // --- Save As: a copy each, and the chat on screen follows the new file
+  const copy = path.join(files, "fortress-copy.schem");
+  await carryDocumentStores(fortress, copy, "copy");
+  equal("Save As keeps the chat on screen", conversationState().entries.length, 2);
+  for (const [where, filePath] of [["the new file", copy], ["the old file", fortress]]) {
+    resetConversation(null);
+    await adoptSubject(filePath);
+    equal(`${where} has the chat`, conversationState().entries.length, 2);
+    equal(`${where} has the versions`, (await listSnapshots(filePath)).length, 1);
+    equal(`${where} has the hotbar`, (await readHotbar(filePath)).slot, 3);
+  }
+  const oldCheckpoint = await checkpointOf(fortress);
+  const newCheckpoint = await checkpointOf(copy);
+  check(
+    "each copy has a checkpoint of its own, so deleting one keeps the other's",
+    oldCheckpoint !== undefined && newCheckpoint !== undefined && oldCheckpoint !== newCheckpoint &&
+      (await checkpointExists(oldCheckpoint)) && (await checkpointExists(newCheckpoint)),
+    `${oldCheckpoint} ${newCheckpoint}`,
+  );
+
+  // --- a destination that already had a history keeps it, beside what arrives
+  const merged = path.join(files, "merged.schem");
+  resetConversation(null);
+  await adoptSubject(merged);
+  appendEntry({ role: "user", text: "an older chat" });
+  await saveConversation();
+  resetConversation(null);
+  await adoptSubject(fortress);
+  await carryDocumentStores(fortress, merged, "copy");
+  equal("a destination with chats of its own keeps them", (await stored(merged))?.conversations.length, 2);
+
+  useConversationDirectory(path.join(workDir, "conversations"));
+  // The other three were unset before this section, and stay so after it.
+  useSnapshotDirectory(null as unknown as string);
+  useHotbarDirectory(null as unknown as string);
+  useCheckpointDirectory(null as unknown as string);
+}
+
 // --- saving is working on it -------------------------------------------------
 //
 // A schematic created and then saved -- from the window or over MCP -- never
@@ -2975,6 +3162,18 @@ console.log("\n--- saving is working on it ---");
     windowSave.includes("rememberDocument(result.filePath)"),
   );
   check("...and so does a save over MCP", mcpSave.includes("rememberDocument(result.filePath)"));
+  // Save As copies what is kept under the old path, on both roads, and a
+  // rename moves the recents entry on both.
+  check(
+    "a Save As from the window and over MCP carries the chats",
+    [windowSave, mcpSave].every((source) => source.includes('carryDocumentStores(before, result.filePath, "copy")')),
+  );
+  const windowRename = between(handlers, "IPC.docRename", "ipcMain.handle(");
+  const mcpRename = between(server, "rename: async", "close:");
+  check(
+    "a rename updates the recents, on both roads",
+    [windowRename, mcpRename].every((source) => source.includes("rememberRenamed(")),
+  );
   check(
     "...as opening does, on both roads",
     windowOpen.includes("rememberDocument(filePath)") && mcpOpen.includes("rememberDocument(filePath)"),
@@ -3658,6 +3857,68 @@ console.log("\n--- ipc channels ---");
 
   const unserved = Object.keys(IPC).filter((name) => !served(name));
   equal("every channel in IPC is handled or sent by main", unserved.join(", "), "");
+}
+
+// --- the loading bar: when main says anything ------------------------------
+//
+// `services/progress.ts` decides when a long piece of work speaks. It is
+// silent for work that ends quickly -- every edit is a mesh build -- sends at
+// most one event per interval within a phase, always sends a new phase, and
+// says "done" only about work it had already spoken of.
+console.log("\n--- loading bar: progress events ---");
+{
+  const { PROGRESS_EVERY_MS, PROGRESS_QUIET_MS, setProgressSink, startProgress } = await import(
+    "../src/main/services/progress.js"
+  );
+  const sent: string[] = [];
+  setProgressSink((progress) => void sent.push(`${progress.phase}:${progress.done}/${progress.total}`));
+  let clock = 0;
+  const now = (): number => clock;
+
+  const quick = startProgress(now);
+  for (let chunk = 0; chunk < 20; chunk += 1) {
+    clock += 5;
+    quick.report("meshing", chunk, 20);
+  }
+  quick.abandon();
+  equal("work that ends inside the quiet says nothing at all", sent, []);
+
+  clock = 0;
+  const long = startProgress(now);
+  long.report("lighting");
+  clock = PROGRESS_QUIET_MS;
+  long.report("lighting");
+  for (let chunk = 0; chunk < 10; chunk += 1) {
+    clock += PROGRESS_EVERY_MS / 5;
+    long.report("meshing", chunk, 10);
+  }
+  equal(
+    "past the quiet it speaks, a new phase at once and the same phase sparingly",
+    sent,
+    ["lighting:0/1", "meshing:0/10", "meshing:5/10"],
+  );
+  check("...and knows it spoke", long.spoke);
+  long.abandon();
+  equal("work it spoke of ends with done", sent.at(-1), "done:1/1");
+
+  setProgressSink(null);
+  const unheard = startProgress(now);
+  clock += PROGRESS_QUIET_MS * 2;
+  unheard.report("meshing", 1, 2);
+  check("with no window to tell, nothing is sent and nothing is claimed", !unheard.spoke);
+
+  // A build reports; opening reports and takes the bar down on failure.
+  const session = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main", "services", "session.ts"),
+    "utf8",
+  );
+  const start = session.indexOf("export async function documentMesh(");
+  const meshBody = session.slice(start, session.indexOf("\nexport ", start + 1));
+  check("a mesh build reports its progress", /progress = startProgress\(\);[\s\S]{0,700}progress \}/.test(meshBody));
+  // A "done" from main would take the bar down while the mesh is still being
+  // cloned across, the longest wait after the meshing itself.
+  check("...and never says done: the window ends the bar when the mesh lands", !meshBody.includes("abandon("));
+  check("an open that fails takes the bar down", /catch \(err\) \{\s*progress\.abandon\(\);\s*throw err;/.test(session));
 }
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`} ===`);

@@ -52,22 +52,59 @@ export const FRAMING_DISTANCE_FACTOR = 1.6;
  *
  * The angle and the 1.6 are the ones the mesh-bounds version used, kept so an
  * ordinary document opens looking the way it always did.
+ *
+ * **And it is brought inside the far plane when a `drawDistance` is given.**
+ * The offset `(d, 0.7d, d)` is `1.58d` long, so a 384-wide terrain was framed
+ * from about 970 blocks with `camera.far` at the default 512: every vertex
+ * clipped, and the viewport showing only sky until somebody zoomed in. The
+ * camera keeps its direction and moves in until the box's bounding sphere fits
+ * inside `DRAW_DISTANCE_SHARE` of the draw distance -- or, for a box bigger than
+ * that, until the target stands half way to it, so the middle of the build is
+ * always drawn. `note` says so, as `resolveCameraAim` does for its own distance.
  */
-export function documentFraming(size: BoxSize): { target: Vec3; position: Vec3 } {
+export function documentFraming(
+  size: BoxSize,
+  drawDistance?: number,
+): { target: Vec3; position: Vec3; note: string | null } {
   const target = {
     x: size.width / 2,
     y: size.height / 2,
     z: size.length / 2,
   };
   const distance = Math.max(size.width, size.height, size.length) * FRAMING_DISTANCE_FACTOR;
+  const offset = { x: distance, y: distance * 0.7, z: distance };
+  const span = Math.hypot(offset.x, offset.y, offset.z);
+  let scale = 1;
+  let note: string | null = null;
+  if (drawDistance !== undefined && Number.isFinite(drawDistance) && drawDistance > 0) {
+    const allowed = framingReach(size, drawDistance);
+    if (span > allowed) {
+      scale = allowed / span;
+      note =
+        `Framed from ${round(allowed)} blocks rather than ${round(span)}: the viewport draws ` +
+        `nothing further than its draw distance of ${drawDistance} blocks.`;
+    }
+  }
   return {
     target,
     position: {
-      x: target.x + distance,
-      y: target.y + distance * 0.7,
-      z: target.z + distance,
+      x: target.x + offset.x * scale,
+      y: target.y + offset.y * scale,
+      z: target.z + offset.z * scale,
     },
+    note,
   };
+}
+
+/**
+ * How far from the box's centre the establishing shot may stand and still
+ * draw the whole of it: the share of the draw distance the aim already trusts,
+ * less the bounding sphere's radius, and never nearer than half that share.
+ */
+export function framingReach(size: BoxSize, drawDistance: number): number {
+  const reach = Math.max(1, drawDistance * DRAW_DISTANCE_SHARE);
+  const radius = Math.hypot(size.width, size.height, size.length) / 2;
+  return Math.max(reach - radius, reach / 2);
 }
 
 /**

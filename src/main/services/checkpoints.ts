@@ -35,7 +35,7 @@
  * be the container that loses the least.
  */
 
-import { mkdir, readFile, rm, writeFile } from "fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "fs/promises";
 import path from "path";
 
 import { documentFromLoaded, type SchematicDocument } from "../domain/document.js";
@@ -179,6 +179,30 @@ export async function removeCheckpoints(ids: readonly string[]): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * A second checkpoint holding what `id` holds, or `null` if it has gone.
+ *
+ * For a conversation copied to another file by Save As: the two copies are
+ * pruned and deleted apart from then on, and a checkpoint they shared would be
+ * taken from one by deleting the other.
+ */
+export async function copyCheckpoint(id: string): Promise<string | null> {
+  const fromSchem = schemFile(id);
+  const fromMeta = metaFile(id);
+  const copy = `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const toSchem = schemFile(copy);
+  const toMeta = metaFile(copy);
+  if (fromSchem === null || fromMeta === null || toSchem === null || toMeta === null) return null;
+  try {
+    await copyFile(fromSchem, toSchem);
+  } catch {
+    return null;
+  }
+  // The messages are the lesser half; `readCheckpoint` already copes without.
+  await copyFile(fromMeta, toMeta).catch(() => {});
+  return copy;
 }
 
 /** Forgets the reuse memo. Called when the open document changes. */

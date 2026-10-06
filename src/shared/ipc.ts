@@ -141,6 +141,13 @@ export const IPC = {
    * closed, which is a state the window has to be able to be told about.
    */
   docChanged: "bgpt:doc:changed",
+  /**
+   * How far a long piece of work on the document has got: reading a file,
+   * lighting it, meshing it. An event, never a request, and only for work that
+   * has already run for a while -- see `services/progress.ts`. The window draws
+   * the loading bar from it and puts the bar away when the mesh arrives.
+   */
+  docProgress: "bgpt:doc:progress",
   docMesh: "bgpt:doc:mesh",
   docApply: "bgpt:doc:apply",
   /**
@@ -202,6 +209,8 @@ export const IPC = {
   /** Copy the selection out; cut also clears it. */
   docCopy: "bgpt:doc:copy",
   docCut: "bgpt:doc:cut",
+  /** Read another schematic onto the clipboard, in the open one's version: a stamp. */
+  docImport: "bgpt:doc:import",
   /** Write the clipboard in, with its corner at a coordinate. */
   docPaste: "bgpt:doc:paste",
   /** Pick a region up and put it down elsewhere, as one step. */
@@ -288,6 +297,11 @@ export const IPC = {
   docSetOffset: "bgpt:doc:offset:set",
   docSave: "bgpt:doc:save",
   /**
+   * Renames the open schematic's file in its folder, and takes its chats, its
+   * version history and its hotbar with it.
+   */
+  docRename: "bgpt:doc:rename",
+  /**
    * The open schematic's own version history: list, add, go back, throw away.
    *
    * Four verbs, four channels. Distinct from the chat's checkpoints, which
@@ -348,6 +362,8 @@ export const IPC = {
   menuClose: "bgpt:menu:close",
   /** File → Convert…: one schematic file into another, without opening it. */
   menuConvert: "bgpt:menu:convert",
+  /** File → Import Schematic…: another file onto the clipboard, as a stamp. */
+  menuImport: "bgpt:menu:import",
   menuUndo: "bgpt:menu:undo",
   menuRedo: "bgpt:menu:redo",
   /**
@@ -1388,6 +1404,13 @@ export type EditRequest =
        * merge is a click gesture and not something a fill can trigger.
        */
       against?: "up" | "down" | "north" | "south" | "east" | "west";
+      /**
+       * Whether the click landed in the upper half of the face, which is
+       * `placedInUpperHalf`'s answer. A slab clicked on its *side* becomes a
+       * double slab only from the half it does not fill, and the renderer is
+       * the only side that knows where on the face the cursor was.
+       */
+      upperHalf?: boolean;
     }
   /**
    * The inspector's block-state editor: write exactly this state, and derive
@@ -1432,6 +1455,7 @@ export type EditRequest =
       z: number;
       block: BlockSpec;
       against?: "up" | "down" | "north" | "south" | "east" | "west";
+      upperHalf?: boolean;
     }
   /**
    * Write a mix into every cell of the regions.
@@ -1789,6 +1813,31 @@ export interface ClipboardInfo {
 }
 
 export type ClipboardResponse = Result<{ clipboard: ClipboardInfo; state: DocumentState }>;
+
+/**
+ * Another schematic read onto the clipboard. `notes` says what the open
+ * document's version renamed, restated or left out on the way in.
+ */
+/**
+ * One step of a long piece of work on the document, for the loading bar.
+ *
+ * `done` of `total` within the phase; a phase with no steps of its own says
+ * `0` of `1`. `done` is the only other answer and means the work ended
+ * without a mesh for the window to wait for -- an open that failed.
+ */
+export type DocProgressPhase = "reading" | "decoding" | "lighting" | "meshing" | "sending";
+
+export interface DocProgress {
+  phase: DocProgressPhase | "done";
+  done: number;
+  total: number;
+}
+
+export type ImportResponse = Result<{
+  clipboard: ClipboardInfo;
+  notes: string[];
+  state: DocumentState;
+}>;
 
 export interface PasteRequest {
   x: number;
@@ -2276,6 +2325,14 @@ export type InspectResponse = Result<BlockInspection>;
 export type SchematicNbtResponse = Result<SchematicNbtText>;
 export type SaveResponse = Result<SaveSuccess>;
 
+export interface RenameSuccess {
+  /** Where the file is now. */
+  filePath: string;
+  state: DocumentState;
+}
+
+export type RenameResponse = Result<RenameSuccess>;
+
 // ---------------------------------------------------------------------------
 // The MCP server
 // ---------------------------------------------------------------------------
@@ -2490,9 +2547,16 @@ export interface BgptApi {
    */
   copyRegion(regions: RegionSpec[]): Promise<ClipboardResponse>;
   cutRegion(regions: RegionSpec[]): Promise<ClipboardResponse>;
+  /**
+   * Reads another schematic onto the clipboard, converted to the open
+   * document's version, so the stamp can carry it. Writes nothing.
+   */
+  importSchematic(filePath: string): Promise<ImportResponse>;
   /** Write the clipboard in. Undoable as one step. */
   pasteClipboard(request: PasteRequest): Promise<EditResponse>;
   saveDocument(request: SaveRequest): Promise<SaveResponse>;
+  /** A new name for the open file, without its extension. See `IPC.docRename`. */
+  renameDocument(name: string): Promise<RenameResponse>;
   /**
    * The filesystem path behind a dropped `File`, or `""` when it has none.
    * Synchronous, and the one method here that is not an IPC call: it is
@@ -2576,6 +2640,8 @@ export interface BgptApi {
    * started it. `null` means it was closed.
    */
   onDocumentChanged(listener: (state: DocumentState | null) => void): () => void;
+  /** How far a long piece of work on the document has got; see `IPC.docProgress`. */
+  onDocProgress(listener: (progress: DocProgress) => void): () => void;
 
   /** What the MCP server is doing right now. */
   getMcpStatus(): Promise<McpStatus>;
@@ -2607,6 +2673,7 @@ export interface BgptApi {
   onMenuSaveAs(listener: () => void): () => void;
   onMenuClose(listener: () => void): () => void;
   onMenuConvert(listener: () => void): () => void;
+  onMenuImport(listener: () => void): () => void;
   onMenuUndo(listener: () => void): () => void;
   onMenuRedo(listener: () => void): () => void;
   onMenuAbout(listener: () => void): () => void;

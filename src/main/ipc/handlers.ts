@@ -66,7 +66,9 @@ import {
   type ScaleRequest,
   type SaveRequest,
   type SaveResponse,
+  type RenameResponse,
   type ClipboardResponse,
+  type ImportResponse,
   type PasteRequest,
   type RegionSpec,
   type DocumentMeshRequest,
@@ -126,6 +128,8 @@ import {
   closeDocument,
   copySelection,
   currentSession,
+  importToClipboard,
+  ImportError,
   cutSelection,
   documentMesh,
   documentState,
@@ -198,9 +202,10 @@ import {
   useCheckpointDirectory,
 } from "../services/checkpoints.js";
 import { loadAllowedBlocks, traceOf } from "../core.js";
-import { buildBlockIcons, warmBlockIcons } from "../services/block_icons.js";
+import { buildBlockIcons, forgetBlockIcons, warmBlockIcons } from "../services/block_icons.js";
 import { listArtifacts } from "../services/artifacts.js";
 import { loadAnchorTexture, loadSkyTextures } from "../services/sky_textures.js";
+import { forgetPackTextures, resourcePackProblem } from "../services/pack_reader.js";
 import { SchematicFormatError } from "../pipeline/loader.js";
 import { classifyGenerateError, generate } from "../services/generate.js";
 import { fetchOpenCodeModels } from "../services/opencode.js";
@@ -270,8 +275,14 @@ import {
   useHotbarDirectory,
   writeHotbar,
 } from "../services/hotbars.js";
-import { refreshShell, rememberDocument, setKeysToCamera } from "../menu.js";
+import { refreshShell, rememberDocument, rememberRenamed, setKeysToCamera } from "../menu.js";
+import {
+  carryDocumentStores,
+  RenameRefusedError,
+  renameDocumentFile,
+} from "../services/document_move.js";
 import { shellState, useWindow } from "../services/broadcast.js";
+import { setProgressSink } from "../services/progress.js";
 import {
   mcpActivity,
   mcpStatus,
@@ -300,6 +311,29 @@ const FILE_FILTERS: Readonly<
     },
   ],
 };
+
+/** Set once the warm-up exists; see where it is assigned. */
+let packChanged: () => void = () => {};
+
+/**
+ * The two packs every texture is read from: the one chosen in the settings,
+ * laid over the bundled one.
+ *
+ * Every caller that meshes, draws an icon or reads the sky asks this. They
+ * each passed `null` for the chosen pack, so choosing one in the settings
+ * changed nothing anywhere -- the path lived in a variable of the window's
+ * and reached only `IPC.preview`, which nothing calls.
+ */
+async function packPaths(): Promise<{
+  resourcePackPath: string | null;
+  fallbackResourcePackPath: string | null;
+}> {
+  const settings = await getSettings();
+  return {
+    resourcePackPath: settings.resourcePack,
+    fallbackResourcePackPath: await defaultResourcePackPath(),
+  };
+}
 
 /**
  * Agent runs the user can still stop, by request id.
@@ -444,6 +478,11 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   useWindow(getWindow);
   // And where the updater pushes its status, for the same reason.
   useUpdateWindow(getWindow);
+  // And where the loading bar hears from: `services/progress.ts`.
+  setProgressSink((progress) => {
+    const window = getWindow();
+    if (window !== null && !window.isDestroyed()) window.webContents.send(IPC.docProgress, progress);
+  });
 
 
   /*
@@ -604,6 +643,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.settingsSet, async (_event, next: Settings): Promise<Settings> => {
     const before = await getSettings();
     const saved = await setSettings(next);
+    if (saved.resourcePack !== before.resourcePack) packChanged();
     if (servingChanged(before.mcp, saved.mcp) && saved.mcp.enabled) {
       await startMcpServer(saved.mcp);
     }
@@ -831,6 +871,13 @@ ${report.stack}`),
       }
     }
 
+    // Opened now, for the folder's reason: a file that is not a pack would
+    // otherwise be chosen and then quietly draw the bundled one.
+    if (req.kind === "resource-pack") {
+      const problem = await resourcePackProblem(picked);
+      if (problem !== null) return { path: null, name: null, error: problem };
+    }
+
     return { path: picked, name: picked.split(/[\\/]/).pop() ?? picked };
   });
 
@@ -924,8 +971,7 @@ ${report.stack}`),
           // documents while the window sat still.
           req.blocks.slice(0, MAX_ICONS_PER_REQUEST),
           {
-            resourcePackPath: null,
-            fallbackResourcePackPath: await defaultResourcePackPath(),
+            ...(await packPaths()),
             biomeColor: settings.preview.biomeColor,
             waterColor: settings.preview.waterColor,
           },
@@ -981,8 +1027,7 @@ ${report.stack}`),
       return await warmBlockIcons(
         [...(await loadAllowedBlocks(resourcesDir()))],
         {
-          resourcePackPath: null,
-          fallbackResourcePackPath: await defaultResourcePackPath(),
+          ...(await packPaths()),
           biomeColor: settings.preview.biomeColor,
           waterColor: settings.preview.waterColor,
         },
@@ -1005,6 +1050,20 @@ ${report.stack}`),
       return 0;
     }
   });
+
+  /*
+   * A new pack is a new baker, so the icons the warm-up decoded belong to the
+   * old one: the warm-up runs again on the new pack, and the textures the sky
+   * and the anchor were read from are let go. The window asks for its icons,
+   * its sky and its mesh again once the setting is saved.
+   */
+  packChanged = (): void => {
+    forgetPackTextures();
+    forgetBlockIcons();
+    warming = null;
+    warmProgress = { done: 0, total: 0 };
+    void startWarming().catch(() => {});
+  };
 
   // Off it goes, before the window exists. Errors are the handler's problem;
   // an unhandled rejection here would be a crash on a slow disk.
@@ -1176,7 +1235,7 @@ ${report.stack}`),
   };
 
   const failure = (err: unknown): Failure => {
-    if (err instanceof NoDocumentError) {
+    if (err instanceof NoDocumentError || err instanceof RenameRefusedError) {
       return { ok: false, kind: "invalid-input", message: err.message };
     }
     if (err instanceof NoSaveTargetError || err instanceof EditTooLargeError) {
@@ -1215,7 +1274,7 @@ ${report.stack}`),
     if (err instanceof SchematicFormatError || err instanceof EmptyPreviewError) {
       return { ok: false, kind: "invalid-input", message: err.message };
     }
-    if (err instanceof EmptyClipboardError) {
+    if (err instanceof EmptyClipboardError || err instanceof ImportError) {
       return { ok: false, kind: "invalid-input", message: err.message };
     }
     if (err instanceof NotSquareError) {
@@ -1363,8 +1422,7 @@ ${report.stack}`),
         const mesh = await documentMesh(
           session,
           {
-            resourcePackPath: null,
-            fallbackResourcePackPath: await defaultResourcePackPath(),
+            ...(await packPaths()),
             biomeColor: settings.biomeColor,
             showMarkers: settings.showMarkers,
             // The document's own, not a setting: what empty space is made of
@@ -1600,7 +1658,8 @@ ${report.stack}`),
 
   ipcMain.handle(IPC.anchorTexture, async (): Promise<PackTexture | null> => {
     try {
-      return await loadAnchorTexture(null, await defaultResourcePackPath());
+      const pack = await packPaths();
+      return await loadAnchorTexture(pack.resourcePackPath, pack.fallbackResourcePackPath);
     } catch {
       // A pack that cannot be read means the marker is drawn as the plain green
       // box, which still says where the anchor is. Not worth a banner.
@@ -1703,8 +1762,7 @@ ${report.stack}`),
       try {
         const settings = await getSettings();
         const result = await regionMesh(requireSession(), regions, {
-          resourcePackPath: null,
-          fallbackResourcePackPath: await defaultResourcePackPath(),
+          ...(await packPaths()),
           biomeColor: settings.preview.biomeColor,
           showMarkers: settings.preview.showMarkers,
           waterColor: settings.preview.waterColor,
@@ -1752,8 +1810,7 @@ ${report.stack}`),
     try {
       const settings = await getSettings();
       const result = await clipboardMesh(requireSession(), {
-        resourcePackPath: null,
-        fallbackResourcePackPath: await defaultResourcePackPath(),
+        ...(await packPaths()),
         biomeColor: settings.preview.biomeColor,
         showMarkers: settings.preview.showMarkers,
         waterColor: settings.preview.waterColor,
@@ -1766,7 +1823,8 @@ ${report.stack}`),
 
   ipcMain.handle(IPC.skyTextures, async (): Promise<SkyTextures> => {
     try {
-      return await loadSkyTextures(null, await defaultResourcePackPath());
+      const pack = await packPaths();
+      return await loadSkyTextures(pack.resourcePackPath, pack.fallbackResourcePackPath);
     } catch {
       // A pack that cannot be read is a sky drawn with plain squares, which is
       // what it was before the pack was asked. Not worth a banner.
@@ -1821,6 +1879,28 @@ ${report.stack}`),
     try {
       const session = requireSession();
       return { ok: true, clipboard: clipboardInfo(cutSelection(session, regions)), state: shellState(session) };
+    } catch (err) {
+      return failure(err);
+    }
+  });
+
+  /*
+   * Another schematic onto the clipboard, in the open document's version. It
+   * writes nothing: the window arms the stamp with it, and Ctrl+V is the edit.
+   */
+  ipcMain.handle(IPC.docImport, async (_event, filePath: string): Promise<ImportResponse> => {
+    try {
+      const session = requireSession();
+      const result = await importToClipboard(session, filePath, {
+        legacyBlocksPath: legacyBlocksPath(),
+        allowedBlocks: await loadAllowedBlocks(resourcesDir()),
+      });
+      return {
+        ok: true,
+        clipboard: clipboardInfo(result.clipboard),
+        notes: [...result.notes],
+        state: shellState(session),
+      };
     } catch (err) {
       return failure(err);
     }
@@ -1889,6 +1969,7 @@ ${report.stack}`),
   ipcMain.handle(IPC.docSave, async (_event, request: SaveRequest): Promise<SaveResponse> => {
     try {
       const session = requireSession();
+      const before = session.doc.filePath;
       const stamped =
         request.version === undefined ? undefined : resolveVersionName(request.version);
       if (stamped === null) {
@@ -1914,11 +1995,16 @@ ${report.stack}`),
         legacyBlocksPath: legacyBlocksPath(),
       });
       /*
-       * A conversation started with nothing open has no key to be stored under
-       * -- this is the moment it gets one. A *Save As* onto a different path is
-       * the same call and does the same thing: the conversation follows the
-       * document to where the document went.
+       * A Save As onto a different path copies the chats, the versions and
+       * the hotbar to the new file and leaves the old one its own -- the
+       * user's choice. This comment used to say the conversation followed the
+       * document, and it did not: `adoptSubject` saved it under the old path
+       * and loaded the new one, empty.
+       *
+       * A conversation started with nothing open has no key to be stored
+       * under, and `adoptSubject` is the moment it gets one.
        */
+      if (before !== null) await carryDocumentStores(before, result.filePath, "copy");
       await adoptSubject(result.filePath);
       // A schematic made here and saved was never opened, so without this it
       // never reached the recents at all.
@@ -1948,6 +2034,24 @@ ${report.stack}`),
         cropped: result.cropped,
         state: shellState(session),
       };
+    } catch (err) {
+      return failure(err);
+    }
+  });
+
+  /*
+   * Renaming the open file, with everything kept under its path.
+   *
+   * The refusals are `renameDocumentFile`'s; this adds the recents, which
+   * need Electron. Main has moved the hotbar before it answers, so the
+   * window's swap to the new path finds it there.
+   */
+  ipcMain.handle(IPC.docRename, async (_event, name: string): Promise<RenameResponse> => {
+    try {
+      const session = requireSession();
+      const { from, to } = await renameDocumentFile(session, String(name));
+      if (from !== to) await rememberRenamed(from, to);
+      return { ok: true, filePath: to, state: shellState(session) };
     } catch (err) {
       return failure(err);
     }

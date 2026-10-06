@@ -39,6 +39,7 @@
   import DimensionsModal from "./lib/DimensionsModal.svelte";
 import VoidBlockModal from "./lib/VoidBlockModal.svelte";
 import VersionModal from "./lib/VersionModal.svelte";
+  import RenameModal from "./lib/RenameModal.svelte";
 import {
   buildLegacyIndex,
   resolveBlockInput,
@@ -59,10 +60,12 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { api, bridgeAvailable, forIpc, bridgeMissingMessage } from "./lib/bridge.svelte.js";
   import { diagnosing, recordEvent } from "./lib/frame_profiler.js";
   import { coalesce } from "./lib/coalesce.js";
+  import LoadingOverlay from "./lib/LoadingOverlay.svelte";
+  import { advance, loadVisible, SHOW_AFTER_MS, type LoadPhase, type LoadState } from "./lib/load_progress.js";
   import { glowPatterns, nextGlow, type GlowSlot } from "./lib/materials.js";
   import { isFileDrop, trackPageDrags } from "./lib/block_drag.js";
   import { applyTraceEvent } from "./lib/trace.js";
-  import { primeBlockIcons } from "./lib/block_icons.svelte.js";
+  import { primeBlockIcons, resetBlockIcons } from "./lib/block_icons.svelte.js";
   import {
     emptyTimeline,
     forgetTimeline,
@@ -98,7 +101,11 @@ import VersionsModal from "./lib/VersionsModal.svelte";
   import { hasTextSelection, isTyping } from "./lib/typing.js";
   import { documentEra, documentVersionName, mcVersion } from "../../shared/mc_versions.js";
   import { blocksIn } from "../../shared/block_versions.js";
-  import { placementState, type PlacementLook } from "../../shared/block_orientation.js";
+  import {
+    placedInUpperHalf,
+    placementState,
+    type PlacementLook,
+  } from "../../shared/block_orientation.js";
   import { continuedPlacement } from "./lib/block_hover.js";
   import { translatedRegion } from "./lib/selection_drag.js";
   import {
@@ -230,8 +237,6 @@ import ConvertModal from "./lib/ConvertModal.svelte";
 
   let imagePath = $state<string | null>(null);
   let imageName = $state<string | null>(null);
-  let resourcePackPath = $state<string | null>(null);
-  let resourcePackName = $state<string | null>(null);
 
   /** component.py:281-282's `st.session_state["bgpt_last_schem_path"]`. */
 
@@ -517,6 +522,36 @@ import ConvertModal from "./lib/ConvertModal.svelte";
      */
     hotbar = held === null ? [...DEFAULT_HOTBAR] : [...held.slots];
     hotbarSlot = held === null ? 0 : held.slot;
+  }
+
+  /**
+   * The open file has moved -- renamed, or saved under a new name -- and what
+   * is in hand moves with it.
+   *
+   * Main has already taken the chats, the versions and the bar to the new
+   * path, so this is the window catching up: the bar's subject is the new
+   * file *before* `docState` says so, which leaves `adoptHotbar` nothing to
+   * do -- it would write the bar under the old path and read the new one,
+   * and a rename would leave a stray bar behind. A first save of an untitled
+   * schematic takes the bar in hand to its file too, rather than starting
+   * over from the factory nine.
+   */
+  function followFile(next: string): boolean {
+    if (hotbarAdopted && hotbarSubject === next) return false;
+    hotbarAdopted = true;
+    hotbarSubject = next;
+    return true;
+  }
+
+  /** What `followFile` leaves to do once `docState` names the new file. */
+  async function caughtUpWithFile(): Promise<void> {
+    await flushHotbar();
+    await refreshVersions();
+    // The copy's checkpoints are new ids on Save As, so the log is main's again.
+    if (bridgeAvailable) {
+      adoptChat(await api().getChatState());
+      await refreshConversations();
+    }
   }
 
   /** Reaches for a different slot. */
@@ -879,6 +914,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       ? new Set<string>()
       : blocksInDocument(docState.palette, docState.size, docState.blockCount),
   );
+  let renameOpen = $state(false);
+  let renameError = $state("");
   let mcVersionOpen = $state(false);
   let mcVersionError = $state("");
   /**
@@ -1002,6 +1039,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         // and so does `use`: the block that might open is one step back along
         // this face from the cell a placement would fill.
         ...(facing.against === null ? {} : { against: facing.against }),
+        // Which half of the face: a slab clicked on its side merges only from
+        // the half it does not already fill.
+        ...(action === "break" ? {} : { upperHalf: placedInUpperHalf(facing) }),
       }),
     );
   }
@@ -1781,6 +1821,12 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       };
       return;
     }
+    // Shift with a schematic open stamps the file into it rather than opening
+    // it in its place; without one there is nothing to import into.
+    if (event.shiftKey && docState !== null) {
+      await importSchematicAt(filePath);
+      return;
+    }
     await openDocumentAt(filePath);
   }
 
@@ -2126,6 +2172,11 @@ import ConvertModal from "./lib/ConvertModal.svelte";
        */
       void refreshRecents();
     });
+    // How far main has got with a large schematic; `services/progress.ts`.
+    const unsubscribeProgress = api().onDocProgress((progress) => {
+      if (progress.phase === "done") endLoad();
+      else reportLoad(progress.phase, progress.done, progress.total);
+    });
     /*
      * The application menu, one subscription per verb.
      *
@@ -2151,6 +2202,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       }),
       api().onMenuClose(() => void closeDocument()),
       api().onMenuConvert(() => (convertOpen = true)),
+      api().onMenuImport(() => void importSchematic()),
       api().onMenuUndo(() => void undoAnything()),
       api().onMenuRedo(() => void redoAnything()),
       api().onMenuAbout(() => {
@@ -2171,6 +2223,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       unsubscribeStartup();
       unsubscribeTrace();
       unsubscribeDocument();
+      unsubscribeProgress();
       unsubscribeCamera();
       unsubscribeGlow();
       unsubscribeMcp();
@@ -3031,6 +3084,28 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     return uiWrites;
   }
 
+  /**
+   * The pack every block, icon and sky body is drawn from.
+   *
+   * It is a setting, so main reads it and it survives a restart. It used to be
+   * a variable of this window's that reached only the file preview nothing
+   * calls, so choosing a pack changed nothing anywhere. Saving it makes main
+   * warm the icons again on the new baker; the window then asks for its
+   * icons, its sky and its mesh again, because nothing it holds was drawn
+   * from the new pack.
+   */
+  async function setResourcePack(path: string | null): Promise<void> {
+    try {
+      await patchSettings({ resourcePack: path });
+      resetBlockIcons();
+      skyTextures = await api().getSkyTextures();
+      anchorTexture = await api().getAnchorTexture();
+      if (docState !== null) await refreshDocument();
+    } catch (err) {
+      failed(err, t("task.changingPack"));
+    }
+  }
+
   /** Persist on every change; the Python UI persisted nothing at all. */
   async function patchSettings(patch: Partial<Settings>): Promise<void> {
     settings = await api().setSettings(forIpc({ ...settings, ...patch }));
@@ -3249,8 +3324,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       imagePath = picked.path;
       imageName = picked.name;
     } else if (kind === "resource-pack") {
-      resourcePackPath = picked.path;
-      resourcePackName = picked.name;
+      void setResourcePack(picked.path);
     } else if (kind === "mcp-root") {
       void patchSettings({ mcp: { ...settings.mcp, root: picked.path } });
     } else if (kind === "directory") {
@@ -3500,7 +3574,69 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     return out;
   }
 
+  /**
+   * The loading bar: what main says it is doing with a large schematic, and
+   * the window's own two phases either side -- reading, which main cannot
+   * report because the parse holds its thread, and drawing, which is here.
+   *
+   * Put away when a mesh lands, whatever the answer: that is the end of every
+   * long piece of work on the document, and main never says "done" about a
+   * build (`services/progress.ts`). Raw, because it is replaced whole.
+   */
+  let loading = $state.raw<LoadState | null>(null);
+  let loadingShown = $state(false);
+
+  function reportLoad(phase: LoadPhase, done = 0, total = 1): void {
+    loading = advance(loading, phase, done, total, performance.now());
+  }
+
+  function endLoad(): void {
+    loading = null;
+  }
+
+  // Drawn only once the work has run for a while, so a small schematic opens
+  // without the bar flashing up, and an ordinary edit never shows one.
+  $effect(() => {
+    const since = loading?.since;
+    if (since === undefined) {
+      loadingShown = false;
+      return;
+    }
+    const wait = SHOW_AFTER_MS - (performance.now() - since);
+    if (wait <= 0) {
+      loadingShown = true;
+      return;
+    }
+    const timer = setTimeout(() => (loadingShown = loadVisible(loading, performance.now())), wait);
+    return () => clearTimeout(timer);
+  });
+
+  /**
+   * Resolves once the browser has painted, so a label set before it is on
+   * screen before what follows takes the thread. A timer backs the frame up,
+   * because a window behind another draws no frames at all.
+   */
+  function nextPaint(): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, 100);
+      requestAnimationFrame(() =>
+        setTimeout(() => {
+          clearTimeout(timer);
+          resolve();
+        }),
+      );
+    });
+  }
+
   async function fetchDocumentMesh(): Promise<void> {
+    try {
+      await fetchDocumentMeshOnce();
+    } finally {
+      endLoad();
+    }
+  }
+
+  async function fetchDocumentMeshOnce(): Promise<void> {
     if (docState === null) {
       mesh = null;
       bounds = null;
@@ -3551,11 +3687,22 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       meshToken = null;
       return;
     }
+    /*
+     * Building the geometry of a whole large schematic holds this thread for a
+     * moment, so the bar says so first and is painted before it starts, then
+     * stays up until the scene has it.
+     */
+    const drawing = loadingShown && !response.mesh.partial;
+    if (drawing) {
+      reportLoad("drawing");
+      await nextPaint();
+    }
     mesh = response.mesh;
     bounds = { center: response.center, size: response.size };
     meshToken = response.mesh.token;
     heldAtlas = response.mesh.atlasVersion;
     heldAtlasLayout = response.mesh.atlasLayout;
+    if (drawing) await nextPaint();
   }
 
   /**
@@ -3749,6 +3896,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     // File menu all end up on this line.
     if (!(await mayDiscard("open"))) return;
     busy = true;
+    // Main cannot say it is reading -- the parse holds its thread -- so the
+    // window starts the bar, and main carries it on from decoding.
+    reportLoad("reading");
     try {
       const response = await api().openDocument(filePath);
       // Re-read either way: main adds the file on success and drops it on
@@ -3804,6 +3954,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     } catch (err) {
       failed(err, t("task.opening"));
     } finally {
+      // An open that failed brings no mesh to put the bar away.
+      endLoad();
       busy = false;
     }
   }
@@ -4383,6 +4535,70 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     }
   }
 
+  /** File → Import Schematic…: choose a file, then stamp it in. */
+  async function importSchematic(): Promise<void> {
+    if (!docState) return;
+    let picked: Awaited<ReturnType<ReturnType<typeof api>["pickFile"]>>;
+    try {
+      picked = await api().pickFile({ kind: "schem" });
+    } catch (err) {
+      failed(err, t("task.openingChooser"));
+      return;
+    }
+    if (picked.error) {
+      status = { tone: "error", text: picked.error };
+      return;
+    }
+    if (picked.path) await importSchematicAt(picked.path);
+  }
+
+  /**
+   * Another schematic, as a stamp: it lands on the clipboard and from there it
+   * is Ctrl+C's own gesture -- the ghost, the gizmo's arrows carrying the box,
+   * Ctrl+V writing it as one step. Nothing is written by the import itself.
+   *
+   * The box is the clipboard's size at the corner of the current selection, or
+   * at the origin, which is where a paste would land without moving anything.
+   * It may reach past the document: the paste grows it.
+   */
+  async function importSchematicAt(filePath: string): Promise<void> {
+    if (!docState) return;
+    busy = true;
+    try {
+      const response = await api().importSchematic(filePath);
+      if (!response.ok) {
+        status = { tone: "error", text: response.message };
+        return;
+      }
+      clipboard = response.clipboard;
+      docState = response.state;
+      const corner = selectionBounds
+        ? { x: selectionBounds.minX, y: selectionBounds.minY, z: selectionBounds.minZ }
+        : { x: 0, y: 0, z: 0 };
+      anchor = corner;
+      setAreas(
+        single({
+          minX: corner.x,
+          minY: corner.y,
+          minZ: corner.z,
+          maxX: corner.x + response.clipboard.width - 1,
+          maxY: corner.y + response.clipboard.height - 1,
+          maxZ: corner.z + response.clipboard.length - 1,
+        }),
+      );
+      const said = tn("status.imported", response.clipboard.blocks);
+      status = {
+        tone: response.notes.length > 0 ? "warn" : "ok",
+        text: [said, ...response.notes].join(" "),
+      };
+      void armStamp();
+    } catch (err) {
+      failed(err, t("task.importing"));
+    } finally {
+      busy = false;
+    }
+  }
+
   /**
    * Pastes at the selection's corner.
    *
@@ -4485,8 +4701,14 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * request to redraw the selection each time, and it is why the mode is
    * armed by the copy itself rather than by the picture arriving: a mesh that
    * failed would otherwise change what the next drag did, silently.
+   *
+   * **Raw, and it has to be.** `armStamp` keeps the stamp it armed and asks
+   * `stamp !== armed` when the picture lands; a deep `$state` stores a proxy
+   * of the object, so that was true on every answer and every picture was
+   * thrown away -- the stamp moved as an empty box. It is geometry anyway,
+   * which nothing should proxy.
    */
-  let stamp = $state<{ chunks: ChunkGeometry[] } | null>(null);
+  let stamp = $state.raw<{ chunks: ChunkGeometry[] } | null>(null);
 
   /**
    * Whether a paste leaves this document's empty space where it falls.
@@ -4896,6 +5118,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     }
     busy = true;
     try {
+      // Written first, so the bar main copies to a new file is the one in hand.
+      await flushHotbar();
       const response = await api().saveDocument({
         filePath: filePath ?? null,
         format,
@@ -4905,7 +5129,9 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         status = { tone: "error", text: response.message };
         return;
       }
+      const moved = followFile(response.filePath);
       docState = response.state;
+      if (moved) await caughtUpWithFile();
       // A schematic made here and then saved joins the recents on this save.
       void refreshRecents();
       status = {
@@ -5021,9 +5247,42 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * which steps aside for it.
    */
 
+  /**
+   * Renames the open file, and with it everything kept under its path.
+   *
+   * The refusals are main's and come back into the dialog, whose scrim
+   * covers the banner. Renaming is not saving: unsaved changes stay unsaved.
+   */
+  async function renameDocument(name: string): Promise<void> {
+    renameError = "";
+    busy = true;
+    try {
+      await flushHotbar();
+      const response = await api().renameDocument(name);
+      if (!response.ok) {
+        renameError = response.message;
+        return;
+      }
+      const moved = followFile(response.filePath);
+      docState = response.state;
+      if (moved) await caughtUpWithFile();
+      void refreshRecents();
+      renameOpen = false;
+      status = { tone: "ok", text: t("status.renamed", { name: response.state.fileName ?? name }) };
+    } catch (err) {
+      renameError = err instanceof Error ? err.message : String(err);
+    } finally {
+      busy = false;
+    }
+  }
+
   /** One of the schematic's own settings, from the Document menu beside its name. */
   function openDocumentSetting(item: DocumentMenuItem): void {
     switch (item) {
+      case "rename":
+        renameError = "";
+        renameOpen = true;
+        break;
       case "version":
         mcVersionOpen = true;
         break;
@@ -5358,8 +5617,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   open={settingsOpen}
   {settings}
   {keyStatus}
-  {resourcePackPath}
-  {resourcePackName}
+  resourcePackPath={settings.resourcePack}
+  resourcePackName={settings.resourcePack?.split(/[\\/]/).pop() ?? null}
   {versions}
   {defaultOutputDir}
   {busy}
@@ -5374,10 +5633,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   onpreviewchange={patchPreview}
   onuichange={patchUi}
   onpickresourcepack={() => pick("resource-pack")}
-  onclearresourcepack={() => {
-    resourcePackPath = null;
-    resourcePackName = null;
-  }}
+  onclearresourcepack={() => void setResourcePack(null)}
   onsavekey={saveKey}
   onclearkey={clearKey}
   {mcpStatus}
@@ -5392,6 +5648,18 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   oncheckupdates={() => void checkUpdates()}
   ondownloadupdate={() => void downloadUpdate()}
   oninstallupdate={() => void installUpdate()}
+/>
+
+<RenameModal
+  open={docState !== null && docState.filePath !== null && renameOpen}
+  fileName={docState?.fileName ?? ""}
+  {busy}
+  error={renameError}
+  onrename={(name) => void renameDocument(name)}
+  onclose={() => {
+    renameOpen = false;
+    renameError = "";
+  }}
 />
 
 <VersionModal
@@ -5889,6 +6157,10 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       />
     {/if}
 
+    {#if loading !== null && loadingShown}
+      <LoadingOverlay load={loading} />
+    {/if}
+
     {#if dropActive}
       <!--
         The whole viewport is the target, so the whole viewport says so: an
@@ -5900,6 +6172,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         <div class="drop-hint slab">
           <strong class="pixel">{t("viewport.dropTitle")}</strong>
           <span>{t("viewport.dropTypes")}</span>
+          {#if docState}<span>{t("viewport.dropImport")}</span>{/if}
         </div>
       </div>
     {/if}
