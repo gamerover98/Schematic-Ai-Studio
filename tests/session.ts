@@ -1408,6 +1408,27 @@ console.log("\n--- two slabs are one block ---");
   equal("...at either level", getBlock(filled.doc, 0, 1, 0).properties.type, "bottom");
 }
 
+// --- a block put on the build grid stays on it -----------------------------
+//
+// The grid is a floor and sends `against: "up"` with nothing under it. The
+// replaceable redirect stepped back to the cell below, which is outside the
+// box and reads as air, so the block went one cell down: the document grew
+// below the origin and the block landed under the floor it was put on.
+console.log("\n--- a block put on the build grid stays on it ---");
+{
+  const session = newDocument({ width: 4, height: 4, length: 4 });
+  applyEdit(session, {
+    kind: "use",
+    x: 1,
+    y: 0,
+    z: 1,
+    block: { namespacedName: "minecraft:stone", properties: {} },
+    against: "up",
+  });
+  equal("a block on the grid goes in the cell clicked", getBlock(session.doc, 1, 0, 1).namespacedName, "minecraft:stone");
+  equal("...and the document does not grow under it", session.doc.height, 4);
+}
+
 // --- connecting to the neighbours -------------------------------------------
 //
 // The rules themselves are tests/blocks.ts's. This is the pass: which cells get

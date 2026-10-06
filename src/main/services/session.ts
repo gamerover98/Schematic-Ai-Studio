@@ -1269,7 +1269,25 @@ export function applyEdit(
      * the moment the redirect landed.
      */
     const held = toEntry(request.block);
-    const clicked = emptiness(held) ? null : clickedCell(request);
+    /*
+     * **A cell outside the document was not clicked.** The build grid is a
+     * floor and sends `against: "up"` with nothing under it, and `getBlock`
+     * answers air outside the box -- which is replaceable. So every block put
+     * on the grid at the floor was redirected one cell *down*, out of the box:
+     * the document grew below the origin, the content moved up, and the block
+     * landed under the floor it had been placed on.
+     */
+    const stepped = emptiness(held) ? null : clickedCell(request);
+    const clicked =
+      stepped !== null &&
+      stepped.x >= 0 &&
+      stepped.y >= 0 &&
+      stepped.z >= 0 &&
+      stepped.x < doc.width &&
+      stepped.y < doc.height &&
+      stepped.z < doc.length
+        ? stepped
+        : null;
     // Ahead of the redirect, which would otherwise write a vine over the vine.
     const hanging = emptiness(held) ? null : hangingVineTarget(doc, request, held);
     const target =

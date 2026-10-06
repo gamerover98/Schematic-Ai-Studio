@@ -184,6 +184,12 @@ click that meant "place beside it" would destroy the slab already there. A fill
 carries no `against`, which is what keeps this a click gesture rather than
 something that halves a filled region.
 
+**A cell outside the document was never clicked.** The build grid sends
+`against: "up"` with nothing under it, `getBlock` answers air outside the box,
+and air is replaceable — so the redirect below moved every block put on the
+grid at the floor one cell down, growing the document under the origin.
+`clickedCell` is used only when it lands inside the box.
+
 **A placement writes over a *replaceable* block and never over anything else,
 and this app had no such concept at all.** `replaceable`, `canBeReplaced`,
 `isReplaceable` — every spelling appeared **zero times** across `src/`,
