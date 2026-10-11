@@ -185,6 +185,8 @@ export const ICONS = {
   },
   /** A folder: open a file, or show one where it is on disk. */
   folder: { paths: ["M3.5 18.5 V5.5 H9.5 L11.5 7.5 H20.5 V18.5 Z", "M3.5 10.5 H20.5"] },
+  /** A pencil, for renaming: a slanted bar with its point at the lower left. */
+  pencil: { paths: ["M5 19 L6 14.5 L15.5 5 L19 8.5 L9.5 18 Z", "M13.5 7 L17 10.5"] },
   /** The chat: a speech bubble, square as everything here is. */
   chat: { paths: ["M4.5 5.5 H19.5 V15.5 H11 L7 19.5 V15.5 H4.5 Z"] },
   /** The docked panels, on the side each one is on. */

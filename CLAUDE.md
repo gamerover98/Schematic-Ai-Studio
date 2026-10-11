@@ -1441,6 +1441,39 @@ has been renamed or written, and refusing would report a failure about an act
 that happened. The recents take the new path and drop the old one
 (`rememberRenamed`); `tests/services.ts` requires it and the copy on both roads.
 
+**A conversation can be named, and the name is a field beside the title
+rather than the title.** `StoredConversation.title` is derived from the first
+thing the user said and is written again from the entries every time the
+conversation is saved -- so a name typed into it would be put back by the next
+message. `customTitle` is the one thing about a name that has to be remembered;
+what a row shows is `customTitle ?? title`, and a conversation that was never
+named stores nothing new, so an old record reads as it always did.
+
+- **Renaming does not touch `updatedAt`.** The list is ordered by it, and a
+  rename is not talking: the chat somebody tidied would otherwise jump to the
+  top of a list ordered by when each was last *used*;
+- **`""` takes the name off**, which is the way back to the derived title. It is
+  deleted from the record rather than stored empty, and `coerceRecord` reads a
+  blank one as absent;
+- **the live conversation is written at once** when it has entries, so a name
+  chosen and then a crash is not a name chosen for nothing. One with nothing
+  said in it yet keeps the name in memory and the first save carries it;
+- **`ConversationSummary.named` is what the picker draws an empty row from.** An
+  empty conversation reads "New chat" in the window's language, which main
+  cannot spell -- unless it was named, and then it reads its name;
+- **the name travels with the chat.** `carryConversations` spreads the stored
+  records, and `tests/services.ts` renames the live conversation before a file
+  rename and a Save As and requires the name at both ends. `forkAt`'s
+  continuation starts without one: the archived copy is the one that was
+  named, and two rows with one name is not what anybody chose.
+
+The field is in the row, from the pencil or F2, and takes every key itself: the
+list's arrows and Escape and the window's single-key shortcuts would otherwise
+all reach somebody typing a name. Enter and leaving the field both keep it,
+Escape throws it away, and `commitRename` is guarded on the row being edited
+because Enter unmounts the field and the blur that follows must not keep it
+twice.
+
 **Recovering is opening, and every way of putting a file on screen has to say
 so.** A conversation is stored under the file *path*, so a document that arrives
 without `adoptSubject` arrives without its history — which is exactly what the

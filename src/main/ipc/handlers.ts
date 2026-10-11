@@ -183,6 +183,7 @@ import {
   newConversation,
   noteTurn,
   openConversation,
+  renameConversation,
   resetConversation,
   saveConversation,
   useConversationDirectory,
@@ -2406,6 +2407,12 @@ ${report.stack}`),
   ipcMain.handle(
     IPC.chatDelete,
     async (_event, id: string): Promise<ChatState> => await deleteConversation(id),
+  );
+
+  ipcMain.handle(
+    IPC.chatRename,
+    async (_event, id: string, title: string): Promise<ConversationList> =>
+      await renameConversation(String(id), String(title)),
   );
 
   ipcMain.handle(

@@ -330,6 +330,8 @@ export const IPC = {
   chatNew: "bgpt:chat:new",
   /** Throw one away for good. */
   chatDelete: "bgpt:chat:delete",
+  /** Give one a name of its own, or take it off again. */
+  chatRename: "bgpt:chat:rename",
   /** Put the schematic back to how it was before one of the turns. */
   chatRestore: "bgpt:chat:restore",
   /** Stop the request in flight. */
@@ -2159,11 +2161,23 @@ export interface ChatEntry {
   checkpoint?: string;
 }
 
+/** The longest a conversation's name runs: a derived one is cut here, a chosen one too. */
+export const CONVERSATION_TITLE_LIMIT = 60;
+
 /** One conversation, as the picker lists it. */
 export interface ConversationSummary {
   id: string;
-  /** The first thing the user said, cut to something that fits a row. */
+  /**
+   * What the row shows: the name the user gave it, or else the first thing
+   * they said, cut to something that fits a row.
+   */
   title: string;
+  /**
+   * Whether `title` is a name the user chose. A row with nothing in it says
+   * "New chat" in the window's own language -- unless it was named, and then it
+   * says what it was named.
+   */
+  named: boolean;
   /** Epoch milliseconds; `0` when nothing was ever recorded. */
   updatedAt: number;
   /** Turns in it, so an empty one can say so rather than look broken. */
@@ -2592,6 +2606,12 @@ export interface BgptApi {
   newConversation(): Promise<ChatState>;
   /** Delete one for good. Deleting the active one starts a new empty one. */
   deleteConversation(id: string): Promise<ChatState>;
+  /**
+   * Name one, or pass `""` to take the name off and go back to the first thing
+   * that was said in it. Answers with the list as it now stands, because the
+   * order does not change and the title is all that did.
+   */
+  renameConversation(id: string, title: string): Promise<ConversationList>;
   /**
    * Put the schematic back to how it was before the turn at `entryIndex`.
    *

@@ -44,9 +44,11 @@ import {
   type ProjectNotes,
   abridgeTrace,
   CONVERSATION_FORMAT,
+  cleanTitle,
   coerceRecord,
   mostRecent,
   pruneConversations,
+  shownTitle,
   storeFileName,
   titleFor,
   type ConversationRecord,
@@ -58,6 +60,12 @@ export const MAX_CONVERSATION_FILES = 100;
 
 interface Live {
   id: string;
+  /**
+   * The name the user gave it. `title` is not stored here at all: it is
+   * derived from the entries each time it is wanted, so a chosen name is the
+   * one thing about a name that has to be remembered.
+   */
+  customTitle?: string;
   /** The document this is about, or `null` while it is about nothing yet. */
   subject: string | null;
   createdAt: number;
@@ -198,6 +206,7 @@ function snapshot(): StoredConversation {
   return {
     id: current.id,
     title: titleFor(current.entries),
+    ...(current.customTitle === undefined ? {} : { customTitle: current.customTitle }),
     createdAt: current.createdAt,
     updatedAt: current.updatedAt,
     entries: current.entries.map((entry) =>
@@ -304,6 +313,7 @@ async function loadFor(subject: string): Promise<void> {
   }
   current = {
     id: stored.id,
+    ...(stored.customTitle === undefined ? {} : { customTitle: stored.customTitle }),
     subject,
     createdAt: stored.createdAt,
     updatedAt: stored.updatedAt,
@@ -331,14 +341,16 @@ export async function listConversations(): Promise<ConversationList> {
     .filter((one) => one.id !== current.id)
     .map((one) => ({
       id: one.id,
-      title: one.title,
+      title: shownTitle(one),
+      named: one.customTitle !== undefined,
       updatedAt: one.updatedAt,
       entryCount: one.entries.length,
     }));
 
   summaries.push({
     id: current.id,
-    title: titleFor(current.entries),
+    title: current.customTitle ?? titleFor(current.entries),
+    named: current.customTitle !== undefined,
     updatedAt: current.updatedAt,
     entryCount: current.entries.length,
   });
@@ -365,6 +377,7 @@ export async function openConversation(id: string): Promise<ChatState> {
   await saveConversation();
   current = {
     id: stored.id,
+    ...(stored.customTitle === undefined ? {} : { customTitle: stored.customTitle }),
     subject: current.subject,
     createdAt: stored.createdAt,
     updatedAt: stored.updatedAt,
@@ -381,6 +394,50 @@ export async function newConversation(): Promise<ChatState> {
   await saveConversation();
   current = fresh(current.subject);
   return conversationState();
+}
+
+/**
+ * Gives one a name of its own, or takes the name off again with `""`.
+ *
+ * **It does not touch `updatedAt`.** The list is ordered by it, and a rename is
+ * not talking: the chat somebody tidied would otherwise jump to the top of a
+ * list ordered by when it was last *used*, which is the order they are looking
+ * for things in.
+ *
+ * The live conversation is written at once, when it has anything worth
+ * writing, rather than left to the next message: a name chosen and then a
+ * crash is a name chosen for nothing. One that is only in memory (no subject
+ * yet, or no entries yet) keeps it there, and the first save carries it.
+ *
+ * An id that is not there resolves with the list as it is, for
+ * `openConversation`'s reason: the list the renderer holds can be a moment
+ * out of date.
+ */
+export async function renameConversation(id: string, title: string): Promise<ConversationList> {
+  const name = cleanTitle(title);
+  if (id === current.id) {
+    if (name === "") delete current.customTitle;
+    else current.customTitle = name;
+    await saveConversation();
+    return await listConversations();
+  }
+  if (current.subject !== null) {
+    const record = await readRecord(current.subject);
+    const file = fileFor(current.subject);
+    if (record && file && record.conversations.some((one) => one.id === id)) {
+      const conversations = record.conversations.map((one) => {
+        if (one.id !== id) return one;
+        const { customTitle: _was, ...rest } = one;
+        return name === "" ? rest : { ...rest, customTitle: name };
+      });
+      try {
+        await writeFile(file, JSON.stringify({ ...record, conversations }), "utf8");
+      } catch {
+        // The list is redrawn from what is actually there either way.
+      }
+    }
+  }
+  return await listConversations();
 }
 
 /**

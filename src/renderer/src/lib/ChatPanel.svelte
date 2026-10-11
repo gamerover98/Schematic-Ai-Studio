@@ -127,6 +127,7 @@
     onrestore: (entryIndex: number) => void;
     onopenconversation: (id: string) => void;
     ondeleteconversation: (id: string) => void;
+    onrenameconversation: (id: string, title: string) => void;
     onstop: () => void;
     onundo: () => void;
     onsettingschange: (patch: Partial<Settings>) => void;
@@ -168,6 +169,7 @@
     onrestore,
     onopenconversation,
     ondeleteconversation,
+  onrenameconversation,
     onstop,
     onundo,
     onsettingschange,
@@ -260,6 +262,7 @@
       onrefresh={onrefreshconversations}
       onopen={onopenconversation}
       ondelete={ondeleteconversation}
+      onrename={onrenameconversation}
     />
     <span class="spacer"></span>
     <button

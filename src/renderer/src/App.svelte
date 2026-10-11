@@ -3284,6 +3284,23 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     await refreshConversations();
   }
 
+  /**
+   * Names a conversation, or takes the name off with `""`.
+   *
+   * No `busy`: the picker cannot open while one is set, and a rename changes
+   * nothing the chat is showing -- only the name on a row and on the tab.
+   */
+  async function renameConversation(id: string, title: string): Promise<void> {
+    if (!bridgeAvailable) return;
+    try {
+      const list = await api().renameConversation(id, title);
+      conversations = list.conversations;
+      activeConversationId = list.activeId;
+    } catch (err) {
+      failed(err, t("task.renamingChat"));
+    }
+  }
+
   async function saveKey(provider: Provider, apiKey: string): Promise<void> {
     keyStatus = await api().setKey({ provider, apiKey });
   }
@@ -6079,6 +6096,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         onrestore={(index) => void restoreCheckpoint(index)}
         onopenconversation={(id) => void openConversation(id)}
         ondeleteconversation={(id) => void deleteConversation(id)}
+        onrenameconversation={(id, title) => void renameConversation(id, title)}
         hasDocument={docState !== null}
         {imageName}
         {acceptsImages}

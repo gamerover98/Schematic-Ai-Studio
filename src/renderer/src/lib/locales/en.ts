@@ -828,6 +828,9 @@ export const en = {
   "chat.historyHint": "Conversations about this schematic",
   "chat.noHistory": "No other conversations yet",
   "chat.deleteChat": "Delete this conversation",
+  "chat.renameChat": "Rename this conversation",
+  "chat.renameLabel": "Conversation name",
+  "chat.renameHint": "Leave it empty to use the first thing you said",
   "chat.restore": "Go back to this version",
   "chat.copyCode": "Copy",
   "chat.copied": "Copied",
@@ -1188,6 +1191,7 @@ export const en = {
   "task.savingVersion": "Keeping a version",
   "task.restoringVersion": "Going back to a version",
   "task.deletingVersion": "Deleting a version",
+  "task.renamingChat": "Renaming the conversation",
 
   "status.failed": "{doing}: {message}",
   "status.notOnDisk": "{name} does not come from a file on disk.",

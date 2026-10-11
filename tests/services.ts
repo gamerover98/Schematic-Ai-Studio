@@ -49,6 +49,7 @@ import {
   newConversation,
   noteTurn,
   openConversation,
+  renameConversation,
   resetConversation,
   saveConversation,
   stampCheckpoint,
@@ -2912,6 +2913,91 @@ console.log("\n--- conversation persistence ---");
     equal("deleting the active one empties the panel", emptied.entries.length, 0);
   }
 
+  /*
+   * A name of its own. The title is derived from the entries every time a
+   * conversation is written, so a chosen one has to be a field beside it or the
+   * next message puts the derived one back -- which is exactly how the first
+   * version of this would have failed, with every check about the *list* green.
+   */
+  {
+    const named = path.join(workDir, "named.schem");
+    resetConversation(null);
+    await adoptSubject(named);
+    appendEntry({ role: "user", text: "build me a lighthouse" });
+    const before = await listConversations();
+    const id = before.activeId;
+    equal("an unnamed one is titled by what was said", before.conversations[0].title, "build me a lighthouse");
+    equal("...and is not marked as named", before.conversations[0].named, false);
+
+    const renamed = await renameConversation(id, "  Lighthouse   plans ");
+    equal("a name is what the row shows, tidied", renamed.conversations[0].title, "Lighthouse plans");
+    equal("...marked as named", renamed.conversations[0].named, true);
+    equal("...with the order untouched: updatedAt does not move", renamed.conversations[0].updatedAt, before.conversations[0].updatedAt);
+
+    // Another message, a save, and the whole thing read back off disk.
+    appendEntry({ role: "agent", text: "A tall one." });
+    await saveConversation();
+    resetConversation(null);
+    await adoptSubject(named);
+    const reread = await listConversations();
+    equal("the name survives another message and a reopen", reread.conversations[0].title, "Lighthouse plans");
+    equal("...and so does the conversation under it", reread.conversations[0].entryCount, 2);
+
+    // One that is not on screen is named in its file.
+    await newConversation();
+    appendEntry({ role: "user", text: "a second thing" });
+    const both = await listConversations();
+    const first = both.conversations.find((one) => one.title === "Lighthouse plans");
+    const other = await renameConversation(both.activeId, "Second");
+    equal("the one on screen takes a name too", other.conversations.find((one) => one.id === both.activeId)?.title, "Second");
+    const away = await renameConversation(first?.id ?? "", "Lighthouse");
+    equal("one that is not on screen takes it in its file", away.conversations.find((one) => one.id === first?.id)?.title, "Lighthouse");
+    equal("...and the one on screen is the same one", away.activeId, both.activeId);
+    const opened = await openConversation(first?.id ?? "");
+    equal("...and opening it brings its log", opened.entries.length, 2);
+    equal(
+      "...under the name it was given",
+      (await listConversations()).conversations.find((one) => one.id === first?.id)?.title,
+      "Lighthouse",
+    );
+
+    // The way back.
+    const cleared = await renameConversation(first?.id ?? "", "   ");
+    const back = cleared.conversations.find((one) => one.id === first?.id);
+    equal("an empty name goes back to the first thing said", back?.title, "build me a lighthouse");
+    equal("...and is no longer marked as named", back?.named, false);
+    const onDisk = JSON.parse(
+      await readFile(path.join(workDir, "conversations", storeFileName(named)), "utf8"),
+    ) as { conversations: { id: string; customTitle?: string }[] };
+    equal(
+      "...and the file does not keep it either, empty or otherwise",
+      onDisk.conversations.find((one) => one.id === first?.id)?.customTitle,
+      undefined,
+    );
+
+    // The limit, and an id nobody has.
+    const long = await renameConversation(first?.id ?? "", "x".repeat(200));
+    equal("a name is cut at the limit", long.conversations.find((one) => one.id === first?.id)?.title.length, 60);
+    const stale = await renameConversation("no-such-id", "nothing");
+    equal(
+      "an unknown id is a no-op",
+      stale.conversations.map((one) => one.title).sort(),
+      long.conversations.map((one) => one.title).sort(),
+    );
+
+    // A conversation with nothing said in it yet can be named, and keeps it
+    // into its first message.
+    resetConversation(null);
+    await adoptSubject(path.join(workDir, "named-empty.schem"));
+    const fresh = await listConversations();
+    const empty = await renameConversation(fresh.activeId, "Ideas");
+    equal("an empty conversation can be named", empty.conversations[0].title, "Ideas");
+    equal("...with no entries in it", empty.conversations[0].entryCount, 0);
+    appendEntry({ role: "user", text: "first words" });
+    await saveConversation();
+    equal("...and keeps the name once something is said", (await listConversations()).conversations[0].title, "Ideas");
+  }
+
   resetConversation(null);
 }
 
@@ -3057,6 +3143,9 @@ console.log("\n--- a schematic changes its path ---");
   await takeSnapshot(session, "manual", "with the moat");
   await writeHotbar(castle, { slots: [...DEFAULT_HOTBAR], slot: 3 });
 
+  // The name chosen for this chat has to travel with the file, wherever it goes.
+  await renameConversation((await listConversations()).activeId, "Moat plans");
+
   // --- rename: everything goes, nothing is left behind
   const moved = await renameDocumentFile(session, "fortress");
   const fortress = path.join(files, "fortress.schem");
@@ -3070,6 +3159,7 @@ console.log("\n--- a schematic changes its path ---");
     "dig a moat",
     "Dug one.",
   ]);
+  equal("...under the name it was given", (await listConversations()).conversations[0].title, "Moat plans");
   equal("the versions went with it", (await listSnapshots(fortress)).map((one) => one.label), ["with the moat"]);
   equal("the hotbar went with it", (await readHotbar(fortress)).slot, 3);
   equal("nothing is left under the old name: chats", await stored(castle), null);
@@ -3106,6 +3196,7 @@ console.log("\n--- a schematic changes its path ---");
     resetConversation(null);
     await adoptSubject(filePath);
     equal(`${where} has the chat`, conversationState().entries.length, 2);
+    equal(`${where} has its name`, (await listConversations()).conversations[0].title, "Moat plans");
     equal(`${where} has the versions`, (await listSnapshots(filePath)).length, 1);
     equal(`${where} has the hotbar`, (await readHotbar(filePath)).slot, 3);
   }

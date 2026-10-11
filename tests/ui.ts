@@ -7034,6 +7034,48 @@ console.log("\n--- chat ---");
     chat.includes("onclick={oncollapse}") && app.includes("oncollapse={toggleSidebar}"),
   );
 
+  // A conversation is renamed in its row. The field takes every key itself, or
+  // the list's arrows, its Escape and the window's single-key shortcuts would
+  // all reach somebody typing a name.
+  const fieldKey = conversations.slice(
+    conversations.indexOf("function onFieldKey("),
+    conversations.indexOf("function onTriggerKey("),
+  );
+  check(
+    "a row renames in place, from a pencil or F2",
+    conversations.includes('class="icon rename"') && /event\.key === "F2"/.test(conversations),
+  );
+  check(
+    "...the field stops every key before it decides anything",
+    fieldKey.indexOf("event.stopPropagation()") !== -1 &&
+      fieldKey.indexOf("event.stopPropagation()") < fieldKey.indexOf('event.key === "Enter"'),
+  );
+  check(
+    "...Enter keeps the name, Escape throws it away, and a composition is not either",
+    /event\.isComposing\) return;[\s\S]*"Enter"[\s\S]*commitRename\(one\)[\s\S]*"Escape"[\s\S]*cancelRename\(\)/.test(
+      fieldKey,
+    ),
+  );
+  check(
+    "...leaving the field keeps it, once: the commit is guarded on the row being edited",
+    conversations.includes("onblur={() => commitRename(one)}") &&
+      /function commitRename[\s\S]*if \(editing !== one\.id\) return;/.test(conversations),
+  );
+  check(
+    "...the field is cut at the limit main cuts at",
+    conversations.includes("maxlength={CONVERSATION_TITLE_LIMIT}"),
+  );
+  check(
+    "a conversation that was named reads its name even with nothing said in it",
+    conversations.includes("one.entryCount === 0 && !one.named"),
+  );
+  check(
+    "the window sends the rename to main and redraws from the list main answers with",
+    /renameConversation\(id: string, title: string\)[\s\S]*api\(\)\.renameConversation\(id, title\)[\s\S]*conversations = list\.conversations/.test(
+      app,
+    ) && chat.includes("onrename={onrenameconversation}"),
+  );
+
   // Every surface of the chat picks from the scales: no rounded corner, no
   // colour of its own, no font size outside the type scale.
   const files = ["ChatPanel", "ChatComposer", "ConversationPicker", "TraceView", "ModelPicker", "Markdown"];
