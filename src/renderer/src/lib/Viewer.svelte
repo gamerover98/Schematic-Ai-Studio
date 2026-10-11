@@ -650,7 +650,7 @@ import { isTyping } from "./typing.js";
     gizmoRegion = null,
     onpick,
     cameraMode = "orbit",
-    flySpeed = 12,
+    flySpeed = 10,
     flyDeceleration = DEFAULT_FLY_DECELERATION,
     onbuild,
     framingKey = 0,

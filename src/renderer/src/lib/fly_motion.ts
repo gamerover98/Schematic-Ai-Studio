@@ -29,7 +29,7 @@
  */
 
 /** The time constant, in seconds, a new install flies with. */
-export const DEFAULT_FLY_DECELERATION = 0.25;
+export const DEFAULT_FLY_DECELERATION = 0.15;
 
 /** The longest the setting offers; the reader refuses anything beyond it. */
 export const MAX_FLY_DECELERATION = 1;

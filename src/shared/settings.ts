@@ -490,10 +490,10 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   groundColor: "",
   biomeColor: DEFAULT_BIOME_COLOR,
   waterColor: DEFAULT_WATER_COLOR,
-  flySpeed: 12,
+  flySpeed: 10,
   // `DEFAULT_FLY_DECELERATION` in the renderer's `fly_motion.ts`, which the
   // main process may not import; a check in tests/ui.ts holds the two together.
-  flyDeceleration: 0.25,
+  flyDeceleration: 0.15,
   showMarkers: true,
   showBounds: false,
   showWorldEditOffset: true,

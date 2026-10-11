@@ -3667,8 +3667,9 @@ round of "camera found: false". Speeds are taken along the camera's heading.
 With D pressed 100 ms into a W glide the forward speed is 0 on the very frame
 and the sideways one is full; with S it is -full at once and does not cross zero
 first; Space let go is 0 on the next frame, and with W held it leaves the
-forward speed alone. At the default a full release coasts `speed * tau` (2.4 of
-2.5 blocks at 10 blocks/s) and is at rest in about a second and a half.
+forward speed alone. A full release coasts `speed * tau` -- 2.4 of 2.5 blocks at
+10 blocks/s and 0.25 s, measured -- and the default, 0.15 s, is a glide of a
+block and a half that is at rest in under a second.
 
 **In flight, Ctrl belongs to the camera, and only main can honour that.** With
 the pointer locked the keyboard is flying: Ctrl is the sprint modifier and WASD
