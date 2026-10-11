@@ -1474,6 +1474,18 @@ Escape throws it away, and `commitRename` is guarded on the row being edited
 because Enter unmounts the field and the blur that follows must not keep it
 twice.
 
+**The pencil closed the list on the first real press, and a script could not
+see it.** The picker puts itself away on a click outside `root`, asked as
+`root.contains(event.target)`. The pencil replaces itself with the field in its
+own click handler, and for a click a user makes -- unlike one a script
+dispatches -- Svelte's update runs between two listeners of the same dispatch:
+by the time the window's listener saw the event its target was out of the
+document, "outside", and the list closed on the press meant to open the field.
+`composedPath()` is fixed when the event starts and still holds the row. It was
+found by clicking with real input events; the first pass drove `.click()`, which
+runs the whole dispatch on one stack and so never exposes it. A control that
+removes itself in its own handler has to be driven with real events.
+
 **Recovering is opening, and every way of putting a file on screen has to say
 so.** A conversation is stored under the file *path*, so a document that arrives
 without `adoptSubject` arrives without its history — which is exactly what the

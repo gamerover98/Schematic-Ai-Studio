@@ -137,8 +137,16 @@
 
   function onWindowClick(event: MouseEvent): void {
     // The popover is `position: fixed` but still a child of `root`, so this
-    // stays a plain containment test rather than needing a portal.
-    if (root && !root.contains(event.target as Node)) open = false;
+    // stays a containment test rather than needing a portal.
+    //
+    // **Asked of the path the event took, not of `target`.** A click on the
+    // pencil swaps the button for the field, and for a click the user made --
+    // unlike one a script dispatched -- Svelte's update runs between two
+    // listeners of the same dispatch: by the time this one sees the event the
+    // button is gone from the document and `root.contains(target)` is false, so
+    // the list closed on the very press that was meant to open the field. The
+    // path was fixed when the event started, and still holds the row.
+    if (root && !event.composedPath().includes(root)) open = false;
   }
 
   function onTriggerKey(event: KeyboardEvent): void {

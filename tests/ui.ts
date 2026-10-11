@@ -7061,6 +7061,16 @@ console.log("\n--- chat ---");
     conversations.includes("onblur={() => commitRename(one)}") &&
       /function commitRename[\s\S]*if \(editing !== one\.id\) return;/.test(conversations),
   );
+  // The pencil swaps itself for the field while the click is still on its way
+  // up. A click a user makes runs Svelte's update between two listeners of the
+  // dispatch, so `target` is out of the document by the time the window sees
+  // it -- and a script's `.click()` does not, which is how the first version
+  // passed every check and closed the list on the first real press.
+  check(
+    "...and an outside click is asked of the path the event took, not of its target",
+    conversations.includes("!event.composedPath().includes(root)") &&
+      !/root\.contains\(event\.target/.test(conversations),
+  );
   check(
     "...the field is cut at the limit main cuts at",
     conversations.includes("maxlength={CONVERSATION_TITLE_LIMIT}"),
