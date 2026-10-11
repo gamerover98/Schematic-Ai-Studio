@@ -163,7 +163,7 @@ import {
     singleMix,
   } from "../../shared/ipc.js";
   import { parseMix, pickAt } from "../../shared/block_mix.js";
-  import { canonicalBlock, isAirBlock, withBlockAdded } from "./lib/block_spelling.js";
+  import { canonicalBlock, findInHotbar, isAirBlock, withBlockAdded } from "./lib/block_spelling.js";
   import type { SchematicFormat } from "../../shared/schematic.js";
 import { schematicExtension } from "../../shared/schematic.js";
 import type { FileKind } from "../../shared/ipc.js";
@@ -684,6 +684,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * labels and `parseBlock` places like any other held block. Built from the
    * layers rather than from `blockData`, which on a pre-Flattening document
    * renames a white banner after its `Base` -- a block that version cannot hold.
+   *
+   * **A block already on the bar is not written again; the bar moves to it.**
+   * That is the game's creative pick, and without it picking the block in your
+   * other hand overwrote the slot you were holding and left two of it. It
+   * matches on the spelling this function builds, so a slot holding the same
+   * block with a state written out (`oak_stairs[facing=east]`) is another
+   * block here -- as it is to `holdBlock`, which would have replaced it.
    */
   async function onPickMaterial(at: { x: number; y: number; z: number }): Promise<void> {
     if (busy) return;
@@ -692,13 +699,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       if (!response.ok || response.block === "minecraft:air") return;
       const base = response.block.split("[")[0];
       const layers = response.banner?.layers ?? [];
-      holdBlock(
+      const picked =
         layers.length === 0
           ? base
           : `${base}[banner_patterns=[${layers
               .map((layer) => `{pattern:"${layer.pattern}",color:"${layer.color}"}`)
-              .join(",")}]]`,
-      );
+              .join(",")}]]`;
+      const onBar = findInHotbar(hotbar, picked, legacyForDoc);
+      if (onBar === -1) holdBlock(picked);
+      else if (onBar !== hotbarSlot) holdSlot(onBar);
     } catch (err) {
       failed(err, t("task.pickingBlock"));
     }

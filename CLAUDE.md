@@ -4562,6 +4562,24 @@ field in the selection tools, the middle mouse button. The wheel is still only
 the bar's *in flight*: in orbit it is the zoom, and the game gets to claim the
 wheel only because the game has no zoom to lose.
 
+**The middle button on a block that is already on the bar moves the bar to it.**
+That is the game's creative pick, and it was not what happened here: the pick
+always wrote the slot in hand, so picking the block in your *other* slot
+overwrote what you were holding and left two of it on the bar. `findInHotbar`
+in `block_spelling.ts` asks first, by the canonical spelling -- name, states and
+a banner's design, so `35:14` on a legacy document and the bare id are one
+block and another design is another block. Three edges, each deliberate:
+
+- **a mix does not hold the blocks it is made of.** A slot of `70%glass,30%dirt`
+  places a share of glass among other things, so jumping to it would put
+  something else in the hand than what was picked. A single block with a weight
+  on it (`50%cobblestone`) is that block;
+- **the pick carries no state** (`onPickMaterial` drops them on purpose), so a
+  slot with `oak_stairs[facing=east]` is not the bare `oak_stairs` that was
+  picked, and the pick still writes the slot in hand -- which is what it
+  replaced already;
+- **a block not on the bar is unchanged**: it goes into the active slot.
+
 **Air is not a block you can hold.** It is a real id everywhere else — every
 empty cell in the document is air, and the writers and the agent both name it —
 but there is nothing to pick up and nothing to draw, so it was a permanently

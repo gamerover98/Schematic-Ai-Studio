@@ -210,6 +210,7 @@ import { BANNER_EDITOR_URL } from "../src/shared/banner_patterns.js";
 import { propertyKind, propertyRows, showsAsCheckbox } from "../src/renderer/src/lib/inspector_rows.js";
 import {
   canonicalBlock,
+  findInHotbar,
   isAirBlock,
   readSpelling,
   withBlockAdded,
@@ -2239,6 +2240,10 @@ console.log("\n--- a patterned banner, in the inspector ---");
   check(
     "the middle button picks a banner up with its design",
     pick.includes("response.banner?.layers") && /banner_patterns=\[/.test(pick),
+  );
+  check(
+    "...and asks the bar first: a block already on it moves the bar rather than writing the slot",
+    /findInHotbar\(hotbar, picked, legacyForDoc\)[\s\S]*holdBlock\(picked\)[\s\S]*holdSlot\(onBar\)/.test(pick),
   );
 
   // A composed cloth grows the atlas, and the icons drawn against the old one
@@ -5415,6 +5420,57 @@ console.log("\n--- the materials, as an inventory ---");
     bedPair?.entries.map((entry) => entry.block),
     ["minecraft:red_bed[facing=north,part=foot]", "minecraft:red_bed[facing=north,part=head]"],
   );
+
+  /*
+   * The middle button on a block that is already on the bar moves the bar to
+   * it, as the game's creative pick does, instead of writing the slot in hand.
+   */
+  const bar = [
+    "minecraft:stone",
+    "oak_planks",
+    "minecraft:oak_stairs[facing=east]",
+    "70%minecraft:glass,30%minecraft:dirt",
+    "50%minecraft:cobblestone",
+    'minecraft:white_banner[banner_patterns=[{pattern:"mojang",color:"red"}]]',
+    "minecraft:torch",
+    "minecraft:sandstone",
+    "minecraft:glowstone",
+  ];
+  equal("a block on the bar is found at its slot", findInHotbar(bar, "minecraft:stone", null), 0);
+  equal("...with the namespace left off a slot", findInHotbar(bar, "minecraft:oak_planks", null), 1);
+  equal("...or off the pick", findInHotbar(bar, "torch", null), 6);
+  equal("a block that is not there is -1", findInHotbar(bar, "minecraft:diamond_block", null), -1);
+  equal(
+    "a slot with a state written out is another block than the bare pick",
+    findInHotbar(bar, "minecraft:oak_stairs", null),
+    -1,
+  );
+  equal(
+    "...and the same state is found",
+    findInHotbar(bar, "minecraft:oak_stairs[facing=east]", null),
+    2,
+  );
+  equal("a mix does not hold the blocks it is made of", findInHotbar(bar, "minecraft:glass", null), -1);
+  equal("a single block with a weight on it is that block", findInHotbar(bar, "minecraft:cobblestone", null), 4);
+  equal(
+    "a banner is found by its design",
+    findInHotbar(bar, 'minecraft:white_banner[banner_patterns=[{pattern:"mojang",color:"red"}]]', null),
+    5,
+  );
+  equal(
+    "...and another design on the same banner is another block",
+    findInHotbar(bar, 'minecraft:white_banner[banner_patterns=[{pattern:"mojang",color:"blue"}]]', null),
+    -1,
+  );
+  const legacyTable = JSON.parse(
+    readFileSync(path.join(here, "..", "resources", "legacy_blocks.json"), "utf8"),
+  ) as { blocks: Record<string, string> };
+  equal(
+    "a legacy ID:DATA is the block it means",
+    findInHotbar(["minecraft:red_wool"], "35:14", buildLegacyIndex(legacyTable.blocks)),
+    0,
+  );
+  equal("the first of two equal slots is the one found", findInHotbar(["minecraft:dirt", "minecraft:dirt"], "dirt", null), 0);
 
   equal("adding to an empty field gives that block alone", withBlockAdded("", "stone", null), "minecraft:stone");
   const two = tryParseMix(withBlockAdded("minecraft:stone", "dirt", null));
