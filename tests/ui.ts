@@ -143,9 +143,13 @@ import {
   type Ray,
 } from "../src/renderer/src/lib/selection_drag.js";
 import {
+  ALIGNED_DOT,
   defaultPivot,
   dragAlongAxis,
+  dragInPlane,
   gizmoOrigin,
+  planePointAt,
+  pointsAtCamera,
   quartersBetween,
   regionCentre,
   regionFits,
@@ -1212,6 +1216,96 @@ console.log("\n--- the transform gizmo ---");
   );
 
   /*
+   * And that refusal is why an arrow pointed at the camera gets a drag of its
+   * own. Looking straight down, the Y arrow is a dot: there is nothing along it
+   * to follow, and what the picture does show is the plane across it. So the
+   * selection moves within that plane and never along the arrow -- Cinema 4D's
+   * answer, and the one asked for.
+   */
+  const downward = { x: 0, y: -1, z: 0 };
+  equal("looking straight down the Y arrow points at the camera", pointsAtCamera("y", downward), true);
+  equal(
+    "...and the two in the plane do not",
+    [pointsAtCamera("x", downward), pointsAtCamera("z", downward)],
+    [false, false],
+  );
+  equal("an arrow pointed away counts the same as one pointed at", pointsAtCamera("y", { x: 0, y: 1, z: 0 }), true);
+  equal(
+    "an isometric view has no arrow facing it",
+    ["x", "y", "z"].map((axis) => pointsAtCamera(axis as "x" | "y" | "z", { x: -1, y: -1, z: -1 })),
+    [false, false, false],
+  );
+  const tilted = (degrees: number) => ({
+    x: Math.sin((degrees * Math.PI) / 180),
+    y: -Math.cos((degrees * Math.PI) / 180),
+    z: 0,
+  });
+  check(
+    "the threshold is about twenty degrees off dead on",
+    pointsAtCamera("y", tilted(18)) && !pointsAtCamera("y", tilted(22)) && ALIGNED_DOT === 0.94,
+  );
+  equal("a view with no direction faces nothing", pointsAtCamera("y", { x: 0, y: 0, z: 0 }), false);
+
+  const grabbed = planePointAt({ origin, axis: "y", ray: down(2.5, -1.5) });
+  equal("a press meets the plane across the arrow", grabbed, { x: 2.5, y: 0.5, z: -1.5 });
+  equal(
+    "...and a ray along that plane meets nothing",
+    planePointAt({
+      origin,
+      axis: "y",
+      ray: { origin: { x: 0, y: 0.5, z: -5 }, direction: { x: 0, y: 0, z: 1 } },
+    }),
+    null,
+  );
+  const inPlane = (x: number, z: number) =>
+    dragInPlane({ origin, axis: "y", ray: down(x, z), grab: grabbed ?? origin });
+  equal("a drag within the plane is a step on both of its axes", inPlane(5.9, -3.6), { x: 3, y: 0, z: -2 });
+  equal("...and back where it was grabbed is the zero step, not a refusal", inPlane(2.5, -1.5), {
+    x: 0,
+    y: 0,
+    z: 0,
+  });
+  check(
+    "...with the pressed axis exactly zero, whichever way the ray comes in",
+    (() => {
+      const slanted = dragInPlane({
+        origin,
+        axis: "y",
+        ray: { origin: { x: 0, y: 10, z: 0 }, direction: { x: 0.3, y: -1, z: 0.1 } },
+        grab: { x: 0, y: 0.5, z: 0 },
+      });
+      return slanted !== null && Object.is(slanted.y, 0);
+    })(),
+  );
+  check(
+    "a rounded negative never leaves a minus zero",
+    (() => {
+      const nudge = inPlane(2.3, -1.7);
+      return nudge !== null && [nudge.x, nudge.y, nudge.z].every((value) => !Object.is(value, -0));
+    })(),
+  );
+  equal(
+    "the same drag about the X arrow moves in Y and Z",
+    dragInPlane({
+      origin,
+      axis: "x",
+      ray: { origin: { x: 10, y: 4.5, z: -2.5 }, direction: { x: -1, y: 0, z: 0 } },
+      grab: { x: 0.5, y: 0.5, z: 0.5 },
+    }),
+    { x: 0, y: 4, z: -3 },
+  );
+  equal(
+    "a drag that has lost its plane is null, which is not the zero step",
+    dragInPlane({
+      origin,
+      axis: "y",
+      ray: { origin: { x: 0, y: 0.5, z: -5 }, direction: { x: 0, y: 0, z: 1 } },
+      grab: grabbed ?? origin,
+    }),
+    null,
+  );
+
+  /*
    * The ring, and the sign that matters. Main turns a region by
    * `(x, z) -> (length - 1 - z, x)`, which sends **east to south**; the ring
    * has to read the same way round or dragging clockwise would turn the build
@@ -1381,6 +1475,23 @@ console.log("\n--- the gizmo takes the press, and gives the camera back ---");
     "...and takes the left button from the camera",
     grab.includes("controls.enabled = false"),
     "LEFT is THREE.MOUSE.PAN, so the camera would pan instead",
+  );
+  check(
+    "an arrow facing an orthographic camera is dragged within the viewed plane",
+    /camera instanceof THREE\.OrthographicCamera[\s\S]{0,400}pointsAtCamera\(handle\.axis, view\)[\s\S]{0,200}planePointAt\(/.test(
+      grab,
+    ) && viewer.includes("dragInPlane({ origin, axis: handle.axis, ray, grab: gizmoDrag.plane })"),
+    "the press decides once, and the move reads what the press decided",
+  );
+  const pickAt = viewer.slice(viewer.indexOf("function gizmoAt("), viewer.indexOf("function gizmoGrabAt("));
+  check(
+    "the dot an aligned arrow makes beats the roots of the other two when the ray crosses both",
+    /OrthographicCamera/.test(pickAt) && /pointsAtCamera\(handle\.axis/.test(pickAt) && /return handle;/.test(pickAt),
+    "an arrow pointing away is behind them, and the nearest hit would otherwise be a root",
+  );
+  check(
+    "...and only an arrow: a ring and a scale handle keep their own gestures",
+    /handle\.kind === "arrow" && camera instanceof THREE\.OrthographicCamera/.test(grab),
   );
   check(
     "...without asking for Shift",

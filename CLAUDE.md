@@ -4004,6 +4004,39 @@ Four things about it are load-bearing:
 - **`null` from a drag means "leave it alone" and must not be read as zero.** An
   axis pointed at the camera has no usable drag plane; treated as zero, a drag
   that grazed that angle would snap the region back to where it started.
+- **An arrow pointed at an orthographic camera drags within the viewed
+  plane.** Looking straight down, the Y arrow is a dot: there is nothing along
+  it to follow, `dragPlaneNormal` refuses, and the press used to do nothing at
+  all -- the cursor said grab and the camera panned. It is Cinema 4D's answer
+  now: the pointer meets the plane *across* the arrow (`planePointAt`) and the
+  step is the rounded difference on the **two** other axes (`dragInPlane`), with
+  the pressed one exactly zero. `step` was already a `Vec3` everywhere downstream
+  -- the ghost, the pivot, `commitMove` -- so nothing past `gizmoDragTo` knows
+  there are two kinds of arrow drag. Four things about it are load-bearing:
+  - **the decision is made once, at the press** (`gizmoDrag.plane`), from
+    `pointsAtCamera`: OrthographicCamera only, an arrow only, `|view . axis| >=
+    ALIGNED_DOT` (0.94, about twenty degrees off dead on). The camera is not
+    moving while a handle is held, and a drag that changed its mind half way
+    would be two gestures in one. An isometric view has every axis at 0.577 and
+    never reaches it;
+  - **perspective is left alone, deliberately.** An arrow exactly aligned there
+    has the same inert press, but the depth is real and which of two readings a
+    pixel means is a question for the user rather than for this arithmetic;
+  - **the dot wins the pixel** (`gizmoAt`). The roots of the other two arrows
+    start at the same point, and a ray through it finds the *nearest*: with the
+    arrow pointing away from the camera that is a root, so the press took a
+    handle that cannot follow the pointer's other axis and the one meant was
+    unreachable. Found by driving it with real events -- the unit checks all
+    passed. Only an aligned arrow gets that priority, in the orthographic view
+    only, and it costs the other two nothing but their roots;
+  - **a rounded negative is not `-0`.** `dragInPlane` says `|| 0`, because the
+    step is compared with `Object.is` somewhere and `-0` is a different number
+    there.
+
+  `dragAlongAxis` is unchanged and its `null` still means "leave it alone": the
+  check that an axis pointed at the camera *refuses* in the along-axis drag is
+  why this had to be a second function rather than a second answer from that
+  one.
 - **A drag decides but does not write.** The destination is drawn as a box, and
   as the region's own geometry when `regionMesh` has arrived; one edit is sent on
   release, so the whole gesture is one Ctrl+Z. The ghost is fetched at the press

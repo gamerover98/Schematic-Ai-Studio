@@ -189,6 +189,86 @@ export function dragAlongAxis(input: {
 }
 
 /**
+ * How squarely an axis must face the camera before an arrow drag stops being
+ * a drag *along* it.
+ *
+ * `|view . axis|` for a unit view, so 0.94 is about twenty degrees off dead
+ * on. Past that the arrow is a third of its length on screen and a pixel of
+ * pointer moves the region several blocks along an axis the picture cannot
+ * show, which is the drag `dragPlaneNormal` refuses at exactly aligned and
+ * does badly short of it. An isometric view has all three at 0.577 and never
+ * reaches it.
+ */
+export const ALIGNED_DOT = 0.94;
+
+/**
+ * Whether `axis` points at (or away from) the camera.
+ *
+ * Asked once, at the press, and kept: the camera is not moving while a handle
+ * is held (OrbitControls is off for the gesture), and a drag that changed its
+ * mind half way would be two gestures in one.
+ */
+export function pointsAtCamera(axis: Axis, view: Vec3): boolean {
+  const length = Math.hypot(view.x, view.y, view.z);
+  if (!(length > 1e-9)) return false;
+  return Math.abs(component(view, axis)) / length >= ALIGNED_DOT;
+}
+
+/**
+ * Where the pointer meets the plane *across* `axis` through the gizmo's
+ * origin, in world units.
+ *
+ * That plane is the one the camera is looking at when the axis points at it,
+ * and it is the best conditioned plane there is for that case: the ray
+ * crosses it nearly square. Null when the ray runs along it, and for a hit
+ * that is not a usable number, for `axisPointAt`'s reason.
+ */
+export function planePointAt(input: { origin: Vec3; axis: Axis; ray: Ray }): Vec3 | null {
+  const hit = intersectPlane(input.ray, input.origin, AXIS_VECTOR[input.axis]);
+  if (hit === null) return null;
+  for (const value of [hit.x, hit.y, hit.z]) {
+    if (!Number.isFinite(value) || Math.abs(value) > MAX_COORDINATE) return null;
+  }
+  return hit;
+}
+
+/**
+ * How many whole cells the region has been dragged within the plane across
+ * `axis`, as a step on all three axes.
+ *
+ * What Cinema 4D does with the handle that points at the camera: the
+ * selection follows the pointer in the viewed plane and does not move along
+ * the arrow, which is the one direction the picture says nothing about. The
+ * component on `axis` is exactly zero, whatever the ray does.
+ *
+ * Both in-plane components round on their own, so a diagonal drag is a
+ * diagonal step. Null means "leave it alone", and -- as for `dragAlongAxis` --
+ * must not be read as the zero step.
+ */
+export function dragInPlane(input: {
+  origin: Vec3;
+  axis: Axis;
+  ray: Ray;
+  /** Where the press met the plane, from `planePointAt`. */
+  grab: Vec3;
+}): Vec3 | null {
+  const hit = planePointAt(input);
+  if (hit === null) return null;
+  // `|| 0` is what turns a rounded -0 into 0, which is the same number to
+  // everything but `Object.is`.
+  const step: Vec3 = {
+    x: Math.round(hit.x - input.grab.x) || 0,
+    y: Math.round(hit.y - input.grab.y) || 0,
+    z: Math.round(hit.z - input.grab.z) || 0,
+  };
+  step[input.axis] = 0;
+  if (Math.abs(step.x) > MAX_COORDINATE || Math.abs(step.y) > MAX_COORDINATE || Math.abs(step.z) > MAX_COORDINATE) {
+    return null;
+  }
+  return step;
+}
+
+/**
  * The pointer's angle around `axis`, for a ring drag.
  *
  * A different plane from the arrows': a ring lies *across* its axis, so the

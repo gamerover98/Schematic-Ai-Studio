@@ -105,7 +105,10 @@ import {
     axisPointAt,
     defaultPivot,
     dragAlongAxis,
+    dragInPlane,
     gizmoOrigin,
+    planePointAt,
+    pointsAtCamera,
     regionFits,
     quartersBetween,
     regionCentre,
@@ -2311,6 +2314,16 @@ import { isTyping } from "./typing.js";
     handle: GizmoHandle;
     origin: THREE.Vector3;
     grab: number;
+    /**
+     * Where the press met the plane across the arrow's axis, when the arrow
+     * points at the camera and the view is orthographic -- else `null`, and
+     * the drag is along the axis as it always was.
+     *
+     * Decided at the press and kept: the camera does not move while a handle
+     * is held, and a drag that changed its mind half way would be two
+     * gestures in one.
+     */
+    plane: Vec3 | null;
     region: Region;
     /** Every area, frozen with `region`, so the preview draws each one. */
     areas: Region[];
@@ -2466,9 +2479,31 @@ import { isTyping } from "./typing.js";
       ),
       camera,
     );
-    const hit = raycaster.intersectObjects(gizmoGroup.children, true)[0];
-    const handle = hit?.object.userData.handle as GizmoHandle | undefined;
-    return handle ?? null;
+    const hits = raycaster.intersectObjects(gizmoGroup.children, true);
+    /*
+     * The arrow that points at an orthographic camera is a dot, and the bases
+     * of the other two arrows start at the same pixel. The ray finds the
+     * nearest, which is a base whenever the arrow points *away* -- so pressing
+     * the dot would take a handle that cannot move the way the pointer does,
+     * and the one the press was meant for would be unreachable. It wins the
+     * dot instead; the other two are long, and lose nothing but their roots.
+     */
+    const facing = camera instanceof THREE.OrthographicCamera;
+    if (facing) camera.getWorldDirection(heading);
+    let first: GizmoHandle | null = null;
+    for (const hit of hits) {
+      const handle = hit.object.userData.handle as GizmoHandle | undefined;
+      if (handle === undefined) continue;
+      first ??= handle;
+      if (
+        facing &&
+        handle.kind === "arrow" &&
+        pointsAtCamera(handle.axis, { x: heading.x, y: heading.y, z: heading.z })
+      ) {
+        return handle;
+      }
+    }
+    return first;
   }
 
   /** The scalar a press on this handle reads: a position, or an angle. */
@@ -2575,10 +2610,24 @@ import { isTyping } from "./typing.js";
       return;
     }
 
-    const delta = dragAlongAxis({ origin, axis: handle.axis, ray, view, grab: gizmoDrag.grab });
-    if (delta === null) return;
-    const step = { x: 0, y: 0, z: 0 };
-    step[handle.axis] = delta;
+    /*
+     * An arrow that points at the camera has no along-the-axis drag worth
+     * having -- the picture shows nothing of that direction -- so it moves the
+     * selection within the plane that is on screen instead, as Cinema 4D
+     * does. The pressed axis stays exactly where it was.
+     */
+    let step: Vec3;
+    if (gizmoDrag.plane !== null) {
+      const inPlane = dragInPlane({ origin, axis: handle.axis, ray, grab: gizmoDrag.plane });
+      if (inPlane === null) return;
+      step = inPlane;
+    } else {
+      const delta = dragAlongAxis({ origin, axis: handle.axis, ray, view, grab: gizmoDrag.grab });
+      if (delta === null) return;
+      step = { x: 0, y: 0, z: 0 };
+      step[handle.axis] = delta;
+    }
+    const still = step.x === 0 && step.y === 0 && step.z === 0;
 
     if (gizmoMode === "pivot") {
       /*
@@ -2602,7 +2651,7 @@ import { isTyping } from "./typing.js";
     }
 
     const to = { x: region.minX + step.x, y: region.minY + step.y, z: region.minZ + step.z };
-    gizmoResult = delta === 0 ? null : { kind: "move", to, region };
+    gizmoResult = still ? null : { kind: "move", to, region };
     showGizmoPreview(dragged.map((area) => translatedRegion(area, [step.x, step.y, step.z])));
     ghostGroup?.position.set(to.x, to.y, to.z);
   }
@@ -4454,12 +4503,27 @@ import { isTyping } from "./typing.js";
         if (handle !== null) {
           const origin = gizmoOrigin(gizmoBox as Region, pivot);
           const ray = rayThrough(event.clientX, event.clientY);
-          const grab = ray === null ? null : gizmoGrabAt(handle, origin, ray);
+          /*
+           * An orthographic view has no depth to read an arrow's length from,
+           * so one pointed at the camera is dragged across the plane it is
+           * normal to. In perspective that is not offered: the depth there is
+           * real, and which of two readings a pixel means is the question.
+           */
+          let plane: Vec3 | null = null;
+          if (handle.kind === "arrow" && camera instanceof THREE.OrthographicCamera && ray !== null) {
+            camera.getWorldDirection(heading);
+            const view = { x: heading.x, y: heading.y, z: heading.z };
+            if (pointsAtCamera(handle.axis, view)) {
+              plane = planePointAt({ origin, axis: handle.axis, ray });
+            }
+          }
+          const grab = ray === null ? null : plane !== null ? 0 : gizmoGrabAt(handle, origin, ray);
           if (grab !== null) {
             gizmoDrag = {
               handle,
               origin: new THREE.Vector3(origin.x, origin.y, origin.z),
               grab,
+              plane,
               region: gizmoBox as Region,
               areas: allAreas.map((area) => ({ ...area })),
             };
