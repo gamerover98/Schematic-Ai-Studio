@@ -330,6 +330,8 @@ export const IPC = {
   chatNew: "bgpt:chat:new",
   /** Throw one away for good. */
   chatDelete: "bgpt:chat:delete",
+  /** Give one a name of its own, or take it off again. */
+  chatRename: "bgpt:chat:rename",
   /** Put the schematic back to how it was before one of the turns. */
   chatRestore: "bgpt:chat:restore",
   /** Stop the request in flight. */
@@ -670,9 +672,9 @@ export interface SetKeyRequest {
  *
  * `component.py:192-199` had only `{id, label}` and derived the label from the
  * id ("free" in the name meant free). Both facts below are now read from
- * models.dev instead of guessed, because both drive behaviour: `pricing`
- * decides whether an API key is required, and `imageInput` decides whether the
- * reference image can be sent at all.
+ * models.dev instead of guessed: `pricing` is what the picker groups and
+ * labels by, and `imageInput` decides whether the reference image can be sent
+ * at all. Neither decides whether a key is needed any more -- every call does.
  *
  * `"unknown"` means models.dev has no entry for the id. It is treated
  * permissively everywhere -- see `mergeCatalogue` for why.
@@ -688,15 +690,6 @@ export interface OpenCodeModelInfo {
   /** USD per million tokens, as models.dev states it. */
   cost?: { input: number; output: number };
   reasoning?: boolean;
-}
-
-/**
- * The key gate for OpenCode, replacing the blanket provider-level exemption in
- * `providerRequiresApiKey`. A model missing from the catalogue is let through:
- * the gateway's own 401 is a better answer than refusing to try.
- */
-export function openCodeModelRequiresKey(model: OpenCodeModelInfo | undefined): boolean {
-  return model?.pricing === "paid";
 }
 
 export interface BlockIconsRequest {
@@ -1579,6 +1572,16 @@ export function singleMix(block: BlockSpec): MixSpec {
 export interface CameraAimRequest {
   id: number;
   camera: CameraPlacement | null;
+  /**
+   * The field of view to draw with, in degrees, or `null` for the setting's.
+   *
+   * **A request states the field of view in force; it does not adjust it.** A
+   * `null` puts the setting back, so main restores it after a picture with one
+   * more request rather than the window having to remember to. It is the
+   * viewport's for the length of one capture and never written to the
+   * settings: the slider says what the window is set to.
+   */
+  fov: number | null;
 }
 
 /** Where the camera stands once the frame has been drawn. */
@@ -1586,6 +1589,8 @@ export interface CameraState {
   position: Vec3;
   target: Vec3;
   projection: "perspective" | "orthographic";
+  /** The vertical field of view the picture was drawn with, in degrees. */
+  fov: number;
 }
 
 /** `IPC.cameraAimed`: the answer, matched to its request by `id`. */
@@ -2159,11 +2164,23 @@ export interface ChatEntry {
   checkpoint?: string;
 }
 
+/** The longest a conversation's name runs: a derived one is cut here, a chosen one too. */
+export const CONVERSATION_TITLE_LIMIT = 60;
+
 /** One conversation, as the picker lists it. */
 export interface ConversationSummary {
   id: string;
-  /** The first thing the user said, cut to something that fits a row. */
+  /**
+   * What the row shows: the name the user gave it, or else the first thing
+   * they said, cut to something that fits a row.
+   */
   title: string;
+  /**
+   * Whether `title` is a name the user chose. A row with nothing in it says
+   * "New chat" in the window's own language -- unless it was named, and then it
+   * says what it was named.
+   */
+  named: boolean;
   /** Epoch milliseconds; `0` when nothing was ever recorded. */
   updatedAt: number;
   /** Turns in it, so an empty one can say so rather than look broken. */
@@ -2592,6 +2609,12 @@ export interface BgptApi {
   newConversation(): Promise<ChatState>;
   /** Delete one for good. Deleting the active one starts a new empty one. */
   deleteConversation(id: string): Promise<ChatState>;
+  /**
+   * Name one, or pass `""` to take the name off and go back to the first thing
+   * that was said in it. Answers with the list as it now stands, because the
+   * order does not change and the title is all that did.
+   */
+  renameConversation(id: string, title: string): Promise<ConversationList>;
   /**
    * Put the schematic back to how it was before the turn at `entryIndex`.
    *

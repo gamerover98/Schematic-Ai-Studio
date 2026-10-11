@@ -42,6 +42,7 @@
     SHADOW_QUALITIES,
     THEMES,
     effectiveIncludeDevBuilds,
+    fovOf,
     lodSettings,
     type GpuPreference,
     type LodMode,
@@ -55,6 +56,7 @@
     type UpdateSettings,
   } from "../../../shared/settings.js";
   import ApiKeysSection from "./ApiKeysSection.svelte";
+  import { decelerationOf } from "./fly_motion.js";
   import { fpsCap } from "./shader_modes.js";
   import { stutterReport } from "./frame_profiler.js";
   import { t, tn } from "./i18n.svelte.js";
@@ -383,7 +385,7 @@
 
   /*
    * The same rules main enforces, mirrored rather than reinvented -- the
-   * arrangement `openCodeModelRequiresKey` and the era rule already have. A
+   * arrangement `providerRequiresApiKey` and the era rule already have. A
    * renderer deciding this for itself would be a second answer to a question
    * that has one, and the two would drift.
    */
@@ -787,6 +789,26 @@
             PREVIEW_SETTING_RANGES.flySpeed,
             preview.flySpeed,
             (flySpeed) => onpreviewchange({ flySpeed }),
+          )}
+          {@render slider(
+            "fly-deceleration",
+            t("preview.flyDeceleration"),
+            decelerationOf(preview.flyDeceleration) === 0
+              ? t("unit.instant")
+              : t("unit.seconds", { value: decelerationOf(preview.flyDeceleration).toFixed(2) }),
+            PREVIEW_SETTING_RANGES.flyDeceleration,
+            decelerationOf(preview.flyDeceleration),
+            (flyDeceleration) => onpreviewchange({ flyDeceleration }),
+            t("preview.flyDecelerationHint"),
+          )}
+          {@render slider(
+            "fov",
+            t("preview.fov"),
+            t("unit.degrees", { value: fovOf(preview.fov).toFixed(0) }),
+            PREVIEW_SETTING_RANGES.fov,
+            fovOf(preview.fov),
+            (fov) => onpreviewchange({ fov }),
+            t("preview.fovHint"),
           )}
         </section>
       {:else if category === "lighting"}

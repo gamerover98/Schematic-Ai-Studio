@@ -52,6 +52,7 @@ import {
 import { type McpActivity, type McpStatus } from "../../shared/ipc.js";
 import {
   DEFAULT_MCP_SETTINGS,
+  fovOf,
   isWildcardAddress,
   type McpSettings,
 } from "../../shared/settings.js";
@@ -328,9 +329,10 @@ function lifecycleHost(): Lifecycle {
     allowDelete: async () => (await getSettings()).mcp.allowDelete,
     refusalFor: (format, version) => refusalFor(format, version ?? ""),
     announce: announceDocument,
-    capture: async (camera) => await requireHost().capture(camera),
+    capture: async (camera, fov) => await requireHost().capture(camera, fov),
     glow: (request) => requireHost().glow(request),
     drawDistance: async () => (await getSettings()).preview.maxDrawDistance,
+    fov: async () => fovOf((await getSettings()).preview.fov),
     versions: async () => {
       const session = currentSession();
       if (session === null) return [];

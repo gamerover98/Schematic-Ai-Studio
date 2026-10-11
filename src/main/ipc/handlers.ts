@@ -47,7 +47,6 @@ import {
   type InspectResponse,
   type McpActivity,
   type McpStatus,
-  openCodeModelRequiresKey,
   type OpenCodeModelInfo,
   type ConfirmDiscardRequest,
   type DocumentVersion,
@@ -183,6 +182,7 @@ import {
   newConversation,
   noteTurn,
   openConversation,
+  renameConversation,
   resetConversation,
   saveConversation,
   useConversationDirectory,
@@ -384,9 +384,29 @@ let viewportRect: { x: number; y: number; width: number; height: number } | null
  * which is what `getBoundingClientRect` gave the renderer, so the two agree on
  * a high-DPI display without a scale factor being carried across.
  */
+/**
+ * One capture at a time.
+ *
+ * `capture_viewport` is `readOnly`, so two of them may be in flight together,
+ * and each lends the window a field of view and puts it back: interleaved, the
+ * second one's restore would land in the middle of the first one's picture.
+ */
+let captureChain: Promise<unknown> = Promise.resolve();
+
 async function captureViewport(
   window: BrowserWindow | null,
   camera: CameraPlacement | null,
+  fov: number | null,
+): Promise<{ data: string; width: number; height: number; camera: CameraState | null } | null> {
+  const run = captureChain.then(() => takeViewport(window, camera, fov));
+  captureChain = run.catch(() => undefined);
+  return await run;
+}
+
+async function takeViewport(
+  window: BrowserWindow | null,
+  camera: CameraPlacement | null,
+  fov: number | null,
 ): Promise<{ data: string; width: number; height: number; camera: CameraState | null } | null> {
   if (window === null || window.isDestroyed()) return null;
   /*
@@ -412,46 +432,70 @@ async function captureViewport(
    * moved, and a picture of the old view described as the new one is the
    * failure this whole change exists to prevent.
    */
+  const asked = camera !== null || fov !== null;
   let state: CameraState | null = null;
   try {
-    state = await cameraReplies.ask(
-      (id) => window.webContents.send(IPC.cameraAim, { id, camera } satisfies CameraAimRequest),
-      camera === null ? CAMERA_REPORT_MS : CAMERA_AIM_MS,
-    );
-  } catch (err) {
-    if (!(err instanceof RendererTimeoutError)) throw err;
-    if (camera !== null) {
+    try {
+      state = await cameraReplies.ask(
+        (id) =>
+          window.webContents.send(IPC.cameraAim, { id, camera, fov } satisfies CameraAimRequest),
+        asked ? CAMERA_AIM_MS : CAMERA_REPORT_MS,
+      );
+    } catch (err) {
+      if (!(err instanceof RendererTimeoutError)) throw err;
+      if (asked) {
+        throw new Error(
+          "The window did not draw the new view in time, so no picture was taken. It may be " +
+            "hidden or busy; ask the user to bring Schematic AI Studio to the front and try again.",
+        );
+      }
+    }
+    if (asked && state === null) {
       throw new Error(
-        "The window did not draw the new view in time, so no picture was taken. It may be " +
-          "hidden or busy; ask the user to bring Schematic AI Studio to the front and try again.",
+        "The viewport is not showing, so the camera could not be moved. Ask the user to close " +
+          "whatever is covering the 3D view and try again.",
       );
     }
+    const rect = viewportRect;
+    const image =
+      rect !== null && rect.width > 0 && rect.height > 0
+        ? await window.webContents.capturePage({
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          })
+        : await window.webContents.capturePage();
+    const size = image.getSize();
+    const scaled = size.width > 1024 ? image.resize({ width: 1024 }) : image;
+    const out = scaled.getSize();
+    return {
+      data: scaled.toPNG().toString("base64"),
+      width: out.width,
+      height: out.height,
+      camera: state,
+    };
+  } finally {
+    /*
+     * The field of view was lent for the picture and is handed back here, once
+     * the pixels have been taken -- not inside the renderer, which answers
+     * *before* `capturePage` runs and would restore it under the shot. In a
+     * `finally` so that a picture that failed does not leave the window wider
+     * than its slider says. A window that does not answer is left as it is:
+     * the next request, which states the field of view in force, mends it.
+     */
+    if (fov !== null && !window.isDestroyed()) {
+      try {
+        await cameraReplies.ask(
+          (id) =>
+            window.webContents.send(IPC.cameraAim, { id, camera: null, fov: null } satisfies CameraAimRequest),
+          CAMERA_REPORT_MS,
+        );
+      } catch {
+        // See above.
+      }
+    }
   }
-  if (camera !== null && state === null) {
-    throw new Error(
-      "The viewport is not showing, so the camera could not be moved. Ask the user to close " +
-        "whatever is covering the 3D view and try again.",
-    );
-  }
-  const rect = viewportRect;
-  const image =
-    rect !== null && rect.width > 0 && rect.height > 0
-      ? await window.webContents.capturePage({
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-        })
-      : await window.webContents.capturePage();
-  const size = image.getSize();
-  const scaled = size.width > 1024 ? image.resize({ width: 1024 }) : image;
-  const out = scaled.getSize();
-  return {
-    data: scaled.toPNG().toString("base64"),
-    width: out.width,
-    height: out.height,
-    camera: state,
-  };
 }
 
 /**
@@ -535,7 +579,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     discoveryFile: mcpDiscoveryFile(),
     defaultRoot: async () => generatedDir(),
     bridgeFile: mcpBridgeFile(),
-    capture: async (camera) => await captureViewport(getWindow(), camera),
+    capture: async (camera, fov) => await captureViewport(getWindow(), camera, fov),
     glow: (request) => {
       const window = getWindow();
       if (window === null || window.isDestroyed()) return false;
@@ -1130,7 +1174,6 @@ ${report.stack}`),
       provider: settings.provider,
       model: settings.model,
       apiKey,
-      snapshotPath: openCodeSnapshotPath(),
       legacyProfilePath: (await orphanedProfile(app.getPath("userData"), legacyUserDataDir()))?.path ?? null,
     });
     if (noKey !== null) return settle({ ok: false, kind: "no-api-key", message: noKey });
@@ -2253,7 +2296,6 @@ ${report.stack}`),
         provider: settings.provider,
         model: settings.model,
         apiKey,
-        snapshotPath: openCodeSnapshotPath(),
         legacyProfilePath: (await orphanedProfile(app.getPath("userData"), legacyUserDataDir()))?.path ?? null,
       });
       if (noKey !== null) return refuse("no-api-key", noKey);
@@ -2406,6 +2448,12 @@ ${report.stack}`),
   ipcMain.handle(
     IPC.chatDelete,
     async (_event, id: string): Promise<ChatState> => await deleteConversation(id),
+  );
+
+  ipcMain.handle(
+    IPC.chatRename,
+    async (_event, id: string, title: string): Promise<ConversationList> =>
+      await renameConversation(String(id), String(title)),
   );
 
   ipcMain.handle(

@@ -23,7 +23,7 @@
  * memory divider was built to make legible: everything reads as history.
  */
 
-import type { ChatEntry, TraceItem } from "../../shared/ipc.js";
+import { CONVERSATION_TITLE_LIMIT, type ChatEntry, type TraceItem } from "../../shared/ipc.js";
 import { SCHEMATIC_FORMATS, type SchematicFormat } from "../../shared/schematic.js";
 import { normaliseVoidBlock } from "../../shared/settings.js";
 
@@ -34,12 +34,22 @@ export const CONVERSATION_FORMAT = 1;
 export const MAX_CONVERSATIONS_PER_DOCUMENT = 10;
 
 /** Characters a title may run to before it is cut. */
-const TITLE_LIMIT = 60;
+const TITLE_LIMIT = CONVERSATION_TITLE_LIMIT;
 
 export interface StoredConversation {
   id: string;
-  /** Drawn from the first thing the user said. */
+  /**
+   * Drawn from the first thing the user said, and recomputed from the entries
+   * every time the conversation is written -- which is why a name somebody
+   * chose cannot live here: the next message would put the derived one back.
+   */
   title: string;
+  /**
+   * The name the user gave it, when they gave one. What is shown is this when
+   * present and `title` otherwise, so a conversation that was never renamed
+   * reads exactly as it did before the field existed.
+   */
+  customTitle?: string;
   /** Epoch milliseconds. */
   createdAt: number;
   updatedAt: number;
@@ -141,6 +151,24 @@ export function titleFor(entries: readonly ChatEntry[]): string {
   const text = (first?.text ?? "").replace(/\s+/g, " ").trim();
   if (text === "") return "New chat";
   return text.length <= TITLE_LIMIT ? text : `${text.slice(0, TITLE_LIMIT - 1)}…`;
+}
+
+/**
+ * What somebody typed as a name, made fit to store: whitespace collapsed and
+ * the ends trimmed, cut at the same limit a derived title has. `""` means
+ * "take my name off", which is the way back to the derived one.
+ *
+ * Cut without an ellipsis, unlike `titleFor`: that one is a sentence being
+ * shortened for a row, and this is a name that was chosen -- an ellipsis the
+ * user did not type would be part of what they see next time.
+ */
+export function cleanTitle(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, TITLE_LIMIT).trim();
+}
+
+/** The name a row shows: the one that was chosen, else the one derived. */
+export function shownTitle(conversation: Pick<StoredConversation, "title" | "customTitle">): string {
+  return conversation.customTitle ?? conversation.title;
 }
 
 /**
@@ -249,9 +277,12 @@ export function coerceRecord(raw: unknown, filePath: string): ConversationRecord
     const messages = usable && Array.isArray(stored.messages) ? stored.messages : [];
     const rememberedFrom = usable ? Number(stored.rememberedFrom) : entries.length;
 
+    const chosen = typeof stored.customTitle === "string" ? cleanTitle(stored.customTitle) : "";
+
     conversations.push({
       id: typeof stored.id === "string" && stored.id !== "" ? stored.id : `c${conversations.length}`,
       title: typeof stored.title === "string" && stored.title !== "" ? stored.title : titleFor(entries),
+      ...(chosen === "" ? {} : { customTitle: chosen }),
       createdAt: finiteOr(stored.createdAt, 0),
       updatedAt: finiteOr(stored.updatedAt, 0),
       entries,

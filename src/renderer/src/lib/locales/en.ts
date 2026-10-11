@@ -828,6 +828,9 @@ export const en = {
   "chat.historyHint": "Conversations about this schematic",
   "chat.noHistory": "No other conversations yet",
   "chat.deleteChat": "Delete this conversation",
+  "chat.renameChat": "Rename this conversation",
+  "chat.renameLabel": "Conversation name",
+  "chat.renameHint": "Leave it empty to use the first thing you said",
   "chat.restore": "Go back to this version",
   "chat.copyCode": "Copy",
   "chat.copied": "Copied",
@@ -880,18 +883,19 @@ export const en = {
   "provider.baseUrl": "Base URL",
   "provider.baseUrlHint":
     "Only needed for a custom OpenAI-compatible endpoint. Leave it empty to use the provider's own.",
-  "provider.apiKeyOptional": "API key (only for paid models)",
+  "provider.opencodeNotice":
+    "OpenCode serves its free models only to OpenCode itself. Paste a key from opencode.ai/auth, or drive this app from OpenCode through the MCP server.",
   "provider.keyStoredPlaceholder": "•••••••• stored",
   "provider.keyPlaceholder": "Paste your key",
-  "provider.free": "Free ({count}) — no API key needed",
-  "provider.paid": "Paid ({count}) — API key required",
+  "provider.free": "Free ({count})",
+  "provider.paid": "Paid ({count})",
   "provider.unknownPricing": "Pricing unknown ({count})",
   "provider.modelSummary": "{id} · {count} models available",
   "provider.textOnly": "· text only, no reference image",
   "provider.imageUnknown": "· image support unknown",
   "provider.fetchFailed": "Model list fetch failed — type the model id manually.",
   "provider.needsKey":
-    "{model} is billed per token, so it needs a key. The free models in the list above do not.",
+    "{model} needs an OpenCode Zen API key: its free tier only works inside OpenCode itself, so free models are refused without one too. Create one at opencode.ai/auth.",
   "provider.keyStored": "A key is stored for {provider}. It is never sent back to this window.",
   "start.legacyProfile":
     "An earlier version of this app kept your {providers} API key in another folder, which this one does not read. Paste the key again to generate.",
@@ -995,6 +999,12 @@ export const en = {
   "preview.renderScale": "Render scale",
   "preview.maxDrawDistance": "Max draw distance",
   "preview.flySpeed": "Flight speed",
+  "preview.flyDeceleration": "Flight deceleration",
+  "preview.fov": "Field of view",
+  "preview.fovHint":
+    "How wide the viewport sees. Wider shows more around you and bends the edges; narrower flattens the view.",
+  "preview.flyDecelerationHint":
+    "How long the camera keeps gliding after you let go of the keys. At zero it stops at once.",
   "preview.showGrid": "Show grid",
   "preview.wireframe": "Wireframe",
   "preview.wireframeHint": "Draws the edges of every triangle, to see what the mesher made.",
@@ -1011,6 +1021,8 @@ export const en = {
   "unit.degrees": "{value}°",
   "unit.blocks": "{value} blocks",
   "unit.blocksPerSecond": "{value} blocks/s",
+  "unit.seconds": "{value} s",
+  "unit.instant": "Instant",
   "unit.gameMinutesPerSecond": "{value} game min/s",
   "unit.times": "{value}×",
   "unit.percent": "{value}%",
@@ -1188,6 +1200,7 @@ export const en = {
   "task.savingVersion": "Keeping a version",
   "task.restoringVersion": "Going back to a version",
   "task.deletingVersion": "Deleting a version",
+  "task.renamingChat": "Renaming the conversation",
 
   "status.failed": "{doing}: {message}",
   "status.notOnDisk": "{name} does not come from a file on disk.",

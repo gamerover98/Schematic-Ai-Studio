@@ -134,7 +134,6 @@ import {
 } from "./lib/gizmo.js";
   import { t, tn, setLocale } from "./lib/i18n.svelte.js";
   import {
-    openCodeModelRequiresKey,
     type TraceItem,
     type Artifact,
     type BlockInspection,
@@ -163,7 +162,7 @@ import {
     singleMix,
   } from "../../shared/ipc.js";
   import { parseMix, pickAt } from "../../shared/block_mix.js";
-  import { canonicalBlock, isAirBlock, withBlockAdded } from "./lib/block_spelling.js";
+  import { canonicalBlock, findInHotbar, isAirBlock, withBlockAdded } from "./lib/block_spelling.js";
   import type { SchematicFormat } from "../../shared/schematic.js";
 import { schematicExtension } from "../../shared/schematic.js";
 import type { FileKind } from "../../shared/ipc.js";
@@ -684,6 +683,13 @@ import ConvertModal from "./lib/ConvertModal.svelte";
    * labels and `parseBlock` places like any other held block. Built from the
    * layers rather than from `blockData`, which on a pre-Flattening document
    * renames a white banner after its `Base` -- a block that version cannot hold.
+   *
+   * **A block already on the bar is not written again; the bar moves to it.**
+   * That is the game's creative pick, and without it picking the block in your
+   * other hand overwrote the slot you were holding and left two of it. It
+   * matches on the spelling this function builds, so a slot holding the same
+   * block with a state written out (`oak_stairs[facing=east]`) is another
+   * block here -- as it is to `holdBlock`, which would have replaced it.
    */
   async function onPickMaterial(at: { x: number; y: number; z: number }): Promise<void> {
     if (busy) return;
@@ -692,13 +698,15 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       if (!response.ok || response.block === "minecraft:air") return;
       const base = response.block.split("[")[0];
       const layers = response.banner?.layers ?? [];
-      holdBlock(
+      const picked =
         layers.length === 0
           ? base
           : `${base}[banner_patterns=[${layers
               .map((layer) => `{pattern:"${layer.pattern}",color:"${layer.color}"}`)
-              .join(",")}]]`,
-      );
+              .join(",")}]]`;
+      const onBar = findInHotbar(hotbar, picked, legacyForDoc);
+      if (onBar === -1) holdBlock(picked);
+      else if (onBar !== hotbarSlot) holdSlot(onBar);
     } catch (err) {
       failed(err, t("task.pickingBlock"));
     }
@@ -1904,11 +1912,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   const hasProviderKey = $derived(
     keyStatus?.keys.find((entry) => entry.provider === settings.provider)?.hasKey ?? false,
   );
-  const blockedOnKey = $derived(
-    settings.provider === "OpenCode"
-      ? openCodeModelRequiresKey(openCodeModel ?? undefined) && !hasProviderKey
-      : providerRequiresApiKey(settings.provider) && !hasProviderKey,
-  );
+  const blockedOnKey = $derived(providerRequiresApiKey(settings.provider) && !hasProviderKey);
   /** Text-only models: the picker is disabled rather than silently ignored. */
   const acceptsImages = $derived(openCodeModel === null || openCodeModel.imageInput !== "no");
 
@@ -3273,6 +3277,23 @@ import ConvertModal from "./lib/ConvertModal.svelte";
     if (!bridgeAvailable) return;
     adoptChat(await api().deleteConversation(id));
     await refreshConversations();
+  }
+
+  /**
+   * Names a conversation, or takes the name off with `""`.
+   *
+   * No `busy`: the picker cannot open while one is set, and a rename changes
+   * nothing the chat is showing -- only the name on a row and on the tab.
+   */
+  async function renameConversation(id: string, title: string): Promise<void> {
+    if (!bridgeAvailable) return;
+    try {
+      const list = await api().renameConversation(id, title);
+      conversations = list.conversations;
+      activeConversationId = list.activeId;
+    } catch (err) {
+      failed(err, t("task.renamingChat"));
+    }
   }
 
   async function saveKey(provider: Provider, apiKey: string): Promise<void> {
@@ -6070,6 +6091,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
         onrestore={(index) => void restoreCheckpoint(index)}
         onopenconversation={(id) => void openConversation(id)}
         ondeleteconversation={(id) => void deleteConversation(id)}
+        onrenameconversation={(id, title) => void renameConversation(id, title)}
         hasDocument={docState !== null}
         {imageName}
         {acceptsImages}
@@ -6325,6 +6347,8 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       onpick={docState ? onPick : undefined}
       {cameraMode}
       flySpeed={settings.preview.flySpeed}
+        flyDeceleration={settings.preview.flyDeceleration}
+        fov={settings.preview.fov}
       framingKey={framingEpoch}
       glow={docState ? glowShell : null}
       onbuild={docState ? (action, at, look) => void onBuild(action, at, look) : undefined}

@@ -1441,6 +1441,51 @@ has been renamed or written, and refusing would report a failure about an act
 that happened. The recents take the new path and drop the old one
 (`rememberRenamed`); `tests/services.ts` requires it and the copy on both roads.
 
+**A conversation can be named, and the name is a field beside the title
+rather than the title.** `StoredConversation.title` is derived from the first
+thing the user said and is written again from the entries every time the
+conversation is saved -- so a name typed into it would be put back by the next
+message. `customTitle` is the one thing about a name that has to be remembered;
+what a row shows is `customTitle ?? title`, and a conversation that was never
+named stores nothing new, so an old record reads as it always did.
+
+- **Renaming does not touch `updatedAt`.** The list is ordered by it, and a
+  rename is not talking: the chat somebody tidied would otherwise jump to the
+  top of a list ordered by when each was last *used*;
+- **`""` takes the name off**, which is the way back to the derived title. It is
+  deleted from the record rather than stored empty, and `coerceRecord` reads a
+  blank one as absent;
+- **the live conversation is written at once** when it has entries, so a name
+  chosen and then a crash is not a name chosen for nothing. One with nothing
+  said in it yet keeps the name in memory and the first save carries it;
+- **`ConversationSummary.named` is what the picker draws an empty row from.** An
+  empty conversation reads "New chat" in the window's language, which main
+  cannot spell -- unless it was named, and then it reads its name;
+- **the name travels with the chat.** `carryConversations` spreads the stored
+  records, and `tests/services.ts` renames the live conversation before a file
+  rename and a Save As and requires the name at both ends. `forkAt`'s
+  continuation starts without one: the archived copy is the one that was
+  named, and two rows with one name is not what anybody chose.
+
+The field is in the row, from the pencil or F2, and takes every key itself: the
+list's arrows and Escape and the window's single-key shortcuts would otherwise
+all reach somebody typing a name. Enter and leaving the field both keep it,
+Escape throws it away, and `commitRename` is guarded on the row being edited
+because Enter unmounts the field and the blur that follows must not keep it
+twice.
+
+**The pencil closed the list on the first real press, and a script could not
+see it.** The picker puts itself away on a click outside `root`, asked as
+`root.contains(event.target)`. The pencil replaces itself with the field in its
+own click handler, and for a click a user makes -- unlike one a script
+dispatches -- Svelte's update runs between two listeners of the same dispatch:
+by the time the window's listener saw the event its target was out of the
+document, "outside", and the list closed on the press meant to open the field.
+`composedPath()` is fixed when the event starts and still holds the row. It was
+found by clicking with real input events; the first pass drove `.click()`, which
+runs the whole dispatch on one stack and so never exposes it. A control that
+removes itself in its own handler has to be driven with real events.
+
 **Recovering is opening, and every way of putting a file on screen has to say
 so.** A conversation is stored under the file *path*, so a document that arrives
 without `adoptSubject` arrives without its history — which is exactly what the
@@ -3023,19 +3068,55 @@ one.
 
 **The key gate is one copy, and it was written out twice.** `ipc/handlers.ts`
 asked "is there a key for this provider" in two places and phrased the answer
-twice; `services/llm_key.ts` is the single copy. The OpenCode arm is per
-*model*, because some of its models are free and the proportion moves, and the
-snapshot path is injected as a string exactly as `ToolContext.legacyBlocksPath`
-is — that module must not reach Electron.
+twice; `services/llm_key.ts` is the single copy, and it is a plain function of
+what it is given, so it is Electron-free and the suites can drive it with no
+network.
 
-**Its fail-open is deliberate and has a cost worth knowing.**
-`openCodeModelRequiresKey` is `pricing === "paid"`, so a model absent from the
-catalogue — which `mimo-v2.5-free` is — passes the gate with **no key at
-all**, and an empty credential goes to the gateway. That is the right trade:
-a models.dev outage must not make the free models unusable. What it produces
-when it is wrong is the gateway's own `Invalid API key.`, which is a true
-sentence pointing at nothing the user can see. Narrowing it would refuse a
-free model every time the catalogue is stale, which is the commoner case.
+**There is no keyless OpenCode any more, and the app does not pretend to be
+what the gateway wants.** Zen answers a request with no key -- or with the
+literal `public` that the OpenCode client sends -- with a 403 `FreeTierError`,
+*"OpenCode's free tier can only be used from within OpenCode"*, and the
+literal `none` this app used to send with a 401 `Invalid API key`. Measured
+against the live gateway, on `big-pickle` and on `mimo-v2.6-flash-free`, and the
+same answer with the `Authorization` header left off. It is the provider's rule
+about who may use the free models without an account, and the rule is the
+point: presenting this app as the OpenCode client (its `User-Agent` and
+`x-opencode-*` headers) would be circumventing an access control the provider
+chose to put there, so it is not done, here or in a later "fix".
+
+What a key buys is not something this app can verify without one: Zen's
+documentation says a key from `opencode.ai/auth` (with billing added) is what
+any client presents, and does not say whether the free models are served to
+other clients with it. A user with a key and a free model is the case to ask
+about, not to assume.
+
+So `providerRequiresApiKey` is `true` for every provider and
+`openCodeModelRequiresKey`, which used to be `pricing === "paid"` with a
+deliberate fail-open for an unlisted model, is gone: its whole reason was that a
+models.dev outage must not make the free models unusable, and they are unusable
+without a key whatever the catalogue says. `apiKeyRefusal` therefore no longer
+reads the catalogue or the network -- it says, before the request, that OpenCode
+needs a key from this app, why even the free models do, and where one comes
+from. The gateway's sentence is true and leaves the reader with nothing to press.
+
+It is said in three places, because each is where somebody looks: the refusal
+itself, the AI providers pane under the OpenCode token
+(`provider.opencodeNotice`, always shown) and the README's provider table with
+the note below it. The README names what works -- OpenCode itself as the
+client through the MCP server, a Zen key, another provider -- and what it
+cannot promise.
+
+`DEFAULT_SETTINGS.provider` stays OpenCode: a Zen key reaches its free models
+and the catalogue is the one the picker already reads. A first run is a notice
+and not a build.
+
+**`PROVIDER_DEFAULT_MODEL.OpenCode` is a model the gateway no longer lists**
+(`mimo-v2.5-free` answers "Model ... is not supported"), and the window repairs
+that itself: when the stored model is not in the catalogue it writes a
+replacement into the settings (`loadOpenCodeModels`). It used to take the first
+id listed, which is **`claude-fable-5` today** -- a Claude model, which bills per
+token, chosen for somebody who had asked for a free one and billed to their key. It takes the
+first *free* one unless the preferred name is back, and only then the first.
 
 **`ProviderKeyStatus.hasKey` means "stored *and* readable", and meant "there
 are bytes on disk".** `getApiKey` answers `""` for absent, for no keyring, and
@@ -3522,6 +3603,74 @@ but `tests/services.ts`: the `publish` repository against `UPDATE_REPOSITORY`,
 `productName` against `NSIS_UNINSTALLER`, and `detectUpdateChannel: false`
 against `updateMetadataFile`.
 
+**The flight camera has a velocity, and letting go of every key slows it rather
+than stopping it.** `updateFlight` moved the position from the held keys
+alone -- `keys * speed * delta` -- so there was nothing for a released key to
+*not* stop, and the camera halted on that frame, which the game's creative
+flight does not. The keys now ask for a *target* velocity and `fly_motion.ts`
+(plain, for `selection_drag.ts`'s reason) decides what the camera does with it.
+**Three rules, and the third is the one the first version broke and was
+reported for:**
+
+- **only stopping is smoothed.** Speeding up is instant, so a key press answers
+  on its own frame; a camera that also took time to get going would feel heavy
+  and not inert;
+- **only the horizontal plane glides.** Rising and sinking stop the frame the
+  key goes up, as they do in the game: a camera that drifts on after Space is
+  not flying, it is falling upwards;
+- **a key held always wins.** The glide is what is left when *nothing* on the
+  horizontal plane is being asked for. The moment any of W, A, S or D is down
+  the camera goes where the keys say, on that frame -- the opposite way too, and
+  with one of two keys let go. The first version smoothed each direction on its
+  own, so pressing S during a forward glide had to bring the forward speed down
+  through zero first and then climb to the new one: the camera could not be
+  steered until the glide had finished, which is what was reported.
+
+Details that are each a way to be wrong:
+
+- **zero is the camera of before, exactly**, which is what lets the setting be
+  the whole of the change and the slider's left end be "stop at once";
+- **the velocity is in the world's axes, not the camera's.** Turning while
+  gliding does not turn the glide: that is momentum, as in the game. The first
+  version kept it in the camera's frame and the glide swung round with the
+  view. `updateFlight` therefore reads the camera's heading each frame
+  (`setFromMatrixColumn(camera.matrix, 0)` and its cross with `up`, which are
+  exactly the two vectors `PointerLockControls.moveForward` and `moveRight` add
+  along) to turn *keys* into a world target, and adds the velocity to the
+  position itself -- `fly.moveForward` is not used;
+- **the decay does not depend on the display's rate.** Two frames of `delta / 2`
+  land where one of `delta` does, which `tests/ui.ts` states, and which is why
+  `getDelta` stays *after* the frame cap: the delta spans the skipped refreshes;
+- **under `FLY_EPSILON` it is zero**, both axes together. An exponential never
+  arrives, and the viewport draws on demand by comparing the camera between
+  refreshes -- a camera creeping a thousandth of a block a second would keep
+  the loop drawing;
+- **a frame is integrated at most `MAX_FLY_DELTA` long.** `getDelta` is not
+  clamped, and with a velocity a refresh held back for seconds is a glide of
+  seconds in one frame;
+- **it is zeroed on `unlock` and whenever `updateFlight` finds nothing steering**
+  -- or the camera would set off again from where it was the moment the lock
+  came back.
+
+`PreviewSettings.flyDeceleration` is read through `decelerationOf`, never raw:
+`coerceSettings` spreads `preview` unchecked, so a junk value has to read like an
+absent one. Its default is written in `settings.ts` and again as
+`DEFAULT_FLY_DECELERATION` in the renderer, which main may not import; a check
+holds the two together.
+
+It was verified by the camera's own position read inside the page, every
+frame: three announces its renderer to `__THREE_DEVTOOLS__` when one is defined
+before the page loads, and wrapping that renderer's `render` hands over the
+camera it draws with. `Page.addScriptToEvaluateOnNewDocument` does not apply to a
+`location.reload()` the page makes itself, only to `Page.reload`, which cost a
+round of "camera found: false". Speeds are taken along the camera's heading.
+With D pressed 100 ms into a W glide the forward speed is 0 on the very frame
+and the sideways one is full; with S it is -full at once and does not cross zero
+first; Space let go is 0 on the next frame, and with W held it leaves the
+forward speed alone. A full release coasts `speed * tau` -- 2.4 of 2.5 blocks at
+10 blocks/s and 0.25 s, measured -- and the default, 0.15 s, is a glide of a
+block and a half that is at rest in under a second.
+
 **In flight, Ctrl belongs to the camera, and only main can honour that.** With
 the pointer locked the keyboard is flying: Ctrl is the sprint modifier and WASD
 is the direction. So every Ctrl+letter the app binds is also a way of moving —
@@ -3855,6 +4004,39 @@ Four things about it are load-bearing:
 - **`null` from a drag means "leave it alone" and must not be read as zero.** An
   axis pointed at the camera has no usable drag plane; treated as zero, a drag
   that grazed that angle would snap the region back to where it started.
+- **An arrow pointed at an orthographic camera drags within the viewed
+  plane.** Looking straight down, the Y arrow is a dot: there is nothing along
+  it to follow, `dragPlaneNormal` refuses, and the press used to do nothing at
+  all -- the cursor said grab and the camera panned. It is Cinema 4D's answer
+  now: the pointer meets the plane *across* the arrow (`planePointAt`) and the
+  step is the rounded difference on the **two** other axes (`dragInPlane`), with
+  the pressed one exactly zero. `step` was already a `Vec3` everywhere downstream
+  -- the ghost, the pivot, `commitMove` -- so nothing past `gizmoDragTo` knows
+  there are two kinds of arrow drag. Four things about it are load-bearing:
+  - **the decision is made once, at the press** (`gizmoDrag.plane`), from
+    `pointsAtCamera`: OrthographicCamera only, an arrow only, `|view . axis| >=
+    ALIGNED_DOT` (0.94, about twenty degrees off dead on). The camera is not
+    moving while a handle is held, and a drag that changed its mind half way
+    would be two gestures in one. An isometric view has every axis at 0.577 and
+    never reaches it;
+  - **perspective is left alone, deliberately.** An arrow exactly aligned there
+    has the same inert press, but the depth is real and which of two readings a
+    pixel means is a question for the user rather than for this arithmetic;
+  - **the dot wins the pixel** (`gizmoAt`). The roots of the other two arrows
+    start at the same point, and a ray through it finds the *nearest*: with the
+    arrow pointing away from the camera that is a root, so the press took a
+    handle that cannot follow the pointer's other axis and the one meant was
+    unreachable. Found by driving it with real events -- the unit checks all
+    passed. Only an aligned arrow gets that priority, in the orthographic view
+    only, and it costs the other two nothing but their roots;
+  - **a rounded negative is not `-0`.** `dragInPlane` says `|| 0`, because the
+    step is compared with `Object.is` somewhere and `-0` is a different number
+    there.
+
+  `dragAlongAxis` is unchanged and its `null` still means "leave it alone": the
+  check that an axis pointed at the camera *refuses* in the along-axis drag is
+  why this had to be a second function rather than a second answer from that
+  one.
 - **A drag decides but does not write.** The destination is drawn as a box, and
   as the region's own geometry when `regionMesh` has arrived; one edit is sent on
   release, so the whole gesture is one Ctrl+Z. The ghost is fetched at the press
@@ -4562,6 +4744,24 @@ field in the selection tools, the middle mouse button. The wheel is still only
 the bar's *in flight*: in orbit it is the zoom, and the game gets to claim the
 wheel only because the game has no zoom to lose.
 
+**The middle button on a block that is already on the bar moves the bar to it.**
+That is the game's creative pick, and it was not what happened here: the pick
+always wrote the slot in hand, so picking the block in your *other* slot
+overwrote what you were holding and left two of it on the bar. `findInHotbar`
+in `block_spelling.ts` asks first, by the canonical spelling -- name, states and
+a banner's design, so `35:14` on a legacy document and the bare id are one
+block and another design is another block. Three edges, each deliberate:
+
+- **a mix does not hold the blocks it is made of.** A slot of `70%glass,30%dirt`
+  places a share of glass among other things, so jumping to it would put
+  something else in the hand than what was picked. A single block with a weight
+  on it (`50%cobblestone`) is that block;
+- **the pick carries no state** (`onPickMaterial` drops them on purpose), so a
+  slot with `oak_stairs[facing=east]` is not the bare `oak_stairs` that was
+  picked, and the pick still writes the slot in hand -- which is what it
+  replaced already;
+- **a block not on the bar is unchanged**: it goes into the active slot.
+
 **Air is not a block you can hold.** It is a real id everywhere else — every
 empty cell in the document is air, and the writers and the agent both name it —
 but there is nothing to pick up and nothing to draw, so it was a permanently
@@ -4716,14 +4916,15 @@ agent reaches the same endpoint with the same key resolved the same way; two
 places deciding what a provider means is how you get something that works in
 generation and not in chat.
 
-**OpenCode's API key is required per model, not per provider.** Some of its
-models are free; the rest bill per token, and the proportion moves -- the
-vendored snapshot was 9 of 61 when this was written and is 26 of 87 now, which
-is why neither number belongs in a sentence anybody reads as a fact about the
-app. `openCodeModelRequiresKey` in
-`shared/ipc.ts` is the rule, `ipc/handlers.ts` is where it is enforced, and the
-renderer only mirrors it. Missing metadata fails *open* — a models.dev outage
-must not make free models unusable.
+**OpenCode's API key is required, for every model, and it was per model.**
+Some of its models are free and the rest bill per token, and the proportion
+moves -- the vendored snapshot was 9 of 61 when this was written and is 26 of 87
+now, which is why neither number belongs in a sentence anybody reads as a fact
+about the app. The picker still groups by it. What changed is that the gateway
+no longer serves a keyless request from any client but its own (see "There is
+no keyless OpenCode any more"), so the gate is `providerRequiresApiKey`, the
+same answer for every provider, in `shared/settings.ts`: `ipc/handlers.ts` is
+where it is enforced and the renderer only mirrors it.
 
 **There are two eras, and the boundary is the Flattening.** `shared/mc_versions.ts`
 is the rule: ≤1.12.2 is `legacy` — numeric `ID:DATA`, **MCEdit only** — and 1.13
@@ -4925,6 +5126,64 @@ frustum does not widen with depth, so "the same view" is only well defined at
 one distance, and the one worth matching is the thing being looked at {EM} get
 it wrong and the toggle reads as a zoom rather than as a projection. A literal
 `60` left at either call site is that bug, so `tests/ui.ts` greps for both.
+
+**The field of view is a setting, and one picture may borrow another.**
+`PreviewSettings.fov`, 30 to 110 -- Minecraft's own range -- with `DEFAULT_FOV`,
+`MIN_FOV`, `MAX_FOV` and the total reader `fovOf` in `shared/settings.ts`,
+because the slider, the viewport and `capture_viewport`'s schema all need the
+same three numbers and only one of them is the renderer. `ORBIT_FOV` is
+`DEFAULT_FOV` and the camera is still *constructed* with it, which the greps
+above hold to; what it is *drawn* with is `currentFov()`:
+
+- **the orthographic frustum follows it.** `applyProjection` derives it from
+  `currentFov()`, so a projection switch is still not a zoom at any value. A
+  literal `60` or a stale `ORBIT_FOV` left in that one call is the fault that
+  paragraph was written about, and `tests/ui.ts` refuses the second;
+- **the establishing shot stands back for a narrow view and comes in for a wide
+  one**, by `fovDistanceFactor`, `tan(30) / tan(fov / 2)`: the same box at the
+  same distance is cropped by a telescope. At 60 it is exactly one, which is why
+  every check about the old framing is still true. R frames for the *setting*,
+  never for a lent value;
+- **the gizmo's handles grow with it.** Their size is a share of the screen,
+  and a wider view makes everything at one distance smaller, so the perspective
+  branch divides by the same factor. The orthographic branch follows the
+  frustum already;
+- **LOD reads `eye.fov` live** and needed nothing.
+
+**`capture_viewport` takes `fov`, a field of its own beside `camera`, for one
+picture, and it is handed back.** Two decisions, both the user's or forced:
+
+- *Beside `camera`, not inside it.* Every `camera` with no `from` is the
+  establishing shot and moves the view, so "the same place, wider" would have had
+  no spelling. Alone, `fov` moves nothing.
+- *Lent and not kept.* The camera's pose stays where the model put it, by the
+  user's choice, because it is not a setting and R puts it back. The field of
+  view is a setting with a slider, and a viewport left wider than its slider
+  says makes the slider a lie. `CameraAimRequest.fov` therefore **states the
+  field of view in force**, never adjusts it: `null` is the setting's, so
+  restoring is one more request.
+
+The restore is main's, in a `finally` after `capturePage`: the renderer answers
+*before* the pixels are taken, so restoring inside it would hand back the old
+view under the shot. A capture that failed restores too, and a window that does
+not answer is left as it is -- the next request states the field of view in
+force and mends it. Captures are chained in `captureViewport`, because the tool
+is `readOnly` and two in flight would have the second one's restore land in the
+middle of the first one's picture.
+
+**The default distance is measured against the viewport's own field of view,
+not the one lent.** `resolveCameraAim` takes the setting's. Scaled by the lent
+one, a wider shot would stand closer and frame the build the same size as a
+narrower one: the argument would do nothing, which is the point of passing it.
+Wider from the same place shows more *around* the build, which is what was asked
+for. Out of range is refused by name (`parseFov`) rather than clamped, as an
+elevation past the pole is: a model that asked for 150 is about to describe a
+picture as wide.
+
+The answer carries `camera.fov` -- `CameraState` has it, and `pictureContent`
+sends the whole object, so no code was needed there -- and it was verified
+against the window: the viewport's own log of every field of view it drew with
+reads 60, 100, 60 over a plain capture, a `fov: 100` one and the next frame.
 
 It stays right across a window resize because OrbitControls dollies an
 orthographic camera by writing `camera.zoom` and never moves it: the distance

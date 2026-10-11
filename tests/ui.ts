@@ -56,6 +56,17 @@ import {
 } from "../src/renderer/src/lib/shader_modes.js";
 import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "../src/renderer/src/lib/gpu_choice.js";
 import { counterIdle, SETTLE_MS, shouldDraw, ViewWatch } from "../src/renderer/src/lib/render_demand.js";
+import {
+  coast,
+  decelerationOf,
+  DEFAULT_FLY_DECELERATION,
+  FLY_EPSILON,
+  isStill,
+  MAX_FLY_DECELERATION,
+  STILL,
+  stepVelocity,
+  type FlyVelocity,
+} from "../src/renderer/src/lib/fly_motion.js";
 import * as THREE from "three";
 import {
   allowed,
@@ -132,9 +143,13 @@ import {
   type Ray,
 } from "../src/renderer/src/lib/selection_drag.js";
 import {
+  ALIGNED_DOT,
   defaultPivot,
   dragAlongAxis,
+  dragInPlane,
   gizmoOrigin,
+  planePointAt,
+  pointsAtCamera,
   quartersBetween,
   regionCentre,
   regionFits,
@@ -171,7 +186,16 @@ import { isSafeHref } from "../src/renderer/src/lib/markdown_policy.js";
 import { HOSTILE_CASES } from "./markdown_cases.js";
 import { missingKeys, translate, translatePlural } from "../src/renderer/src/lib/i18n_core.js";
 import { openedAge } from "../src/renderer/src/lib/recent_age.js";
-import { DEFAULT_PREVIEW_SETTINGS, PREVIEW_SETTING_RANGES, PROVIDERS } from "../src/shared/settings.js";
+import {
+  DEFAULT_FOV,
+  DEFAULT_PREVIEW_SETTINGS,
+  fovOf,
+  MAX_FOV,
+  MIN_FOV,
+  PREVIEW_SETTING_RANGES,
+  PROVIDERS,
+} from "../src/shared/settings.js";
+import { fovDistanceFactor } from "../src/shared/camera_aim.js";
 import {
   COPLANAR_OFFSET,
   depthEpsilon,
@@ -210,6 +234,7 @@ import { BANNER_EDITOR_URL } from "../src/shared/banner_patterns.js";
 import { propertyKind, propertyRows, showsAsCheckbox } from "../src/renderer/src/lib/inspector_rows.js";
 import {
   canonicalBlock,
+  findInHotbar,
   isAirBlock,
   readSpelling,
   withBlockAdded,
@@ -1191,6 +1216,96 @@ console.log("\n--- the transform gizmo ---");
   );
 
   /*
+   * And that refusal is why an arrow pointed at the camera gets a drag of its
+   * own. Looking straight down, the Y arrow is a dot: there is nothing along it
+   * to follow, and what the picture does show is the plane across it. So the
+   * selection moves within that plane and never along the arrow -- Cinema 4D's
+   * answer, and the one asked for.
+   */
+  const downward = { x: 0, y: -1, z: 0 };
+  equal("looking straight down the Y arrow points at the camera", pointsAtCamera("y", downward), true);
+  equal(
+    "...and the two in the plane do not",
+    [pointsAtCamera("x", downward), pointsAtCamera("z", downward)],
+    [false, false],
+  );
+  equal("an arrow pointed away counts the same as one pointed at", pointsAtCamera("y", { x: 0, y: 1, z: 0 }), true);
+  equal(
+    "an isometric view has no arrow facing it",
+    ["x", "y", "z"].map((axis) => pointsAtCamera(axis as "x" | "y" | "z", { x: -1, y: -1, z: -1 })),
+    [false, false, false],
+  );
+  const tilted = (degrees: number) => ({
+    x: Math.sin((degrees * Math.PI) / 180),
+    y: -Math.cos((degrees * Math.PI) / 180),
+    z: 0,
+  });
+  check(
+    "the threshold is about twenty degrees off dead on",
+    pointsAtCamera("y", tilted(18)) && !pointsAtCamera("y", tilted(22)) && ALIGNED_DOT === 0.94,
+  );
+  equal("a view with no direction faces nothing", pointsAtCamera("y", { x: 0, y: 0, z: 0 }), false);
+
+  const grabbed = planePointAt({ origin, axis: "y", ray: down(2.5, -1.5) });
+  equal("a press meets the plane across the arrow", grabbed, { x: 2.5, y: 0.5, z: -1.5 });
+  equal(
+    "...and a ray along that plane meets nothing",
+    planePointAt({
+      origin,
+      axis: "y",
+      ray: { origin: { x: 0, y: 0.5, z: -5 }, direction: { x: 0, y: 0, z: 1 } },
+    }),
+    null,
+  );
+  const inPlane = (x: number, z: number) =>
+    dragInPlane({ origin, axis: "y", ray: down(x, z), grab: grabbed ?? origin });
+  equal("a drag within the plane is a step on both of its axes", inPlane(5.9, -3.6), { x: 3, y: 0, z: -2 });
+  equal("...and back where it was grabbed is the zero step, not a refusal", inPlane(2.5, -1.5), {
+    x: 0,
+    y: 0,
+    z: 0,
+  });
+  check(
+    "...with the pressed axis exactly zero, whichever way the ray comes in",
+    (() => {
+      const slanted = dragInPlane({
+        origin,
+        axis: "y",
+        ray: { origin: { x: 0, y: 10, z: 0 }, direction: { x: 0.3, y: -1, z: 0.1 } },
+        grab: { x: 0, y: 0.5, z: 0 },
+      });
+      return slanted !== null && Object.is(slanted.y, 0);
+    })(),
+  );
+  check(
+    "a rounded negative never leaves a minus zero",
+    (() => {
+      const nudge = inPlane(2.3, -1.7);
+      return nudge !== null && [nudge.x, nudge.y, nudge.z].every((value) => !Object.is(value, -0));
+    })(),
+  );
+  equal(
+    "the same drag about the X arrow moves in Y and Z",
+    dragInPlane({
+      origin,
+      axis: "x",
+      ray: { origin: { x: 10, y: 4.5, z: -2.5 }, direction: { x: -1, y: 0, z: 0 } },
+      grab: { x: 0.5, y: 0.5, z: 0.5 },
+    }),
+    { x: 0, y: 4, z: -3 },
+  );
+  equal(
+    "a drag that has lost its plane is null, which is not the zero step",
+    dragInPlane({
+      origin,
+      axis: "y",
+      ray: { origin: { x: 0, y: 0.5, z: -5 }, direction: { x: 0, y: 0, z: 1 } },
+      grab: grabbed ?? origin,
+    }),
+    null,
+  );
+
+  /*
    * The ring, and the sign that matters. Main turns a region by
    * `(x, z) -> (length - 1 - z, x)`, which sends **east to south**; the ring
    * has to read the same way round or dragging clockwise would turn the build
@@ -1362,6 +1477,23 @@ console.log("\n--- the gizmo takes the press, and gives the camera back ---");
     "LEFT is THREE.MOUSE.PAN, so the camera would pan instead",
   );
   check(
+    "an arrow facing an orthographic camera is dragged within the viewed plane",
+    /camera instanceof THREE\.OrthographicCamera[\s\S]{0,400}pointsAtCamera\(handle\.axis, view\)[\s\S]{0,200}planePointAt\(/.test(
+      grab,
+    ) && viewer.includes("dragInPlane({ origin, axis: handle.axis, ray, grab: gizmoDrag.plane })"),
+    "the press decides once, and the move reads what the press decided",
+  );
+  const pickAt = viewer.slice(viewer.indexOf("function gizmoAt("), viewer.indexOf("function gizmoGrabAt("));
+  check(
+    "the dot an aligned arrow makes beats the roots of the other two when the ray crosses both",
+    /OrthographicCamera/.test(pickAt) && /pointsAtCamera\(handle\.axis/.test(pickAt) && /return handle;/.test(pickAt),
+    "an arrow pointing away is behind them, and the nearest hit would otherwise be a root",
+  );
+  check(
+    "...and only an arrow: a ring and a scale handle keep their own gestures",
+    /handle\.kind === "arrow" && camera instanceof THREE\.OrthographicCamera/.test(grab),
+  );
+  check(
     "...without asking for Shift",
     grabAt >= 0 && shiftGate > grabAt,
     "a handle is drawn for this gesture; behind the Shift gate it would need one",
@@ -1411,6 +1543,144 @@ console.log("\n--- the gizmo takes the press, and gives the camera back ---");
   check(
     "...and before the build grid",
     order("updateHover") < order("updateBuildGrid"),
+  );
+}
+
+// --- flight slows down -------------------------------------------------------
+//
+// `updateFlight` moved the camera from the keys alone, with no velocity, so
+// letting go of one stopped it on that frame. In the game's creative flight it
+// carries on and slows; the time it takes is a setting. Three rules, the third
+// of which the first version broke and was reported for: only stopping is
+// smoothed, only the horizontal plane glides, and a key held always wins.
+console.log("\n--- flight deceleration ---");
+{
+  const TAU = 0.25;
+  const SPEED = 12;
+  const at = (x: number, y: number, z: number): FlyVelocity => ({ x, y, z });
+  const equalVelocity = (name: string, got: FlyVelocity, want: FlyVelocity): void => equal(name, got, want);
+
+  // Letting go of everything.
+  const gliding = stepVelocity(at(SPEED, 0, 0), STILL, 0.016, TAU);
+  check("a released key keeps the camera moving a frame later", gliding.x > 0 && gliding.x < SPEED, String(gliding.x));
+  equalVelocity("with no deceleration it stops on that frame, as before", stepVelocity(at(SPEED, 0, 0), STILL, 0.016, 0), STILL);
+
+  let v = at(SPEED, 0, 0);
+  const trail: number[] = [];
+  for (let frame = 0; frame < 150; frame += 1) {
+    v = stepVelocity(v, STILL, 1 / 60, TAU);
+    trail.push(v.x);
+  }
+  check("...it only ever slows", trail.every((now, i) => i === 0 || now <= trail[i - 1]));
+  check("...never past zero", trail.every((now) => now >= 0));
+  check("...to a stop, which the epsilon makes exact", isStill(v));
+  check("a time constant leaves 1/e of the speed", Math.abs(coast(SPEED, TAU, TAU) / SPEED - Math.exp(-1)) < 1e-9);
+  check("five of them leave less than a hundredth", coast(SPEED, 5 * TAU, TAU) / SPEED < 0.01);
+  const once = coast(SPEED, 0.1, TAU);
+  const twice = coast(coast(SPEED, 0.05, TAU), 0.05, TAU);
+  check("two half frames land where one whole one does", Math.abs(once - twice) < 1e-12, `${once} ${twice}`);
+  check("a frame with no time passed changes nothing", stepVelocity(at(SPEED, 0, 0), STILL, 0, TAU).x === SPEED);
+  const bent = stepVelocity(at(SPEED, 0, SPEED), STILL, 0.5, TAU);
+  check("a glide keeps its heading, both axes slowing together", Math.abs(bent.x - bent.z) < 1e-12 && bent.x > 0);
+  check(
+    "under the epsilon it is stopped, or the loop would be kept drawing by a creep",
+    isStill(stepVelocity(at(FLY_EPSILON / 4, 0, FLY_EPSILON / 4), STILL, 0.001, TAU)),
+  );
+
+  // The reported fault: a key held is obeyed at once, whatever is left of the
+  // glide. Each of these used to take the old speed down through zero first.
+  equalVelocity(
+    "pressing another direction mid-glide is that direction on that frame",
+    stepVelocity(at(SPEED * 0.7, 0, 0), at(0, 0, SPEED), 0.016, TAU),
+    at(0, 0, SPEED),
+  );
+  equalVelocity(
+    "...the opposite direction too, without crossing zero first",
+    stepVelocity(at(SPEED * 0.9, 0, 0), at(-SPEED, 0, 0), 0.016, TAU),
+    at(-SPEED, 0, 0),
+  );
+  equalVelocity(
+    "...and letting one of two keys go leaves the other at its full speed",
+    stepVelocity(at(8.5, 0, 8.5), at(SPEED, 0, 0), 0.016, TAU),
+    at(SPEED, 0, 0),
+  );
+  equalVelocity(
+    "...and letting go of sprint with a key still down is walking at once",
+    stepVelocity(at(2 * SPEED, 0, 0), at(SPEED, 0, 0), 0.016, TAU),
+    at(SPEED, 0, 0),
+  );
+
+  // Vertical never glides.
+  equalVelocity(
+    "rising stops the frame the key goes up",
+    stepVelocity(at(0, SPEED, 0), STILL, 0.016, TAU),
+    STILL,
+  );
+  const rising = stepVelocity(at(SPEED, SPEED, 0), STILL, 0.016, TAU);
+  check("...while a horizontal glide, if there is one, carries on", rising.y === 0 && rising.x > 0);
+  const sinking = stepVelocity(at(SPEED, 0, 0), at(0, -SPEED, 0), 0.016, TAU);
+  check("a vertical key is obeyed at once, gliding or not", sinking.y === -SPEED);
+  check("...and does not stop the horizontal glide it was started in", sinking.x > 0 && sinking.z === 0);
+  equalVelocity(
+    "a vertical key alongside a horizontal one is both targets",
+    stepVelocity(STILL, at(SPEED, SPEED, 0), 0.016, TAU),
+    at(SPEED, SPEED, 0),
+  );
+  check("a camera at rest is still", isStill(STILL) && !isStill(at(0, 0, 0.5)));
+
+  // The setting is read totally: `coerceSettings` spreads `preview` unchecked.
+  equal("an absent setting is the default", decelerationOf(undefined), DEFAULT_FLY_DECELERATION);
+  equal("...so is a string", decelerationOf("fast"), DEFAULT_FLY_DECELERATION);
+  equal("...and NaN", decelerationOf(Number.NaN), DEFAULT_FLY_DECELERATION);
+  equal("...and Infinity", decelerationOf(Number.POSITIVE_INFINITY), DEFAULT_FLY_DECELERATION);
+  equal("a negative one is zero, which is instant", decelerationOf(-3), 0);
+  equal("...and one past the range is the longest", decelerationOf(40), MAX_FLY_DECELERATION);
+  equal("a good one passes through", decelerationOf(0.5), 0.5);
+  equal(
+    "the stored default is the one the viewer assumes",
+    DEFAULT_PREVIEW_SETTINGS.flyDeceleration,
+    DEFAULT_FLY_DECELERATION,
+  );
+  check(
+    "...and the slider offers exactly what the reader accepts",
+    PREVIEW_SETTING_RANGES.flyDeceleration.min === 0 &&
+      PREVIEW_SETTING_RANGES.flyDeceleration.max === MAX_FLY_DECELERATION,
+  );
+
+  // The viewer: the keys ask for a target, the velocity is what moves, and it
+  // is a velocity in the world.
+  const flightSource = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
+  const begin = flightSource.indexOf("function updateFlight(");
+  const update = flightSource.slice(begin, begin + 3600);
+  check("flight steps its velocity through the module", update.includes("stepVelocity("));
+  check(
+    "...moves the camera from the velocity, on all three axes, not from the keys",
+    /camera\.position\.x \+= flyVelocity\.x \* dt/.test(update) &&
+      /camera\.position\.y \+= flyVelocity\.y \* dt/.test(update) &&
+      /camera\.position\.z \+= flyVelocity\.z \* dt/.test(update),
+  );
+  check(
+    "...in the world's axes: the heading is read once per frame and not kept",
+    /setFromMatrixColumn\(camera\.matrix, 0\)/.test(update) && !/fly\.move(Forward|Right)/.test(update),
+  );
+  check("...reads the setting through the total reader", update.includes("decelerationOf(flyDeceleration)"));
+  check("...and integrates a long frame as a short one", update.includes("Math.min(delta, MAX_FLY_DELTA)"));
+  check("...and nothing is left gliding when nothing steers", /isLocked\) \{[\s\S]{0,160}flyVelocity = STILL;/.test(update));
+  check(
+    "letting go of the pointer lock stops it too",
+    /addEventListener\("unlock", \(\) => \{[\s\S]{0,600}flyVelocity = STILL;/.test(flightSource),
+  );
+  check(
+    "the slider sits under the flight speed's and feeds the setting",
+    /fly-speed[\s\S]{0,400}fly-deceleration[\s\S]{0,600}onpreviewchange\(\{ flyDeceleration \}\)/.test(
+      readFileSync(path.join(RENDERER, "lib", "SettingsModal.svelte"), "utf8"),
+    ),
+  );
+  check(
+    "the window hands the setting to the viewport",
+    readFileSync(path.join(RENDERER, "App.svelte"), "utf8").includes(
+      "flyDeceleration={settings.preview.flyDeceleration}",
+    ),
   );
 }
 
@@ -2240,6 +2510,10 @@ console.log("\n--- a patterned banner, in the inspector ---");
     "the middle button picks a banner up with its design",
     pick.includes("response.banner?.layers") && /banner_patterns=\[/.test(pick),
   );
+  check(
+    "...and asks the bar first: a block already on it moves the bar rather than writing the slot",
+    /findInHotbar\(hotbar, picked, legacyForDoc\)[\s\S]*holdBlock\(picked\)[\s\S]*holdSlot\(onBar\)/.test(pick),
+  );
 
   // A composed cloth grows the atlas, and the icons drawn against the old one
   // were thrown away and never asked for again: the hotbar went blank.
@@ -2315,8 +2589,94 @@ console.log("\n--- orthographic projection ---");
    */
   const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
   check("the viewer builds its camera with the shared field of view", /PerspectiveCamera\(ORBIT_FOV/.test(viewer));
-  check("...and derives the orthographic frustum from the same one", viewer.includes("orthoFrustumHeight(ORBIT_FOV"));
+  check(
+    "...and derives the orthographic frustum from the one in force, which starts as that",
+    viewer.includes("orthoFrustumHeight(currentFov()") && !viewer.includes("orthoFrustumHeight(ORBIT_FOV"),
+  );
   check("ORBIT_FOV is the 60 the viewport always used", ORBIT_FOV === 60);
+  check("...and is the setting's default", ORBIT_FOV === DEFAULT_FOV && DEFAULT_PREVIEW_SETTINGS.fov === ORBIT_FOV);
+
+  /*
+   * The field of view is a setting now, and one picture may borrow another.
+   * `fovOf` is total, for the reason every preview reader is: `coerceSettings`
+   * spreads `preview` over the defaults and checks nothing.
+   */
+  equal("an absent field of view is the default", fovOf(undefined), DEFAULT_FOV);
+  equal("...so is junk", [fovOf("wide"), fovOf(Number.NaN), fovOf(null)], [DEFAULT_FOV, DEFAULT_FOV, DEFAULT_FOV]);
+  equal("one past the range is clamped to it", [fovOf(500), fovOf(-3)], [MAX_FOV, MIN_FOV]);
+  equal("a good one passes through", fovOf(75), 75);
+  check(
+    "the slider offers exactly the range the reader and the tool accept",
+    PREVIEW_SETTING_RANGES.fov.min === MIN_FOV && PREVIEW_SETTING_RANGES.fov.max === MAX_FOV,
+  );
+  check("the default is inside it", DEFAULT_FOV >= MIN_FOV && DEFAULT_FOV <= MAX_FOV);
+
+  // An orthographic frustum follows the field of view, or a projection switch
+  // would read as a zoom the moment it was not 60.
+  check(
+    "the same distance is a taller slice at a wider view",
+    orthoFrustumHeight(100, 10) > orthoFrustumHeight(60, 10) && orthoFrustumHeight(30, 10) < orthoFrustumHeight(60, 10),
+  );
+  check(
+    "...by the tangent of half of it",
+    Math.abs(orthoFrustumHeight(90, 10) / orthoFrustumHeight(60, 10) - Math.tan(Math.PI / 4) / Math.tan(Math.PI / 6)) <
+      1e-9,
+  );
+
+  /*
+   * The establishing shot stands back for a narrow view and comes in for a wide
+   * one, so the whole build is in the picture at any of them -- and at 60 it is
+   * exactly the framing it always was.
+   */
+  const cube = { width: 20, height: 20, length: 20 };
+  const reachAt = (fov: number | undefined): number => {
+    const shot = fov === undefined ? documentFraming(cube) : documentFraming(cube, undefined, fov);
+    return Math.hypot(
+      shot.position.x - shot.target.x,
+      shot.position.y - shot.target.y,
+      shot.position.z - shot.target.z,
+    );
+  };
+  check("at the default the framing is the one it always was", Math.abs(reachAt(60) - reachAt(undefined)) < 1e-9);
+  check("a narrower view stands further back", reachAt(30) > reachAt(60));
+  check("a wider one comes in", reachAt(100) < reachAt(60));
+  check(
+    "...by the ratio of the tangents, so the build fills the same share of the picture",
+    Math.abs(reachAt(90) / reachAt(60) - Math.tan(Math.PI / 6) / Math.tan(Math.PI / 4)) < 1e-9,
+  );
+  check("the factor is exactly one at the default", fovDistanceFactor(60) === 1);
+
+  // The viewer: lent for one picture, and handed back.
+  const lens = viewer.slice(viewer.indexOf("let fovOverride"), viewer.indexOf("let fovOverride") + 1500);
+  check(
+    "the viewport draws with the lent field of view when there is one, else the setting's",
+    /return fovOverride \?\? fovOf\(fov\)/.test(lens),
+  );
+  check("...and applying it re-derives the orthographic frustum from it", /updateProjectionMatrix\(\);[\s\S]{0,80}applyProjection\(/.test(lens));
+  const aimed = viewer.slice(viewer.indexOf("async function aimCamera("), viewer.indexOf("async function aimCamera(") + 1800);
+  check(
+    "a request states the field of view in force, so a null puts the setting back",
+    /fovOverride = request\.fov/.test(aimed),
+  );
+  check(
+    "...the answer says what it drew with",
+    /fov: Math\.round\(currentFov\(\) \* 100\) \/ 100/.test(viewer),
+  );
+  check(
+    "the gizmo keeps its share of the screen at any field of view",
+    /GIZMO_REACH\) \/ fovDistanceFactor\(currentFov\(\)\)/.test(viewer),
+  );
+  check("R frames for the setting, not for a lent one", /camera\.far,[\s\S]{0,160}fovOf\(fov\)/.test(viewer));
+  check(
+    "the slider sits under the flight deceleration's and feeds the setting",
+    /fly-deceleration[\s\S]{0,900}"fov"[\s\S]{0,500}onpreviewchange\(\{ fov \}\)/.test(
+      readFileSync(path.join(RENDERER, "lib", "SettingsModal.svelte"), "utf8"),
+    ),
+  );
+  check(
+    "the window hands the setting to the viewport",
+    readFileSync(path.join(RENDERER, "App.svelte"), "utf8").includes("fov={settings.preview.fov}"),
+  );
 
   /*
    * Flight forces perspective. Not belt-and-braces over the greyed checkbox:
@@ -5416,6 +5776,57 @@ console.log("\n--- the materials, as an inventory ---");
     ["minecraft:red_bed[facing=north,part=foot]", "minecraft:red_bed[facing=north,part=head]"],
   );
 
+  /*
+   * The middle button on a block that is already on the bar moves the bar to
+   * it, as the game's creative pick does, instead of writing the slot in hand.
+   */
+  const bar = [
+    "minecraft:stone",
+    "oak_planks",
+    "minecraft:oak_stairs[facing=east]",
+    "70%minecraft:glass,30%minecraft:dirt",
+    "50%minecraft:cobblestone",
+    'minecraft:white_banner[banner_patterns=[{pattern:"mojang",color:"red"}]]',
+    "minecraft:torch",
+    "minecraft:sandstone",
+    "minecraft:glowstone",
+  ];
+  equal("a block on the bar is found at its slot", findInHotbar(bar, "minecraft:stone", null), 0);
+  equal("...with the namespace left off a slot", findInHotbar(bar, "minecraft:oak_planks", null), 1);
+  equal("...or off the pick", findInHotbar(bar, "torch", null), 6);
+  equal("a block that is not there is -1", findInHotbar(bar, "minecraft:diamond_block", null), -1);
+  equal(
+    "a slot with a state written out is another block than the bare pick",
+    findInHotbar(bar, "minecraft:oak_stairs", null),
+    -1,
+  );
+  equal(
+    "...and the same state is found",
+    findInHotbar(bar, "minecraft:oak_stairs[facing=east]", null),
+    2,
+  );
+  equal("a mix does not hold the blocks it is made of", findInHotbar(bar, "minecraft:glass", null), -1);
+  equal("a single block with a weight on it is that block", findInHotbar(bar, "minecraft:cobblestone", null), 4);
+  equal(
+    "a banner is found by its design",
+    findInHotbar(bar, 'minecraft:white_banner[banner_patterns=[{pattern:"mojang",color:"red"}]]', null),
+    5,
+  );
+  equal(
+    "...and another design on the same banner is another block",
+    findInHotbar(bar, 'minecraft:white_banner[banner_patterns=[{pattern:"mojang",color:"blue"}]]', null),
+    -1,
+  );
+  const legacyTable = JSON.parse(
+    readFileSync(path.join(here, "..", "resources", "legacy_blocks.json"), "utf8"),
+  ) as { blocks: Record<string, string> };
+  equal(
+    "a legacy ID:DATA is the block it means",
+    findInHotbar(["minecraft:red_wool"], "35:14", buildLegacyIndex(legacyTable.blocks)),
+    0,
+  );
+  equal("the first of two equal slots is the one found", findInHotbar(["minecraft:dirt", "minecraft:dirt"], "dirt", null), 0);
+
   equal("adding to an empty field gives that block alone", withBlockAdded("", "stone", null), "minecraft:stone");
   const two = tryParseMix(withBlockAdded("minecraft:stone", "dirt", null));
   check(
@@ -6976,6 +7387,67 @@ console.log("\n--- chat ---");
   check(
     "the chat is put away from its own strip, as the tools' panel is",
     chat.includes("onclick={oncollapse}") && app.includes("oncollapse={toggleSidebar}"),
+  );
+
+  // A stored model the catalogue no longer lists is replaced, and the first id
+  // it lists is not a free model: it was `claude-fable-5`, billed to a key that
+  // had been pasted for something else.
+  const modelsModule = readFileSync(path.join(RENDERER, "lib", "models.svelte.ts"), "utf8");
+  check(
+    "a model the catalogue lost is replaced by a free one before the first listed",
+    /"mimo-v2\.5-free"\)[\s\S]*pricing === "free"\)[\s\S]*models\[0\]/.test(modelsModule),
+  );
+
+  // A conversation is renamed in its row. The field takes every key itself, or
+  // the list's arrows, its Escape and the window's single-key shortcuts would
+  // all reach somebody typing a name.
+  const fieldKey = conversations.slice(
+    conversations.indexOf("function onFieldKey("),
+    conversations.indexOf("function onTriggerKey("),
+  );
+  check(
+    "a row renames in place, from a pencil or F2",
+    conversations.includes('class="icon rename"') && /event\.key === "F2"/.test(conversations),
+  );
+  check(
+    "...the field stops every key before it decides anything",
+    fieldKey.indexOf("event.stopPropagation()") !== -1 &&
+      fieldKey.indexOf("event.stopPropagation()") < fieldKey.indexOf('event.key === "Enter"'),
+  );
+  check(
+    "...Enter keeps the name, Escape throws it away, and a composition is not either",
+    /event\.isComposing\) return;[\s\S]*"Enter"[\s\S]*commitRename\(one\)[\s\S]*"Escape"[\s\S]*cancelRename\(\)/.test(
+      fieldKey,
+    ),
+  );
+  check(
+    "...leaving the field keeps it, once: the commit is guarded on the row being edited",
+    conversations.includes("onblur={() => commitRename(one)}") &&
+      /function commitRename[\s\S]*if \(editing !== one\.id\) return;/.test(conversations),
+  );
+  // The pencil swaps itself for the field while the click is still on its way
+  // up. A click a user makes runs Svelte's update between two listeners of the
+  // dispatch, so `target` is out of the document by the time the window sees
+  // it -- and a script's `.click()` does not, which is how the first version
+  // passed every check and closed the list on the first real press.
+  check(
+    "...and an outside click is asked of the path the event took, not of its target",
+    conversations.includes("!event.composedPath().includes(root)") &&
+      !/root\.contains\(event\.target/.test(conversations),
+  );
+  check(
+    "...the field is cut at the limit main cuts at",
+    conversations.includes("maxlength={CONVERSATION_TITLE_LIMIT}"),
+  );
+  check(
+    "a conversation that was named reads its name even with nothing said in it",
+    conversations.includes("one.entryCount === 0 && !one.named"),
+  );
+  check(
+    "the window sends the rename to main and redraws from the list main answers with",
+    /renameConversation\(id: string, title: string\)[\s\S]*api\(\)\.renameConversation\(id, title\)[\s\S]*conversations = list\.conversations/.test(
+      app,
+    ) && chat.includes("onrename={onrenameconversation}"),
   );
 
   // Every surface of the chat picks from the scales: no rounded corner, no

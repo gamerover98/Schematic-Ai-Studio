@@ -59,7 +59,7 @@ export function schematicExtension(format: SchematicFormat): string {
  * anchor as never written, would be reasoning correctly from what the app said.
  *
  * The table is `spongeVectors`'s, in `main/pipeline/loader_formats.ts`, and it
- * is here rather than there for the reason `openCodeModelRequiresKey` is in
+ * is here rather than there for the reason `providerRequiresApiKey` is in
  * `shared/`: the renderer has to name the tag and may not import out of `main/`.
  * Two copies of a table is how the two come to disagree, so `tests/formats.ts`
  * saves a real file and walks the path this names -- the vector has to be

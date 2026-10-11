@@ -227,6 +227,8 @@ const api: BgptApi = {
   newConversation: () => ipcRenderer.invoke(IPC.chatNew) as Promise<ChatState>,
   deleteConversation: (id: string) =>
     ipcRenderer.invoke(IPC.chatDelete, id) as Promise<ChatState>,
+  renameConversation: (id: string, title: string) =>
+    ipcRenderer.invoke(IPC.chatRename, id, title) as Promise<ConversationList>,
   restoreCheckpoint: (entryIndex: number) =>
     ipcRenderer.invoke(IPC.chatRestore, entryIndex) as Promise<RestoreResponse>,
   cancelAgent: (requestId: string) =>

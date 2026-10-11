@@ -14,6 +14,7 @@
  * unobservable.
  */
 
+import { DEFAULT_FOV } from "../../../shared/settings.js";
 import { GRID_DIVISIONS, GRID_SIZE } from "./depth.js";
 
 /** One cell of the `GridHelper`, in blocks. 256 across in 32 divisions is 8. */
@@ -71,7 +72,7 @@ export { documentFraming, framingReach } from "../../../shared/camera_aim.js";
  * not resize the build on screen, and the only way to be sure of that is for
  * both to be derived from one number.
  */
-export const ORBIT_FOV = 60;
+export const ORBIT_FOV = DEFAULT_FOV;
 
 /**
  * How tall a slice of the world an orthographic camera must show to frame the

@@ -116,3 +116,33 @@ export function withBlockAdded(text: string, block: string, legacy: LegacyIndex 
 export function withBlocksAdded(text: string, blocks: readonly string[], legacy: LegacyIndex | null): string {
   return blocks.reduce((next, block) => withBlockAdded(next, block, legacy), text);
 }
+
+/**
+ * Which slot of the hotbar already holds `block`, or `-1`.
+ *
+ * What the middle button asks before it writes anything: in the game, picking
+ * a block that is already on the bar moves the selection to it rather than
+ * overwriting the slot in hand.
+ *
+ * **Equal is the whole canonical spelling** -- name, states and a banner's
+ * design -- so `35:14` on a legacy document, a bare name and the namespaced one
+ * are the same block, and a banner with another design is not. A slot holding a
+ * *mix* is not holding the block: it places a share of it among others, and
+ * jumping to it would put something else in the hand than what was picked.
+ * A slot that is one block with a weight on it (`70%stone`) is that block.
+ *
+ * Plain, so `tests/ui.ts` can state it.
+ */
+export function findInHotbar(
+  slots: readonly string[],
+  block: string,
+  legacy: LegacyIndex | null,
+): number {
+  const wanted = canonicalBlock(block, legacy);
+  return slots.findIndex((slot) => {
+    const mix = tryParseMix(slot);
+    if (mix !== null && mix.entries.length !== 1) return false;
+    const held = mix === null ? slot : mix.entries[0].block;
+    return canonicalBlock(held, legacy) === wanted;
+  });
+}

@@ -42,12 +42,23 @@ export const PROVIDER_DEFAULT_MODEL: Readonly<Record<Provider, string>> = {
 };
 
 /**
- * component.py:383 -- OpenCode is the one provider whose key is optional
- * ("API Key (Optional for free models)"), and the one the Generate gate lets
- * through with an empty key.
+ * Whether a call to this provider needs an API key. Every one of them does.
+ *
+ * component.py:383 had OpenCode as the one provider whose key was optional
+ * ("API Key (Optional for free models)"), and for as long as that was true a
+ * first run worked with nothing pasted. It stopped being true at the gateway:
+ * Zen answers a request with no key -- or with the literal `public` that the
+ * OpenCode client sends -- with a 403 `FreeTierError`, "OpenCode's free tier can
+ * only be used from within OpenCode". It is the provider's rule about who may
+ * use the free models without an account, not a fault in a request, so the
+ * answer is a key from the user's own Zen account, which every client may
+ * present. Nothing in this app pretends to be the OpenCode client.
+ *
+ * Kept as a function, and not inlined, because main and the renderer both ask
+ * it and a provider that lets somebody in without one may come back.
  */
-export function providerRequiresApiKey(provider: Provider): boolean {
-  return provider !== "OpenCode";
+export function providerRequiresApiKey(_provider: Provider): boolean {
+  return true;
 }
 
 /**
@@ -392,6 +403,24 @@ export interface PreviewSettings {
   /** Blocks per second in the Creative flight camera. */
   flySpeed: number;
   /**
+   * Seconds the flight camera takes to slow down once the keys are let go: the
+   * time constant of an exponential, so about a fifth of it is left after one
+   * and almost nothing after three. `0` stops at once, as it used to.
+   *
+   * Read through `decelerationOf` in the renderer, never raw: `coerceSettings`
+   * spreads `preview` without checking it.
+   */
+  flyDeceleration: number;
+  /**
+   * The viewport's vertical field of view, in degrees.
+   *
+   * Read through `fovOf`, never raw: `coerceSettings` spreads `preview` without
+   * checking it. The same number sizes the orthographic frustum, so switching
+   * projection still does not read as a zoom, and `capture_viewport` can lend
+   * the viewport another one for a single picture.
+   */
+  fov: number;
+  /**
    * Whether barriers and structure voids are drawn.
    *
    * They are invisible to a player and placed on purpose — a barrier keeps
@@ -426,6 +455,31 @@ export interface PreviewSettings {
    * rebuild. It also has nothing to hide when the schematic carries no anchor.
    */
   showWorldEditOffset: boolean;
+}
+
+/**
+ * The field of view the viewport has always had, and the range it may take.
+ *
+ * 30 to 110 is Minecraft's own: narrower is a telescope, wider is a fisheye, and
+ * the viewport's picture stops being of a build. In `shared/` because the
+ * slider, the viewport and `capture_viewport`'s schema all need the same three
+ * numbers and only one of them is the renderer.
+ */
+export const DEFAULT_FOV = 60;
+export const MIN_FOV = 30;
+export const MAX_FOV = 110;
+
+/**
+ * The field of view for a stored value.
+ *
+ * Total, for `fpsCap`'s reason: `coerceSettings` spreads `preview` over the
+ * defaults without checking it, and that is safe only while a junk value reads
+ * exactly like an absent one. A number past the range is clamped to it rather
+ * than refused -- somebody who typed 400 wanted "as wide as it goes".
+ */
+export function fovOf(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_FOV;
+  return Math.min(MAX_FOV, Math.max(MIN_FOV, value));
 }
 
 /** component.py:319-328 slider/checkbox defaults, verbatim. */
@@ -470,7 +524,11 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   groundColor: "",
   biomeColor: DEFAULT_BIOME_COLOR,
   waterColor: DEFAULT_WATER_COLOR,
-  flySpeed: 12,
+  flySpeed: 10,
+  // `DEFAULT_FLY_DECELERATION` in the renderer's `fly_motion.ts`, which the
+  // main process may not import; a check in tests/ui.ts holds the two together.
+  flyDeceleration: 0.15,
+  fov: DEFAULT_FOV,
   showMarkers: true,
   showBounds: false,
   showWorldEditOffset: true,
@@ -484,6 +542,8 @@ export const PREVIEW_SETTING_RANGES = {
   renderScale: { min: 0.5, max: 2, step: 0.1 },
   maxDrawDistance: { min: 64, max: 2048, step: 8 },
   flySpeed: { min: 2, max: 60, step: 1 },
+  flyDeceleration: { min: 0, max: 1, step: 0.05 },
+  fov: { min: MIN_FOV, max: MAX_FOV, step: 1 },
   timeOfDay: { min: 0, max: 24000, step: 100 },
   daylightSpeed: { min: 5, max: 600, step: 5 },
 } as const;
@@ -812,7 +872,7 @@ export function isWildcardAddress(address: string): boolean {
  * In `shared/` because three places ask it and only one of them is main:
  * `coerceMcp` falls back on a bad value, the server refuses to start on one,
  * and the settings field says so while it is being typed. Same reason
- * `openCodeModelRequiresKey` lives here.
+ * `providerRequiresApiKey` lives here.
  *
  * A **hostname is refused** as well as a range, and that is not fussiness:
  * `acceptsRequest` compares the request's `Host` header against this string,
@@ -1097,9 +1157,12 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   // component.py:239 opened on OpenAI, which cannot generate anything until you
-  // paste a paid API key. OpenCode's free tier can, so a first run now works
-  // out of the box. This is only the *initial* value: `settings.json` records
-  // whatever you last chose, and that wins on every subsequent launch.
+  // paste an API key. OpenCode was chosen instead because its free tier needed
+  // none; that is no longer so (see `providerRequiresApiKey`), and it stays the
+  // initial provider because a Zen key also reaches its free models and the
+  // catalogue is the one this app already reads. This is only the *initial*
+  // value: `settings.json` records whatever you last chose, and that wins on
+  // every subsequent launch.
   provider: "OpenCode",
   model: PROVIDER_DEFAULT_MODEL.OpenCode,
   baseUrl: "",

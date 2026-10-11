@@ -205,6 +205,7 @@ function fakeLifecycle(over: Partial<Lifecycle> & { log?: string[] } = {}): Life
       return true;
     },
     drawDistance: async () => 512,
+    fov: async () => 60,
     versions: async () => [{ id: "v1", label: "before the roof", at: 1 }],
     saveVersion: async (label) => {
       log.push(`version:${label}`);
@@ -1303,23 +1304,41 @@ try {
      */
     {
       const asked: unknown[] = [];
-      const aiming = (drawDistance = 512) =>
+      const lent: (number | null)[] = [];
+      const aiming = (drawDistance = 512, setFov = 60) =>
         fakeLifecycle({
           drawDistance: async () => drawDistance,
-          capture: async (camera) => {
+          fov: async () => setFov,
+          capture: async (camera, fov) => {
             asked.push(camera);
+            lent.push(fov);
             return {
               data: "iVBOR",
               width: 8,
               height: 8,
-              camera: camera === null ? null : { ...camera, projection: "perspective" as const },
+              // The window answers with the field of view it drew with: the one
+              // lent for the picture, or the viewport's own.
+              camera:
+                camera === null && fov === null
+                  ? null
+                  : {
+                      position: camera?.position ?? { x: 0, y: 0, z: 0 },
+                      target: camera?.target ?? { x: 0, y: 0, z: 0 },
+                      projection: "perspective" as const,
+                      fov: fov ?? setFov,
+                    },
             };
           },
         });
-      const shoot = async (args: unknown, drawDistance?: number) => {
+      const shoot = async (args: unknown, drawDistance?: number, setFov?: number) => {
         asked.length = 0;
-        const result = await attempt("capture_viewport", args, options(sink, aiming(drawDistance)));
-        return { result, camera: asked[0] as { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } | null | undefined };
+        lent.length = 0;
+        const result = await attempt("capture_viewport", args, options(sink, aiming(drawDistance, setFov)));
+        return {
+          result,
+          camera: asked[0] as { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } | null | undefined,
+          fov: lent[0] as number | null | undefined,
+        };
       };
 
       open(); // 8x8x8, so the middle is (4, 4, 4)
@@ -1367,6 +1386,68 @@ try {
         position: { x: 1, y: 2, z: 3 },
         target: { x: 0, y: 0, z: 0 },
       });
+
+      /*
+       * The field of view. A top-level argument and not a field of `camera`:
+       * every `camera` with no `from` is the establishing shot and moves the
+       * view, and "the same place, wider" has to be sayable.
+       */
+      const wide = await shoot({ fov: 100 });
+      equal("a field of view alone leaves the camera where it was", wide.camera, null);
+      equal("...and is lent to the window for the picture", wide.fov, 100);
+      equal(
+        "...which says what it drew with",
+        (wide.result.camera as { fov?: number } | undefined)?.fov,
+        100,
+      );
+      const plainFov = await shoot({});
+      equal("no field of view lends nothing", plainFov.fov, null);
+      const both = await shoot({ camera: { from: "east", elevation: 0, distance: 10 }, fov: 40 });
+      equal("a field of view and a camera are both applied", [both.camera?.position, both.fov], [{ x: 14, y: 4, z: 4 }, 40]);
+      const edge = await shoot({ fov: 30 });
+      equal("the narrowest the viewport has is accepted", edge.fov, 30);
+      equal("...and the widest", (await shoot({ fov: 110 })).fov, 110);
+
+      for (const [label, fov] of [
+        ["a field of view below the range", 5],
+        ["...above it", 200],
+        ["...not a number", "wide"],
+        ["...not finite", Number.POSITIVE_INFINITY],
+        ["...a negative one", -60],
+      ] as const) {
+        const refused = await shoot({ fov });
+        check(
+          `${label} is refused by name, before the window is asked`,
+          typeof refused.result.refused === "string" &&
+            (refused.result.refused as string).includes("fov") &&
+            refused.fov === undefined,
+          JSON.stringify(refused.result),
+        );
+      }
+
+      // The distance a shot is framed from is the viewport's own field of view,
+      // not the one lent: at the setting's, so that a wider shot shows more
+      // around the build, and that is what asking for one is for.
+      const reachOf = (shot: { camera?: { position: { x: number; y: number; z: number } } | null }): number =>
+        shot.camera == null
+          ? NaN
+          : Math.hypot(shot.camera.position.x - 4, shot.camera.position.y - 4, shot.camera.position.z - 4);
+      const framedAt90 = await shoot({ camera: { from: "north" } }, 512, 90);
+      check(
+        "the default distance follows the viewport's own field of view",
+        Math.abs(reachOf(framedAt90) - 8 * 1.6 * (Math.tan(Math.PI / 6) / Math.tan(Math.PI / 4))) < 1e-9,
+        String(reachOf(framedAt90)),
+      );
+      const framedLent = await shoot({ camera: { from: "north" }, fov: 110 }, 512, 90);
+      check(
+        "...and not the one lent for the picture",
+        Math.abs(reachOf(framedLent) - reachOf(framedAt90)) < 1e-9,
+        `${reachOf(framedLent)} ${reachOf(framedAt90)}`,
+      );
+      check(
+        "...and at the default it is the 1.6 it always was",
+        Math.abs(reachOf(await shoot({ camera: { from: "north" } })) - 8 * 1.6) < 1e-9,
+      );
 
       const establishing = await shoot({ camera: {} });
       check(
@@ -1433,7 +1514,7 @@ try {
         data: "iVBOR",
         width: 8,
         height: 8,
-        camera: { position: { x: 1, y: 2, z: 3 }, target: { x: 0, y: 0, z: 0 }, projection: "perspective" },
+        camera: { position: { x: 1, y: 2, z: 3 }, target: { x: 0, y: 0, z: 0 }, projection: "perspective", fov: 100 },
         note: "Moved in.",
       });
       equal("a picture is an image block first", content?.[0], { type: "image", data: "iVBOR", mimeType: "image/png" });

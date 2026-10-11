@@ -41,6 +41,16 @@
   import { animationsUsed } from "./atlas_animation.js";
   import { counterIdle, shouldDraw, ViewWatch } from "./render_demand.js";
   import {
+    DEFAULT_FLY_DECELERATION,
+    decelerationOf,
+    MAX_FLY_DELTA,
+    STILL,
+    stepVelocity,
+    type FlyVelocity,
+  } from "./fly_motion.js";
+  import { fovDistanceFactor } from "../../../shared/camera_aim.js";
+  import { fovOf } from "../../../shared/settings.js";
+  import {
     BAYER_4X4,
     LOD_TINT,
     LOD_TINT_AMOUNT,
@@ -95,7 +105,10 @@ import {
     axisPointAt,
     defaultPivot,
     dragAlongAxis,
+    dragInPlane,
     gizmoOrigin,
+    planePointAt,
+    pointsAtCamera,
     regionFits,
     quartersBetween,
     regionCentre,
@@ -413,6 +426,17 @@ import { isTyping } from "./typing.js";
     /** Blocks per second in fly mode. */
     flySpeed?: number;
     /**
+     * Seconds the camera takes to slow down once the keys are let go. Read
+     * through `decelerationOf`: the settings behind it are not validated.
+     */
+    flyDeceleration?: number;
+    /**
+     * The vertical field of view, in degrees, as set. Read through `fovOf`: the
+     * settings behind it are not validated. `capture_viewport` may lend the
+     * viewport another for one picture (`fovOverride`), which is never this.
+     */
+    fov?: number;
+    /**
      * Identifies *which* structure is being shown, as opposed to which version
      * of it.
      *
@@ -637,7 +661,9 @@ import { isTyping } from "./typing.js";
     gizmoRegion = null,
     onpick,
     cameraMode = "orbit",
-    flySpeed = 12,
+    flySpeed = 10,
+    flyDeceleration = DEFAULT_FLY_DECELERATION,
+    fov = ORBIT_FOV,
     onbuild,
     framingKey = 0,
     theme = "dark",
@@ -1241,15 +1267,39 @@ import { isTyping } from "./typing.js";
   const held = new Set<string>();
 
   /**
+   * How fast the camera is going, in blocks per second, in **world** axes.
+   *
+   * It lives across frames, which is the whole of the change: the position used
+   * to be moved from the keys alone, so there was nothing for letting go of a
+   * key to *not* stop. In the world's frame and not the camera's, so turning
+   * while gliding does not turn the glide -- momentum, as in the game. The first
+   * version kept it in the camera's frame and the glide swung round with the
+   * view, which is the one thing a glide is not.
+   */
+  let flyVelocity: FlyVelocity = STILL;
+
+  /** Scratch for `updateFlight`: the camera's heading on the ground. */
+  const flightRight = new THREE.Vector3();
+  const flightForward = new THREE.Vector3();
+
+  /**
    * Moves the camera for one frame of flight.
    *
    * Speed is per *second* and scaled by the frame time, so a slow machine
    * travels the same distance as a fast one rather than crawling. Ctrl doubles
-   * it, matching the sprint every game binds there.
+   * it, matching the sprint every game binds there. What the keys ask for is a
+   * *target* velocity in world axes; `stepVelocity` decides what the camera
+   * does with it (see `fly_motion.ts`): a key held is obeyed on that frame, and
+   * only when none is does it glide, and never vertically.
    */
   function updateFlight(delta: number): void {
-    if (!fly || !camera || !fly.isLocked) return;
-    const speed = flySpeed * (held.has("ControlLeft") || held.has("ControlRight") ? 2 : 1) * delta;
+    if (!fly || !camera || !fly.isLocked) {
+      // Nothing steers, so nothing may be left gliding for when it does.
+      flyVelocity = STILL;
+      return;
+    }
+    const dt = Math.min(delta, MAX_FLY_DELTA);
+    const speed = flySpeed * (held.has("ControlLeft") || held.has("ControlRight") ? 2 : 1);
 
     let forward = 0;
     let strafe = 0;
@@ -1264,15 +1314,32 @@ import { isTyping } from "./typing.js";
     // Diagonals are normalised, or moving forward-and-right would be 1.41x as
     // fast as either alone.
     const planar = Math.hypot(forward, strafe);
-    if (planar > 0) {
-      fly.moveForward((forward / planar) * speed);
-      fly.moveRight((strafe / planar) * speed);
-    }
-    if (lift !== 0) {
-      // Straight up in world space, not along the camera's up: looking at the
-      // floor and pressing Space should still rise, as it does in the game.
-      camera.position.y += lift * speed;
-    }
+    const ahead = planar > 0 ? (forward / planar) * speed : 0;
+    const across = planar > 0 ? (strafe / planar) * speed : 0;
+
+    // The camera's heading, flattened to the ground: exactly the two vectors
+    // `PointerLockControls.moveForward` and `moveRight` add along, taken here
+    // so the answer can be kept as a velocity in the world.
+    flightRight.setFromMatrixColumn(camera.matrix, 0);
+    flightForward.crossVectors(camera.up, flightRight);
+
+    flyVelocity = stepVelocity(
+      flyVelocity,
+      {
+        x: flightForward.x * ahead + flightRight.x * across,
+        // Straight up in world space, not along the camera's up: looking at the
+        // floor and pressing Space should still rise, as it does in the game.
+        y: lift * speed,
+        z: flightForward.z * ahead + flightRight.z * across,
+      },
+      dt,
+      decelerationOf(flyDeceleration),
+    );
+    // Moved from the velocity and not from the keys: the camera is still going
+    // a while after the last one went up.
+    camera.position.x += flyVelocity.x * dt;
+    camera.position.y += flyVelocity.y * dt;
+    camera.position.z += flyVelocity.z * dt;
   }
 
   /**
@@ -2247,6 +2314,16 @@ import { isTyping } from "./typing.js";
     handle: GizmoHandle;
     origin: THREE.Vector3;
     grab: number;
+    /**
+     * Where the press met the plane across the arrow's axis, when the arrow
+     * points at the camera and the view is orthographic -- else `null`, and
+     * the drag is along the axis as it always was.
+     *
+     * Decided at the press and kept: the camera does not move while a handle
+     * is held, and a drag that changed its mind half way would be two
+     * gestures in one.
+     */
+    plane: Vec3 | null;
     region: Region;
     /** Every area, frozen with `region`, so the preview draws each one. */
     areas: Region[];
@@ -2384,7 +2461,10 @@ import { isTyping } from "./typing.js";
     const reach =
       camera instanceof THREE.OrthographicCamera
         ? ((camera.top - camera.bottom) / camera.zoom) * GIZMO_REACH
-        : camera.position.distanceTo(gizmoOrigin3) * GIZMO_REACH;
+        : // The same share of the screen at any field of view: a wider view
+          // makes everything at one distance smaller, so the handles grow with
+          // it by the inverse of the factor the establishing shot uses.
+          (camera.position.distanceTo(gizmoOrigin3) * GIZMO_REACH) / fovDistanceFactor(currentFov());
     gizmoGroup.scale.setScalar(Math.max(0.4, reach));
   }
 
@@ -2399,9 +2479,31 @@ import { isTyping } from "./typing.js";
       ),
       camera,
     );
-    const hit = raycaster.intersectObjects(gizmoGroup.children, true)[0];
-    const handle = hit?.object.userData.handle as GizmoHandle | undefined;
-    return handle ?? null;
+    const hits = raycaster.intersectObjects(gizmoGroup.children, true);
+    /*
+     * The arrow that points at an orthographic camera is a dot, and the bases
+     * of the other two arrows start at the same pixel. The ray finds the
+     * nearest, which is a base whenever the arrow points *away* -- so pressing
+     * the dot would take a handle that cannot move the way the pointer does,
+     * and the one the press was meant for would be unreachable. It wins the
+     * dot instead; the other two are long, and lose nothing but their roots.
+     */
+    const facing = camera instanceof THREE.OrthographicCamera;
+    if (facing) camera.getWorldDirection(heading);
+    let first: GizmoHandle | null = null;
+    for (const hit of hits) {
+      const handle = hit.object.userData.handle as GizmoHandle | undefined;
+      if (handle === undefined) continue;
+      first ??= handle;
+      if (
+        facing &&
+        handle.kind === "arrow" &&
+        pointsAtCamera(handle.axis, { x: heading.x, y: heading.y, z: heading.z })
+      ) {
+        return handle;
+      }
+    }
+    return first;
   }
 
   /** The scalar a press on this handle reads: a position, or an angle. */
@@ -2508,10 +2610,24 @@ import { isTyping } from "./typing.js";
       return;
     }
 
-    const delta = dragAlongAxis({ origin, axis: handle.axis, ray, view, grab: gizmoDrag.grab });
-    if (delta === null) return;
-    const step = { x: 0, y: 0, z: 0 };
-    step[handle.axis] = delta;
+    /*
+     * An arrow that points at the camera has no along-the-axis drag worth
+     * having -- the picture shows nothing of that direction -- so it moves the
+     * selection within the plane that is on screen instead, as Cinema 4D
+     * does. The pressed axis stays exactly where it was.
+     */
+    let step: Vec3;
+    if (gizmoDrag.plane !== null) {
+      const inPlane = dragInPlane({ origin, axis: handle.axis, ray, grab: gizmoDrag.plane });
+      if (inPlane === null) return;
+      step = inPlane;
+    } else {
+      const delta = dragAlongAxis({ origin, axis: handle.axis, ray, view, grab: gizmoDrag.grab });
+      if (delta === null) return;
+      step = { x: 0, y: 0, z: 0 };
+      step[handle.axis] = delta;
+    }
+    const still = step.x === 0 && step.y === 0 && step.z === 0;
 
     if (gizmoMode === "pivot") {
       /*
@@ -2535,7 +2651,7 @@ import { isTyping } from "./typing.js";
     }
 
     const to = { x: region.minX + step.x, y: region.minY + step.y, z: region.minZ + step.z };
-    gizmoResult = delta === 0 ? null : { kind: "move", to, region };
+    gizmoResult = still ? null : { kind: "move", to, region };
     showGizmoPreview(dragged.map((area) => translatedRegion(area, [step.x, step.y, step.z])));
     ghostGroup?.position.set(to.x, to.y, to.z);
   }
@@ -3285,6 +3401,9 @@ import { isTyping } from "./typing.js";
     const { target, position, note } = documentFraming(
       { width: size[0], height: size[1], length: size[2] },
       camera.far,
+      // The setting, not a lent one: R puts the establishing shot back for the
+      // viewport the user has.
+      fovOf(fov),
     );
     if (note !== null) console.info(`[viewer] ${note}`);
     camera.position.set(position.x, position.y, position.z);
@@ -3797,7 +3916,7 @@ import { isTyping } from "./typing.js";
       const distance = controls
         ? ortho.position.distanceTo(controls.target)
         : ortho.position.length();
-      const bounds = orthoBounds(orthoFrustumHeight(ORBIT_FOV, distance), aspect);
+      const bounds = orthoBounds(orthoFrustumHeight(currentFov(), distance), aspect);
       ortho.left = bounds.left;
       ortho.right = bounds.right;
       ortho.top = bounds.top;
@@ -3810,6 +3929,37 @@ import { isTyping } from "./typing.js";
       perspective.updateProjectionMatrix();
     }
   }
+
+  /**
+   * A field of view lent to the viewport for one picture, or `null`.
+   *
+   * Held here and not in the setting: the slider says what the window is set
+   * to and a picture must not change that. Cleared by the next request, which
+   * states the field of view in force (see `CameraAimRequest.fov`).
+   */
+  let fovOverride: number | null = null;
+
+  /** The field of view the viewport is drawing with this frame. */
+  function currentFov(): number {
+    return fovOverride ?? fovOf(fov);
+  }
+
+  /**
+   * Puts `currentFov()` on the perspective camera, and re-derives the
+   * orthographic frustum from it: that is matched to the same number, so
+   * changing it must not leave the two cameras describing different views.
+   */
+  function applyFov(): void {
+    if (perspective === undefined) return;
+    perspective.fov = currentFov();
+    perspective.updateProjectionMatrix();
+    applyProjection(perspective.aspect);
+  }
+
+  $effect(() => {
+    void fov;
+    applyFov();
+  });
 
   /**
    * Tells main where this canvas is, so `capture_viewport` can crop to it.
@@ -4020,6 +4170,10 @@ import { isTyping } from "./typing.js";
 
       const far = maxDrawDistance || 2048;
       perspective = new THREE.PerspectiveCamera(ORBIT_FOV, 1, 0.1, far);
+      // Built at the default and set to the field of view in force at once: the
+      // literal is what the orthographic frustum was matched to, and a window
+      // that opens on a stored 90 must not draw its first frame at 60.
+      perspective.fov = currentFov();
       perspective.position.set(32, 32, 32);
       // The sides are placeholders: `resize` runs before the first frame and
       // derives them from the aspect and the orbit distance.
@@ -4063,6 +4217,9 @@ import { isTyping } from "./typing.js";
         // Keys held when the pointer released would otherwise stay held
         // forever: the keyup lands on whatever has focus next, not here.
         held.clear();
+        // ...and a camera still gliding would carry on from where it was the
+        // moment the lock came back.
+        flyVelocity = STILL;
         // The button that was painting is still down, and its release will
         // land somewhere else -- the same reason, for the brush.
         endStroke();
@@ -4346,12 +4503,27 @@ import { isTyping } from "./typing.js";
         if (handle !== null) {
           const origin = gizmoOrigin(gizmoBox as Region, pivot);
           const ray = rayThrough(event.clientX, event.clientY);
-          const grab = ray === null ? null : gizmoGrabAt(handle, origin, ray);
+          /*
+           * An orthographic view has no depth to read an arrow's length from,
+           * so one pointed at the camera is dragged across the plane it is
+           * normal to. In perspective that is not offered: the depth there is
+           * real, and which of two readings a pixel means is the question.
+           */
+          let plane: Vec3 | null = null;
+          if (handle.kind === "arrow" && camera instanceof THREE.OrthographicCamera && ray !== null) {
+            camera.getWorldDirection(heading);
+            const view = { x: heading.x, y: heading.y, z: heading.z };
+            if (pointsAtCamera(handle.axis, view)) {
+              plane = planePointAt({ origin, axis: handle.axis, ray });
+            }
+          }
+          const grab = ray === null ? null : plane !== null ? 0 : gizmoGrabAt(handle, origin, ray);
           if (grab !== null) {
             gizmoDrag = {
               handle,
               origin: new THREE.Vector3(origin.x, origin.y, origin.z),
               grab,
+              plane,
               region: gizmoBox as Region,
               areas: allAreas.map((area) => ({ ...area })),
             };
@@ -5094,6 +5266,8 @@ import { isTyping } from "./typing.js";
       gizmoRegion,
       cameraMode,
       flySpeed,
+      flyDeceleration,
+      fov,
       framingKey,
       theme,
       documentSizeProp,
@@ -5520,6 +5694,13 @@ import { isTyping } from "./typing.js";
       oncameraaimed?.({ id: request.id, camera: null });
       return;
     }
+    // States the field of view in force: the one asked for, or -- for `null` --
+    // the setting's, which is how a picture's is handed back.
+    const lensBefore = currentFov();
+    fovOverride = request.fov;
+    const lensChanged = currentFov() !== lensBefore;
+    if (lensChanged) applyFov();
+    if (request.camera === null && lensChanged) renderFrame();
     if (request.camera !== null) {
       // A compass flight still running would carry the camera on from here.
       flight = null;
@@ -5569,6 +5750,7 @@ import { isTyping } from "./typing.js";
         z: round(controls.target.z),
       },
       projection: camera === ortho ? "orthographic" : "perspective",
+      fov: Math.round(currentFov() * 100) / 100,
     };
   }
 

@@ -141,8 +141,24 @@ MCP is recommended above.
 |---|---|
 | **OpenAI** | API key required |
 | **Google Gemini** | API key required |
-| **OpenCode** | Many of its models are **free and need no key at all**. The rest are paid. |
+| **OpenCode** | **An API key is required**, free models included. See the note below. |
 | **Custom (OpenAI Compatible)** | Any endpoint that follows the OpenAI API |
+
+> **OpenCode's free tier cannot be used from this app without a key.** OpenCode
+> used to serve its free models to anybody. Its gateway now answers a request
+> with no key with *"OpenCode's free tier can only be used from within
+> OpenCode"*, and that is its rule about who may use them, so this app does not
+> try to look like the OpenCode client. What works:
+>
+> - **Use OpenCode itself as the client**, through the [MCP server](#1-mcp-server--recommended).
+>   The free model then runs inside OpenCode, as the gateway asks, and drives
+>   the schematic you have open with the same tools as the chat.
+> - **Paste an OpenCode Zen key** from [opencode.ai/auth](https://opencode.ai/auth),
+>   which needs billing details. Whether that key is served the free models from
+>   a client other than OpenCode is not something this app can check, and
+>   OpenCode's documentation does not say.
+> - **Use another provider.** Gemini has a free tier with limits, and the
+>   Custom row below runs a model on your own computer at no cost.
 
 That last row is the interesting one, because **it is how you run models on your
 own computer**. Point the base URL at **LM Studio**, at Ollama's
