@@ -999,6 +999,9 @@ export const en = {
   "preview.renderScale": "Render scale",
   "preview.maxDrawDistance": "Max draw distance",
   "preview.flySpeed": "Flight speed",
+  "preview.flyDeceleration": "Flight deceleration",
+  "preview.flyDecelerationHint":
+    "How long the camera keeps gliding after you let go of the keys. At zero it stops at once.",
   "preview.showGrid": "Show grid",
   "preview.wireframe": "Wireframe",
   "preview.wireframeHint": "Draws the edges of every triangle, to see what the mesher made.",
@@ -1015,6 +1018,8 @@ export const en = {
   "unit.degrees": "{value}°",
   "unit.blocks": "{value} blocks",
   "unit.blocksPerSecond": "{value} blocks/s",
+  "unit.seconds": "{value} s",
+  "unit.instant": "Instant",
   "unit.gameMinutesPerSecond": "{value} game min/s",
   "unit.times": "{value}×",
   "unit.percent": "{value}%",

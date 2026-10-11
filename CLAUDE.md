@@ -3603,6 +3603,52 @@ but `tests/services.ts`: the `publish` repository against `UPDATE_REPOSITORY`,
 `productName` against `NSIS_UNINSTALLER`, and `detectUpdateChannel: false`
 against `updateMetadataFile`.
 
+**The flight camera has a velocity, and letting go of a key slows it rather
+than stopping it.** `updateFlight` moved the position from the held keys
+alone -- `keys * speed * delta` -- so there was nothing for a released key to
+*not* stop, and the camera halted on that frame, which the game's creative
+flight does not. The keys now ask for a *target* velocity, and
+`fly_motion.ts` (plain, for `selection_drag.ts`'s reason) moves the velocity
+towards it:
+
+- **speeding up is instant and only slowing is smoothed.** A target further out
+  in the direction already going, or a camera at rest, is taken on that frame;
+  anything else -- a key let go, sprint let go, the opposite key -- is an
+  exponential approach with `flyDeceleration` seconds as its time constant. A
+  camera that also took time to get going would feel heavy and not inert;
+- **zero is the camera of before, exactly**, which is what lets the setting be
+  the whole of the change and the slider's left end be "stop at once";
+- **the decay does not depend on the display's rate.** Two frames of `delta / 2`
+  land where one of `delta` does, which `tests/ui.ts` states, and which is why
+  `getDelta` stays *after* the frame cap: the delta spans the skipped refreshes;
+- **under `FLY_EPSILON` it is zero.** An exponential never arrives, and the
+  viewport draws on demand by comparing the camera between refreshes -- a camera
+  creeping a thousandth of a block a second would keep the loop drawing;
+- **a frame is integrated at most `MAX_FLY_DELTA` long.** `getDelta` is not
+  clamped, and with a velocity a refresh held back for seconds is a glide of
+  seconds in one frame;
+- **the velocity is the camera's own, not the world's**, so turning while
+  gliding sends the glide where the camera now points, as in the game, and it
+  is zeroed on `unlock` and whenever `updateFlight` finds nothing steering --
+  or the camera would set off again from where it was the moment the lock came
+  back.
+
+`PreviewSettings.flyDeceleration` is read through `decelerationOf`, never raw:
+`coerceSettings` spreads `preview` unchecked, so a junk value has to read like an
+absent one. Its default is written in `settings.ts` and again as
+`DEFAULT_FLY_DECELERATION` in the renderer, which main may not import; a check
+holds the two together.
+
+It was verified by the camera's own position read inside the page, every
+frame: three announces its renderer to `__THREE_DEVTOOLS__` when one is defined
+before the page loads, and wrapping that renderer's `render` hands over the
+camera it draws with. `Page.addScriptToEvaluateOnNewDocument` does not apply to a
+`location.reload()` the page makes itself, only to `Page.reload`, which cost a
+round of "camera found: false". At the default, 12 blocks/s drops to 10.1, 7.9,
+4.2, 1.5 and 0.2 at 0, 100, 250, 500 and 1000 ms, and the camera coasts the
+`speed * tau` the arithmetic says (2.87 of 3 blocks); at zero it is at rest on
+the next frame.
+
 **In flight, Ctrl belongs to the camera, and only main can honour that.** With
 the pointer locked the keyboard is flying: Ctrl is the sprint modifier and WASD
 is the direction. So every Ctrl+letter the app binds is also a way of moving —

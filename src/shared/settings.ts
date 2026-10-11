@@ -403,6 +403,15 @@ export interface PreviewSettings {
   /** Blocks per second in the Creative flight camera. */
   flySpeed: number;
   /**
+   * Seconds the flight camera takes to slow down once the keys are let go: the
+   * time constant of an exponential, so about a fifth of it is left after one
+   * and almost nothing after three. `0` stops at once, as it used to.
+   *
+   * Read through `decelerationOf` in the renderer, never raw: `coerceSettings`
+   * spreads `preview` without checking it.
+   */
+  flyDeceleration: number;
+  /**
    * Whether barriers and structure voids are drawn.
    *
    * They are invisible to a player and placed on purpose — a barrier keeps
@@ -482,6 +491,9 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   biomeColor: DEFAULT_BIOME_COLOR,
   waterColor: DEFAULT_WATER_COLOR,
   flySpeed: 12,
+  // `DEFAULT_FLY_DECELERATION` in the renderer's `fly_motion.ts`, which the
+  // main process may not import; a check in tests/ui.ts holds the two together.
+  flyDeceleration: 0.25,
   showMarkers: true,
   showBounds: false,
   showWorldEditOffset: true,
@@ -495,6 +507,7 @@ export const PREVIEW_SETTING_RANGES = {
   renderScale: { min: 0.5, max: 2, step: 0.1 },
   maxDrawDistance: { min: 64, max: 2048, step: 8 },
   flySpeed: { min: 2, max: 60, step: 1 },
+  flyDeceleration: { min: 0, max: 1, step: 0.05 },
   timeOfDay: { min: 0, max: 24000, step: 100 },
   daylightSpeed: { min: 5, max: 600, step: 5 },
 } as const;

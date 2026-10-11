@@ -55,6 +55,7 @@
     type UpdateSettings,
   } from "../../../shared/settings.js";
   import ApiKeysSection from "./ApiKeysSection.svelte";
+  import { decelerationOf } from "./fly_motion.js";
   import { fpsCap } from "./shader_modes.js";
   import { stutterReport } from "./frame_profiler.js";
   import { t, tn } from "./i18n.svelte.js";
@@ -787,6 +788,17 @@
             PREVIEW_SETTING_RANGES.flySpeed,
             preview.flySpeed,
             (flySpeed) => onpreviewchange({ flySpeed }),
+          )}
+          {@render slider(
+            "fly-deceleration",
+            t("preview.flyDeceleration"),
+            decelerationOf(preview.flyDeceleration) === 0
+              ? t("unit.instant")
+              : t("unit.seconds", { value: decelerationOf(preview.flyDeceleration).toFixed(2) }),
+            PREVIEW_SETTING_RANGES.flyDeceleration,
+            decelerationOf(preview.flyDeceleration),
+            (flyDeceleration) => onpreviewchange({ flyDeceleration }),
+            t("preview.flyDecelerationHint"),
           )}
         </section>
       {:else if category === "lighting"}

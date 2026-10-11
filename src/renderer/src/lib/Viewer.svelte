@@ -41,6 +41,14 @@
   import { animationsUsed } from "./atlas_animation.js";
   import { counterIdle, shouldDraw, ViewWatch } from "./render_demand.js";
   import {
+    DEFAULT_FLY_DECELERATION,
+    decelerationOf,
+    MAX_FLY_DELTA,
+    STILL,
+    stepVelocity,
+    type FlyVelocity,
+  } from "./fly_motion.js";
+  import {
     BAYER_4X4,
     LOD_TINT,
     LOD_TINT_AMOUNT,
@@ -413,6 +421,11 @@ import { isTyping } from "./typing.js";
     /** Blocks per second in fly mode. */
     flySpeed?: number;
     /**
+     * Seconds the camera takes to slow down once the keys are let go. Read
+     * through `decelerationOf`: the settings behind it are not validated.
+     */
+    flyDeceleration?: number;
+    /**
      * Identifies *which* structure is being shown, as opposed to which version
      * of it.
      *
@@ -638,6 +651,7 @@ import { isTyping } from "./typing.js";
     onpick,
     cameraMode = "orbit",
     flySpeed = 12,
+    flyDeceleration = DEFAULT_FLY_DECELERATION,
     onbuild,
     framingKey = 0,
     theme = "dark",
@@ -1241,15 +1255,33 @@ import { isTyping } from "./typing.js";
   const held = new Set<string>();
 
   /**
+   * How fast the camera is going, in blocks per second, in its own frame.
+   *
+   * It lives across frames, which is the whole of the change: the position used
+   * to be moved from the keys alone, so there was nothing for letting go of a
+   * key to *not* stop. In the camera's frame, not the world's, so turning while
+   * gliding sends the glide where the camera now points -- as it does in the
+   * game.
+   */
+  let flyVelocity: FlyVelocity = STILL;
+
+  /**
    * Moves the camera for one frame of flight.
    *
    * Speed is per *second* and scaled by the frame time, so a slow machine
    * travels the same distance as a fast one rather than crawling. Ctrl doubles
-   * it, matching the sprint every game binds there.
+   * it, matching the sprint every game binds there. What the keys ask for is a
+   * *target* velocity; the camera arrives at it at once and leaves it over
+   * `flyDeceleration` (see `fly_motion.ts`).
    */
   function updateFlight(delta: number): void {
-    if (!fly || !camera || !fly.isLocked) return;
-    const speed = flySpeed * (held.has("ControlLeft") || held.has("ControlRight") ? 2 : 1) * delta;
+    if (!fly || !camera || !fly.isLocked) {
+      // Nothing steers, so nothing may be left gliding for when it does.
+      flyVelocity = STILL;
+      return;
+    }
+    const dt = Math.min(delta, MAX_FLY_DELTA);
+    const speed = flySpeed * (held.has("ControlLeft") || held.has("ControlRight") ? 2 : 1);
 
     let forward = 0;
     let strafe = 0;
@@ -1264,14 +1296,24 @@ import { isTyping } from "./typing.js";
     // Diagonals are normalised, or moving forward-and-right would be 1.41x as
     // fast as either alone.
     const planar = Math.hypot(forward, strafe);
-    if (planar > 0) {
-      fly.moveForward((forward / planar) * speed);
-      fly.moveRight((strafe / planar) * speed);
-    }
-    if (lift !== 0) {
+    flyVelocity = stepVelocity(
+      flyVelocity,
+      {
+        forward: planar > 0 ? (forward / planar) * speed : 0,
+        right: planar > 0 ? (strafe / planar) * speed : 0,
+        up: lift * speed,
+      },
+      dt,
+      decelerationOf(flyDeceleration),
+    );
+    // Asked of the velocity and not of the keys: the camera is still moving a
+    // while after the last key went up.
+    if (flyVelocity.forward !== 0) fly.moveForward(flyVelocity.forward * dt);
+    if (flyVelocity.right !== 0) fly.moveRight(flyVelocity.right * dt);
+    if (flyVelocity.up !== 0) {
       // Straight up in world space, not along the camera's up: looking at the
       // floor and pressing Space should still rise, as it does in the game.
-      camera.position.y += lift * speed;
+      camera.position.y += flyVelocity.up * dt;
     }
   }
 
@@ -4063,6 +4105,9 @@ import { isTyping } from "./typing.js";
         // Keys held when the pointer released would otherwise stay held
         // forever: the keyup lands on whatever has focus next, not here.
         held.clear();
+        // ...and a camera still gliding would carry on from where it was the
+        // moment the lock came back.
+        flyVelocity = STILL;
         // The button that was painting is still down, and its release will
         // land somewhere else -- the same reason, for the brush.
         endStroke();
@@ -5094,6 +5139,7 @@ import { isTyping } from "./typing.js";
       gizmoRegion,
       cameraMode,
       flySpeed,
+      flyDeceleration,
       framingKey,
       theme,
       documentSizeProp,
