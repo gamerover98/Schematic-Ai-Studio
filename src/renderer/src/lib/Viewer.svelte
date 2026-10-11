@@ -1255,15 +1255,20 @@ import { isTyping } from "./typing.js";
   const held = new Set<string>();
 
   /**
-   * How fast the camera is going, in blocks per second, in its own frame.
+   * How fast the camera is going, in blocks per second, in **world** axes.
    *
    * It lives across frames, which is the whole of the change: the position used
    * to be moved from the keys alone, so there was nothing for letting go of a
-   * key to *not* stop. In the camera's frame, not the world's, so turning while
-   * gliding sends the glide where the camera now points -- as it does in the
-   * game.
+   * key to *not* stop. In the world's frame and not the camera's, so turning
+   * while gliding does not turn the glide -- momentum, as in the game. The first
+   * version kept it in the camera's frame and the glide swung round with the
+   * view, which is the one thing a glide is not.
    */
   let flyVelocity: FlyVelocity = STILL;
+
+  /** Scratch for `updateFlight`: the camera's heading on the ground. */
+  const flightRight = new THREE.Vector3();
+  const flightForward = new THREE.Vector3();
 
   /**
    * Moves the camera for one frame of flight.
@@ -1271,8 +1276,9 @@ import { isTyping } from "./typing.js";
    * Speed is per *second* and scaled by the frame time, so a slow machine
    * travels the same distance as a fast one rather than crawling. Ctrl doubles
    * it, matching the sprint every game binds there. What the keys ask for is a
-   * *target* velocity; the camera arrives at it at once and leaves it over
-   * `flyDeceleration` (see `fly_motion.ts`).
+   * *target* velocity in world axes; `stepVelocity` decides what the camera
+   * does with it (see `fly_motion.ts`): a key held is obeyed on that frame, and
+   * only when none is does it glide, and never vertically.
    */
   function updateFlight(delta: number): void {
     if (!fly || !camera || !fly.isLocked) {
@@ -1296,25 +1302,32 @@ import { isTyping } from "./typing.js";
     // Diagonals are normalised, or moving forward-and-right would be 1.41x as
     // fast as either alone.
     const planar = Math.hypot(forward, strafe);
+    const ahead = planar > 0 ? (forward / planar) * speed : 0;
+    const across = planar > 0 ? (strafe / planar) * speed : 0;
+
+    // The camera's heading, flattened to the ground: exactly the two vectors
+    // `PointerLockControls.moveForward` and `moveRight` add along, taken here
+    // so the answer can be kept as a velocity in the world.
+    flightRight.setFromMatrixColumn(camera.matrix, 0);
+    flightForward.crossVectors(camera.up, flightRight);
+
     flyVelocity = stepVelocity(
       flyVelocity,
       {
-        forward: planar > 0 ? (forward / planar) * speed : 0,
-        right: planar > 0 ? (strafe / planar) * speed : 0,
-        up: lift * speed,
+        x: flightForward.x * ahead + flightRight.x * across,
+        // Straight up in world space, not along the camera's up: looking at the
+        // floor and pressing Space should still rise, as it does in the game.
+        y: lift * speed,
+        z: flightForward.z * ahead + flightRight.z * across,
       },
       dt,
       decelerationOf(flyDeceleration),
     );
-    // Asked of the velocity and not of the keys: the camera is still moving a
-    // while after the last key went up.
-    if (flyVelocity.forward !== 0) fly.moveForward(flyVelocity.forward * dt);
-    if (flyVelocity.right !== 0) fly.moveRight(flyVelocity.right * dt);
-    if (flyVelocity.up !== 0) {
-      // Straight up in world space, not along the camera's up: looking at the
-      // floor and pressing Space should still rise, as it does in the game.
-      camera.position.y += flyVelocity.up * dt;
-    }
+    // Moved from the velocity and not from the keys: the camera is still going
+    // a while after the last one went up.
+    camera.position.x += flyVelocity.x * dt;
+    camera.position.y += flyVelocity.y * dt;
+    camera.position.z += flyVelocity.z * dt;
   }
 
   /**

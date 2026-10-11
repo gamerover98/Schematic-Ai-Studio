@@ -57,14 +57,15 @@ import {
 import { choiceValue, formatMemory, gpuNeedsRestart, parseChoiceValue, pixelLoad } from "../src/renderer/src/lib/gpu_choice.js";
 import { counterIdle, SETTLE_MS, shouldDraw, ViewWatch } from "../src/renderer/src/lib/render_demand.js";
 import {
+  coast,
   decelerationOf,
   DEFAULT_FLY_DECELERATION,
   FLY_EPSILON,
   isStill,
   MAX_FLY_DECELERATION,
-  smoothVelocity,
   STILL,
   stepVelocity,
+  type FlyVelocity,
 } from "../src/renderer/src/lib/fly_motion.js";
 import * as THREE from "three";
 import {
@@ -1429,64 +1430,83 @@ console.log("\n--- the gizmo takes the press, and gives the camera back ---");
 //
 // `updateFlight` moved the camera from the keys alone, with no velocity, so
 // letting go of one stopped it on that frame. In the game's creative flight it
-// carries on and slows; the time it takes is a setting. Speeding up stays
-// instant -- only the slowing is smoothed.
+// carries on and slows; the time it takes is a setting. Three rules, the third
+// of which the first version broke and was reported for: only stopping is
+// smoothed, only the horizontal plane glides, and a key held always wins.
 console.log("\n--- flight deceleration ---");
 {
   const TAU = 0.25;
   const SPEED = 12;
+  const at = (x: number, y: number, z: number): FlyVelocity => ({ x, y, z });
+  const equalVelocity = (name: string, got: FlyVelocity, want: FlyVelocity): void => equal(name, got, want);
 
-  equal("with no deceleration the camera is the keys', exactly as before", smoothVelocity(SPEED, 0, 0.016, 0), 0);
-  equal("...and starting is the target on the same frame", smoothVelocity(0, SPEED, 0.016, TAU), SPEED);
-  equal("speeding up in the direction already going is instant", smoothVelocity(6, SPEED, 0.016, TAU), SPEED);
+  // Letting go of everything.
+  const gliding = stepVelocity(at(SPEED, 0, 0), STILL, 0.016, TAU);
+  check("a released key keeps the camera moving a frame later", gliding.x > 0 && gliding.x < SPEED, String(gliding.x));
+  equalVelocity("with no deceleration it stops on that frame, as before", stepVelocity(at(SPEED, 0, 0), STILL, 0.016, 0), STILL);
 
-  // Letting go.
-  const afterOne = smoothVelocity(SPEED, 0, 0.016, TAU);
-  check("a released key keeps the camera moving a frame later", afterOne > 0 && afterOne < SPEED, String(afterOne));
-  let v = SPEED;
+  let v = at(SPEED, 0, 0);
   const trail: number[] = [];
-  for (let frame = 0; frame < 120; frame += 1) {
-    v = smoothVelocity(v, 0, 1 / 60, TAU);
-    trail.push(v);
+  for (let frame = 0; frame < 150; frame += 1) {
+    v = stepVelocity(v, STILL, 1 / 60, TAU);
+    trail.push(v.x);
   }
-  check("...and it only ever slows", trail.every((now, at) => now >= 0 && (at === 0 || now <= trail[at - 1])));
+  check("...it only ever slows", trail.every((now, i) => i === 0 || now <= trail[i - 1]));
   check("...never past zero", trail.every((now) => now >= 0));
-  check("...to a stop, which the epsilon makes exact", trail[trail.length - 1] === 0);
-  const fifth = smoothVelocity(SPEED, 0, TAU, TAU) / SPEED;
-  check("a time constant leaves 1/e of the speed", Math.abs(fifth - Math.exp(-1)) < 1e-9, String(fifth));
-  check(
-    "five of them leave less than a hundredth",
-    smoothVelocity(SPEED, 0, 5 * TAU, TAU) / SPEED < 0.01,
-  );
-
-  // The glide does not depend on how often the display refreshes.
-  const once = smoothVelocity(SPEED, 0, 0.1, TAU);
-  const twice = smoothVelocity(smoothVelocity(SPEED, 0, 0.05, TAU), 0, 0.05, TAU);
+  check("...to a stop, which the epsilon makes exact", isStill(v));
+  check("a time constant leaves 1/e of the speed", Math.abs(coast(SPEED, TAU, TAU) / SPEED - Math.exp(-1)) < 1e-9);
+  check("five of them leave less than a hundredth", coast(SPEED, 5 * TAU, TAU) / SPEED < 0.01);
+  const once = coast(SPEED, 0.1, TAU);
+  const twice = coast(coast(SPEED, 0.05, TAU), 0.05, TAU);
   check("two half frames land where one whole one does", Math.abs(once - twice) < 1e-12, `${once} ${twice}`);
-
-  // Turning the other way, and sprint let go.
-  const turning = smoothVelocity(SPEED, -SPEED, 0.05, TAU);
-  check("pressing the opposite key slows through zero rather than flipping", turning > -SPEED && turning < SPEED);
-  const walking = smoothVelocity(2 * SPEED, SPEED, 0.05, TAU);
-  check("letting go of sprint settles to walking", walking > SPEED && walking < 2 * SPEED);
-  equal("a camera at rest with nothing asked stays at rest", smoothVelocity(0, 0, 0.1, TAU), 0);
-  check("a frame with no time passed changes nothing", smoothVelocity(SPEED, 0, 0, TAU) === SPEED);
-
-  // Under the epsilon a slowing camera is stopped, or the loop would be kept
-  // drawing by a creep nobody can see.
-  check("a speed under the epsilon is zero once nothing is asked", smoothVelocity(FLY_EPSILON / 2, 0, 0.001, TAU) === 0);
+  check("a frame with no time passed changes nothing", stepVelocity(at(SPEED, 0, 0), STILL, 0, TAU).x === SPEED);
+  const bent = stepVelocity(at(SPEED, 0, SPEED), STILL, 0.5, TAU);
+  check("a glide keeps its heading, both axes slowing together", Math.abs(bent.x - bent.z) < 1e-12 && bent.x > 0);
   check(
-    "...but not while something is: that is a target, not a creep",
-    smoothVelocity(FLY_EPSILON / 2, FLY_EPSILON / 2, 0.001, TAU) === FLY_EPSILON / 2,
+    "under the epsilon it is stopped, or the loop would be kept drawing by a creep",
+    isStill(stepVelocity(at(FLY_EPSILON / 4, 0, FLY_EPSILON / 4), STILL, 0.001, TAU)),
   );
 
-  // The three components, and the sentinel.
-  const slowed = stepVelocity({ forward: SPEED, right: -SPEED, up: 0 }, STILL, 0.1, TAU);
-  check(
-    "all three components slow together, each on its own side of zero",
-    slowed.forward > 0 && slowed.right < 0 && slowed.up === 0,
+  // The reported fault: a key held is obeyed at once, whatever is left of the
+  // glide. Each of these used to take the old speed down through zero first.
+  equalVelocity(
+    "pressing another direction mid-glide is that direction on that frame",
+    stepVelocity(at(SPEED * 0.7, 0, 0), at(0, 0, SPEED), 0.016, TAU),
+    at(0, 0, SPEED),
   );
-  check("a camera at rest is still", isStill(STILL) && !isStill(slowed));
+  equalVelocity(
+    "...the opposite direction too, without crossing zero first",
+    stepVelocity(at(SPEED * 0.9, 0, 0), at(-SPEED, 0, 0), 0.016, TAU),
+    at(-SPEED, 0, 0),
+  );
+  equalVelocity(
+    "...and letting one of two keys go leaves the other at its full speed",
+    stepVelocity(at(8.5, 0, 8.5), at(SPEED, 0, 0), 0.016, TAU),
+    at(SPEED, 0, 0),
+  );
+  equalVelocity(
+    "...and letting go of sprint with a key still down is walking at once",
+    stepVelocity(at(2 * SPEED, 0, 0), at(SPEED, 0, 0), 0.016, TAU),
+    at(SPEED, 0, 0),
+  );
+
+  // Vertical never glides.
+  equalVelocity(
+    "rising stops the frame the key goes up",
+    stepVelocity(at(0, SPEED, 0), STILL, 0.016, TAU),
+    STILL,
+  );
+  const rising = stepVelocity(at(SPEED, SPEED, 0), STILL, 0.016, TAU);
+  check("...while a horizontal glide, if there is one, carries on", rising.y === 0 && rising.x > 0);
+  const sinking = stepVelocity(at(SPEED, 0, 0), at(0, -SPEED, 0), 0.016, TAU);
+  check("a vertical key is obeyed at once, gliding or not", sinking.y === -SPEED);
+  check("...and does not stop the horizontal glide it was started in", sinking.x > 0 && sinking.z === 0);
+  equalVelocity(
+    "a vertical key alongside a horizontal one is both targets",
+    stepVelocity(STILL, at(SPEED, SPEED, 0), 0.016, TAU),
+    at(SPEED, SPEED, 0),
+  );
+  check("a camera at rest is still", isStill(STILL) && !isStill(at(0, 0, 0.5)));
 
   // The setting is read totally: `coerceSettings` spreads `preview` unchecked.
   equal("an absent setting is the default", decelerationOf(undefined), DEFAULT_FLY_DECELERATION);
@@ -1507,15 +1527,21 @@ console.log("\n--- flight deceleration ---");
       PREVIEW_SETTING_RANGES.flyDeceleration.max === MAX_FLY_DECELERATION,
   );
 
-  // The viewer: the keys ask for a target, the velocity is what moves.
+  // The viewer: the keys ask for a target, the velocity is what moves, and it
+  // is a velocity in the world.
   const flightSource = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
-  const at = flightSource.indexOf("function updateFlight(");
-  const update = flightSource.slice(at, at + 3000);
-  check("flight smooths its velocity through the module", update.includes("stepVelocity("));
+  const begin = flightSource.indexOf("function updateFlight(");
+  const update = flightSource.slice(begin, begin + 3600);
+  check("flight steps its velocity through the module", update.includes("stepVelocity("));
   check(
-    "...moves the camera from the velocity, not from the keys",
-    /fly\.moveForward\(flyVelocity\.forward \* dt\)/.test(update) &&
-      /camera\.position\.y \+= flyVelocity\.up \* dt/.test(update),
+    "...moves the camera from the velocity, on all three axes, not from the keys",
+    /camera\.position\.x \+= flyVelocity\.x \* dt/.test(update) &&
+      /camera\.position\.y \+= flyVelocity\.y \* dt/.test(update) &&
+      /camera\.position\.z \+= flyVelocity\.z \* dt/.test(update),
+  );
+  check(
+    "...in the world's axes: the heading is read once per frame and not kept",
+    /setFromMatrixColumn\(camera\.matrix, 0\)/.test(update) && !/fly\.move(Forward|Right)/.test(update),
   );
   check("...reads the setting through the total reader", update.includes("decelerationOf(flyDeceleration)"));
   check("...and integrates a long frame as a short one", update.includes("Math.min(delta, MAX_FLY_DELTA)"));

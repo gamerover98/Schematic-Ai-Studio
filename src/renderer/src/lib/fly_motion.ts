@@ -10,9 +10,22 @@
  * the rendering steps, which the harness here often does not run, so the
  * decision is kept where it can be tested and only the trigger is the viewer's.
  *
- * **Speeding up stays instant and only slowing down is smoothed.** That is what
- * was asked for, and it keeps a key press answering on its own frame: a camera
- * that also took time to get going would feel heavy rather than inert.
+ * **Three rules, and the third is the one the first version got wrong.**
+ *
+ * 1. *Only stopping is smoothed.* Speeding up is instant, so a key press
+ *    answers on its own frame.
+ * 2. *Only the horizontal glide exists.* Rising and sinking stop the frame the
+ *    key goes up, as they do in the game: a camera that drifts on after Space
+ *    is not flying, it is falling upwards.
+ * 3. *A key held always wins.* The glide is what is left when **nothing** on
+ *    the horizontal plane is being asked for. The moment any of W, A, S or D is
+ *    down the camera goes where the keys say, at once -- including the other
+ *    way. The first version smoothed each direction on its own, so pressing S
+ *    during a forward glide had to bring the forward speed down through zero
+ *    first, and the camera could not be steered until the glide had finished.
+ *
+ * The velocity is in the **world**, not in the camera's frame: turning while
+ * gliding does not turn the glide, which is momentum, as it is in the game.
  */
 
 /** The time constant, in seconds, a new install flies with. */
@@ -22,7 +35,7 @@ export const DEFAULT_FLY_DECELERATION = 0.25;
 export const MAX_FLY_DECELERATION = 1;
 
 /**
- * Below this, blocks per second, a slowing camera is stopped.
+ * Below this, blocks per second, a gliding camera is stopped.
  *
  * An exponential never reaches zero, and the viewport draws on demand by
  * *comparing* the camera between refreshes: left to creep, a camera moving a
@@ -54,51 +67,54 @@ export function decelerationOf(value: unknown): number {
   return Math.min(MAX_FLY_DECELERATION, Math.max(0, value));
 }
 
-/**
- * One component of the velocity, one frame on.
- *
- * - `tau` of zero is the target itself: the camera of before, exactly.
- * - The target further out in the direction already going, or the camera at
- *   rest, is taken at once.
- * - Anything else -- a key let go, sprint let go, the other way pressed -- is
- *   an exponential approach with `tau` as its time constant. Two frames of
- *   `delta / 2` land where one of `delta` does, so the glide does not depend on
- *   the display's rate.
- */
-export function smoothVelocity(velocity: number, target: number, delta: number, tau: number): number {
-  if (tau <= 0) return target;
-  if (Math.abs(target) >= Math.abs(velocity) && target * velocity >= 0) return target;
-  const next = target + (velocity - target) * Math.exp(-Math.max(0, delta) / tau);
-  return target === 0 && Math.abs(next) < FLY_EPSILON ? 0 : next;
-}
-
-/** The three components of a flying camera's velocity, in blocks per second. */
+/** The camera's velocity in world axes, in blocks per second. */
 export interface FlyVelocity {
-  /** Along the way the camera looks, flattened to the ground. */
-  forward: number;
-  /** Across it. */
-  right: number;
-  /** World up. */
-  up: number;
+  x: number;
+  /** World up; never glides. */
+  y: number;
+  z: number;
 }
 
-export const STILL: FlyVelocity = { forward: 0, right: 0, up: 0 };
+export const STILL: FlyVelocity = { x: 0, y: 0, z: 0 };
 
-/** `smoothVelocity` over all three. */
+/**
+ * One frame of the horizontal glide: the velocity a frame later with nothing
+ * asked for.
+ *
+ * An exponential with `tau` as its time constant, so two frames of `delta / 2`
+ * land where one of `delta` does and the glide does not depend on the display's
+ * rate. `tau` of zero is no glide at all -- the camera of before, exactly.
+ */
+export function coast(velocity: number, delta: number, tau: number): number {
+  if (tau <= 0) return 0;
+  return velocity * Math.exp(-Math.max(0, delta) / tau);
+}
+
+/**
+ * The velocity one frame on, given what the keys ask for as a `target`.
+ *
+ * - **Anything asked for horizontally** is the velocity, on this frame: a key
+ *   pressed, one let go with another still down, the opposite one, sprint.
+ * - **Nothing asked for** glides: the horizontal velocity coasts down and is
+ *   zero under `FLY_EPSILON`.
+ * - **Vertical is the target always**, so it starts and stops with the key.
+ */
 export function stepVelocity(
   velocity: FlyVelocity,
   target: FlyVelocity,
   delta: number,
   tau: number,
 ): FlyVelocity {
-  return {
-    forward: smoothVelocity(velocity.forward, target.forward, delta, tau),
-    right: smoothVelocity(velocity.right, target.right, delta, tau),
-    up: smoothVelocity(velocity.up, target.up, delta, tau),
-  };
+  if (target.x !== 0 || target.z !== 0) return { x: target.x, y: target.y, z: target.z };
+  const x = coast(velocity.x, delta, tau);
+  const z = coast(velocity.z, delta, tau);
+  // Together, or a glide would lose one axis before the other and bend at the
+  // very end of its run.
+  if (Math.hypot(x, z) < FLY_EPSILON) return { x: 0, y: target.y, z: 0 };
+  return { x, y: target.y, z };
 }
 
 /** Whether there is nothing left to move. */
 export function isStill(velocity: FlyVelocity): boolean {
-  return velocity.forward === 0 && velocity.right === 0 && velocity.up === 0;
+  return velocity.x === 0 && velocity.y === 0 && velocity.z === 0;
 }

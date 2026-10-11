@@ -3603,35 +3603,54 @@ but `tests/services.ts`: the `publish` repository against `UPDATE_REPOSITORY`,
 `productName` against `NSIS_UNINSTALLER`, and `detectUpdateChannel: false`
 against `updateMetadataFile`.
 
-**The flight camera has a velocity, and letting go of a key slows it rather
+**The flight camera has a velocity, and letting go of every key slows it rather
 than stopping it.** `updateFlight` moved the position from the held keys
 alone -- `keys * speed * delta` -- so there was nothing for a released key to
 *not* stop, and the camera halted on that frame, which the game's creative
-flight does not. The keys now ask for a *target* velocity, and
-`fly_motion.ts` (plain, for `selection_drag.ts`'s reason) moves the velocity
-towards it:
+flight does not. The keys now ask for a *target* velocity and `fly_motion.ts`
+(plain, for `selection_drag.ts`'s reason) decides what the camera does with it.
+**Three rules, and the third is the one the first version broke and was
+reported for:**
 
-- **speeding up is instant and only slowing is smoothed.** A target further out
-  in the direction already going, or a camera at rest, is taken on that frame;
-  anything else -- a key let go, sprint let go, the opposite key -- is an
-  exponential approach with `flyDeceleration` seconds as its time constant. A
-  camera that also took time to get going would feel heavy and not inert;
+- **only stopping is smoothed.** Speeding up is instant, so a key press answers
+  on its own frame; a camera that also took time to get going would feel heavy
+  and not inert;
+- **only the horizontal plane glides.** Rising and sinking stop the frame the
+  key goes up, as they do in the game: a camera that drifts on after Space is
+  not flying, it is falling upwards;
+- **a key held always wins.** The glide is what is left when *nothing* on the
+  horizontal plane is being asked for. The moment any of W, A, S or D is down
+  the camera goes where the keys say, on that frame -- the opposite way too, and
+  with one of two keys let go. The first version smoothed each direction on its
+  own, so pressing S during a forward glide had to bring the forward speed down
+  through zero first and then climb to the new one: the camera could not be
+  steered until the glide had finished, which is what was reported.
+
+Details that are each a way to be wrong:
+
 - **zero is the camera of before, exactly**, which is what lets the setting be
   the whole of the change and the slider's left end be "stop at once";
+- **the velocity is in the world's axes, not the camera's.** Turning while
+  gliding does not turn the glide: that is momentum, as in the game. The first
+  version kept it in the camera's frame and the glide swung round with the
+  view. `updateFlight` therefore reads the camera's heading each frame
+  (`setFromMatrixColumn(camera.matrix, 0)` and its cross with `up`, which are
+  exactly the two vectors `PointerLockControls.moveForward` and `moveRight` add
+  along) to turn *keys* into a world target, and adds the velocity to the
+  position itself -- `fly.moveForward` is not used;
 - **the decay does not depend on the display's rate.** Two frames of `delta / 2`
   land where one of `delta` does, which `tests/ui.ts` states, and which is why
   `getDelta` stays *after* the frame cap: the delta spans the skipped refreshes;
-- **under `FLY_EPSILON` it is zero.** An exponential never arrives, and the
-  viewport draws on demand by comparing the camera between refreshes -- a camera
-  creeping a thousandth of a block a second would keep the loop drawing;
+- **under `FLY_EPSILON` it is zero**, both axes together. An exponential never
+  arrives, and the viewport draws on demand by comparing the camera between
+  refreshes -- a camera creeping a thousandth of a block a second would keep
+  the loop drawing;
 - **a frame is integrated at most `MAX_FLY_DELTA` long.** `getDelta` is not
   clamped, and with a velocity a refresh held back for seconds is a glide of
   seconds in one frame;
-- **the velocity is the camera's own, not the world's**, so turning while
-  gliding sends the glide where the camera now points, as in the game, and it
-  is zeroed on `unlock` and whenever `updateFlight` finds nothing steering --
-  or the camera would set off again from where it was the moment the lock came
-  back.
+- **it is zeroed on `unlock` and whenever `updateFlight` finds nothing steering**
+  -- or the camera would set off again from where it was the moment the lock
+  came back.
 
 `PreviewSettings.flyDeceleration` is read through `decelerationOf`, never raw:
 `coerceSettings` spreads `preview` unchecked, so a junk value has to read like an
@@ -3644,10 +3663,12 @@ frame: three announces its renderer to `__THREE_DEVTOOLS__` when one is defined
 before the page loads, and wrapping that renderer's `render` hands over the
 camera it draws with. `Page.addScriptToEvaluateOnNewDocument` does not apply to a
 `location.reload()` the page makes itself, only to `Page.reload`, which cost a
-round of "camera found: false". At the default, 12 blocks/s drops to 10.1, 7.9,
-4.2, 1.5 and 0.2 at 0, 100, 250, 500 and 1000 ms, and the camera coasts the
-`speed * tau` the arithmetic says (2.87 of 3 blocks); at zero it is at rest on
-the next frame.
+round of "camera found: false". Speeds are taken along the camera's heading.
+With D pressed 100 ms into a W glide the forward speed is 0 on the very frame
+and the sideways one is full; with S it is -full at once and does not cross zero
+first; Space let go is 0 on the next frame, and with W held it leaves the
+forward speed alone. At the default a full release coasts `speed * tau` (2.4 of
+2.5 blocks at 10 blocks/s) and is at rest in about a second and a half.
 
 **In flight, Ctrl belongs to the camera, and only main can honour that.** With
 the pointer locked the keyboard is flying: Ctrl is the sprint modifier and WASD
