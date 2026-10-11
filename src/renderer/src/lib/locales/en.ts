@@ -1000,6 +1000,9 @@ export const en = {
   "preview.maxDrawDistance": "Max draw distance",
   "preview.flySpeed": "Flight speed",
   "preview.flyDeceleration": "Flight deceleration",
+  "preview.fov": "Field of view",
+  "preview.fovHint":
+    "How wide the viewport sees. Wider shows more around you and bends the edges; narrower flattens the view.",
   "preview.flyDecelerationHint":
     "How long the camera keeps gliding after you let go of the keys. At zero it stops at once.",
   "preview.showGrid": "Show grid",

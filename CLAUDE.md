@@ -5094,6 +5094,64 @@ one distance, and the one worth matching is the thing being looked at {EM} get
 it wrong and the toggle reads as a zoom rather than as a projection. A literal
 `60` left at either call site is that bug, so `tests/ui.ts` greps for both.
 
+**The field of view is a setting, and one picture may borrow another.**
+`PreviewSettings.fov`, 30 to 110 -- Minecraft's own range -- with `DEFAULT_FOV`,
+`MIN_FOV`, `MAX_FOV` and the total reader `fovOf` in `shared/settings.ts`,
+because the slider, the viewport and `capture_viewport`'s schema all need the
+same three numbers and only one of them is the renderer. `ORBIT_FOV` is
+`DEFAULT_FOV` and the camera is still *constructed* with it, which the greps
+above hold to; what it is *drawn* with is `currentFov()`:
+
+- **the orthographic frustum follows it.** `applyProjection` derives it from
+  `currentFov()`, so a projection switch is still not a zoom at any value. A
+  literal `60` or a stale `ORBIT_FOV` left in that one call is the fault that
+  paragraph was written about, and `tests/ui.ts` refuses the second;
+- **the establishing shot stands back for a narrow view and comes in for a wide
+  one**, by `fovDistanceFactor`, `tan(30) / tan(fov / 2)`: the same box at the
+  same distance is cropped by a telescope. At 60 it is exactly one, which is why
+  every check about the old framing is still true. R frames for the *setting*,
+  never for a lent value;
+- **the gizmo's handles grow with it.** Their size is a share of the screen,
+  and a wider view makes everything at one distance smaller, so the perspective
+  branch divides by the same factor. The orthographic branch follows the
+  frustum already;
+- **LOD reads `eye.fov` live** and needed nothing.
+
+**`capture_viewport` takes `fov`, a field of its own beside `camera`, for one
+picture, and it is handed back.** Two decisions, both the user's or forced:
+
+- *Beside `camera`, not inside it.* Every `camera` with no `from` is the
+  establishing shot and moves the view, so "the same place, wider" would have had
+  no spelling. Alone, `fov` moves nothing.
+- *Lent and not kept.* The camera's pose stays where the model put it, by the
+  user's choice, because it is not a setting and R puts it back. The field of
+  view is a setting with a slider, and a viewport left wider than its slider
+  says makes the slider a lie. `CameraAimRequest.fov` therefore **states the
+  field of view in force**, never adjusts it: `null` is the setting's, so
+  restoring is one more request.
+
+The restore is main's, in a `finally` after `capturePage`: the renderer answers
+*before* the pixels are taken, so restoring inside it would hand back the old
+view under the shot. A capture that failed restores too, and a window that does
+not answer is left as it is -- the next request states the field of view in
+force and mends it. Captures are chained in `captureViewport`, because the tool
+is `readOnly` and two in flight would have the second one's restore land in the
+middle of the first one's picture.
+
+**The default distance is measured against the viewport's own field of view,
+not the one lent.** `resolveCameraAim` takes the setting's. Scaled by the lent
+one, a wider shot would stand closer and frame the build the same size as a
+narrower one: the argument would do nothing, which is the point of passing it.
+Wider from the same place shows more *around* the build, which is what was asked
+for. Out of range is refused by name (`parseFov`) rather than clamped, as an
+elevation past the pole is: a model that asked for 150 is about to describe a
+picture as wide.
+
+The answer carries `camera.fov` -- `CameraState` has it, and `pictureContent`
+sends the whole object, so no code was needed there -- and it was verified
+against the window: the viewport's own log of every field of view it drew with
+reads 60, 100, 60 over a plain capture, a `fov: 100` one and the next frame.
+
 It stays right across a window resize because OrbitControls dollies an
 orthographic camera by writing `camera.zoom` and never moves it: the distance
 `applyProjection` reads does not change while zooming, so recomputing from it

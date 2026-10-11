@@ -42,6 +42,7 @@
     SHADOW_QUALITIES,
     THEMES,
     effectiveIncludeDevBuilds,
+    fovOf,
     lodSettings,
     type GpuPreference,
     type LodMode,
@@ -799,6 +800,15 @@
             decelerationOf(preview.flyDeceleration),
             (flyDeceleration) => onpreviewchange({ flyDeceleration }),
             t("preview.flyDecelerationHint"),
+          )}
+          {@render slider(
+            "fov",
+            t("preview.fov"),
+            t("unit.degrees", { value: fovOf(preview.fov).toFixed(0) }),
+            PREVIEW_SETTING_RANGES.fov,
+            fovOf(preview.fov),
+            (fov) => onpreviewchange({ fov }),
+            t("preview.fovHint"),
           )}
         </section>
       {:else if category === "lighting"}

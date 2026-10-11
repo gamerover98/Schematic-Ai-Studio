@@ -6348,6 +6348,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
       {cameraMode}
       flySpeed={settings.preview.flySpeed}
         flyDeceleration={settings.preview.flyDeceleration}
+        fov={settings.preview.fov}
       framingKey={framingEpoch}
       glow={docState ? glowShell : null}
       onbuild={docState ? (action, at, look) => void onBuild(action, at, look) : undefined}

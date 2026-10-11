@@ -59,9 +59,11 @@ import {
   DEFAULT_AIM_ELEVATION,
   MAX_AIM_ELEVATION,
   parseCameraAim,
+  parseFov,
   resolveCameraAim,
   type CameraPlacement,
 } from "../../shared/camera_aim.js";
+import { MAX_FOV, MIN_FOV } from "../../shared/settings.js";
 import type { CameraState, GlowRequest } from "../../shared/ipc.js";
 import { findBlocks } from "../domain/find_blocks.js";
 import { parsePaletteEntry } from "../pipeline/loader_formats.js";
@@ -143,11 +145,17 @@ export interface Lifecycle {
    * it where the user had it. The answer carries where it actually stood, which
    * is `null` only when the window could not say.
    *
+   * `fov` is the field of view to draw this one picture with, in degrees, or
+   * `null` for the viewport's own. It is lent for the picture and **put back**
+   * afterwards: unlike the camera, which stays where the model put it, it is a
+   * setting with a slider, and a view left wider or narrower than the slider
+   * says would make the slider a lie.
+   *
    * `null` when there is no window to photograph — the process outlives its
    * window on macOS, and a client asking then should be told so rather than
    * handed a blank image.
    */
-  capture(camera: CameraPlacement | null): Promise<{
+  capture(camera: CameraPlacement | null, fov: number | null): Promise<{
     data: string;
     width: number;
     height: number;
@@ -160,6 +168,12 @@ export interface Lifecycle {
    * move, and a camera stood behind the far plane photographs an empty sky.
    */
   drawDistance(): Promise<number>;
+  /**
+   * The viewport's field of view as set, in degrees. What an establishing shot
+   * is measured against: a picture asked to be wider is taken from where the
+   * build fits at *this*, so that it shows more around it.
+   */
+  fov(): Promise<number>;
   /**
    * Lights blocks up in the user's viewport, or puts the glow out for no
    * patterns. `false` when there is no window to tell.
@@ -275,7 +289,12 @@ const DISCARD = {
  *
  * Still `readOnly`. The flag is a promise about the schematic, the undo stack
  * and the clipboard, and none of them moves; the view is presentation, the way
- * a scrollbar is. Marking it otherwise would put a permission prompt in front
+ * a scrollbar is.
+ *
+ * `fov` is the exception to "stays there afterwards", and deliberately: the
+ * camera's pose is not a setting and its field of view is. The window is lent
+ * the one asked for and handed back the one on the slider once the picture is
+ * taken, so what the pane says is always what the viewport is set to. Marking it otherwise would put a permission prompt in front
  * of every look a model takes at its own work.
  */
 /**
@@ -314,8 +333,9 @@ const CAPTURE: LifecycleSpec = {
   description:
     "A picture of the 3D viewport — the user's lighting and theme. Use it to check that what you have built actually looks right; a block list cannot show you a wall facing the wrong way. " +
     "Without `camera` it shows the view the user left. With `camera` it first moves the camera, and the camera stays there afterwards, so the user sees what you looked at. " +
+    "`fov` is the field of view for this picture only, in degrees: wider shows more around the build from the same place, narrower fills the frame with less. It goes back to the user's setting afterwards. " +
     "Coordinates are the schematic's own blocks: north is -z, east is +x, up is +y. " +
-    "The answer says where the camera stood.",
+    "The answer says where the camera stood and the field of view it was drawn with.",
   schema: {
     type: "object",
     properties: {
@@ -340,6 +360,14 @@ const CAPTURE: LifecycleSpec = {
         },
         additionalProperties: false,
       },
+      fov: {
+        type: "number",
+        minimum: MIN_FOV,
+        maximum: MAX_FOV,
+        description:
+          `Vertical field of view in degrees, ${MIN_FOV} to ${MAX_FOV}, for this picture only. ` +
+          "The viewport's own is the default; 60 unless the user changed it.",
+      },
     },
     additionalProperties: false,
   },
@@ -348,6 +376,8 @@ const CAPTURE: LifecycleSpec = {
   async run(host, args) {
     const aim = parseCameraAim((args as { camera?: unknown } | null)?.camera);
     if (!aim.ok) throw new McpRefusal(aim.refused);
+    const lens = parseFov((args as { fov?: unknown } | null)?.fov);
+    if (!lens.ok) throw new McpRefusal(lens.refused);
 
     let camera: CameraPlacement | null = null;
     let notes: readonly string[] = [];
@@ -369,13 +399,14 @@ const CAPTURE: LifecycleSpec = {
         aim.value,
         { width: doc.width, height: doc.height, length: doc.length },
         await host.drawDistance(),
+        await host.fov(),
       );
       if (!resolved.ok) throw new McpRefusal(resolved.refused);
       camera = resolved.value.camera;
       notes = resolved.value.notes;
     }
 
-    const shot = await host.capture(camera);
+    const shot = await host.capture(camera, lens.value);
     if (shot === null) {
       throw new McpRefusal(
         "There is no window open to photograph. Ask the user to bring Schematic AI Studio " +

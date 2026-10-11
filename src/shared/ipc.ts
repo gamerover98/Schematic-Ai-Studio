@@ -1572,6 +1572,16 @@ export function singleMix(block: BlockSpec): MixSpec {
 export interface CameraAimRequest {
   id: number;
   camera: CameraPlacement | null;
+  /**
+   * The field of view to draw with, in degrees, or `null` for the setting's.
+   *
+   * **A request states the field of view in force; it does not adjust it.** A
+   * `null` puts the setting back, so main restores it after a picture with one
+   * more request rather than the window having to remember to. It is the
+   * viewport's for the length of one capture and never written to the
+   * settings: the slider says what the window is set to.
+   */
+  fov: number | null;
 }
 
 /** Where the camera stands once the frame has been drawn. */
@@ -1579,6 +1589,8 @@ export interface CameraState {
   position: Vec3;
   target: Vec3;
   projection: "perspective" | "orthographic";
+  /** The vertical field of view the picture was drawn with, in degrees. */
+  fov: number;
 }
 
 /** `IPC.cameraAimed`: the answer, matched to its request by `id`. */

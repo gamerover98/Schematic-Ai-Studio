@@ -48,6 +48,8 @@
     stepVelocity,
     type FlyVelocity,
   } from "./fly_motion.js";
+  import { fovDistanceFactor } from "../../../shared/camera_aim.js";
+  import { fovOf } from "../../../shared/settings.js";
   import {
     BAYER_4X4,
     LOD_TINT,
@@ -426,6 +428,12 @@ import { isTyping } from "./typing.js";
      */
     flyDeceleration?: number;
     /**
+     * The vertical field of view, in degrees, as set. Read through `fovOf`: the
+     * settings behind it are not validated. `capture_viewport` may lend the
+     * viewport another for one picture (`fovOverride`), which is never this.
+     */
+    fov?: number;
+    /**
      * Identifies *which* structure is being shown, as opposed to which version
      * of it.
      *
@@ -652,6 +660,7 @@ import { isTyping } from "./typing.js";
     cameraMode = "orbit",
     flySpeed = 10,
     flyDeceleration = DEFAULT_FLY_DECELERATION,
+    fov = ORBIT_FOV,
     onbuild,
     framingKey = 0,
     theme = "dark",
@@ -2439,7 +2448,10 @@ import { isTyping } from "./typing.js";
     const reach =
       camera instanceof THREE.OrthographicCamera
         ? ((camera.top - camera.bottom) / camera.zoom) * GIZMO_REACH
-        : camera.position.distanceTo(gizmoOrigin3) * GIZMO_REACH;
+        : // The same share of the screen at any field of view: a wider view
+          // makes everything at one distance smaller, so the handles grow with
+          // it by the inverse of the factor the establishing shot uses.
+          (camera.position.distanceTo(gizmoOrigin3) * GIZMO_REACH) / fovDistanceFactor(currentFov());
     gizmoGroup.scale.setScalar(Math.max(0.4, reach));
   }
 
@@ -3340,6 +3352,9 @@ import { isTyping } from "./typing.js";
     const { target, position, note } = documentFraming(
       { width: size[0], height: size[1], length: size[2] },
       camera.far,
+      // The setting, not a lent one: R puts the establishing shot back for the
+      // viewport the user has.
+      fovOf(fov),
     );
     if (note !== null) console.info(`[viewer] ${note}`);
     camera.position.set(position.x, position.y, position.z);
@@ -3852,7 +3867,7 @@ import { isTyping } from "./typing.js";
       const distance = controls
         ? ortho.position.distanceTo(controls.target)
         : ortho.position.length();
-      const bounds = orthoBounds(orthoFrustumHeight(ORBIT_FOV, distance), aspect);
+      const bounds = orthoBounds(orthoFrustumHeight(currentFov(), distance), aspect);
       ortho.left = bounds.left;
       ortho.right = bounds.right;
       ortho.top = bounds.top;
@@ -3865,6 +3880,37 @@ import { isTyping } from "./typing.js";
       perspective.updateProjectionMatrix();
     }
   }
+
+  /**
+   * A field of view lent to the viewport for one picture, or `null`.
+   *
+   * Held here and not in the setting: the slider says what the window is set
+   * to and a picture must not change that. Cleared by the next request, which
+   * states the field of view in force (see `CameraAimRequest.fov`).
+   */
+  let fovOverride: number | null = null;
+
+  /** The field of view the viewport is drawing with this frame. */
+  function currentFov(): number {
+    return fovOverride ?? fovOf(fov);
+  }
+
+  /**
+   * Puts `currentFov()` on the perspective camera, and re-derives the
+   * orthographic frustum from it: that is matched to the same number, so
+   * changing it must not leave the two cameras describing different views.
+   */
+  function applyFov(): void {
+    if (perspective === undefined) return;
+    perspective.fov = currentFov();
+    perspective.updateProjectionMatrix();
+    applyProjection(perspective.aspect);
+  }
+
+  $effect(() => {
+    void fov;
+    applyFov();
+  });
 
   /**
    * Tells main where this canvas is, so `capture_viewport` can crop to it.
@@ -4075,6 +4121,10 @@ import { isTyping } from "./typing.js";
 
       const far = maxDrawDistance || 2048;
       perspective = new THREE.PerspectiveCamera(ORBIT_FOV, 1, 0.1, far);
+      // Built at the default and set to the field of view in force at once: the
+      // literal is what the orthographic frustum was matched to, and a window
+      // that opens on a stored 90 must not draw its first frame at 60.
+      perspective.fov = currentFov();
       perspective.position.set(32, 32, 32);
       // The sides are placeholders: `resize` runs before the first frame and
       // derives them from the aspect and the orbit distance.
@@ -5153,6 +5203,7 @@ import { isTyping } from "./typing.js";
       cameraMode,
       flySpeed,
       flyDeceleration,
+      fov,
       framingKey,
       theme,
       documentSizeProp,
@@ -5579,6 +5630,13 @@ import { isTyping } from "./typing.js";
       oncameraaimed?.({ id: request.id, camera: null });
       return;
     }
+    // States the field of view in force: the one asked for, or -- for `null` --
+    // the setting's, which is how a picture's is handed back.
+    const lensBefore = currentFov();
+    fovOverride = request.fov;
+    const lensChanged = currentFov() !== lensBefore;
+    if (lensChanged) applyFov();
+    if (request.camera === null && lensChanged) renderFrame();
     if (request.camera !== null) {
       // A compass flight still running would carry the camera on from here.
       flight = null;
@@ -5628,6 +5686,7 @@ import { isTyping } from "./typing.js";
         z: round(controls.target.z),
       },
       projection: camera === ortho ? "orthographic" : "perspective",
+      fov: Math.round(currentFov() * 100) / 100,
     };
   }
 

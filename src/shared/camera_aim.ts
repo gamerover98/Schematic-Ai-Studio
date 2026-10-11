@@ -22,6 +22,8 @@
  * of that shot is how the R key and the tool come to disagree about it.
  */
 
+import { DEFAULT_FOV, MAX_FOV, MIN_FOV } from "./settings.js";
+
 export interface Vec3 {
   x: number;
   y: number;
@@ -40,6 +42,19 @@ export interface BoxSize {
  * side. The number the mesh-bounds framing always used.
  */
 export const FRAMING_DISTANCE_FACTOR = 1.6;
+
+/**
+ * How much further out a camera of this field of view must stand to frame what
+ * a 60-degree one does: `tan(30) / tan(fov / 2)`.
+ *
+ * A narrower view at the same distance crops the build, so the establishing shot
+ * and the R key stand back for it; a wider one comes in. At the default it is
+ * exactly 1, which is what keeps every check about the old framing true.
+ */
+export function fovDistanceFactor(fovDeg: number): number {
+  const half = (Math.min(MAX_FOV, Math.max(MIN_FOV, fovDeg)) * Math.PI) / 360;
+  return Math.tan((DEFAULT_FOV * Math.PI) / 360) / Math.tan(half);
+}
 
 /**
  * The establishing shot for a document of this size.
@@ -65,13 +80,15 @@ export const FRAMING_DISTANCE_FACTOR = 1.6;
 export function documentFraming(
   size: BoxSize,
   drawDistance?: number,
+  fov: number = DEFAULT_FOV,
 ): { target: Vec3; position: Vec3; note: string | null } {
   const target = {
     x: size.width / 2,
     y: size.height / 2,
     z: size.length / 2,
   };
-  const distance = Math.max(size.width, size.height, size.length) * FRAMING_DISTANCE_FACTOR;
+  const distance =
+    Math.max(size.width, size.height, size.length) * FRAMING_DISTANCE_FACTOR * fovDistanceFactor(fov);
   const offset = { x: distance, y: distance * 0.7, z: distance };
   const span = Math.hypot(offset.x, offset.y, offset.z);
   let scale = 1;
@@ -172,6 +189,28 @@ export interface CameraPlacement {
 }
 
 export type AimVerdict<T> = { ok: true; value: T } | { ok: false; refused: string };
+
+/**
+ * Reads the `fov` argument: `null` for none, which leaves the viewport's own.
+ *
+ * Refused by name outside the range rather than clamped, unlike a stored
+ * setting. A model that asked for 150 degrees is about to describe a picture as
+ * wide, and a quietly narrower one would make that description wrong -- the
+ * reason an elevation past the pole is refused too.
+ */
+export function parseFov(raw: unknown): AimVerdict<number | null> {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return { ok: false, refused: "fov must be a number of degrees." };
+  }
+  if (raw < MIN_FOV || raw > MAX_FOV) {
+    return {
+      ok: false,
+      refused: `fov must be between ${MIN_FOV} and ${MAX_FOV} degrees, the range the viewport has; got ${raw}.`,
+    };
+  }
+  return { ok: true, value: raw };
+}
 
 const FIELDS = ["target", "position", "from", "elevation", "distance"] as const;
 
@@ -307,6 +346,14 @@ export function resolveCameraAim(
   aim: CameraAim,
   size: BoxSize,
   drawDistance: number,
+  /**
+   * The viewport's own field of view, which the default distance is measured
+   * against. **Not** the one the picture is taken with: a wider shot from the
+   * distance that fits the build at 60 shows more around it, which is what
+   * asking for a wider shot is for -- scaled by its own, it would frame the
+   * build the same size and the argument would do nothing.
+   */
+  fov: number = DEFAULT_FOV,
 ): AimVerdict<ResolvedAim> {
   const notes: string[] = [];
   const framing = documentFraming(size);
@@ -332,7 +379,8 @@ export function resolveCameraAim(
   }
 
   const asked =
-    aim.distance ?? Math.max(size.width, size.height, size.length) * FRAMING_DISTANCE_FACTOR;
+    aim.distance ??
+    Math.max(size.width, size.height, size.length) * FRAMING_DISTANCE_FACTOR * fovDistanceFactor(fov);
   const distance = Math.min(asked, reach);
   if (distance < asked) {
     notes.push(

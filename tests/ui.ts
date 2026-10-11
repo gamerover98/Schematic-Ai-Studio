@@ -182,7 +182,16 @@ import { isSafeHref } from "../src/renderer/src/lib/markdown_policy.js";
 import { HOSTILE_CASES } from "./markdown_cases.js";
 import { missingKeys, translate, translatePlural } from "../src/renderer/src/lib/i18n_core.js";
 import { openedAge } from "../src/renderer/src/lib/recent_age.js";
-import { DEFAULT_PREVIEW_SETTINGS, PREVIEW_SETTING_RANGES, PROVIDERS } from "../src/shared/settings.js";
+import {
+  DEFAULT_FOV,
+  DEFAULT_PREVIEW_SETTINGS,
+  fovOf,
+  MAX_FOV,
+  MIN_FOV,
+  PREVIEW_SETTING_RANGES,
+  PROVIDERS,
+} from "../src/shared/settings.js";
+import { fovDistanceFactor } from "../src/shared/camera_aim.js";
 import {
   COPLANAR_OFFSET,
   depthEpsilon,
@@ -2469,8 +2478,94 @@ console.log("\n--- orthographic projection ---");
    */
   const viewer = readFileSync(path.join(RENDERER, "lib", "Viewer.svelte"), "utf8");
   check("the viewer builds its camera with the shared field of view", /PerspectiveCamera\(ORBIT_FOV/.test(viewer));
-  check("...and derives the orthographic frustum from the same one", viewer.includes("orthoFrustumHeight(ORBIT_FOV"));
+  check(
+    "...and derives the orthographic frustum from the one in force, which starts as that",
+    viewer.includes("orthoFrustumHeight(currentFov()") && !viewer.includes("orthoFrustumHeight(ORBIT_FOV"),
+  );
   check("ORBIT_FOV is the 60 the viewport always used", ORBIT_FOV === 60);
+  check("...and is the setting's default", ORBIT_FOV === DEFAULT_FOV && DEFAULT_PREVIEW_SETTINGS.fov === ORBIT_FOV);
+
+  /*
+   * The field of view is a setting now, and one picture may borrow another.
+   * `fovOf` is total, for the reason every preview reader is: `coerceSettings`
+   * spreads `preview` over the defaults and checks nothing.
+   */
+  equal("an absent field of view is the default", fovOf(undefined), DEFAULT_FOV);
+  equal("...so is junk", [fovOf("wide"), fovOf(Number.NaN), fovOf(null)], [DEFAULT_FOV, DEFAULT_FOV, DEFAULT_FOV]);
+  equal("one past the range is clamped to it", [fovOf(500), fovOf(-3)], [MAX_FOV, MIN_FOV]);
+  equal("a good one passes through", fovOf(75), 75);
+  check(
+    "the slider offers exactly the range the reader and the tool accept",
+    PREVIEW_SETTING_RANGES.fov.min === MIN_FOV && PREVIEW_SETTING_RANGES.fov.max === MAX_FOV,
+  );
+  check("the default is inside it", DEFAULT_FOV >= MIN_FOV && DEFAULT_FOV <= MAX_FOV);
+
+  // An orthographic frustum follows the field of view, or a projection switch
+  // would read as a zoom the moment it was not 60.
+  check(
+    "the same distance is a taller slice at a wider view",
+    orthoFrustumHeight(100, 10) > orthoFrustumHeight(60, 10) && orthoFrustumHeight(30, 10) < orthoFrustumHeight(60, 10),
+  );
+  check(
+    "...by the tangent of half of it",
+    Math.abs(orthoFrustumHeight(90, 10) / orthoFrustumHeight(60, 10) - Math.tan(Math.PI / 4) / Math.tan(Math.PI / 6)) <
+      1e-9,
+  );
+
+  /*
+   * The establishing shot stands back for a narrow view and comes in for a wide
+   * one, so the whole build is in the picture at any of them -- and at 60 it is
+   * exactly the framing it always was.
+   */
+  const cube = { width: 20, height: 20, length: 20 };
+  const reachAt = (fov: number | undefined): number => {
+    const shot = fov === undefined ? documentFraming(cube) : documentFraming(cube, undefined, fov);
+    return Math.hypot(
+      shot.position.x - shot.target.x,
+      shot.position.y - shot.target.y,
+      shot.position.z - shot.target.z,
+    );
+  };
+  check("at the default the framing is the one it always was", Math.abs(reachAt(60) - reachAt(undefined)) < 1e-9);
+  check("a narrower view stands further back", reachAt(30) > reachAt(60));
+  check("a wider one comes in", reachAt(100) < reachAt(60));
+  check(
+    "...by the ratio of the tangents, so the build fills the same share of the picture",
+    Math.abs(reachAt(90) / reachAt(60) - Math.tan(Math.PI / 6) / Math.tan(Math.PI / 4)) < 1e-9,
+  );
+  check("the factor is exactly one at the default", fovDistanceFactor(60) === 1);
+
+  // The viewer: lent for one picture, and handed back.
+  const lens = viewer.slice(viewer.indexOf("let fovOverride"), viewer.indexOf("let fovOverride") + 1500);
+  check(
+    "the viewport draws with the lent field of view when there is one, else the setting's",
+    /return fovOverride \?\? fovOf\(fov\)/.test(lens),
+  );
+  check("...and applying it re-derives the orthographic frustum from it", /updateProjectionMatrix\(\);[\s\S]{0,80}applyProjection\(/.test(lens));
+  const aimed = viewer.slice(viewer.indexOf("async function aimCamera("), viewer.indexOf("async function aimCamera(") + 1800);
+  check(
+    "a request states the field of view in force, so a null puts the setting back",
+    /fovOverride = request\.fov/.test(aimed),
+  );
+  check(
+    "...the answer says what it drew with",
+    /fov: Math\.round\(currentFov\(\) \* 100\) \/ 100/.test(viewer),
+  );
+  check(
+    "the gizmo keeps its share of the screen at any field of view",
+    /GIZMO_REACH\) \/ fovDistanceFactor\(currentFov\(\)\)/.test(viewer),
+  );
+  check("R frames for the setting, not for a lent one", /camera\.far,[\s\S]{0,160}fovOf\(fov\)/.test(viewer));
+  check(
+    "the slider sits under the flight deceleration's and feeds the setting",
+    /fly-deceleration[\s\S]{0,900}"fov"[\s\S]{0,500}onpreviewchange\(\{ fov \}\)/.test(
+      readFileSync(path.join(RENDERER, "lib", "SettingsModal.svelte"), "utf8"),
+    ),
+  );
+  check(
+    "the window hands the setting to the viewport",
+    readFileSync(path.join(RENDERER, "App.svelte"), "utf8").includes("fov={settings.preview.fov}"),
+  );
 
   /*
    * Flight forces perspective. Not belt-and-braces over the greyed checkbox:

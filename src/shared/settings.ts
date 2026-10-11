@@ -412,6 +412,15 @@ export interface PreviewSettings {
    */
   flyDeceleration: number;
   /**
+   * The viewport's vertical field of view, in degrees.
+   *
+   * Read through `fovOf`, never raw: `coerceSettings` spreads `preview` without
+   * checking it. The same number sizes the orthographic frustum, so switching
+   * projection still does not read as a zoom, and `capture_viewport` can lend
+   * the viewport another one for a single picture.
+   */
+  fov: number;
+  /**
    * Whether barriers and structure voids are drawn.
    *
    * They are invisible to a player and placed on purpose — a barrier keeps
@@ -446,6 +455,31 @@ export interface PreviewSettings {
    * rebuild. It also has nothing to hide when the schematic carries no anchor.
    */
   showWorldEditOffset: boolean;
+}
+
+/**
+ * The field of view the viewport has always had, and the range it may take.
+ *
+ * 30 to 110 is Minecraft's own: narrower is a telescope, wider is a fisheye, and
+ * the viewport's picture stops being of a build. In `shared/` because the
+ * slider, the viewport and `capture_viewport`'s schema all need the same three
+ * numbers and only one of them is the renderer.
+ */
+export const DEFAULT_FOV = 60;
+export const MIN_FOV = 30;
+export const MAX_FOV = 110;
+
+/**
+ * The field of view for a stored value.
+ *
+ * Total, for `fpsCap`'s reason: `coerceSettings` spreads `preview` over the
+ * defaults without checking it, and that is safe only while a junk value reads
+ * exactly like an absent one. A number past the range is clamped to it rather
+ * than refused -- somebody who typed 400 wanted "as wide as it goes".
+ */
+export function fovOf(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_FOV;
+  return Math.min(MAX_FOV, Math.max(MIN_FOV, value));
 }
 
 /** component.py:319-328 slider/checkbox defaults, verbatim. */
@@ -494,6 +528,7 @@ export const DEFAULT_PREVIEW_SETTINGS: PreviewSettings = {
   // `DEFAULT_FLY_DECELERATION` in the renderer's `fly_motion.ts`, which the
   // main process may not import; a check in tests/ui.ts holds the two together.
   flyDeceleration: 0.15,
+  fov: DEFAULT_FOV,
   showMarkers: true,
   showBounds: false,
   showWorldEditOffset: true,
@@ -508,6 +543,7 @@ export const PREVIEW_SETTING_RANGES = {
   maxDrawDistance: { min: 64, max: 2048, step: 8 },
   flySpeed: { min: 2, max: 60, step: 1 },
   flyDeceleration: { min: 0, max: 1, step: 0.05 },
+  fov: { min: MIN_FOV, max: MAX_FOV, step: 1 },
   timeOfDay: { min: 0, max: 24000, step: 100 },
   daylightSpeed: { min: 5, max: 600, step: 5 },
 } as const;
