@@ -1,7 +1,7 @@
 /**
  * The one MCP fact both processes need to agree on.
  *
- * In `shared/` for the reason `openCodeModelRequiresKey` and `anchorLocation`
+ * In `shared/` for the reason `providerRequiresApiKey` and `anchorLocation`
  * are: the settings pane has to show the command and the renderer may not
  * import out of `main/`, while `mcp/policy.ts` is where a test can hold it.
  * Two copies of a command line is two chances to get a flag wrong, and a wrong

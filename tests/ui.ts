@@ -7034,6 +7034,15 @@ console.log("\n--- chat ---");
     chat.includes("onclick={oncollapse}") && app.includes("oncollapse={toggleSidebar}"),
   );
 
+  // A stored model the catalogue no longer lists is replaced, and the first id
+  // it lists is not a free model: it was `claude-fable-5`, billed to a key that
+  // had been pasted for something else.
+  const modelsModule = readFileSync(path.join(RENDERER, "lib", "models.svelte.ts"), "utf8");
+  check(
+    "a model the catalogue lost is replaced by a free one before the first listed",
+    /"mimo-v2\.5-free"\)[\s\S]*pricing === "free"\)[\s\S]*models\[0\]/.test(modelsModule),
+  );
+
   // A conversation is renamed in its row. The field takes every key itself, or
   // the list's arrows, its Escape and the window's single-key shortcuts would
   // all reach somebody typing a name.

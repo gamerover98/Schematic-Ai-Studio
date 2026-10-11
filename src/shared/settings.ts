@@ -42,12 +42,23 @@ export const PROVIDER_DEFAULT_MODEL: Readonly<Record<Provider, string>> = {
 };
 
 /**
- * component.py:383 -- OpenCode is the one provider whose key is optional
- * ("API Key (Optional for free models)"), and the one the Generate gate lets
- * through with an empty key.
+ * Whether a call to this provider needs an API key. Every one of them does.
+ *
+ * component.py:383 had OpenCode as the one provider whose key was optional
+ * ("API Key (Optional for free models)"), and for as long as that was true a
+ * first run worked with nothing pasted. It stopped being true at the gateway:
+ * Zen answers a request with no key -- or with the literal `public` that the
+ * OpenCode client sends -- with a 403 `FreeTierError`, "OpenCode's free tier can
+ * only be used from within OpenCode". It is the provider's rule about who may
+ * use the free models without an account, not a fault in a request, so the
+ * answer is a key from the user's own Zen account, which every client may
+ * present. Nothing in this app pretends to be the OpenCode client.
+ *
+ * Kept as a function, and not inlined, because main and the renderer both ask
+ * it and a provider that lets somebody in without one may come back.
  */
-export function providerRequiresApiKey(provider: Provider): boolean {
-  return provider !== "OpenCode";
+export function providerRequiresApiKey(_provider: Provider): boolean {
+  return true;
 }
 
 /**
@@ -812,7 +823,7 @@ export function isWildcardAddress(address: string): boolean {
  * In `shared/` because three places ask it and only one of them is main:
  * `coerceMcp` falls back on a bad value, the server refuses to start on one,
  * and the settings field says so while it is being typed. Same reason
- * `openCodeModelRequiresKey` lives here.
+ * `providerRequiresApiKey` lives here.
  *
  * A **hostname is refused** as well as a range, and that is not fussiness:
  * `acceptsRequest` compares the request's `Host` header against this string,
@@ -1097,9 +1108,12 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   // component.py:239 opened on OpenAI, which cannot generate anything until you
-  // paste a paid API key. OpenCode's free tier can, so a first run now works
-  // out of the box. This is only the *initial* value: `settings.json` records
-  // whatever you last chose, and that wins on every subsequent launch.
+  // paste an API key. OpenCode was chosen instead because its free tier needed
+  // none; that is no longer so (see `providerRequiresApiKey`), and it stays the
+  // initial provider because a Zen key also reaches its free models and the
+  // catalogue is the one this app already reads. This is only the *initial*
+  // value: `settings.json` records whatever you last chose, and that wins on
+  // every subsequent launch.
   provider: "OpenCode",
   model: PROVIDER_DEFAULT_MODEL.OpenCode,
   baseUrl: "",

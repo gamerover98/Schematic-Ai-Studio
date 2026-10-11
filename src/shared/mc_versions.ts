@@ -4,7 +4,7 @@
  * In `shared/` rather than in main because three places need the same answer
  * and only one of them is main: the format picker offers containers, the
  * writers refuse the ones that cannot work, and the block inventory filters
- * what it shows. Same reason `openCodeModelRequiresKey` lives beside it — one
+ * what it shows. Same reason `providerRequiresApiKey` lives beside it — one
  * rule, mirrored by the UI and *enforced* by main.
  *
  * That third clause was a lie for a long time and is worth knowing about. The

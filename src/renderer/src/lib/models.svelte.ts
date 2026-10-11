@@ -70,7 +70,13 @@ export function loadOpenCodeModels(
       catalogue = models;
       fetchFailed = models === null;
       if (models && !models.some((model) => model.id === currentModel)) {
-        const preferred = models.find((model) => model.id === "mimo-v2.5-free") ?? models[0];
+        // The default is a free model, and the first id listed is not
+        // reliably one: it is `claude-fable-5` at the time of writing, which
+        // would be billed to a key somebody pasted for another reason.
+        const preferred =
+          models.find((model) => model.id === "mimo-v2.5-free") ??
+          models.find((model) => model.pricing === "free") ??
+          models[0];
         if (preferred) onPreferred(preferred.id);
       }
     })

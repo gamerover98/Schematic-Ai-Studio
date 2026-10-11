@@ -33,15 +33,11 @@
  */
 
 import { providerRequiresApiKey, type Provider } from "../../shared/settings.js";
-import { openCodeModelRequiresKey } from "../../shared/ipc.js";
-import { fetchOpenCodeModels } from "./opencode.js";
 
 export interface KeyCheck {
   provider: Provider;
   model: string;
   apiKey: string;
-  /** Where the vendored `opencode_models.json` is; `null` if unavailable. */
-  snapshotPath: string | null;
   /**
    * The pre-rename profile, when it has keys and this one does not.
    *
@@ -57,28 +53,32 @@ export interface KeyCheck {
 /**
  * The reason this call cannot be made, or `null`.
  *
- * OpenCode is asked **per model** rather than per provider, because that is how
- * its billing works: some of its models are free and the proportion moves --
- * 9 of 61 when the gate was written, 26 of 87 now -- so a provider-level rule
- * would refuse a free model or admit a paid one depending on the year. Missing
- * metadata fails *open*, which `openCodeModelRequiresKey` already decides: a
- * models.dev outage must not make the free models unusable.
+ * **OpenCode's free models are not an exception.** They used to be, per model,
+ * and this function consulted the catalogue to find out; Zen now refuses a
+ * request with no key from anything but the OpenCode client (a 403
+ * `FreeTierError`), so every model needs one from here and the question has one
+ * answer. Said before the request, in this app's words, because what came back
+ * was the gateway's own sentence about a client this is not -- true, and
+ * pointing at nothing the user can change.
+ *
+ * It is not worked around. The restriction is the provider's, and presenting
+ * this app as the OpenCode client to get past it would be exactly what it
+ * exists to prevent.
  */
 export async function apiKeyRefusal(check: KeyCheck): Promise<string | null> {
   if (check.apiKey.trim() !== "") return null;
+  if (!providerRequiresApiKey(check.provider)) return null;
 
   if (check.provider === "OpenCode") {
-    const catalogue = await fetchOpenCodeModels({ snapshotPath: check.snapshotPath });
-    const model = catalogue?.find((entry) => entry.id === check.model);
-    if (!openCodeModelRequiresKey(model)) return null;
     return withLegacyHint(
-      `${model?.name ?? check.model} is a paid OpenCode model and no API key is set. ` +
-        `Add one, or pick one of the free models in the LLM provider panel.`,
+      `OpenCode Zen needs an API key to be used from this app: its free tier only works ` +
+        `inside OpenCode itself, so ${check.model || "every model"} is refused without one, ` +
+        `free ones included. Create a key at https://opencode.ai/auth and paste it under ` +
+        `Settings → LLM provider.`,
       check,
     );
   }
 
-  if (!providerRequiresApiKey(check.provider)) return null;
   return withLegacyHint(`No API key is set for ${check.provider}.`, check);
 }
 

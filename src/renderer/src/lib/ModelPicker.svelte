@@ -13,7 +13,8 @@
    * changes what generation runs on too. Structure says so beside its button
    * rather than pretending otherwise.
    */
-  import { openCodeModelRequiresKey, type OpenCodeModelInfo } from "../../../shared/ipc.js";
+  import type { OpenCodeModelInfo } from "../../../shared/ipc.js";
+  import { providerRequiresApiKey } from "../../../shared/settings.js";
   import {
     PROVIDERS,
     PROVIDER_DEFAULT_MODEL,
@@ -54,7 +55,7 @@
     keyStatus?.keys.find((entry) => entry.provider === settings.provider)?.hasKey ?? false,
   );
   /** The gate the main process applies, mirrored here for the UI only. */
-  const needsKey = $derived(openCodeModelRequiresKey(selected ?? undefined) && !hasKey);
+  const needsKey = $derived(providerRequiresApiKey(settings.provider) && !hasKey);
 
   const free = $derived(catalogue?.filter((m) => m.pricing === "free") ?? []);
   const paid = $derived(catalogue?.filter((m) => m.pricing === "paid") ?? []);

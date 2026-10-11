@@ -133,8 +133,10 @@ export function resolveModel(req: {
   baseUrl: string;
 }) {
   const baseUrl = resolveBaseUrl(req.provider, req.baseUrl).replace(/\/+$/, "");
-  // component.py:68 -- an empty key becomes the literal "none", which is what
-  // OpenCode's free tier expects and what the other providers reject anyway.
+  // component.py:68 -- an empty key becomes the literal "none". It was what
+  // OpenCode's free tier took; the gateway now answers it with a 401, and
+  // `apiKeyRefusal` stops every path that reaches here before it is sent. Kept
+  // because an empty `Authorization` header is refused by the SDK on its own.
   const apiKey = req.apiKey.trim() !== "" ? req.apiKey.trim() : "none";
   const provider = createOpenAICompatible({ name: req.provider, baseURL: baseUrl, apiKey });
   return provider(req.model);

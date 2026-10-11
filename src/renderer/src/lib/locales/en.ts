@@ -883,18 +883,19 @@ export const en = {
   "provider.baseUrl": "Base URL",
   "provider.baseUrlHint":
     "Only needed for a custom OpenAI-compatible endpoint. Leave it empty to use the provider's own.",
-  "provider.apiKeyOptional": "API key (only for paid models)",
+  "provider.opencodeNotice":
+    "OpenCode serves its free models only to OpenCode itself. Paste a key from opencode.ai/auth, or drive this app from OpenCode through the MCP server.",
   "provider.keyStoredPlaceholder": "•••••••• stored",
   "provider.keyPlaceholder": "Paste your key",
-  "provider.free": "Free ({count}) — no API key needed",
-  "provider.paid": "Paid ({count}) — API key required",
+  "provider.free": "Free ({count})",
+  "provider.paid": "Paid ({count})",
   "provider.unknownPricing": "Pricing unknown ({count})",
   "provider.modelSummary": "{id} · {count} models available",
   "provider.textOnly": "· text only, no reference image",
   "provider.imageUnknown": "· image support unknown",
   "provider.fetchFailed": "Model list fetch failed — type the model id manually.",
   "provider.needsKey":
-    "{model} is billed per token, so it needs a key. The free models in the list above do not.",
+    "{model} needs an OpenCode Zen API key: its free tier only works inside OpenCode itself, so free models are refused without one too. Create one at opencode.ai/auth.",
   "provider.keyStored": "A key is stored for {provider}. It is never sent back to this window.",
   "start.legacyProfile":
     "An earlier version of this app kept your {providers} API key in another folder, which this one does not read. Paste the key again to generate.",

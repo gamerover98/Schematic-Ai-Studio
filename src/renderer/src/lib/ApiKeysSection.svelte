@@ -15,7 +15,6 @@
   import {
     PROVIDERS,
     PROVIDER_DEFAULT_BASE_URL,
-    providerRequiresApiKey,
     type KeyStorageStatus,
     type Provider,
     type Settings,
@@ -86,7 +85,7 @@
 {#each PROVIDERS as provider (provider)}
   <div class="field">
     <label for={`key-${provider}`}>
-      {providerLabel(provider)}{providerRequiresApiKey(provider) ? "" : ` — ${t("provider.apiKeyOptional")}`}
+      {providerLabel(provider)}
     </label>
     <div class="key-row">
       <input
@@ -109,6 +108,14 @@
         {t("common.clear")}
       </button>
     </div>
+    <!--
+      Under the token, always: the gateway's own refusal says the free tier
+      "can only be used from within OpenCode" and leaves nothing to press, and
+      this is where somebody goes to find out what to paste.
+    -->
+    {#if provider === "OpenCode"}
+      <p class="hint warn">{t("provider.opencodeNotice")}</p>
+    {/if}
     {#if hasKey(provider)}
       <p class="hint ok">{t("provider.keyStored", { provider: providerLabel(provider) })}</p>
     <!--

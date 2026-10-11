@@ -383,7 +383,7 @@
 
   /*
    * The same rules main enforces, mirrored rather than reinvented -- the
-   * arrangement `openCodeModelRequiresKey` and the era rule already have. A
+   * arrangement `providerRequiresApiKey` and the era rule already have. A
    * renderer deciding this for itself would be a second answer to a question
    * that has one, and the two would drift.
    */

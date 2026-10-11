@@ -36,7 +36,7 @@ import {
   type AdapterList,
 } from "../src/main/services/gpu_adapters.js";
 import { parsePersistedFile, type PersistedFile } from "../src/main/services/settings_file.js";
-import { IPC, openCodeModelRequiresKey } from "../src/shared/ipc.js";
+import { IPC } from "../src/shared/ipc.js";
 import { createReplyTable, RendererTimeoutError } from "../src/main/services/renderer_request.js";
 import { rememberedFromIndex } from "../src/main/services/conversation_core.js";
 import {
@@ -190,6 +190,8 @@ import {
   lodSettings,
   type GpuPreference,
   type PreviewSettings,
+  PROVIDERS,
+  providerRequiresApiKey,
 } from "../src/shared/settings.js";
 import { MC_VERSIONS, eraOf, resolveVersionName } from "../src/shared/mc_versions.js";
 import {
@@ -914,9 +916,15 @@ try {
   // model is unusable".
   equal("an unknown id still appears", byId.get("brand-new-model")?.pricing, "unknown");
   equal("an unknown id gets a readable name", byId.get("brand-new-model")?.name, "Brand New Model");
-  check("an unknown id is not gated behind a key", !openCodeModelRequiresKey(byId.get("brand-new-model")));
-  check("a paid model is gated behind a key", openCodeModelRequiresKey(byId.get("gpt-5.5")));
-  check("a free model is not gated behind a key", !openCodeModelRequiresKey(byId.get("mimo-v2.5-free")));
+  /*
+   * It was three checks about which models a key was needed for, and the
+   * answer used to differ: an unknown id and a free model went through with
+   * none. Zen refuses a request with no key from anything but the OpenCode
+   * client, whatever the model costs, so the rule is one answer and is stated
+   * as one -- including for the three ids those checks were about.
+   */
+  check("OpenCode needs a key", providerRequiresApiKey("OpenCode"));
+  check("...as does every other provider", PROVIDERS.every((provider) => providerRequiresApiKey(provider)));
 
   equal("free models sort ahead of paid", catalogue[0]?.pricing, "free");
   equal("paid models sort last", catalogue[catalogue.length - 1]?.pricing, "paid");
@@ -1982,7 +1990,6 @@ console.log("\n--- the profile the rename left behind ---");
     provider: "OpenAI",
     model: "gpt-4o-mini",
     apiKey: "",
-    snapshotPath: null,
   });
   check(
     "a refusal on a clean install invents no folder",
@@ -1993,7 +2000,6 @@ console.log("\n--- the profile the rename left behind ---");
     provider: "OpenAI",
     model: "gpt-4o-mini",
     apiKey: "",
-    snapshotPath: null,
     legacyProfilePath: withKeys,
   });
   check(
@@ -2027,7 +2033,6 @@ console.log("\n--- whose API key it is ---");
     provider: "OpenAI",
     model: "gpt-4o-mini",
     apiKey: "",
-    snapshotPath: null,
   });
   check("a provider with no key is refused", refusal !== null);
   check(
@@ -2035,16 +2040,39 @@ console.log("\n--- whose API key it is ---");
     (refusal ?? "").includes("OpenAI"),
     refusal ?? "(none)",
   );
+  /*
+   * OpenCode's arm was the one that reached the network, because the gate
+   * depended on what a model cost. It does not now, so it is checked here, and
+   * the sentence has to say what somebody can actually do: the gateway's own
+   * ("can only be used from within OpenCode") is true and leaves them with
+   * nothing to press.
+   */
+  const zen = await apiKeyRefusal({ provider: "OpenCode", model: "big-pickle", apiKey: "" });
+  check("OpenCode with no key is refused, free models included", zen !== null);
+  check("...naming the model", (zen ?? "").includes("big-pickle"), zen ?? "(none)");
+  check("...and saying where a key comes from", (zen ?? "").includes("opencode.ai/auth"), zen ?? "(none)");
+  check("...and why a free model is refused", (zen ?? "").includes("free tier"), zen ?? "(none)");
+  equal("...and a key is all it takes there too", await apiKeyRefusal({ provider: "OpenCode", model: "big-pickle", apiKey: "sk-x" }), null);
+  equal(
+    "the model the gateway no longer lists is refused the same way, with no network",
+    (await apiKeyRefusal({ provider: "OpenCode", model: "mimo-v2.5-free", apiKey: "  " })) === null,
+    false,
+  );
+  equal(
+    "...and an empty model name still gives a sentence",
+    (await apiKeyRefusal({ provider: "OpenCode", model: "", apiKey: "" }))?.includes("every model"),
+    true,
+  );
   equal(
     "...and a key is all it takes",
-    await apiKeyRefusal({ provider: "OpenAI", model: "gpt-4o-mini", apiKey: "sk-x", snapshotPath: null }),
+    await apiKeyRefusal({ provider: "OpenAI", model: "gpt-4o-mini", apiKey: "sk-x" }),
     null,
   );
   // Whitespace is not a key. This is what a field pasted into and cleared again
   // leaves behind.
   check(
     "blank space is not a key",
-    (await apiKeyRefusal({ provider: "OpenAI", model: "m", apiKey: "   ", snapshotPath: null })) !== null,
+    (await apiKeyRefusal({ provider: "OpenAI", model: "m", apiKey: "   " })) !== null,
   );
 
   /*

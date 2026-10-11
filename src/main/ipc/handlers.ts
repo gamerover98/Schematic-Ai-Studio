@@ -47,7 +47,6 @@ import {
   type InspectResponse,
   type McpActivity,
   type McpStatus,
-  openCodeModelRequiresKey,
   type OpenCodeModelInfo,
   type ConfirmDiscardRequest,
   type DocumentVersion,
@@ -1131,7 +1130,6 @@ ${report.stack}`),
       provider: settings.provider,
       model: settings.model,
       apiKey,
-      snapshotPath: openCodeSnapshotPath(),
       legacyProfilePath: (await orphanedProfile(app.getPath("userData"), legacyUserDataDir()))?.path ?? null,
     });
     if (noKey !== null) return settle({ ok: false, kind: "no-api-key", message: noKey });
@@ -2254,7 +2252,6 @@ ${report.stack}`),
         provider: settings.provider,
         model: settings.model,
         apiKey,
-        snapshotPath: openCodeSnapshotPath(),
         legacyProfilePath: (await orphanedProfile(app.getPath("userData"), legacyUserDataDir()))?.path ?? null,
       });
       if (noKey !== null) return refuse("no-api-key", noKey);

@@ -134,7 +134,6 @@ import {
 } from "./lib/gizmo.js";
   import { t, tn, setLocale } from "./lib/i18n.svelte.js";
   import {
-    openCodeModelRequiresKey,
     type TraceItem,
     type Artifact,
     type BlockInspection,
@@ -1913,11 +1912,7 @@ import ConvertModal from "./lib/ConvertModal.svelte";
   const hasProviderKey = $derived(
     keyStatus?.keys.find((entry) => entry.provider === settings.provider)?.hasKey ?? false,
   );
-  const blockedOnKey = $derived(
-    settings.provider === "OpenCode"
-      ? openCodeModelRequiresKey(openCodeModel ?? undefined) && !hasProviderKey
-      : providerRequiresApiKey(settings.provider) && !hasProviderKey,
-  );
+  const blockedOnKey = $derived(providerRequiresApiKey(settings.provider) && !hasProviderKey);
   /** Text-only models: the picker is disabled rather than silently ignored. */
   const acceptsImages = $derived(openCodeModel === null || openCodeModel.imageInput !== "no");
 

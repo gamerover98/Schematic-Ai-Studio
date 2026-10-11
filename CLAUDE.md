@@ -3068,19 +3068,55 @@ one.
 
 **The key gate is one copy, and it was written out twice.** `ipc/handlers.ts`
 asked "is there a key for this provider" in two places and phrased the answer
-twice; `services/llm_key.ts` is the single copy. The OpenCode arm is per
-*model*, because some of its models are free and the proportion moves, and the
-snapshot path is injected as a string exactly as `ToolContext.legacyBlocksPath`
-is — that module must not reach Electron.
+twice; `services/llm_key.ts` is the single copy, and it is a plain function of
+what it is given, so it is Electron-free and the suites can drive it with no
+network.
 
-**Its fail-open is deliberate and has a cost worth knowing.**
-`openCodeModelRequiresKey` is `pricing === "paid"`, so a model absent from the
-catalogue — which `mimo-v2.5-free` is — passes the gate with **no key at
-all**, and an empty credential goes to the gateway. That is the right trade:
-a models.dev outage must not make the free models unusable. What it produces
-when it is wrong is the gateway's own `Invalid API key.`, which is a true
-sentence pointing at nothing the user can see. Narrowing it would refuse a
-free model every time the catalogue is stale, which is the commoner case.
+**There is no keyless OpenCode any more, and the app does not pretend to be
+what the gateway wants.** Zen answers a request with no key -- or with the
+literal `public` that the OpenCode client sends -- with a 403 `FreeTierError`,
+*"OpenCode's free tier can only be used from within OpenCode"*, and the
+literal `none` this app used to send with a 401 `Invalid API key`. Measured
+against the live gateway, on `big-pickle` and on `mimo-v2.6-flash-free`, and the
+same answer with the `Authorization` header left off. It is the provider's rule
+about who may use the free models without an account, and the rule is the
+point: presenting this app as the OpenCode client (its `User-Agent` and
+`x-opencode-*` headers) would be circumventing an access control the provider
+chose to put there, so it is not done, here or in a later "fix".
+
+What a key buys is not something this app can verify without one: Zen's
+documentation says a key from `opencode.ai/auth` (with billing added) is what
+any client presents, and does not say whether the free models are served to
+other clients with it. A user with a key and a free model is the case to ask
+about, not to assume.
+
+So `providerRequiresApiKey` is `true` for every provider and
+`openCodeModelRequiresKey`, which used to be `pricing === "paid"` with a
+deliberate fail-open for an unlisted model, is gone: its whole reason was that a
+models.dev outage must not make the free models unusable, and they are unusable
+without a key whatever the catalogue says. `apiKeyRefusal` therefore no longer
+reads the catalogue or the network -- it says, before the request, that OpenCode
+needs a key from this app, why even the free models do, and where one comes
+from. The gateway's sentence is true and leaves the reader with nothing to press.
+
+It is said in three places, because each is where somebody looks: the refusal
+itself, the AI providers pane under the OpenCode token
+(`provider.opencodeNotice`, always shown) and the README's provider table with
+the note below it. The README names what works -- OpenCode itself as the
+client through the MCP server, a Zen key, another provider -- and what it
+cannot promise.
+
+`DEFAULT_SETTINGS.provider` stays OpenCode: a Zen key reaches its free models
+and the catalogue is the one the picker already reads. A first run is a notice
+and not a build.
+
+**`PROVIDER_DEFAULT_MODEL.OpenCode` is a model the gateway no longer lists**
+(`mimo-v2.5-free` answers "Model ... is not supported"), and the window repairs
+that itself: when the stored model is not in the catalogue it writes a
+replacement into the settings (`loadOpenCodeModels`). It used to take the first
+id listed, which is **`claude-fable-5` today** -- a Claude model, which bills per
+token, chosen for somebody who had asked for a free one and billed to their key. It takes the
+first *free* one unless the preferred name is back, and only then the first.
 
 **`ProviderKeyStatus.hasKey` means "stored *and* readable", and meant "there
 are bytes on disk".** `getApiKey` answers `""` for absent, for no keyring, and
@@ -4779,14 +4815,15 @@ agent reaches the same endpoint with the same key resolved the same way; two
 places deciding what a provider means is how you get something that works in
 generation and not in chat.
 
-**OpenCode's API key is required per model, not per provider.** Some of its
-models are free; the rest bill per token, and the proportion moves -- the
-vendored snapshot was 9 of 61 when this was written and is 26 of 87 now, which
-is why neither number belongs in a sentence anybody reads as a fact about the
-app. `openCodeModelRequiresKey` in
-`shared/ipc.ts` is the rule, `ipc/handlers.ts` is where it is enforced, and the
-renderer only mirrors it. Missing metadata fails *open* — a models.dev outage
-must not make free models unusable.
+**OpenCode's API key is required, for every model, and it was per model.**
+Some of its models are free and the rest bill per token, and the proportion
+moves -- the vendored snapshot was 9 of 61 when this was written and is 26 of 87
+now, which is why neither number belongs in a sentence anybody reads as a fact
+about the app. The picker still groups by it. What changed is that the gateway
+no longer serves a keyless request from any client but its own (see "There is
+no keyless OpenCode any more"), so the gate is `providerRequiresApiKey`, the
+same answer for every provider, in `shared/settings.ts`: `ipc/handlers.ts` is
+where it is enforced and the renderer only mirrors it.
 
 **There are two eras, and the boundary is the Flattening.** `shared/mc_versions.ts`
 is the rule: ≤1.12.2 is `legacy` — numeric `ID:DATA`, **MCEdit only** — and 1.13
